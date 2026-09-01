@@ -12,7 +12,7 @@ Ast, ExprId, Expr, Call, Access, Record, Block, Function, Span, Try = std.ast
 nowhere = std.ast
 Stmt, Bind, Member, Field = std.ast
 Checker = sema.sema
-CImport, Lib, Exe, Dep, Target = std.build
+CImport, Lib, Extern, Exe, Dep, Target = std.build
 
 PlanFault* = MissingBuild(str)
     | CheckedFaults
@@ -35,6 +35,12 @@ LibNode* = {
     dep*: Dep,
 }
 
+ExternNode* = {
+    name*: str,
+    spec*: Extern,
+    dep*: Dep,
+}
+
 ExeNode* = {
     name*: str,
     spec*: Exe,
@@ -44,6 +50,7 @@ BuildPlan* = {
     target*: Target,
     imports* :: Vec<CImportNode>,
     libs* :: Vec<LibNode>,
+    externs* :: Vec<ExternNode>,
     exes* :: Vec<ExeNode>,
 }
 
@@ -211,15 +218,7 @@ Executor = {
     free_call = (self :: @Self, name: str, c: Call, at: Span)
                 Res<Value, PlanError> {
         name.match({
-            "Path" => self.one_arg(c, at).match({
-                Err(e) => Err(e),
-                Ok(id) => self.eval(id).try().match({
-                    TextValue(text) => Ok(Value.PathValue(Path(text))),
-                    _               => Err(PlanError.Refused(PlanFault.Unsupported(
-                        at
-                    ))),
-                }),
-            }),
+            "Path" => self.path_call(c, at),
             "Ok"   => self.one_arg(c, at).match({
                 Err(e) => Err(e),
                 Ok(id) => self.eval(id).try().match({
@@ -231,17 +230,97 @@ Executor = {
         })
     }
 
+    // Path has a borrowed one-argument constructor and an allocating
+    // allocator-plus-text constructor. The checked call has already selected
+    // the overload; the plan retains only the resulting path bytes.
+    path_call = (self :: @Self, c: Call, at: Span)
+                Res<Value, PlanError> {
+        c.args.len.match({
+            1 => self.path_arg(c, 0, at),
+            2 => self.path_arg(c, 1, at),
+            _ => failed_value(PlanFault.Unsupported(at)),
+        })
+    }
+
+    path_arg = (self :: @Self, c: Call, i: usize, at: Span)
+               Res<Value, PlanError> {
+        id = self.arg(c, i, at).try();
+        self.eval(id).try().match({
+            TextValue(text) => Ok(Value.PathValue(Path(text))),
+            _               => failed_value(PlanFault.Unsupported(at)),
+        })
+    }
+
     access_call = (self :: @Self, id: ExprId, c: Call, a: Access, at: Span)
                   Res<Value, PlanError> {
         self.builder_access(a).match({
-            false => (a.name.text.eq("Vec") && c.args.len == 0).match({
-                true  => Ok(Value.EmptyList),
-                false => failed_value(PlanFault.Unsupported(at)),
-            }),
+            false => self.value_call(c, a, at),
             // The whole module has already passed sema. Member-call memos are
             // not populated for required Builder members because no body is
             // selected; the checked receiver type is the proof available.
             true  => self.builder_call(a.name.text, c, at),
+        })
+    }
+
+    value_call = (self :: @Self, c: Call, a: Access, at: Span)
+                 Res<Value, PlanError> {
+        (a.name.text.eq("Vec") && c.args.len == 0).match({
+            true  => Ok(Value.EmptyList),
+            false => self.local_add(c, a, at),
+        })
+    }
+
+    // A dependency accumulator is the mutable local shape used by real build
+    // files before handing the completed Vec to an executable target.
+    local_add = (self :: @Self, c: Call, a: Access, at: Span)
+                Res<Value, PlanError> {
+        base = self.tree.expr_at(a.base);
+        (a.name.text.eq("add") && c.args.len == 1).match({
+            false => failed_value(PlanFault.Unsupported(at)),
+            true  => base.kind.match({
+                Name(n) => self.add_dep_local(n.text, c, at),
+                _       => failed_value(PlanFault.Unsupported(at)),
+            }),
+        })
+    }
+
+    add_dep_local = (self :: @Self, name: str, c: Call, at: Span)
+                    Res<Value, PlanError> {
+        value = self.eval(self.arg(c, 0, at).try()).try();
+        value.match({
+            DepValue(dep) => self.push_dep(name, dep, at),
+            _             => failed_value(PlanFault.Unsupported(at)),
+        })
+    }
+
+    push_dep = (self :: @Self, name: str, dep: Dep, at: Span)
+               Res<Value, PlanError> {
+        self.local_index(name).match({
+            None  => failed_value(PlanFault.UnknownName(at)),
+            Ok(i) => self.locals.get(i).match({
+                None      => failed_value(PlanFault.UnknownName(at)),
+                Ok(local) => local.value.match({
+                    EmptyList       => {
+                        values ::= self.alloc.Vec<Dep>();
+                        values.add(dep).try(PlanError.OutOfMemory);
+                        self.replace_local(i, name, Value.DepList(values))
+                    },
+                    DepList(values) => {
+                        kept ::= values;
+                        kept.add(dep).try(PlanError.OutOfMemory);
+                        self.replace_local(i, name, Value.DepList(kept))
+                    },
+                    _               => failed_value(PlanFault.Unsupported(at)),
+                }),
+            }),
+        })
+    }
+
+    replace_local = (self :: @Self, i: usize, name: str, value: Value)
+                    Res<Value, PlanError> {
+        self.locals.set(i, Local(name: name, value: value)).match({
+            None  => failed_value(PlanFault.UnknownName(nowhere())),
+            Ok(_) => Ok(Value.UnitValue),
         })
     }
 
@@ -261,6 +340,7 @@ Executor = {
             }),
             "c_import" => self.add_import(c, at),
             "lib"      => self.add_lib(c, at),
+            "extern"   => self.add_extern(c, at),
             "exe"      => self.add_exe(c, at),
             _          => failed_value(PlanFault.Unsupported(at)),
         })
@@ -306,6 +386,25 @@ Executor = {
         Ok(Value.DepValue(dep))
     }
 
+    add_extern = (self :: @Self, c: Call, at: Span)
+                 Res<Value, PlanError> {
+        name = self.name_arg(c, at).try();
+        self.unique(name).try();
+        r    = self.record(self.arg(c, 1, at).try()).try();
+        spec = Extern(
+            src: self.path_field(r, "src").try(),
+            libs: self.texts_field(r, "libs").try(),
+            paths: self.texts_field(r, "paths").try()
+        );
+        dep  = Dep(name: name);
+        self.plan.externs.add(ExternNode(
+            name: name,
+            spec: spec,
+            dep: dep
+        )).try(PlanError.OutOfMemory);
+        Ok(Value.DepValue(dep))
+    }
+
     add_exe = (self :: @Self, c: Call, at: Span) Res<Value, PlanError> {
         name = self.name_arg(c, at).try();
         self.unique(name).try();
@@ -327,6 +426,9 @@ Executor = {
                 Ok(_) => true, None => false,
             })
             || self.plan.libs.find((n) { n.name.eq(name) }).match({
+                Ok(_) => true, None => false,
+            })
+            || self.plan.externs.find((n) { n.name.eq(name) }).match({
                 Ok(_) => true, None => false,
             })
             || self.plan.exes.find((n) { n.name.eq(name) }).match({
@@ -470,6 +572,15 @@ Executor = {
             None  => false,
         })
     }
+
+    local_index = (self: @Self, name: str) Res<usize> {
+        Range(0, self.locals.len).find((i) {
+            self.locals.get(i).match({
+                Ok(local) => local.name.eq(name),
+                None      => false,
+            })
+        })
+    }
 }
 
 plan* = (a: Alloc, tree: Ast, check: Checker, target: Target)
@@ -522,6 +633,7 @@ execute_function = (
             target: target,
             imports: a.Vec<CImportNode>(),
             libs: a.Vec<LibNode>(),
+            externs: a.Vec<ExternNode>(),
             exes: a.Vec<ExeNode>()
         )
     );

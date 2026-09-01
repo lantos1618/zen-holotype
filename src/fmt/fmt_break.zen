@@ -1,117 +1,16 @@
-// src/fmt/fmt_break.zen
-// The WIDTH rule: a line is 80 columns, and a list that does not fit
-// breaks vertically. The second rule that reaches inside a declaration
-// and the first that changes how many LINES one takes — which is why it
-// is a pass of its own (`fmt.zen` runs it after the pads, re-lexing
-// what that wrote) and not a table keyed by line like `fmt_decl.zen`'s:
-// this rule's own edits would move that table's keys.
+// Canonical line breaking for calls, parameter lists, unions, enums, and
+// array literals. Lists are first packed innermost-first, then lists wider
+// than WIDTH are broken outermost-first. Re-parsing between rounds keeps
+// offsets and indentation aligned with the rewritten text.
 //
-// THREE FORMS, one mechanic — find the list's separators, set the
-// whitespace around each:
+// Calls, parameters, unions, and enum variants place one item per line.
+// Homogeneous array literals fill each line greedily. A bracketed closer
+// stands alone at the opener's indentation.
 //
-//   - BRACKETED LISTS. `f(a, b)`, construction `Sym(name: n, ..)` and a
-//     function's `(a: A, b: B)` — a declaration's, a lambda's, a
-//     function type's. Packed past the width: one item per line at +4,
-//     `)` on a line of its own back at the opener's indent.
-//
-//     ONE RULE FOR ARGUMENTS AND PARAMETERS. Parameters used to be
-//     nobody's: over the width an author wrapped them by hand under the
-//     `(`, and this rule then held that layout forever. Two lists a
-//     comma apart in kind cannot disagree about what wrapping looks
-//     like.
-//
-//     THE `)` GETS ITS OWN LINE rather than hugging the last item.
-//     Hugging reads fine for a call, but a parameter list closes into
-//     ` Res<..> {` and the body that follows is also at +4 — hugged, a
-//     signature's last parameter and the body's first statement are the
-//     same shape at the same column. `AST_CONTRACT.md` records
-//     `params_span` for exactly this decision.
-//
-//   - UNION BARS. An enum's variants (and an anonymous union's members)
-//     packed past the width: one per line, the bar leading at +4.
-//
-//   - ARRAY LITERALS. `[a, b, c]`. The same brackets, the same +4, the
-//     same closer alone on its line — and the one place this rule
-//     disagrees with itself: the items FILL, as many to a line as fit.
-//
-//     A DIFFERENT KIND OF LIST, NOT A DISAGREEING ONE. Argument and
-//     parameter lists are HETEROGENEOUS — each item a distinct concept,
-//     each line meaning something different — which is why one per line
-//     makes them readable. An array literal is a HOMOGENEOUS SEQUENCE:
-//     nothing tells item four from item five, so a line of its own says
-//     nothing about either and the vertical alignment has nothing to
-//     align.
-//
-//     THE CORPUS SETTLED IT, not the symmetry. Every array literal in
-//     the tree a break can reach is a closed set of short names —
-//     `is_c_integer`'s ten C integer types, `ptr_verb`'s eight `Ptr`
-//     methods, `is_integer`'s nine — and one per line turns each into a
-//     column of quoted words nobody reads down. Filled, all three land
-//     on a single line inside the brackets, and `sema_ty`'s
-//     `is_integer` (at 79) stops needing the break at all.
-//
-// JOIN FIRST, THEN BREAK, which is why a shape here is COMPUTED rather
-// than inherited: the rule used to only break, so a list a human had
-// wrapped by hand was ratified forever and two identical calls in one
-// file could carry two different shapes.
-//
-//   - JOIN, innermost first: every gap becomes its packed form — the
-//     opener hugs the first item, a separator and one space stand
-//     between two, the closer hugs the last. An item is left alone, so
-//     a list packs only once the lists INSIDE it have; the rounds are
-//     what make that "innermost first", and they settle when a round
-//     moves nothing.
-//   - BREAK, outermost first: the packed line, measured. A list INSIDE
-//     one this round broke keeps — it moved to a new line and a new
-//     indent, and the width it is judged at is the one it lands at,
-//     which the next round reads off the text. So
-//     `be.report(a, b, GenFault.Unsupported(".."))` breaks at the outer
-//     parens and the inner call, now alone on a line that fits, stays
-//     packed.
-//
-// TWO LISTS KEEP RATHER THAN BREAK. One SHARING its line with a
-// disjoint one: `f(a) || g(b)` over the width has no list whose break
-// fixes the line — the width lives in the operators — and breaking one
-// side is raggedness. And a WRAPPER, a list whose one item is another
-// list: `out.add(Sym(..))` has one place worth breaking, and the inner
-// break is the one that buys width. Rounds are also what make the pass
-// idempotent: a list already in the broken form emits the bytes it has,
-// and a round that moves nothing does not CLAIM the list, so the lists
-// inside it are asked next.
-//
-// MOVES NO TOKEN: every comma, bar and item byte is the author's; only
-// whitespace around a separator is set, so `fmt.zen`'s guard covers
-// this rule with the same three lines it always had.
-//
-// REFUSES:
-//   - a gap holding anything but whitespace and its separator — a
-//     comment there is a token, and overwriting one is the accident
-//     this folder exists to prevent.
-//   - a list with a multi-line ITEM (a closure body, a record literal):
-//     the item's inner lines carry their own indentation, which neither
-//     half can re-lay-out. `.loop((h) { .. })` and its kin stay as
-//     written. A nested CALL broken across lines is NOT this case — it
-//     packs first, and then its container has a one-line item.
-//   - a COMMENT anywhere in the span, refused for joining outright. A
-//     `//` runs to end of line, so packing a list across one would pull
-//     every item after it INTO the comment: code deleted. Found by
-//     scanning for `//` and `/*`, which reads a `"http://"` inside a
-//     string as a comment and declines the list — conservative in the
-//     only direction that is safe.
-//   - JOINING a parameter list written one per line. That shape is a
-//     COLUMN `fmt_decl.zen` owns (it lines the `:`/`::` up), and
-//     packing it would carry that column onto a line with nothing to
-//     align to. Such a list is still BROKEN back to the canonical form
-//     when it is not in it, so nothing is frozen except the choice to
-//     stay vertical.
-//   - an array literal written with a TRAILING COMMA. That comma lies
-//     in the gap between the last item and the `]`, which is then not
-//     whitespace, so `may_relay` declines the list. This rule adds no
-//     comma of its own either: `fmt.zen`'s `faithful` guard rests on
-//     the token stream being untouched, and a comma is a token.
-//
-// NOT LISTS FOR THIS RULE: `{ .. }` records and a fixed array's
-// arguments. The mechanic would fit them; the demand is unwritten.
+// This pass rewrites whitespace only. It declines lists containing comments,
+// multi-line items, non-trivia in separator gaps, aligned parameter columns,
+// or trailing commas. It also leaves disjoint sibling lists and one-item
+// wrappers alone when breaking them would not solve the over-wide line.
 
 Alloc, AllocError = std.mem
 str, String = std.text
@@ -125,11 +24,7 @@ scan, Source, Lexed = std.lex.lex
 Parser, module = std.parse.parse
 Src = fmt.fmt_src
 
-// 80, because that is the width the tree already keeps: measured across
-// src/, 372 of 52092 lines exceed it (93 exceed 100), and this rule's
-// worked example — `ValueShape` in parse_lookahead.zen — sits at 84,
-// between the two candidates. `make cap` counts a FILE's lines; nothing
-// else in the tree names a column count, so it is written here, once.
+// The formatter's single line-width policy.
 WIDTH*: usize = 80
 
 // One separator-bounded piece of a list, in bytes: an argument, a

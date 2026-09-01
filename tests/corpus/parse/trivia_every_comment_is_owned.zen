@@ -1,30 +1,7 @@
-// tests/corpus/parse/trivia_every_comment_is_owned.zen
-// Every comment and blank this file lexes is named by EXACTLY ONE
-// trivia run of the tree the parser builds — checked against the
-// arena, zero-length runs included.
+// Every comment and blank belongs to exactly one source-ordered AST trivia
+// run. Total run length detects omissions; monotonic indices detect duplicates.
 //
-// This is the walk that found issue #740, kept as a gate. A comment
-// that is the last thing in a bare block or a closure body sat in no
-// run at all: `block_here` built every `Block` with `trailing:
-// no_trivia()` unconditionally, nothing claimed `p.pending` while the
-// body was read, and bumping the closing `}` drained the pending run
-// PAST the comment and overwrote it with one starting beyond it. The
-// formatter cannot catch this and never will on its own: `fmt.zen`
-// reads only each declaration's leading run and the module's trailing
-// run and copies every declaration BODY verbatim, so its round trip
-// stays byte-identical even when a comment below declaration level is
-// dropped. The round trip is a vacuous oracle for this property; the
-// walk over the arena is not.
-//
-// The audit is two assertions. Summing run lengths against
-// `Ast.trivia_count` catches a piece named by NO run. Ordering catches
-// double ownership: the arena keeps trivia in source order and every
-// run is a contiguous window of it, so pieces met through well-formed
-// runs form a strictly increasing sequence — a repeat or a step back
-// means two runs named one piece.
-//
-// One comment per placement the contract names an owner for, with the
-// two this gate exists to keep marked HERE:
+// One comment per placement that has a distinct owner:
 //
 //    1  // before the declaration              -> Point.leading
 //    2  Point = {
@@ -53,7 +30,7 @@
 //   25  // at end of file                     -> Module.trailing
 
 scan, Source = std.lex.lex
-Parser = std.parse.parser
+Parser, module = std.parse
 Ast = std.ast.ast_arena
 TriviaRun = std.ast.ast_span
 ExprId, TypeId, PatternId, BlockId = std.ast.ast_id

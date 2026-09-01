@@ -1,22 +1,6 @@
-// src/gen/gen_c/gen_c_array.zen
-// What a FIXED ARRAY is in C: its layout, its two literal forms, its
-// bounds-checked index, and the walk that makes it a Range.
-// ONE FILE, ONE SUBJECT: the layout decides the member name, the
-// literals write through it, the index reads through it, the walk reads
-// through it once per pass. Splitting by caller would put one C
-// spelling in four files with four chances to drift.
-// A `[T, N]` IS A STRUCT AROUND A C ARRAY, not a bare `T[N]`: C arrays
-// don't assign, pass by value, or return, but a Zen fixed array does all
-// three ("lives on the stack, no alloc") — wrapping gives it C's own
-// value semantics.
-// THE COUNT COMES FROM THE TYPE, NEVER THE EXPRESSION — `TyArray.count`,
-// interned, so the bounds check needs no length stored beside the
-// bytes, and a `Res`-carried array has the length that was written.
-// A FIXED ARRAY SATISFIES `Range` INTRINSICALLY (`std/core/range.zen`:
-// "`[T, N]` is a type constructor, not a name, so there is no `[T,
-// N].impl(..)` to write"). Start is 0, end is the comptime count, `at`
-// is the index below — no `at` call or `Res` per pass, so a fold stays
-// a plain C for-loop.
+// C layout, literals, checked indexing, and intrinsic Range walking for fixed
+// arrays. `[T, N]` uses a struct around a C array to preserve value semantics;
+// N lives in the type and requires no runtime length field.
 
 ExprId, ArrayLit, FixedArray, Index, Lambda = std.ast
 AllocError = std.mem
@@ -170,22 +154,9 @@ write_compound = (
     Ok(());
 }
 
-// THE ELEMENTS RUN LEFT TO RIGHT TOO. One literal is ONE C compound
-// literal, and C11 6.7.9p23 leaves its initialiser expressions
-// indeterminately sequenced — the same hand-away a call's argument
-// list was before 1aab00ca and a construction's fields were before
-// 37a3e62a1. So each element asks the question those two ask
-// (`holds`, `infix_operand_held`): it is held while a call is still to
-// its RIGHT, the rightmost calling element stays inline because by the
-// time it runs everything to its left already has, and nothing is
-// touched at all unless some element runs. A whole literal standing in
-// a position that holds IT (`two([t(), t()], t())`) is the caller's
-// `value_held` at work, one level up.
-// The question is asked of the LITERAL, not through `be.holds`: a
-// literal has no receiver and no callee record to ask with. The arity
-// question and the something-runs question are asked ONCE for the
-// whole list (`multi`, `last`), the rightmost-calling-element
-// question once per element — the split `holds` makes inside itself.
+// C does not sequence compound-literal initializers. Hold each element while a
+// call remains to its right, leaving only the last calling element inline, to
+// preserve Zen's left-to-right evaluation order.
 elem_held = (
     be    : CBackend,
     multi : bool,

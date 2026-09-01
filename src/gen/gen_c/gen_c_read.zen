@@ -1,21 +1,6 @@
-// src/gen/gen_c/gen_c_read.zen
-// WHAT A DOT READS.
-// `gen_c_member.zen` owns `x.f(a)`; this owns `x.f`, and they are not
-// the same question. One node, `Access`, and three readings of it that
-// DESIGN.md separates by what the base NAMES:
-//   Shape.Unit    a NULLARY VARIANT: the base names an enum, and the
-//                 variant IS a value of it — the tag and no payload
-//   usize.BITS    a CONSTANT ON A TYPE: the base names a declaration,
-//                 and the member is a value OF that declaration, read
-//                 out of nothing. "A prelude declaration of a
-//                 primitive's name IS that primitive", so `usize`'s
-//                 members are `std.core.num.usize`'s
-//   p.x           a FIELD: the base is a value, and this is the only
-//                 one of the three that reads a receiver
-// The order is the order the questions can be answered in, and each one
-// is asked of the DECLARATION rather than of the spelling.
-// `str` IS THE ONE TYPE WHOSE C REPRESENTATION IS THE RUNTIME FLOOR'S,
-// which is why the field rule is here rather than in the mangler.
+// Lower dot reads: nullary enum variants, type constants, and value fields.
+// Method calls remain in `gen_c_member`. Primitive fields use runtime-floor
+// names; declared fields use mangled names.
 
 ExprId, Decl, Struct, Member = std.ast
 Const, Access, Impl = std.ast
@@ -42,11 +27,7 @@ expr, ty_of = gen.gen_c.gen_c_expr
 field_of = gen.gen_c.gen_c_type
 lower_const_value = gen.gen_c.gen_c_const
 
-// access and calls
-
-// `p.x` on a struct, and `Shape.Unit` on an enum: one node, and the
-// difference is whether the base is a value or a declaration — "that
-// access form already exists, so this adds a spelling, not a concept".
+// The base's resolved kind separates declaration reads from value fields.
 lower_access* = (
     be   :: CBackend,
     id   : ExprId,
@@ -79,15 +60,11 @@ lower_type_or_field = (
     })
 }
 
-// `j.WIDTH`, WHERE `WIDTH` IS A CONSTANT AND `j` IS A VALUE.
+// `j.WIDTH`, where `WIDTH` is a constant and `j` is a value.
 // A constant is one value per type and there is nothing in a receiver
 // to read it out of — so which side of the dot the TYPE arrives on
-// cannot change the answer. `Limits.WIDTH` folded and `j.WIDTH` fell
-// through to the field path, which emitted `.zg_m5WIDTH` on a struct
-// that declares no such member: the diagnostic came from `cc` and named
-// a symbol the author never wrote. The bootstrapper already folded it,
-// so this was also the two implementations disagreeing.
-// ASKED AFTER `type_const` AND BEFORE THE FIELD PATH. A name that is
+// cannot change the answer. Ask after `type_const` and before the field
+// path. A name that is
 // both is not possible — grammar R4 makes `NAME: T = value` a constant
 // and `name :: T = value` a field, one member each way — and a constant
 // is the reading that has no storage to fall back on.

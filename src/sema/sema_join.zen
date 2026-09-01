@@ -1,11 +1,7 @@
 // src/sema/sema_join.zen
-// What a `.match` EVALUATES TO, when its arms do not all say the same
-// thing.
-//
-// One question, folded once per arm: what the match is worth so far,
-// joined with what this arm is worth. Its own file because it's its own
-// subject — `sema_match.zen` decides which values
-// REACH an arm, this decides what comes back out.
+// Computes the value type of a match by folding once over its arms.
+// `sema_match.zen` decides which values reach an arm; this module decides
+// what comes back out.
 //
 // `Res` is the whole difficulty, and a deliberate one. `Ok(x)` is
 // OPEN — which `Res` it closes isn't decided until an expectation
@@ -14,18 +10,8 @@
 // and the PAYLOAD off the arm that has one, since a match written
 // `Ok(v)` / `None` has neither arm knowing both.
 //
-// Everything else is first-arm-wins, deliberately: Zen has no numeric
-// tower and no common supertype, so two arms of genuinely different
-// types mean something the language cannot express — inventing a join
-// for it would hide the mistake rather than report it.
-//
-// AND IT IS REPORTED, which is what makes the paragraph above a rule
-// and not a shrug. Wherever a position writes a type down the arms owe
-// it (`sema_hoist.check_arms`); where nothing does, they owe the join
-// this file computes (`check_arms_agree`). So the answer below has to
-// be the type the arms actually settle on: a first-arm-wins that was
-// merely lenient would now refuse working programs, which is why
-// `settled_literal` exists.
+// Otherwise the first arm supplies the type: Zen has no numeric tower or
+// general common supertype. Arm agreement is checked by `sema_hoist`.
 
 AllocError = std.mem
 TyId, TyRes, is_failure = sema.sema_ty
@@ -45,16 +31,7 @@ keep_or_settle = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
     })
 }
 
-// THE SAME JOIN WITH THE ARMS THE OTHER WAY ROUND, because which arm is
-// open is the author's ordering and not a fact about the type. The fold
-// reaches here with `a` the arms so far and `b` the one being added, and
-// only `a` had ever been asked.
-//
-// WITHOUT THIS THE JOIN WAS ORDER-DEPENDENT, and the example in this
-// file's own header only worked one way round. `Ok(v)` then `None`
-// typed; `None` then `Ok(v)` — the same match, arms swapped — took
-// `None`'s type whole and answered `Res<Infer>`, which is the `int`
-// where the payload goes that `settled_res` above exists to prevent.
+// Repeat the join with reversed arms because arm ordering is not a type fact.
 settle_reversed = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
     (c.open_res(b) && (c.is_unknown(a) == false)).match({
         true  => c.settled_res(b, a),
@@ -62,20 +39,8 @@ settle_reversed = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
     })
 }
 
-// A LITERAL IS NOT A TYPE A MATCH CAN BE WORTH, so the arm that HAS a
-// type says which. `at_least_one = (n: usize) usize { (n == 0).match({
-// true => 1, false => n }) }` is `usize`: `1` is an `int` literal, and
-// "a literal's type comes from its context" (`sema_check.assignable`) —
-// the other arm IS the context, there being no other.
-//
-// First-arm-wins answered `int` here. Nothing downstream complained,
-// because `assignable` lets an `int` literal reach every integer type,
-// so the wrong answer was a lenient one — and it stayed invisible until
-// the arms were asked to agree, which refused twenty-eight matches in
-// `src/` that are not wrong.
-//
-// Not a supertype and not an invention: the collapse `coerce` and
-// `check_literal` already make at every typed slot, read sideways.
+// A literal is not a settled match type, so a concrete compatible arm
+// supplies its context (the same collapse used by `check_literal`).
 settled_literal = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
     (c.is_literal_ty(a) && c.concrete(b) && c.assignable(a, b)).match({
         true  => Ok(b),

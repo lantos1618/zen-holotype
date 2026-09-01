@@ -1,42 +1,22 @@
-// src/lsp/lsp_reply.zen
-// The wire's shapes: reading a request's fields, and building a reply.
-//
-// Split out of `lsp_serve.zen` when the session file met STYLE.md's
-// hard cap — the split is on SUBJECT, not on size: what follows is the
-// JSON-RPC envelope's grammar (where `params` lives, how an id is
-// echoed, the exact byte shapes of `result` and `error`), while the
-// session that produces the values inside those shapes stays behind.
-// Nothing here knows what a document is.
+// Reads JSON-RPC request fields and writes response envelopes and capabilities.
 
 str, String = std.text
 Alloc, AllocError = std.mem
 Jsons, JsonId, write_text, written, obj, Nest,
     JsonFault = std.json
-write_decimal = lsp.lsp_frame
 Hover = lsp.lsp_hover
 Target, write_location = lsp.lsp_def
 write_wire = lsp.lsp_pos
-// The legend `initialize` advertises the colours under: the index a
-// token carries and the list it indexes cannot be spelled in two files.
 write_legend = lsp.lsp_colour
-
-// --- reading a request -----------------------------------------------
-//
-// Every one of these answers "" or 0 for a field it cannot find, and
-// none fails — refusal happens later, by name, where it can carry an id.
 
 method_of* = (tree: Jsons, req: JsonId) str {
     string_at(tree, req, "method")
 }
 
-// `params`, or the request itself when there are none — a malformed
-// message reads as one with every field absent.
 params_of* = (tree: Jsons, req: JsonId) JsonId {
     tree.field(req, "params").match({ None => req, Ok(ps) => ps })
 }
 
-// `params.<name>`, and the object itself when absent — same reading one
-// level down.
 param* = (tree: Jsons, req: JsonId, name: str) JsonId {
     ps = params_of(tree, req);
     tree.field(ps, name).match({ None => ps, Ok(v) => v })
@@ -55,13 +35,6 @@ number_at* = (tree: Jsons, obj: JsonId, name: str) usize {
         Ok(v) => tree.whole(v).match({ Ok(n) => n, None => 0 }),
     })
 }
-
-// --- the reply shapes ------------------------------------------------
-//
-// Built as TEXT and not through the arena: a reply is a fixed shape with
-// two holes, and an arena would mean building six nodes to print eight
-// bytes. Every quotable string goes through `write_text`,
-// `std.json`'s escaper — one escaping rule in this tree.
 
 result* = (tree: Jsons, rid: JsonId, body: str, msg :: String)
           Res<(), AllocError> {
@@ -83,17 +56,13 @@ failed* = (
     fault ::= obj(msg).try();
     fault.key("code", msg).try();
     msg.add('-').try();
-    write_decimal(rpc_code(code), msg).try();
+    msg.write_usize(rpc_code(code)).try();
     fault.key("message", msg).try();
     write_text(why, msg).try();
     fault.close(msg).try();
     reply.close(msg)
 }
 
-// THE ID IS ECHOED VERBATIM, out of the arena it was read from — a
-// JSON-RPC id may be a number or a string, and re-emitting the node
-// matches either without a second representation of "an id". The open
-// envelope comes back, since both replies put one more member in it.
 head = (tree: Jsons, rid: JsonId, msg :: String) Res<Nest, AllocError> {
     reply ::= obj(msg).try();
     reply.text("jsonrpc", "2.0", msg).try();
@@ -102,8 +71,6 @@ head = (tree: Jsons, rid: JsonId, msg :: String) Res<Nest, AllocError> {
     Ok(reply)
 }
 
-// A frame this server could not parse gets an error with a NULL id —
-// the id lives inside the document that failed to parse.
 parse_error* = (f: JsonFault, msg :: String) Res<(), AllocError> {
     reply ::= obj(msg).try();
     reply.text("jsonrpc", "2.0", msg).try();
@@ -113,29 +80,24 @@ parse_error* = (f: JsonFault, msg :: String) Res<(), AllocError> {
     why ::= obj(msg).try();
     why.key("code", msg).try();
     msg.add('-').try();
-    write_decimal(rpc_code(RpcFault.ParseError), msg).try();
+    msg.write_usize(rpc_code(RpcFault.ParseError)).try();
     why.key("message", msg).try();
     write_fault(f, msg).try();
     why.close(msg).try();
     reply.close(msg)
 }
 
-// The fault, with its byte offset — `TESTING.md:17`: "a rejection with
-// the wrong span is a failure".
 write_fault = (f: JsonFault, msg :: String) Res<(), AllocError> {
     msg.add('"').try();
     said = fault_text(f);
     msg.add(said.why).try();
     said.at.match({
         None  => written(),
-        Ok(i) => { msg.add(" at byte ").try(); write_decimal(i, msg) },
+        Ok(i) => { msg.add(" at byte ").try(); msg.write_usize(i) },
     }).try();
     msg.add('"')
 }
 
-// The message and the byte offset from ONE match — a new `JsonFault`
-// variant edits one place, not two. `at` is `None` only for `NoMemory`,
-// which has no byte to name.
 FaultText = { why: str, at: Res<usize> }
 
 fault_text = (f: JsonFault) FaultText {
@@ -156,9 +118,6 @@ fault_text = (f: JsonFault) FaultText {
     })
 }
 
-// A `Hover` as the protocol spells one. `plaintext` and not `markdown`:
-// rendering as markup would let a `*` inside a name become emphasis —
-// not hypothetical, since an exported name IS starred.
 write_hover* = (h: Hover, out :: String) Res<(), AllocError> {
     answer ::= obj(out).try();
     answer.key("contents", out).try();
@@ -177,8 +136,6 @@ write_hover* = (h: Hover, out :: String) Res<(), AllocError> {
     answer.close(out)
 }
 
-// A `Target` as the protocol spells it, `null` when there is none — the
-// two lines every definition answer shares, once.
 write_target* = (t: Target, body :: String) Res<(), AllocError> {
     t.found.match({
         false => body.add("null"),
@@ -186,30 +143,6 @@ write_target* = (t: Target, body :: String) Res<(), AllocError> {
     })
 }
 
-// WHAT THIS SERVER SAYS IT CAN DO, and only what it does.
-//
-// WRITTEN, not a constant: the semantic-token legend belongs to
-// `lsp_colour.zen`, and the index a `tokenType` uses cannot be spelled
-// in two files without one day silently disagreeing.
-//
-// Sync kind 1 is Full — `lsp_serve.zen`'s header says why not 2.
-//
-// `full: true` AND NOTHING ELSE. A client believes what it is told:
-// advertising `range` would make VS Code send
-// `textDocument/semanticTokens/range`, which this server refuses with
-// `-32601`, leaving the file with NO COLOUR AT ALL and no reason shown.
-// A capability is a promise; the only safe one is the one already kept.
-//
-// `documentFormattingProvider` AND NOT `documentRangeFormattingProvider`
-// NOR `documentOnTypeFormattingProvider`, for that same reason: this
-// server formats a whole document (`lsp_fmt.zen`), because `src/fmt/`
-// parses a whole file, and a range it cannot format is a range it must
-// not be asked for.
-//
-// `codeActionProvider` names `quickfix` AND NOTHING ELSE: the one action
-// this server offers is the auto-import on an undefined name
-// (`lsp_action.zen`). No `resolveProvider` — every action carries its
-// edit up front, so there is nothing to resolve later.
 write_capabilities* = (out :: String) Res<(), AllocError> {
     out.add(
         "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"definitionProvider\":true,\"documentSymbolProvider\":true,\"documentFormattingProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\"]},\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\"]},\"semanticTokensProvider\":{\"legend\":"
@@ -220,19 +153,8 @@ write_capabilities* = (out :: String) Res<(), AllocError> {
     )
 }
 
-// The one method `semanticTokensProvider` above promises, spelled once
-// beside the promise.
 SEMANTIC_TOKENS*: str = "textDocument/semanticTokens/full"
 
-// THE METHODS THIS SERVER ANSWERS, as a union, for the same reason the
-// codes below are one: a router that compares strings in its arms nests
-// one level per method, and every arm holds a whole handler call. Named
-// here, the ladder is eight one-word arms and `lsp_serve.zen`'s
-// `answered` is one flat match.
-//
-// `Unknown` IS A VARIANT, not a failure: an LSP client may send any
-// method, and the answer to one this server does not implement is
-// `-32601`, which `answered` writes like any other reply.
 Request* = Initialize
     | Shutdown
     | Hover
@@ -244,13 +166,6 @@ Request* = Initialize
     | Action
     | Unknown
 
-// The one place a method's spelling is compared. Ordered by how often a
-// session sends each: a document is hovered far more than it is opened.
-// Early return over a chain: the one-shot loop is a breakable block,
-// each guard a `.then` naming the one request it spells, the last break
-// the answer to everything else — `sequence_len` in `std/text` is the
-// same idiom, and the typed binding is load-bearing for the reason its
-// own comment states.
 request_of* = (method: str) Request {
     found: Res<Request> = loop<Request>((h) {
         method.eq("textDocument/hover").then(() { h.break(Request.Hover) });
@@ -258,9 +173,6 @@ request_of* = (method: str) Request {
         method.eq("textDocument/completion").then(() { h.break(Request.Completion) });
         method.eq("textDocument/documentSymbol").then(() { h.break(Request.Outline) });
         method.eq(SEMANTIC_TOKENS).then(() { h.break(Request.Colour) });
-        // FORMATTING AND CODE ACTIONS ARE LAST OF THE DOCUMENT METHODS: a buffer
-        // is coloured on every keystroke, formatted on save, and asked for
-        // quickfixes only when the cursor pauses on a squiggle.
         method.eq("textDocument/formatting").then(() { h.break(Request.Format) });
         method.eq("textDocument/codeAction").then(() { h.break(Request.Action) });
         method.eq("initialize").then(() { h.break(Request.Initialize) });
@@ -273,10 +185,6 @@ request_of* = (method: str) Request {
     });
 }
 
-// JSON-RPC's codes as a UNION: a call site names a fault, never a
-// number, and the wire's magnitude comes from this one match —
-// `lsp_colour.zen`'s `Colour`/`index_of` is the same move. MAGNITUDES,
-// because the sign is written by the one function that emits them.
 RpcFault* = ParseError | MethodNotFound | InvalidParams | NotInitialized
 
 rpc_code = (f: RpcFault) usize {
@@ -288,11 +196,6 @@ rpc_code = (f: RpcFault) usize {
     })
 }
 
-// A `str` copied into an arena — what a session keeps may not borrow
-// the message's arena (dropped once the reply is written) nor the
-// request's bytes (only a string without escapes is a slice of the
-// request, `json_read.zen`). THE ONLY COPY IN THIS FOLDER —
-// `lsp_serve.zen`, `lsp_diag.zen` and `lsp_built.zen` all call it.
 own_str* = (a: Alloc, s: str) Res<str, AllocError> {
     out ::= a.String().try();
     out.add(s).try();

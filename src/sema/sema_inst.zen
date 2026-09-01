@@ -1,25 +1,7 @@
-// src/sema/sema_inst.zen
-// What a type parameter BECOMES. `sema_ty.zen` gives it its own type,
-// `Ty.Var`; this file substitutes it.
-//
-// An instantiation is a pair of parallel lists, not a `Map` (same
-// reason as the backend's type worklist: small, built once, read many
-// times) — `vars` holds the `Ty.Var` ids, `args` what each became, so a
-// lookup is a `u32` compare.
-//
-// The memo is not re-keyed by instantiation: a generic body is checked
-// exactly once, generically; `ExprId` already separates call sites, and
-// re-keying would re-check the body per instantiation, duplicating
-// every diagnostic it owes.
-//
-// Substitution happens only at a call resolving (`sema_call.zen`) and a
-// member reached through a generic receiver (`sema_member.zen`);
-// everything downstream reads those answers rather than deriving them.
-//
-// A partial substitution is worse than none: `subst` leaves an unbound
-// `Var` alone; `has_var` is what every consumer must check before
-// emitting, since a `Var` reaching a backend mangles to one letter,
-// colliding two instantiations into one symbol.
+// Generic substitutions and instantiation edges. `Inst` pairs type-variable
+// ids with their arguments. Generic bodies are checked once; call and member
+// sites record their substitutions. `subst` preserves an unbound variable so
+// consumers can refuse incomplete instantiations explicitly.
 
 Decl, Struct, Enum, TParam, Span = std.ast
 Alloc, AllocError = std.mem
@@ -373,21 +355,10 @@ unify* = (c :: Checker, param: TyId, actual: TyId, inst :: Inst)
     })
 }
 
-// Poison never becomes a binding: an untypeable argument says nothing
-// about `T` — binding `T = <unknown>` would emit a type nobody wrote.
-//
-// A type that still mentions a parameter is NOT poison — refusing it
-// here used to turn an open answer into an opaque one. Bug found the
-// hard way: `Range(1, 4).map(alloc, ..)` answers `Res<Vec<U>>` (map's
-// own `U`, settled only by the body), and `ok_or`'s
-// `<T>(r: Res<T>, ..)` declined to bind `T` at all — so
-// `.ok_or(..).try()` answered a bare `T` instead of `Vec<U>`.
-// `sema_call.zen` reaches no members through a foreign `Var`, so the
-// `.loop` on it resolved to nothing, and a backend reading `call_memo`
-// reported seven declarations of `loop` as an ambiguity.
-//
-// Binding keeps openness: `Vec<U>` is as open as `U`, and the refusal
-// for it already lives at the consumer via `has_var`.
+// Unknown and inference placeholders say nothing about a parameter and never
+// become bindings. A structured type that still contains a type variable is a
+// valid open binding; consumers decide whether remaining variables are usable
+// through `has_var`.
 bind_actual = (c :: Checker, param: TyId, actual: TyId, inst :: Inst)
               Res<(), AllocError> {
     c.usable_actual(actual).match({

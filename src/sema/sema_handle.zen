@@ -1,14 +1,5 @@
-// src/sema/sema_handle.zen
-// THE LOOP-HANDLE LAW, in one file: a LoopHandle is not a value.
-//
-// `h` arrives in a loop body as the loop it came from — `gen_c_loop
-// .bind_handle` gives the name no storage and lowers `h.break` at the
-// NAME — but the signature `(h: LoopHandle, ..)` types it as an
-// ordinary nominal. Every position that would give it C storage is
-// refused here, at the span that names the handle, because zen said
-// yes while cc alone objected (`zu_l1h` undeclared): the BIND (#782),
-// the CALL ARGUMENT (#782), the BLOCK TAIL (#807), and the
-// construction FIELD this file's callers reach through `field_fits`.
+// A LoopHandle identifies its active loop and has no value storage. Bindings,
+// ordinary call arguments, block tails, and construction fields must refuse it.
 //
 // The one legal inward path is the spliced body: a lambda's parameters
 // are bound by the frame it is inlined into, and `gen_c_inline
@@ -16,14 +7,8 @@
 // loop it names. So `(g: LoopHandle) ()`, a body type carrying one,
 // and `h.break(..)` / `h.next()` inside the body itself stay legal.
 //
-// ITS OWN LEAF so every seat can ask the same question without a
-// cycle: the predicates lived in `sema_place.zen`, whose other
-// imports made `sema_hoist -> sema_place` a cycle — the shape that
-// stopped the backend emitting whole instantiations once before
-// (`sema_hoist.zen`, the `sema_bound` note). This file imports only
-// leaves, and everything imports it.
-//
-// `LoopHandle` by WHERE IT IS DECLARED, not by who names it: a program
+// This leaf module lets every semantic position share the rule without an
+// import cycle. LoopHandle is recognized by where it is declared, not by who names it: a program
 // may call its own struct `LoopHandle` and bind that freely — the
 // refusal answers the library type alone. An unknown module reads as
 // NOT the handle — fail-open, since a missed check only misses while a
@@ -75,9 +60,7 @@ refuse_handle_at* = (c :: Checker, id: ExprId) Res<(), AllocError> {
     )
 }
 
-// A LOOP HANDLE IS NOT A VALUE, so binding it is refused outright.
-//
-// Reported at the VALUE, the one byte that names what cannot be kept;
+// Report at the value that cannot be retained;
 // the bind itself runs on, so one mistake stays one diagnostic and
 // nothing downstream re-asks. (`sema_place.bind_stmt`, the BIND seat.)
 refuse_handle_value* = (c :: Checker, id: ExprId, got: TyId)
@@ -88,8 +71,7 @@ refuse_handle_value* = (c :: Checker, id: ExprId, got: TyId)
     })
 }
 
-// THE SAME RULE ONE CALL OVER. `f(h)` reads like handing the loop on,
-// but a real callee's formal is C storage. Asked AFTER the candidate
+// A real callee formal has storage. Ask after the candidate
 // is chosen (`sema_call.args_handle_check`), so the diagnostic names
 // the handle rather than inventing an overload failure.
 refuse_handle_argument* = (c :: Checker, a: Arg, want: TyId, ctx: Ctx)

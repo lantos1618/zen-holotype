@@ -37,6 +37,48 @@ strndup_zg(zg_str s)
     return p;
 }
 
+static int
+invalid_string(zg_str s)
+{
+    return s.len > 0 && (!s.data || memchr(s.data, '\0', s.len) != NULL);
+}
+
+static void
+argv_free(char **argv, size_t argc)
+{
+    size_t i;
+    if (!argv) return;
+    for (i = 0; i < argc; i++) free(argv[i]);
+    free(argv);
+}
+
+/* Copy Zen strings into the NUL-terminated shape posix_spawnp requires.
+   Empty argv and embedded NUL bytes are invalid rather than silently changed. */
+static char **
+argv_copy(zg_str *args, size_t argc)
+{
+    char **argv;
+    size_t i;
+
+    if (!args || argc == 0 || argc == SIZE_MAX || args[0].len == 0) return NULL;
+
+    argv = calloc(argc + 1, sizeof(*argv));
+    if (!argv) return NULL;
+
+    for (i = 0; i < argc; i++) {
+        if (invalid_string(args[i])) {
+            argv_free(argv, argc);
+            return NULL;
+        }
+        argv[i] = strndup_zg(args[i]);
+        if (!argv[i]) {
+            argv_free(argv, argc);
+            return NULL;
+        }
+    }
+    return argv;
+}
+
 struct capture {
     uint8_t *data;
     size_t len;
@@ -130,15 +172,22 @@ wait_for(pid_t pid, int *status)
     return r < 0 ? -1 : 0;
 }
 
-/* 0 = ok, 1 = SpawnFailed, 2 = WaitFailed, 3 = ReadFailed */
-int32_t
-zg_proc_run(zg_str cwd, zg_str cmd,
-            int32_t *code_out,
-            uint8_t **out_buf, size_t *out_len,
-            uint8_t **err_buf, size_t *err_len)
+static int32_t
+exit_code(int status)
 {
-    char *cwd_c = strndup_zg(cwd);
-    char *cmd_c = strndup_zg(cmd);
+    if (WIFEXITED(status)) return (int32_t)WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + (int32_t)WTERMSIG(status);
+    return 127;
+}
+
+/* Spawn one process and capture both output streams without risking a pipe
+   deadlock. cwd is NULL when the child should inherit the current directory. */
+static int32_t
+run_captured(const char *cwd, const char *file, char *const argv[],
+             int32_t *code_out,
+             uint8_t **out_buf, size_t *out_len,
+             uint8_t **err_buf, size_t *err_len)
+{
     int out_pipe[2] = {-1, -1};
     int err_pipe[2] = {-1, -1};
     posix_spawn_file_actions_t fa;
@@ -149,16 +198,12 @@ zg_proc_run(zg_str cwd, zg_str cmd,
     struct capture err = {0};
     int32_t ret = 1; /* SpawnFailed */
 
-    if (!cmd_c) goto done;
-
     if (pipe(out_pipe) != 0 || pipe(err_pipe) != 0) goto done;
 
     if (posix_spawn_file_actions_init(&fa) != 0) goto done;
     fa_init = 1;
 
-    if (cwd.len > 0 && cwd_c) {
-        if (posix_spawn_file_actions_addchdir_np(&fa, cwd_c) != 0) goto done;
-    }
+    if (cwd && posix_spawn_file_actions_addchdir_np(&fa, cwd) != 0) goto done;
 
     if (posix_spawn_file_actions_adddup2(&fa, out_pipe[1], STDOUT_FILENO) != 0) goto done;
     if (posix_spawn_file_actions_adddup2(&fa, err_pipe[1], STDERR_FILENO) != 0) goto done;
@@ -167,8 +212,7 @@ zg_proc_run(zg_str cwd, zg_str cmd,
     if (posix_spawn_file_actions_addclose(&fa, err_pipe[0]) != 0) goto done;
     if (posix_spawn_file_actions_addclose(&fa, err_pipe[1]) != 0) goto done;
 
-    char *argv[] = {"sh", "-c", cmd_c, NULL};
-    if (posix_spawnp(&pid, "/bin/sh", &fa, NULL, argv, environ) != 0) goto done;
+    if (posix_spawnp(&pid, file, &fa, NULL, argv, environ) != 0) goto done;
 
     /* Parent: close write ends and read. */
     close(out_pipe[1]); out_pipe[1] = -1;
@@ -185,13 +229,7 @@ zg_proc_run(zg_str cwd, zg_str cmd,
     if (wait_for(pid, &status) != 0) { ret = 2; goto done; }
     pid = -1; /* reaped */
 
-    if (WIFEXITED(status)) {
-        *code_out = (int32_t)WEXITSTATUS(status);
-    } else if (WIFSIGNALED(status)) {
-        *code_out = 128 + (int32_t)WTERMSIG(status);
-    } else {
-        *code_out = 127;
-    }
+    *code_out = exit_code(status);
 
     *out_buf = out.data;
     *out_len = out.len;
@@ -213,11 +251,100 @@ done:
         kill(pid, SIGKILL);
         wait_for(pid, &status);
     }
-    free(cwd_c);
-    free(cmd_c);
     if (ret != 0) {
         capture_free(&out);
         capture_free(&err);
     }
+    return ret;
+}
+
+/* 0 = ok, 1 = SpawnFailed, 2 = WaitFailed, 3 = ReadFailed */
+int32_t
+zg_proc_run(zg_str cwd, zg_str cmd,
+            int32_t *code_out,
+            uint8_t **out_buf, size_t *out_len,
+            uint8_t **err_buf, size_t *err_len)
+{
+    char *cwd_c = strndup_zg(cwd);
+    char *cmd_c = strndup_zg(cmd);
+    char *argv[] = {"sh", "-c", cmd_c, NULL};
+    int32_t ret = 1;
+
+    if (cmd_c) {
+        ret = run_captured(cwd.len > 0 ? cwd_c : NULL, "/bin/sh", argv,
+                           code_out, out_buf, out_len, err_buf, err_len);
+    }
+    free(cwd_c);
+    free(cmd_c);
+    return ret;
+}
+
+/* Execute an explicit argv and capture stdout and stderr. No shell is used. */
+int32_t
+zg_proc_run_argv(zg_str cwd, zg_str *args, size_t argc,
+                 int32_t *code_out,
+                 uint8_t **out_buf, size_t *out_len,
+                 uint8_t **err_buf, size_t *err_len)
+{
+    char *cwd_c = NULL;
+    char **argv = NULL;
+    int32_t ret = 1; /* SpawnFailed */
+
+    if (invalid_string(cwd)) goto done;
+    if (cwd.len > 0) {
+        cwd_c = strndup_zg(cwd);
+        if (!cwd_c) goto done;
+    }
+    argv = argv_copy(args, argc);
+    if (!argv) goto done;
+
+    ret = run_captured(cwd_c, argv[0], argv,
+                       code_out, out_buf, out_len, err_buf, err_len);
+
+done:
+    free(cwd_c);
+    argv_free(argv, argc);
+    return ret;
+}
+
+/* Execute an explicit argv with the parent's stdin, stdout, and stderr. */
+int32_t
+zg_proc_run_argv_inherit(zg_str cwd, zg_str *args, size_t argc,
+                         int32_t *code_out)
+{
+    char *cwd_c = NULL;
+    char **argv = NULL;
+    posix_spawn_file_actions_t fa;
+    int fa_init = 0;
+    pid_t pid = -1;
+    int status;
+    int32_t ret = 1; /* SpawnFailed */
+
+    if (invalid_string(cwd)) goto done;
+    if (cwd.len > 0) {
+        cwd_c = strndup_zg(cwd);
+        if (!cwd_c) goto done;
+    }
+    argv = argv_copy(args, argc);
+    if (!argv) goto done;
+
+    if (posix_spawn_file_actions_init(&fa) != 0) goto done;
+    fa_init = 1;
+    if (cwd_c && posix_spawn_file_actions_addchdir_np(&fa, cwd_c) != 0) goto done;
+
+    if (posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ) != 0) goto done;
+    if (wait_for(pid, &status) != 0) { ret = 2; goto done; }
+    pid = -1;
+    *code_out = exit_code(status);
+    ret = 0;
+
+done:
+    if (fa_init) posix_spawn_file_actions_destroy(&fa);
+    if (pid >= 0) {
+        kill(pid, SIGKILL);
+        wait_for(pid, &status);
+    }
+    free(cwd_c);
+    argv_free(argv, argc);
     return ret;
 }

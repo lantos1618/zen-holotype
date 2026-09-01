@@ -1,9 +1,5 @@
-// src/lsp/lsp_diag.zen
-// `textDocument/publishDiagnostics`: what a build found, said to a client.
-// Changes mark a pending whole-program build; settling ensures that build and
-// publishes one notification per affected URI. Empty lists clear previous
-// diagnostics. Byte-identical notifications are suppressed without changing
-// the server's remembered state.
+// Owns the workspace check used to publish diagnostics. A settle publishes
+// changed results and empty lists for files whose previous errors disappeared.
 
 str, String = std.text
 Vec, Map = std.collections
@@ -13,59 +9,44 @@ Checker = sema.sema_check
 root_for, relative_to = zen.zen_path
 write_range = lsp.lsp_pos
 obj, arr, Nest, written = std.json
-write_frame, write_decimal = lsp.lsp_frame
+write_frame = lsp.lsp_frame
 path_of = lsp.lsp_uri
-// Arena-backed string ownership helper.
 own_str = lsp.lsp_reply
-// The build retained by the session and its diagnostic rows.
 Built, Spot* = lsp.lsp_built
-// Semantic name classifications gathered from the retained build.
 Classed = lsp.lsp_colour
 
-// Read-only query access to a retained checker and its compilation root.
 Shared* = {
     c*: Res<Checker>,
     root*: str,
 }
 
-// Pending diagnostic work, published state, and the shared build.
 Diagnostics* = {
     a: Alloc,
 
-    // The newest document requiring a whole-program build, or empty.
     owed :: str = "",
 
-    // Session-owned URIs currently carrying non-empty diagnostics.
     showing :: Vec<str>,
 
-    // Closed documents awaiting an empty diagnostic notification.
     closing :: Vec<str>,
 
-    // Build shared by diagnostics and document queries.
     built :: Built,
 
-    // Semantic classes are valid only for the most recently settled text.
     fresh :: bool = false,
 
-    // Last notification body per URI, owned by the session arena.
     said :: Map<str, str>,
 
-    // Mark changed text for the next settle and stale semantic classes.
     owes* = (self :: @Self, uri: str) () {
         self.built.invalidate();
         self.owed  = uri;
         self.fresh = false;
     }
 
-    // Disk changes retire the build because its cache key covers overlays,
-    // not dependency bytes read from disk.
     stales* = (self :: @Self, uri: str) () {
         self.built.invalidate();
         self.fresh = false;
         self.owed.is_empty().then(() { self.owed = uri; });
     }
 
-    // Closing retires the overlay build and schedules a diagnostic clear.
     closed* = (self :: @Self, uri: str, next: str)
               Res<(), AllocError> {
         self.built.invalidate();
@@ -77,8 +58,6 @@ Diagnostics* = {
         })
     }
 
-    // Sorted semantic classifications from the last settle. Empty means the
-    // caller should use lexical classifications.
     classes_for* = (self :: @Self, t: Alloc, uri: str)
                    Res<Vec<Classed>, AllocError> {
         self.fresh.match({
@@ -87,7 +66,6 @@ Diagnostics* = {
         })
     }
 
-    // Ensure the workspace build and expose it to a document query.
     shared* = (self :: @Self, env: Env, workspace: str, uris: Vec<str>,
                docs: Map<str, str>, path: str, t: Alloc)
               Res<Shared, AllocError> {
@@ -96,8 +74,6 @@ Diagnostics* = {
         Ok(Shared(c: self.built.checker(), root: self.built.root()));
     }
 
-    // Ensure one whole-program build for the pending state and publish it.
-    // The overlay includes every open document; `t` is settle-local scratch.
     settled* = (self :: @Self, env: Env, workspace: str, uris: Vec<str>,
                 docs: Map<str, str>, t: Alloc, out :: String)
                Res<(), AllocError> {
@@ -127,8 +103,6 @@ Diagnostics* = {
         Ok(())
     }
 
-    // Without a workspace root, suppress diagnostics rather than report
-    // imported names as undefined from an incomplete single-file build.
     build_owed = (self :: @Self, env: Env, workspace: str, uris: Vec<str>,
                   docs: Map<str, str>, t: Alloc, out :: String)
                  Res<(), AllocError> {
@@ -156,14 +130,12 @@ Diagnostics* = {
            Res<(), AllocError> {
         self.built.ensure(env, root, entry, uris, docs).try();
         self.fresh = true;
-        // If the retained build is unexpectedly absent, publish nothing.
         self.built.spots().match({
             None      => written(),
             Ok(spots) => self.say_all(env, t, uri, uris, docs, spots, out),
         })
     }
 
-    // Publish the edited URI, current diagnostic URIs, then required clears.
     say_all = (self :: @Self, env: Env, t: Alloc, uri: str, uris: Vec<str>,
                docs: Map<str, str>, spots: Vec<Spot>, out :: String)
               Res<(), AllocError> {
@@ -181,7 +153,6 @@ Diagnostics* = {
         Ok(());
     }
 
-    // Copy URIs into the session arena because the build arena is replaceable.
     remember_showing = (self :: @Self, now: Vec<str>) Res<(), AllocError> {
         self.showing = self.a.Vec<str>();
         now.loop((h, u) {
@@ -191,7 +162,6 @@ Diagnostics* = {
         Ok(());
     }
 
-    // Send one URI's list only when its serialized body changed.
     say_one = (self :: @Self, env: Env, t: Alloc, uri: str, uris: Vec<str>,
                docs: Map<str, str>, spots: Vec<Spot>, out :: String)
               Res<(), AllocError> {
@@ -220,7 +190,6 @@ Diagnostics* = {
         write_frame(body.view(), out)
     }
 
-    // Clear previously showing URIs absent from the current result.
     take_back = (self :: @Self, env: Env, t: Alloc, uri: str, now: Vec<str>,
                  uris: Vec<str>, docs: Map<str, str>, spots: Vec<Spot>,
                  out :: String) Res<(), AllocError> {
@@ -248,8 +217,6 @@ Diagnostics* = (a: Alloc, env: Env) Diagnostics {
     )
 }
 
-// This URI was showing errors and is not among the ones that have them
-// now.
 gone = (u: str, uri: str, now: Vec<str>) bool {
     u.eq(uri).match({
         true  => false,
@@ -259,7 +226,6 @@ gone = (u: str, uri: str, now: Vec<str>) bool {
     })
 }
 
-// The distinct URIs these spots name, in the order they were found.
 uris_of = (spots: Vec<Spot>, into :: Vec<str>) Res<(), AllocError> {
     spots.loop((h, s) {
         into.find((u) { u.eq(s.uri) }).match({
@@ -270,11 +236,6 @@ uris_of = (spots: Vec<Spot>, into :: Vec<str>) Res<(), AllocError> {
     Ok(());
 }
 
-// --- the notification --------------------------------------------------
-
-// The bytes the spans in `uri` were measured against: the open buffer if
-// there is one, disk otherwise, or empty when neither answers. `to_wire`
-// clamps positions for missing text so the diagnostic still reaches the client.
 text_of = (env: Env, t: Alloc, uri: str, docs: Map<str, str>) str {
     docs.get(uri).match({
         Ok(text) => text,
@@ -289,8 +250,6 @@ on_disk = (env: Env, t: Alloc, path: str) str {
     })
 }
 
-// Frame one file's complete list. An empty list clears prior diagnostics;
-// spans are converted against that file's own text.
 publish* = (a: Alloc, uri: str, text: str, spots: Vec<Spot>, out :: String)
            Res<(), AllocError> {
     body ::= a.String().try();
@@ -298,7 +257,6 @@ publish* = (a: Alloc, uri: str, text: str, spots: Vec<Spot>, out :: String)
     write_frame(body.view(), out)
 }
 
-// `textDocument/publishDiagnostics` is a notification and therefore has no id.
 write_notification = (
     a     : Alloc,
     uri   : str,
@@ -320,7 +278,6 @@ write_notification = (
     top.close(body)
 }
 
-// This spot, if it belongs to this file.
 one_of = (s: Spot, uri: str, text: str, items :: Nest, out :: String)
          Res<(), AllocError> {
     s.uri.eq(uri).match({
@@ -340,14 +297,13 @@ write_spot = (s: Spot, text: str, out :: String) Res<(), AllocError> {
     spot.key("range", out).try();
     write_range(text, s.span, out).try();
     spot.key("severity", out).try();
-    write_decimal(ERROR, out).try();
+    out.write_usize(ERROR).try();
     spot.text("source", "zen", out).try();
     spot.text("message", s.message, out).try();
     write_note(s, text, spot, out).try();
     spot.close(out)
 }
 
-// Related information points to the diagnostic's URI and note span.
 write_note = (
     s    : Spot,
     text : str,
@@ -360,7 +316,6 @@ write_note = (
     })
 }
 
-// `next` owns array separators for every related-information entry.
 write_related = (uri: str, n: Note, text: str, spot :: Nest, out :: String)
                 Res<(), AllocError> {
     spot.key("relatedInformation", out).try();
@@ -378,5 +333,4 @@ write_related = (uri: str, n: Note, text: str, spot :: Nest, out :: String)
     notes.close(out)
 }
 
-// LSP `DiagnosticSeverity.Error`.
 ERROR*: usize = 1

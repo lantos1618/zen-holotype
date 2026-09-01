@@ -1,43 +1,75 @@
 // src/zen/zen.zen
 // The CLI, and the folder's surface.
 //
-// PLAN.md: "thin cli: build / fmt / test / lsp" — `main` reads the
-// command line, picks a command, returns its exit code; everything a
+// `main` reads the command line, picks a command, and returns its exit code.
+// Everything a
 // command does is one call away in a sibling, since the compiler is a
 // library from commit one — `zen build`/`fmt`/`lsp`/`test` are entry
 // points into one artifact, never four programs.
 //
-// A FOLDER, NOT A FILE, because of a gate: `tests/run.py` stages a
-// test against the top-level DIRECTORIES of `src/`, so a top-level
-// FILE could never be reached by a corpus test. This folder also holds
-// `main`, the one declaration re-exporting couldn't express anyway.
-// `tests/corpus/cli/` imports this module.
-//
-// `main` RETURNS `Res<i32, AllocError>`, the only error the seed subset
-// lets it name (PLAN.md 0.5 has no error unions): a program that opens
-// files and allocates carries ONE nominal error, everything else a
-// value. The count of what went wrong is the exit code.
+// The folder also provides the public CLI surface imported by corpus tests.
 
 Alloc, AllocError = std.mem
 str, String = std.text
 FsError = std.env
+BuildArgs, ProjectArgs = std.build
 
 Cli*, FmtJob*, cli*, USAGE* = zen.zen_cli
 Build* = zen.zen_build
 fs_message* = std.env
 Unit* = zen.zen_path
+std_root_for = zen.zen_path
 build* = zen.zen_run
+project = zen.zen_project
 format* = zen.zen_fmt
 Server, serve, serve_stdio = lsp
 
 main = (env: Env) Res<i32, AllocError> {
     alloc ::= env.mem.alloc();
     cli(env, env.argv).try().match({
-        Build(job)    => build(env, alloc, job),
+        Build(job)    => build_cli(env, alloc, job),
+        Project(job)  => project_cli(env, alloc, job, false),
+        Run(job)      => project_cli(env, alloc, job, true),
         Fmt(job)      => format(env, alloc, job),
         Later(name)   => later(env, alloc, name),
         Usage(word)   => usage(word),
         Missing(flag) => missing(flag),
+    })
+}
+
+// The CLI parser borrows most project arguments from Env, but an inferred
+// stdlib root is assembled in its scratch arena. Copy it into main's arena
+// before the build starts so the project never observes a dangling path.
+project_cli = (env: Env, a: Alloc, job: ProjectArgs, execute: bool)
+              Res<i32, AllocError> {
+    std_root ::= a.String("{}", std_root_for(env, a)).try();
+    configured = ProjectArgs(
+        root: job.root,
+        target: job.target,
+        std_root: std_root.view(),
+        argv: job.argv,
+        args_at: job.args_at
+    );
+    project(env, a, configured, execute)
+}
+
+build_cli = (env: Env, a: Alloc, job: BuildArgs) Res<i32, AllocError> {
+    job.std_root.is_empty().match({
+        false => build(env, a, job),
+        true  => {
+            std_root ::= a.String("{}", std_root_for(env, a)).try();
+            configured = BuildArgs(
+                root: job.root,
+                emission: job.emission,
+                entry: job.entry,
+                std_root: std_root.view(),
+                symbol_map: job.symbol_map,
+                ffi: job.ffi,
+                repeat: job.repeat,
+                permute: job.permute
+            );
+            build(env, a, configured)
+        },
     })
 }
 
@@ -66,24 +98,15 @@ not_yet = (name: str) Res<i32, AllocError> {
 // `zen lsp` — the language server over stdin and stdout, what an editor
 // launches and the only thing it can launch.
 //
-// `zen lsp <requests> <replies>` IS THE SAME SERVER OVER TWO FILES,
-// kept because the corpus drives it: a test cannot hold a pipe open,
-// and an untested transport rots. Both spellings reach `lsp_serve.zen`,
-// which holds no transport at all, so they cannot drift apart.
+// `zen lsp <requests> <replies>` runs the same server over two files for
+// deterministic transport tests. Both forms reach lsp_serve.
 //
 // NO FLAGS, NO `--entry` (design_lsp.md §4): a root is discovered from
 // `initialize`'s `rootUri`, and the driver already probes when no
 // entry is named.
 //
-// `--stdio` IS THE ONE WORD THIS ACCEPTS AND IGNORES — not invented
-// here, it is what a client appends: VS Code's `vscode-languageclient`
-// adds it to server argv whenever `TransportKind.stdio` is named,
-// predating servers that speak only one transport. Without swallowing
-// it, the word arrives as `from`, the FILE form finds no second name,
-// and the server exits 2 — which inside an editor reads as `write
-// EPIPE`/"the server crashed", naming nothing actually wrong. Found the
-// first time anyone ran this from a real editor: every gate here drives
-// the server directly, so none ever passed the argv a real client sends.
+// `--stdio` is accepted for editor clients that append an explicit transport
+// flag even when the server supports only standard I/O.
 lsp = (env: Env, a: Alloc) Res<i32, AllocError> {
     from = file_arg(env, 2);
     to   = file_arg(env, 3);

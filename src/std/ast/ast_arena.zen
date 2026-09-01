@@ -1,4 +1,3 @@
-// src/std/ast/ast_arena.zen
 // Where nodes live.
 //
 // One `Ast` per compilation. It owns four arenas — expressions, types,
@@ -148,12 +147,7 @@ Ast* = {
     // routing it through `Res` would put `.try()` on every child
     // access and bury the signal that makes `.try()` readable.
     //
-    // The explicit compare exists because an earlier version let the
-    // subtraction underflow and trap on its own — it printed only
-    // `trap: integer overflow` at a line in this file, naming neither
-    // the id nor the cause, costing an afternoon to trace. `stale` is
-    // what the compare buys, for the price of one free-beside-the-copy
-    // length check.
+    // Check explicitly so stale ids report their family and index before trap.
     // -----------------------------------------------------------------
 
     expr_at* = (self: @Self, id: ExprId) Expr {
@@ -338,15 +332,12 @@ c_type_in = (binding: CBinding, decl: u32) Res<CTypeBinding> {
     })
 }
 
-// AN ID THE ARENA NEVER HANDED OUT, said in full before the trap fires.
-//
-// The likely cause is not "off by one": `Ast` is a VALUE and each
+// Report an id the arena never handed out before trapping. Ast is a value and each
 // arena is a `Vec` (pointer, length, capacity), so a copy of an `Ast`
 // is a SNAPSHOT. `alloc.Checker(tree)` or `alloc.CBackend(tree, c)`
 // captures the tree as it stood at that call; a node added afterwards
 // exists only in the caller's tree, and its id is past the snapshot's
-// arena end. SEMA_BOOTSTRAP_FIXES.md §12: the engine is a query over a
-// FINISHED tree.
+// arena end. The query engine expects a finished tree.
 //
 // Returns `()` but never does — the final subtraction underflows and
 // traps, after this has already printed the reason.

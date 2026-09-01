@@ -8,15 +8,41 @@ Vec = std.collections
 H2Error, FrameType, frame_type, wire, FLAG_PADDED, FLAG_PRIORITY, MAX_RECV = std.net.http2.http2_types
 Stream, stream_write, read_n = std.net.http2.http2_transport
 
+H2Range* = { from*: usize, len*: usize }
+
 Frame* = {
     ftype*:   FrameType,
     flags*:   u8,
     sid*:     u32,
     payload*: Vec<u8>,
-}
 
-has_flag* = (f: Frame, flag: u8) bool {
-    (f.flags / flag) % 2 == 1;
+    has_flag* = (self: @Self, flag: u8) bool {
+        (self.flags / flag) % 2 == 1;
+    }
+
+    // Locate application bytes after optional DATA/HEADERS prefixes.
+    content_range* = (self: @Self) Res<H2Range, H2Error> {
+        from: usize ::= 0;
+        pad: usize  ::= 0;
+        self.has_flag(FLAG_PADDED).then(() {
+            p    = self.payload.get(0).ok_or(H2Error.DecodeFailed).try();
+            pad  = p.to_usize();
+            from = 1;
+        });
+        self.ftype.match({
+            Headers => self.has_flag(FLAG_PRIORITY).then(() {
+                from = from + 5;
+            }),
+            _       => None,
+        });
+        (from + pad > self.payload.len).match({
+            true  => Err(H2Error.DecodeFailed),
+            false => Ok(H2Range(
+                from: from,
+                len: self.payload.len - from - pad
+            )),
+        });
+    }
 }
 
 read_frame* = (s: Stream, a: Alloc) Res<Frame, H2Error> {
@@ -114,25 +140,4 @@ u31_of* = (payload: Vec<u8>, at: usize) Res<usize, H2Error> {
     b3 = payload.get(at + 3).ok_or(H2Error.DecodeFailed).try();
     Ok((b0.to_usize() % 128) * 16777216 + b1.to_usize() * 65536
         + b2.to_usize() * 256 + b3.to_usize());
-}
-
-H2Range* = { from*: usize, len*: usize }
-
-// content window of a DATA/HEADERS payload after PADDED/PRIORITY fields
-content_range* = (f: Frame) Res<H2Range, H2Error> {
-    from: usize ::= 0;
-    pad: usize  ::= 0;
-    f.has_flag(FLAG_PADDED).then(() {
-        p    = f.payload.get(0).ok_or(H2Error.DecodeFailed).try();
-        pad  = p.to_usize();
-        from = 1;
-    });
-    f.ftype.match({
-        Headers => f.has_flag(FLAG_PRIORITY).then(() { from = from + 5; }),
-        _       => None,
-    });
-    (from + pad > f.payload.len).match({
-        true  => Err(H2Error.DecodeFailed),
-        false => Ok(H2Range(from: from, len: f.payload.len - from - pad)),
-    });
 }

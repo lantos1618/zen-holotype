@@ -1,24 +1,5 @@
-// src/lsp/lsp_names.zen
-// Which names sema settled, and what it settled them to — the semantic
-// half of `textDocument/semanticTokens/full`.
-//
-// This reads the memos left by a completed semantic check plus declaration
-// kinds already present in the AST. It performs no new resolution; an
-// unsettled name keeps the lexer's variable classification.
-//
-// Declaration sites come directly from AST kinds. Written named types use
-// type_memo, resolved callees use call_memo, and parameter uses use
-// param_memo. Match and try nodes are syntax intrinsics and therefore classify
-// as keywords without a declaration lookup.
-//
-// Names remain lexical variables when sema recorded no answer: a function
-// named but not called; a type in value position; an enum variant;
-// a constant; an import binding; a local of every kind; a closure's
-// parameter. All stay `variable` — the lexer's answer, and never a
-// wrong one.
-//
-// `lsp_built.zen` calls classify only for a clean build, so poison and partial
-// results keep their lexical colours.
+// Converts semantic-checker memos into token classifications without running
+// another name-resolution pass.
 
 str = std.text
 Alloc, AllocError = std.mem
@@ -37,8 +18,6 @@ Classes = {
     rows :: Vec<Classed>,
 }
 
-// Produce only the requested file's rows in request scratch. The checker
-// stays shared; unrelated workspace files retain no colour table.
 classify* = (a: Alloc, c: Checker, file: str)
            Res<Vec<Classed>, AllocError> {
     out ::= Classes(file: file, rows: a.Vec<Classed>());
@@ -66,8 +45,6 @@ class_as = (
     Ok(())
 }
 
-// --- declaration sites -------------------------------------------------
-
 decl_sites = (a: Alloc, c: Checker, out :: Classes)
              Res<(), AllocError> {
     Range(0, c.tree.module_count()).loop((h, i) {
@@ -88,9 +65,6 @@ module_sites = (a: Alloc, m: Module, out :: Classes)
     Ok(());
 }
 
-// A declaration nested in a body — `ast_named.zen`'s two-scan shape:
-// every block is flat in the arena, so a nested decl is found without
-// recursing into its parent.
 nested_sites = (a: Alloc, tree: Ast, out :: Classes)
                Res<(), AllocError> {
     bid ::= BlockId(index: 0);
@@ -134,9 +108,6 @@ fn_site = (a: Alloc, f: Function, out :: Classes)
     Ok(());
 }
 
-// A struct and an impl write their names the same way — the type word,
-// then the members beneath it — so one walk serves both; only the
-// caller names the difference (`s.name` against `im.target`).
 member_sites = (
     a       : Alloc,
     name    : Span,
@@ -148,8 +119,6 @@ member_sites = (
     Ok(());
 }
 
-// A constant and a field keep the lexer's answer; a member function is
-// a declaration site like any other.
 member_site = (a: Alloc, m: Member, out :: Classes)
               Res<(), AllocError> {
     m.kind.match({
@@ -159,12 +128,6 @@ member_site = (a: Alloc, m: Member, out :: Classes)
     })
 }
 
-// --- written types -----------------------------------------------------
-
-// Every `Named` type node the checker memoized a non-poison answer
-// for. The memo, not the spelling, is the evidence: `Point` resolves, and
-// so does the `T` of `<T>` — both are types a reader should see
-// coloured alike.
 written_types = (a: Alloc, c: Checker, out :: Classes)
                Res<(), AllocError> {
     tid ::= TypeId(index: 0);
@@ -203,10 +166,6 @@ named_site = (
     })
 }
 
-// --- call sites and parameter uses -------------------------------------
-
-// One pass over every expression: calls use call_memo, names use param_memo,
-// and intrinsic nodes carry their classification directly.
 expr_sites = (a: Alloc, c: Checker, out :: Classes)
              Res<(), AllocError> {
     eid ::= ExprId(index: 0);
@@ -233,8 +192,6 @@ expr_site = (
     })
 }
 
-// A bare name's span is the expression's — `Name` carries no `Ident`,
-// "the enclosing `Expr` already has the span" (`ast_node.zen`).
 param_site = (
     a    : Alloc,
     c    : Checker,
@@ -282,9 +239,6 @@ callee_site = (
     })
 }
 
-// The name a resolved call was made through: bare (`add(a, b)`) or the
-// member of an access (`x.f(..)` — `call_memo` holds the declaration
-// either way, and resolution is one rule, `sema_cand.zen`).
 fn_callee = (
     a   : Alloc,
     c   : Checker,
@@ -299,9 +253,6 @@ fn_callee = (
     })
 }
 
-// A construction names the type only when it names it bare and by its
-// own name: `Point(x: 1)`. The same memo entry covers `Shape.Circle(c)`,
-// where the name written is the variant's, and a variant is not a type.
 type_callee = (
     a    : Alloc,
     c    : Checker,

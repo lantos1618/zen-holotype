@@ -1,0 +1,49 @@
+Alloc, AllocError = std.mem
+Vec = std.collections
+Cli, cli = zen
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    show(env, command(a, "build", "", "", "").try()).try();
+    show(env, command(a, "build", "app", "", "").try()).try();
+    show(env, command(a, "run", "app", "--", "hello").try()).try();
+    Ok(0)
+}
+
+show = (env: Env, argv: Vec<str>) Res<(), AllocError> {
+    cli(env, argv).try().match({
+        Project(job)  => println(
+            "project root={} target={} args={}",
+            job.root,
+            job.target,
+            job.argv.len - job.args_at
+        ),
+        Run(job)      => println(
+            "run root={} target={} args={}",
+            job.root,
+            job.target,
+            job.argv.len - job.args_at
+        ),
+        Build(_)      => println("raw build"),
+        Fmt(_)        => println("fmt"),
+        Later(name)   => println("later {}", name),
+        Usage(word)   => println("usage {}", word),
+        Missing(flag) => println("missing {}", flag),
+    });
+    Ok(())
+}
+
+command = (a: Alloc, name: str, one: str, two: str, three: str)
+          Res<Vec<str>, AllocError> {
+    argv ::= a.Vec<str>();
+    argv.add("zen").try();
+    argv.add(name).try();
+    argv.add_if(one).try();
+    argv.add_if(two).try();
+    argv.add_if(three).try();
+    Ok(argv)
+}
+
+add_if = (argv :: Vec<str>, word: str) Res<(), AllocError> {
+    word.is_empty().match({ true => Ok(()), false => argv.add(word) })
+}

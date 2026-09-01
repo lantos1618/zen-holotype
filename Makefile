@@ -56,11 +56,12 @@ all: test
 build: seed/zen.c
 	@mkdir -p build/obj
 	$(ZCC) $(CFLAGS) -c seed/zen.c -o build/obj/seed.o
-	$(CC) build/obj/seed.o -o zen
+	$(ZCC) $(CFLAGS) -c src/std/proc/proc.c -o build/obj/proc.o
+	$(CC) build/obj/seed.o build/obj/proc.o -o zen
 	rm -rf build/c && mkdir -p build/c
 	./zen build $(ROOT) --emit-c-dir build/c $(if $(strip $(SYMBOL_MAP)),--symbol-map $(SYMBOL_MAP))
 	ls build/c/*.c | xargs -P $(J) -I{} $(ZCC) $(CFLAGS) -c {} -o {}.o
-	$(CC) build/c/*.o -o zen-new && mv zen-new zen
+	$(CC) build/c/*.o build/obj/proc.o -o zen-new && mv zen-new zen
 
 ## seed: regenerate AND stage, in one target. never two commands —
 ## commit-then-regenerate ships a seed one change stale, and only a
@@ -276,7 +277,8 @@ fmt: build
 asan: seed/zen.c
 	@mkdir -p build/obj
 	$(ZCC) -std=c99 -O1 -g -fsanitize=address,leak -c seed/zen.c -o build/obj/seed-asan.o
-	$(CC) -fsanitize=address,leak build/obj/seed-asan.o -o zen-asan
+	$(ZCC) -std=c99 -O1 -g -fsanitize=address,leak -c src/std/proc/proc.c -o build/obj/proc-asan.o
+	$(CC) -fsanitize=address,leak build/obj/seed-asan.o build/obj/proc-asan.o -o zen-asan
 	tests/bench/asan.sh ./zen-asan
 
 ## leak: valgrind's answer to the same question. definite leaks only --
@@ -291,7 +293,7 @@ leak: profile
 profile: SYMBOL_MAP := build/zen.symbols.tsv
 profile: build
 	ls build/c/*.c | xargs -P $(J) -I{} $(ZCC) $(PROFILE_CFLAGS) -c {} -o {}.profile.o
-	$(CC) build/c/*.c.profile.o -o zen-fp
+	$(CC) build/c/*.c.profile.o build/obj/proc.o -o zen-fp
 
 clean:
 	rm -f zen zen-new zen-asan zen-fp grammar/zen.so

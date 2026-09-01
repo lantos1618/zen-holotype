@@ -1,31 +1,7 @@
-// src/gen/gen_c/gen_c_widen.zen
-// A VALUE REACHING A TYPE WIDER THAN ITS OWN: a MEMBER reaching a set,
-// or a `Res` reaching a `Res` with a wider error set. Both are paid for
-// the same way — BUILD the wider value rather than assign the narrower
-// one — so they share this file.
-// What an expression IS and what it becomes on the way somewhere are
-// two subjects: `expr` asks both in order, and the answers live here.
-// widening a `Res` ANYWHERE THAT IS NOT A `return`
-// "The error type of a `Res` is a union, and propagation merges sets"
-// (DESIGN.md, Errors). `gen_c_try.zen` pays for it via `.try()`. A match
-// pays for it too: its arms deliver into ONE shared temporary declared
-// at the merged type —
-//     (n > 1).match({ true => fails(n), false => faults(n) })
-// — and `Res<(), AllocError>` vs `Res<(), AllocError | Fault>` are
-// different C structs, so `cc` rejected programs sema had admitted.
-// A WIDENING IS A REBUILD, AND THE REBUILD ALREADY EXISTS.
-// `gen_c_bound.convert` rebuilds a `Res` variant by variant (tag,
-// success payload, error payload) because no two `Res` instantiations
-// are guaranteed to share a layout. This file decides WHEN to widen;
-// `convert` decides HOW — one layout decision, not two.
-// NARROW ON PURPOSE. Only what `convert` can actually build is claimed:
-// same forms, same success payload, error unchanged or ONE MEMBER
-// reaching a structural set. A set reaching a WIDER set is a re-tagging
-// (the two number their members differently) — that's a statement, not
-// an expression, and costs `gen_c_try.write_retag`. Claiming it here
-// would emit the wrong member number: a silent wrong value at runtime.
-// So instead it falls through to a bare assignment `cc` refuses — a
-// report, not a miscompilation.
+// Rebuild values that reach a wider structural set or Res error set. This file
+// decides when conversion is valid; gen_c_bound.convert owns representation.
+// Set-to-larger-set retagging remains statement lowering in gen_c_try because
+// the two sets may assign different tag numbers.
 
 ExprId = std.ast
 AllocError = std.mem
@@ -144,9 +120,8 @@ widen_expr* = (
 // the slot usually carries the declaration's NAME, `Trouble` and not
 // `AllocError | ParseError`, and the raw name is no union, so asking
 // the question of the name alone answered false for every DECLARED set
-// and left the member to fall through as a bare assignment cc refuses
-// (#736). The structural reading was reached either way; only the
-// declared one ever arrived here and was turned away.
+// and leave the member as an invalid bare assignment. The structural reading
+// is already resolved; declared sets need this explicit step.
 needs_set* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
             Res<bool, AllocError> {
     wide = be.check.set_of(want);
@@ -210,7 +185,7 @@ is_named_or_res = (be: CBackend, cty: TyId) bool {
 // one names it through the variant carrying the member, and each has
 // its own definition emitted. The declared path reuses `.try()`'s
 // carrier lookup and `wrap_error` rather than spelling either again —
-// one layout decision, not two (#736).
+// one layout decision, not two.
 set_expr* = (
     be   :: CBackend,
     id   : ExprId,

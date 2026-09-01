@@ -1,16 +1,5 @@
-// src/gen/gen_c/gen_c_build.zen
-// `Point(x: 3, y: 4)` — what a callee that names a TYPE is.
-// `gen_c_call.zen` owns the question — "`Point(x: 3, y: 4)` and
-// `area(p)` are the same AST node. Which one it is depends on what the
-// callee NAMES" — and this file is the answer when it names a type.
-// Two files because building a value and calling a function share
-// nothing past the node.
-// A C COMPOUND LITERAL WITH ONE DESIGNATED INITIALISER PER ARGUMENT.
-// Designators, not positions: Zen's construction form is `name: value`
-// and the emitted field order is the declaration's, so positions would
-// tie the two together for no gain.
-// WHAT IS BEING BUILT IS SEMA'S ANSWER FOR THIS NODE, and the
-// declaration alone is only the fallback — `construct_type` argues it.
+// Lower struct construction to a C compound literal. Sema supplies the
+// instantiated type; field designators preserve Zen's named-argument model.
 
 ExprId, Decl, Struct, Member = std.ast
 Call, Arg = std.ast
@@ -32,8 +21,6 @@ is_pure_value = gen.gen_c.gen_c_const
 holds, value_held = gen.gen_c.gen_c_expr
 Call = std.ast
 
-// construction
-
 construct* = (
     be  :: CBackend,
     id  : ExprId,
@@ -50,12 +37,8 @@ construct* = (
     })
 }
 
-// WHAT IS BEING BUILT IS SEMA'S ANSWER FOR THIS NODE. `Box<i32>(held: 7)`
-// writes its argument outright and only the node knows it — the
-// declaration alone says `Box<T>` (what `constructed` derives, hence
-// FALLBACK not the answer). Sema records the written arguments at the
-// call; this reads them back, as `chosen_def` reads back which
-// declaration the call meant.
+// Prefer sema's instantiated answer; a declaration alone may still contain
+// open type parameters.
 construct_type = (be :: CBackend, id: ExprId, d: Def, ctx: Ctx)
                  Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
@@ -82,10 +65,7 @@ construct_decl = (
     })
 }
 
-// A GENERIC TYPE IS CONSTRUCTED AT ITS ARGUMENTS, not refused: `Vec(..)`
-// inside `Vec<T>`'s own constructor builds the `Vec<i32>` this emission
-// is at. Still refused: a construction whose arguments settle to
-// nothing — a bare `Vec` has no layout to write.
+// Refuse a generic construction only when its storage layout remains open.
 construct_struct = (
     be  :: CBackend,
     id  : ExprId,
@@ -109,13 +89,7 @@ construct_struct = (
     })
 }
 
-// WHAT A CONSTRUCTION'S TYPE ARGUMENTS ARE, when nothing else said.
-// `Entry(hash: h, key: key, value: value)` inside `Map<K, V>` builds an
-// `Entry<K, V>`, and only the ARGUMENTS say so: sema records a
-// construction's type under the node only inside a body it CHECKED, and
-// it checks top-level declarations only. So each argument is matched
-// structurally against the field it supplies — the enclosing emission
-// has already said what `K` and `V` are.
+// Infer still-open type arguments by matching supplied values to fields.
 settle_construction = (
     be  :: CBackend,
     c   : Call,
@@ -159,16 +133,15 @@ unify_field = (
     ctx   : Ctx,
     out   :: Inst
 ) Res<(), AllocError> {
-    name     = field_name(be, a, i, s, empty, dctx).try();
-    declared = be.storage_type(s, name, empty, dctx);
+    fields   = Storage(decl: s, inst: empty, ctx: dctx);
+    name     = fields.field_name(be, a, i).try();
+    declared = fields.ty_of(be, name);
     unknown  = be.check.types.unknown().try();
     actual   = be.arg_type(a.value, ctx, unknown).try();
     unify(be, declared, actual, out)
 }
 
-// Every parameter in declaration order, or the type UNCHANGED when the
-// arguments left one unsaid — the caller refuses with a position, which
-// is better than a layout invented here.
+// Keep the original type when an argument leaves any parameter unsettled.
 rebuilt_type = (be :: CBackend, d: Def, s: Struct, found: Inst, ty: TyId)
                Res<TyId, AllocError> {
     vars ::= be.alloc.Vec<TyId>();
@@ -188,12 +161,7 @@ keep_arg = (found: Inst, v: TyId, out :: Vec<TyId>) Res<(), AllocError> {
     })
 }
 
-// "A PRELUDE DECLARATION OF A PRIMITIVE'S NAME IS THAT PRIMITIVE."
-// `text_str.zen` declares `str` with a `data` and a `len`; the C type
-// behind it is the runtime floor's `zg_str`, which every string
-// literal, `zg_print_str`, and C caller already agrees on. So
-// `str(data: .., len: ..)` builds the PRIMITIVE at both ends: the
-// compound literal's type and each designator.
+// Prelude declarations of primitive names use the primitive C layout.
 prim_named = (be :: CBackend, s: Struct, ty: TyId) Res<TyId, AllocError> {
     is_prim(s.name.text).match({
         false => Ok(ty),
@@ -201,9 +169,7 @@ prim_named = (be :: CBackend, s: Struct, ty: TyId) Res<TyId, AllocError> {
     })
 }
 
-// The floor's own member names for a primitive's fields, the mangler's
-// for everything else — the same rule `gen_c_read.field_name` reads a
-// field back through.
+// Primitive fields use floor names; declared fields use mangled names.
 designator = (be :: CBackend, ty: TyId, name: str, out :: String)
              Res<(), AllocError> {
     be.is_prim_ty(ty).match({
@@ -216,18 +182,8 @@ is_prim_ty = (be :: CBackend, ty: TyId) bool {
     be.check.types.at(ty).match({ Prim(_) => true, _ => false })
 }
 
-// A TYPE ARGUMENT NO STORAGE MEMBER READS DOES NOT CHANGE THE LAYOUT,
-// so leaving it free is not a refusal. `Range(0, 5)` leaves `T` free —
-// `start`/`end` are `usize`, `at` is a bodiless hook with no bytes — and
-// `Range(0, v.len)` is std's ordinary way to walk an index space. Asking
-// of the type's ARGUMENTS made these unwritable; asking of its STORAGE
-// asks about what's actually emitted.
-// Two open `Range`s mangle alike (right here, wrong for `Box<T>`: `held:
-// T` is storage, so `Box` still refuses). THE STRUCT'S OWN PARAMETERS GO
-// BACK IN SCOPE FOR THE READ: `Entry<K, V>` and `Map<K, V>` spell
-// parameters alike, and constructing one INSIDE the other once resolved
-// `K` to the enclosing declaration's `Var` — a different type of the
-// same name — so every `Map` in the language was refused.
+// Open parameters are harmless when no stored field depends on them. Read
+// fields with the struct's own parameters in scope before deciding.
 layout_open = (be :: CBackend, s: Struct, d: Def, ty: TyId)
     Res<bool, AllocError> {
     dctx  = be.decl_ctx_of(d);
@@ -244,9 +200,8 @@ layout_open = (be :: CBackend, s: Struct, d: Def, ty: TyId)
     Ok(got);
 }
 
-// A CONSTRUCTION WITH NO ARGUMENTS STILL HAS DEFAULTS TO WRITE, so
-// there is no shortcut for the empty argument list: the `{0}` the next
-// section names made `Cursor()` come back zeroed.
+// Empty calls still pass through initialisation because fields may declare
+// non-zero defaults.
 write_literal = (
     be  :: CBackend,
     c   : Call,
@@ -259,7 +214,7 @@ write_literal = (
     cty ::= be.alloc.String().try();
     be.ctype(ty, cty).try();
     out.fmt("({})", cty.view()).try();
-    be.write_initialisers(c, s, d, ty, ctx, out).try();
+    write_initialisers(be, c, s, d, ty, ctx, out).try();
     Ok(());
 }
 
@@ -273,195 +228,200 @@ write_initialisers = (
     out :: String
 )
                      Res<(), AllocError> {
-    dctx = be.decl_ctx_of(d);
-    mark = be.enter_tparams(s.tparams, d.qname).try();
-    // the CONSTRUCTED type's own arguments: `Box<i32>(held: 7)` supplies
-    // an `i32`, and reading the field's declared `T` without them would
-    // give the literal no width to take.
+    dctx  = be.decl_ctx_of(d);
+    mark  = be.enter_tparams(s.tparams, d.qname).try();
     dinst = be.recv_inst(ty).try();
-    out.add("{ ").try();
-    // The count of initialisers WRITTEN, not the argument index, because
-    // an argument that supplies no field writes none and a comma keyed
-    // to `i` would then open or close the list on nothing.
-    seen: usize ::= 0;
-    // THE FIELDS RUN LEFT TO RIGHT TOO. A construction emits ONE compound
-    // literal, and C11 6.7.9p23 leaves its initialiser expressions
-    // indeterminately sequenced — the same hand-away a call's argument
-    // list was, so the same question (`holds`, no receiver to count) and
-    // the same door (`value_held`) answer it here.
-    c.args.loop((h, i, a) {
-        hold = be.holds(c, i, 0);
-        seen = seen + be.supplied_initialiser(
-            a,
-            i,
-            s,
-            ty,
-            dinst,
-            dctx,
-            ctx,
-            hold,
-            seen,
-            out
-        ).try();
-    });
-    seen = seen + be.defaulted_initialisers(
-        c,
-        s,
-        ty,
-        dinst,
-        dctx,
-        seen,
-        out
-    ).try();
-    // Sema refuses any argument naming a member the struct does not
-    // declare AND any argument naming a struct-body constant (the #778
-    // gate `check_ctor_fields`, which `construct` runs before this phase
-    // ever sees the call -- an ordering pinned by
-    // tests/must-fail/sema/construction_*_names_*), so reaching here
-    // means every name landed on declared, writable storage —
-    // `seen == 0` says only that C99 needs the zero, not that an
-    // argument vanished.
-    (seen == 0).then(() { out.add("0").try() });
-    out.add(" }").try();
+    init  = Initialisers(
+        call: c,
+        fields: Storage(decl: s, inst: dinst, ctx: dctx),
+        ty: ty,
+        call_ctx: ctx,
+    );
+    init.write(be, out).try();
     be.leave_tparams(mark).try();
     Ok(());
 }
 
-// defaults
-// "`= default` makes a field optional at construction" — a field the
-// call omitted is not absent, it's the value its DECLARATION wrote.
-// Previously the list was built from arguments alone, left to C's
-// `{0}` — wrong for any default but zero, which is why it went unnoticed
-// (every default in std happened to already be zero).
-// WRITTEN IN THE DECLARING MODULE'S CONTEXT, not the call's: the
-// expression names what that module can see; read at the call site, a
-// default like `Pos(line: 1, col: 1)` resolves against whatever `Pos`
-// the caller imported, or nothing at all.
-// APPENDED AFTER THE ARGUMENTS, not merged into declaration order — C99
-// 6.7.8 lets designators come in any order, and appending keeps every
-// construction with no defaults emitting byte-identical C to before.
+// Field lookup at one receiver instantiation. Methods and constants do not
+// occupy positional-constructor slots.
+Storage = {
+    decl: Struct,
+    inst: Inst,
+    ctx: Ctx,
 
-defaulted_initialisers = (
-    be    :: CBackend,
-    c     : Call,
-    s     : Struct,
-    ty    : TyId,
-    dinst : Inst,
-    dctx  : Ctx,
-    seen  : usize,
-    out   :: String
-) Res<usize, AllocError> {
-    wrote ::= 0;
-    s.members.loop((h, m) {
-        wrote = wrote + be.default_initialiser(
-            c,
-            m,
-            s,
-            ty,
-            dinst,
-            dctx,
-            seen + wrote,
-            out
-        ).try();
-    });
-    Ok(wrote);
-}
-
-default_initialiser = (
-    be    :: CBackend,
-    c     : Call,
-    m     : Member,
-    s     : Struct,
-    ty    : TyId,
-    dinst : Inst,
-    dctx  : Ctx,
-    seen  : usize,
-    out   :: String
-) Res<usize, AllocError> {
-    name = m.name().text;
-    (is_storage(be, m, dinst, dctx) && !be.supplies(c, s, name, dinst, dctx))
-        .match({
-            false => Ok(0),
-            true  => be.member_default(m, name, s, ty, dinst, dctx, seen, out),
+    field_name = (self: @Self, be :: CBackend, a: Arg, i: usize)
+                 Res<str, AllocError> {
+        a.name.match({
+            None  => self.name_at(be, i),
+            Ok(n) => Ok(n.text),
         })
+    }
+
+    name_at = (self: @Self, be :: CBackend, i: usize)
+              Res<str, AllocError> {
+        name ::= "";
+        seen ::= 0;
+        self.decl.members.loop((h, m) {
+            self.is_stored(be, m).then(() {
+                (seen == i).then(() { name = m.name().text; });
+                seen = seen + 1;
+            });
+        });
+        Ok(name)
+    }
+
+    is_stored = (self: @Self, be :: CBackend, m: Member) bool {
+        be.field_type(m, self.ctx, self.inst).match({
+            Ok(t) => be.has_storage(t),
+            None  => false,
+        })
+    }
+
+    has_named = (self: @Self, be :: CBackend, name: str) bool {
+        got ::= false;
+        self.decl.members.loop((h, m) {
+            (m.named(name) && self.is_stored(be, m))
+                .then(() { got = true; });
+        });
+        got
+    }
+
+    // Field types include receiver substitution and provide literal width.
+    ty_of = (self: @Self, be :: CBackend, name: str) TyId {
+        found ::= TyId(index: 0);
+        self.decl.members.loop((h, m) {
+            m.named(name).then(() {
+                found = be.field_type(m, self.ctx, self.inst).match({
+                    Ok(t) => t,
+                    None  => TyId(index: 0),
+                });
+            });
+        });
+        found
+    }
 }
 
-// The value a member declares, written here.
-// `is_pure_value` is the same gate a constant read is held to, and for
-// the same reason: this expression is emitted at every construction
-// site, so it may name no function and read no frame.
-// A DEFAULT THAT FAILS IT IS REPORTED, NOT DROPPED. It used to be
-// dropped, on the claim that `Vec`'s `data :: Ptr<T> = null_ptr<T>()`
-// was the only shape reaching it and zeroing gave the same answer. That
-// claim was about the tree as it stood, not about the rule: `a:: i64 =
-// five()` reaches it too, and the field then read back 0 with nothing
-// said. So `null_ptr<T>()` is now admitted by `is_pure_call` for what it
-// is — a null pointer constant — and every other call is a diagnostic.
-member_default = (
-    be    :: CBackend,
-    m     : Member,
-    name  : str,
-    s     : Struct,
-    ty    : TyId,
-    dinst : Inst,
-    dctx  : Ctx,
-    seen  : usize,
-    out   :: String
-) Res<usize, AllocError> {
-    declared_value(m).match({
-        None  => Ok(0),
-        Ok(v) => be.write_default(v, name, s, ty, dinst, dctx, seen, out),
-    })
+// Context shared by every field written into one compound literal. Defaults
+// use `fields.ctx`; supplied values use `call_ctx`.
+Initialisers = {
+    call: Call,
+    fields: Storage,
+    ty: TyId,
+    call_ctx: Ctx,
+
+    write = (self: @Self, be :: CBackend, out :: String)
+            Res<(), AllocError> {
+        out.add("{ ").try();
+        seen: usize ::= 0;
+        self.call.args.loop((h, i, a) {
+            hold = be.holds(self.call, i, 0);
+            seen = seen + self.supplied(be, a, i, hold, seen, out).try();
+        });
+        seen = seen + self.defaults(be, seen, out).try();
+        (seen == 0).then(() { out.add("0").try() });
+        out.add(" }")
+    }
+
+    defaults = (self: @Self, be :: CBackend, seen: usize, out :: String)
+               Res<usize, AllocError> {
+        wrote ::= 0;
+        self.fields.decl.members.loop((h, m) {
+            wrote = wrote + self.default_one(be, m, seen + wrote, out).try();
+        });
+        Ok(wrote)
+    }
+
+    default_one = (self: @Self, be :: CBackend, m: Member, seen: usize,
+                   out :: String) Res<usize, AllocError> {
+        name = m.name().text;
+        (self.fields.is_stored(be, m) && !self.supplies(be, name)).match({
+            false => Ok(0),
+            true  => self.member_default(be, m, name, seen, out),
+        })
+    }
+
+    member_default = (self: @Self, be :: CBackend, m: Member, name: str,
+                      seen: usize, out :: String) Res<usize, AllocError> {
+        declared_value(m).match({
+            None  => Ok(0),
+            Ok(v) => self.write_default(be, v, name, seen, out),
+        })
+    }
+
+    write_default = (self: @Self, be :: CBackend, v: ExprId, name: str,
+                     seen: usize, out :: String) Res<usize, AllocError> {
+        (seen > 0).then(() { out.add(", ").try() });
+        des ::= be.alloc.String().try();
+        be.designator(self.ty, name, des).try();
+        out.fmt(".{} = ", des.view()).try();
+        self.default_value(be, v, name, out).try();
+        Ok(1)
+    }
+
+    // A default is emitted at every construction site, so it may not read a
+    // frame or call an impure function.
+    default_value = (self: @Self, be :: CBackend, v: ExprId, name: str,
+                     out :: String) Res<(), AllocError> {
+        be.is_pure_value(v, self.fields.ctx).match({
+            false => be.unsupported(
+                v,
+                "a field default that names a function or reads a frame",
+                out
+            ),
+            true  => expr(
+                be,
+                v,
+                self.fields.ctx,
+                self.fields.ty_of(be, name),
+                out
+            ),
+        })
+    }
+
+    supplies = (self: @Self, be :: CBackend, name: str) bool {
+        got ::= false;
+        self.call.args.loop((h, i, a) {
+            self.arg_supplies(be, a, i, name).then(() { got = true; });
+        });
+        got
+    }
+
+    arg_supplies = (self: @Self, be :: CBackend, a: Arg, i: usize,
+                    name: str) bool {
+        self.fields.field_name(be, a, i).match({
+            Err(_) => false,
+            Ok(n)  => n.eq(name),
+        })
+    }
+
+    supplied = (self: @Self, be :: CBackend, a: Arg, i: usize, hold: bool,
+                seen: usize, out :: String) Res<usize, AllocError> {
+        name = self.fields.field_name(be, a, i).try();
+        self.fields.has_named(be, name).match({
+            false => Ok(0),
+            true  => self.designated(be, a, name, hold, seen, out),
+        })
+    }
+
+    designated = (self: @Self, be :: CBackend, a: Arg, name: str,
+                  hold: bool, seen: usize, out :: String)
+                 Res<usize, AllocError> {
+        (seen > 0).then(() { out.add(", ").try() });
+        self.write_one(be, a, name, hold, out).try();
+        Ok(1)
+    }
+
+    write_one = (self: @Self, be :: CBackend, a: Arg, name: str,
+                 hold: bool, out :: String) Res<(), AllocError> {
+        des ::= be.alloc.String().try();
+        be.designator(self.ty, name, des).try();
+        out.fmt(".{} = ", des.view()).try();
+        want = self.fields.ty_of(be, name);
+        be.value_held(a.value, self.call_ctx, want, hold, out)
+    }
 }
 
-write_default = (
-    be    :: CBackend,
-    v     : ExprId,
-    name  : str,
-    s     : Struct,
-    ty    : TyId,
-    dinst : Inst,
-    dctx  : Ctx,
-    seen  : usize,
-    out   :: String
-)
-                Res<usize, AllocError> {
-    (seen > 0).then(() { out.add(", ").try() });
-    des ::= be.alloc.String().try();
-    be.designator(ty, name, des).try();
-    out.fmt(".{} = ", des.view()).try();
-    be.default_value(v, name, s, ty, dinst, dctx, out).try();
-    Ok(1);
-}
-
-// The designator is already written, so both arms must leave a value
-// behind it — `unsupported` writes the `0` that keeps the initialiser
-// list parsing around a diagnostic.
-default_value = (
-    be    :: CBackend,
-    v     : ExprId,
-    name  : str,
-    s     : Struct,
-    ty    : TyId,
-    dinst : Inst,
-    dctx  : Ctx,
-    out   :: String
-)
-                Res<(), AllocError> {
-    be.is_pure_value(v, dctx).match({
-        false => be.unsupported(
-            v,
-            "a field default that names a function or reads a frame",
-            out
-        ),
-        true  => expr(be, v, dctx, be.storage_type(s, name, dinst, dctx), out),
-    })
-}
-
-// A member's written value, whichever of the two member forms holds
-// it. `Const` cannot reach here — a constant is not storage — but the
-// two nodes carry the same field and asking both is what keeps this
-// from depending on that.
+// Both field-like AST forms store their optional declared value here.
 declared_value = (m: Member) Res<ExprId> {
     m.kind.match({
         Field(f) => f.value,
@@ -470,118 +430,7 @@ declared_value = (m: Member) Res<ExprId> {
     })
 }
 
-// Under `field_name`'s rule, asked again here rather than remembered
-// from the walk — `storage_name` says why a `Vec<str>` can't be.
-supplies = (
-    be    :: CBackend,
-    c     : Call,
-    s     : Struct,
-    name  : str,
-    dinst : Inst,
-    dctx  : Ctx
-) bool {
-    got ::= false;
-    c.args.loop((h, i, a) {
-        be.arg_supplies(a, i, s, name, dinst, dctx).then(() { got = true; });
-    });
-    got
-}
-
-arg_supplies = (
-    be    :: CBackend,
-    a     : Arg,
-    i     : usize,
-    s     : Struct,
-    name  : str,
-    dinst : Inst,
-    dctx  : Ctx
-) bool {
-    field_name(be, a, i, s, dinst, dctx).match({
-        Err(_) => false,
-        Ok(n)  => n.eq(name),
-    })
-}
-
-// AN ARGUMENT THAT NAMES NO STORAGE MEMBER SUPPLIES NOTHING; writing a
-// designator for it is worse than dropping it. C has no `.bogus` on a
-// struct that doesn't declare one, so `Param(.., value: None)` against a
-// `Param` with no `value` came out as a C error naming a member the
-// author never wrote — or, for a bare `None`, as `codegen has no type
-// for None`, the field lookup having found nothing to type it by.
-// A field that doesn't exist is a diagnostic SEMA owes and neither
-// implementation raises. Until one does, the two must at least agree,
-// and the bootstrapper agrees by walking DECLARED fields.
-supplied_initialiser = (
-    be    :: CBackend,
-    a     : Arg,
-    i     : usize,
-    s     : Struct,
-    ty    : TyId,
-    dinst : Inst,
-    dctx  : Ctx,
-    ctx   : Ctx,
-    hold  : bool,
-    seen  : usize,
-    out   :: String
-) Res<usize, AllocError> {
-    name = field_name(be, a, i, s, dinst, dctx).try();
-    be.is_storage_named(s, name, dinst, dctx).match({
-        false => Ok(0),
-        true  => be.designated(
-            a,
-            name,
-            s,
-            ty,
-            dinst,
-            dctx,
-            ctx,
-            hold,
-            seen,
-            out
-        ),
-    })
-}
-
-designated = (
-    be    :: CBackend,
-    a     : Arg,
-    name  : str,
-    s     : Struct,
-    ty    : TyId,
-    dinst : Inst,
-    dctx  : Ctx,
-    ctx   : Ctx,
-    hold  : bool,
-    seen  : usize,
-    out   :: String
-)
-             Res<usize, AllocError> {
-    (seen > 0).then(() { out.add(", ").try() });
-    be.write_initialiser(a, name, s, ty, dinst, dctx, ctx, hold, out).try();
-    Ok(1);
-}
-
-is_storage_named = (
-    be    :: CBackend,
-    s     : Struct,
-    name  : str,
-    dinst : Inst,
-    dctx  : Ctx
-) bool {
-    got ::= false;
-    s.members.loop((h, m) {
-        (m.named(name) && is_storage(be, m, dinst, dctx))
-            .then(() { got = true; });
-    });
-    got
-}
-
-// A STRUCT'S OWN MEMBER TYPES ARE READ IN THE MODULE THAT DECLARES IT,
-// never the one that constructs it. `Lexed` names `Vec<Token>`, and a
-// caller that imported `Lexed` alone has no `Token` — read at the call
-// site the argument resolves to nothing, and since `type_from_ast`
-// memoizes on the node id, that answer becomes every later reader's: the
-// LAYOUT came out `Vec<q>` and `cc` rejected forty-four initialisers.
+// Defaults and field types are resolved in the declaring module.
 decl_ctx_of = (be :: CBackend, d: Def) Ctx {
     Ctx(
         module: d.id.module.to_usize(),
@@ -590,97 +439,4 @@ decl_ctx_of = (be :: CBackend, d: Def) Ctx {
         self_ty: TyId(index: 0),
         has_self: false
     )
-}
-
-write_initialiser = (
-    be    :: CBackend,
-    a     : Arg,
-    name  : str,
-    s     : Struct,
-    ty    : TyId,
-    dinst : Inst,
-    dctx  : Ctx,
-    ctx   : Ctx,
-    hold  : bool,
-    out   :: String
-) Res<(), AllocError> {
-    des ::= be.alloc.String().try();
-    be.designator(ty, name, des).try();
-    out.fmt(".{} = ", des.view()).try();
-    want = be.storage_type(s, name, dinst, dctx);
-    be.value_held(a.value, ctx, want, hold, out)
-}
-
-// The field an argument supplies: the one it names, or the i-th
-// storage member when it does not.
-field_name = (
-    be    :: CBackend,
-    a     : Arg,
-    i     : usize,
-    s     : Struct,
-    dinst : Inst,
-    dctx  : Ctx
-) Res<str, AllocError> {
-    a.name.match({
-        None  => be.storage_name(s, i, dinst, dctx),
-        Ok(n) => Ok(n.text),
-    })
-}
-
-// The i-th storage member's name, for a positional argument. A method
-// and struct-body constant are not storage and don't count. Counted,
-// not collected: a `Vec<str>` can't be read back — `Vec.get` at
-// `T = str` fails to infer its own `Ok` (docs/GEN_BOOTSTRAP_FIXES.md).
-storage_name = (
-    be    :: CBackend,
-    s     : Struct,
-    i     : usize,
-    dinst : Inst,
-    dctx  : Ctx
-) Res<str, AllocError> {
-    name ::= "";
-    seen ::= 0;
-    s.members.loop((h, m) {
-        is_storage(be, m, dinst, dctx).then(() {
-            (seen == i).then(() { name = m.name().text; });
-            seen = seen + 1;
-        });
-    });
-    Ok(name);
-}
-
-is_storage = (be :: CBackend, m: Member, dinst: Inst, dctx: Ctx) bool {
-    be.field_type(m, dctx, dinst).match({
-        Ok(t) => be.has_storage(t),
-        None  => false,
-    })
-}
-
-// The declared type of the field an argument supplies, so a literal
-// argument takes the field's width, not the widest one.
-// Written as named helpers, not a closure chain: a `.then` whose body
-// captures several enclosing parameters is inlined wrongly, and this
-// shape once produced a `Map` instantiated at unresolved type arguments
-// (docs/GEN_BOOTSTRAP_FIXES.md).
-storage_type = (
-    be    :: CBackend,
-    s     : Struct,
-    name  : str,
-    dinst : Inst,
-    dctx  : Ctx
-) TyId {
-    found ::= TyId(index: 0);
-    s.members.loop((h, m) {
-        m.named(name).then(() {
-            found = be.named_field(m, dinst, dctx);
-        });
-    });
-    found
-}
-
-named_field = (be :: CBackend, m: Member, dinst: Inst, dctx: Ctx) TyId {
-    be.field_type(m, dctx, dinst).match({
-        Ok(t) => t,
-        None  => TyId(index: 0),
-    })
 }

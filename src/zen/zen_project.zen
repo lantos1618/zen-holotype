@@ -1,0 +1,380 @@
+// Project builds start at build.zen. This driver executes its checked target
+// graph, compiles each selected Zen entry, links it, and optionally runs it.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+Path, Range, join_path = std.core
+Map, Vec = std.collections
+
+BuildArgs, ProjectArgs, Emission, Target, Os, Arch, Abi, Dep = std.build
+Build = zen.zen_build
+run_once = zen.zen_run
+entry_of = zen.zen_path
+BuildPlan, ExeNode, plan = zen.zen_build_plan
+
+project* = (env: Env, a: Alloc, job: ProjectArgs, execute: bool)
+           Res<i32, AllocError> {
+    marker = join_path(a, job.root, "build.zen").try();
+    env.fs.exists(marker.view()).match({
+        false => { println("zen: no build.zen in `{}`", job.root); Ok(1) },
+        true  => project_present(env, a, job, execute),
+    })
+}
+
+project_present = (env: Env, a: Alloc, job: ProjectArgs, execute: bool)
+                  Res<i32, AllocError> {
+    build ::= a.Build(env, job.root);
+    build.set_std_root(job.std_root);
+    entry = entry_of(env, a, job.root, "build.zen").try();
+    build.walk(entry).try();
+    checked ::= build.checked().try();
+    report  ::= a.String().try();
+    checked.render_diags(report).try();
+    (checked.diag_count() > 0).then(() { println("{}", report.view()); });
+    (build.faults > 0 || checked.diag_count() > 0).match({
+        true  => Ok(1),
+        false => plan(a, build.tree, checked, host_target()).match({
+            Err(_)      => {
+                println("zen: build.zen uses an unsupported build expression");
+                Ok(1)
+            },
+            Ok(planned) => execute_plan(env, a, job, planned, execute),
+        }),
+    })
+}
+
+host_target = () Target {
+    Target(os: Os.Linux, arch: Arch.X86_64, abi: Abi.Gnu)
+}
+
+execute_plan = (
+    env     : Env,
+    a       : Alloc,
+    job     : ProjectArgs,
+    planned : BuildPlan,
+    execute : bool
+) Res<i32, AllocError> {
+    select_exe(planned, job.target, execute).match({
+        Err(message) => { println("zen: {}", message); Ok(1) },
+        Ok(selected) => execute.match({
+            true  => build_and_run(env, a, job, planned, selected),
+            false => build_selected(env, a, job, planned, selected),
+        }),
+    })
+}
+
+// An empty selection means `zen build` builds every executable. `zen run`
+// requires one unambiguous target.
+select_exe = (planned: BuildPlan, named: str, execute: bool)
+             Res<Res<ExeNode>, str> {
+    named.is_empty().match({
+        false => planned.exes.find((exe) { exe.name.eq(named) }).match({
+            None      => Err("build.zen declares no such executable target"),
+            Ok(found) => Ok(Ok(found)),
+        }),
+        true  => execute.match({
+            false => Ok(None),
+            true  => (planned.exes.len == 1).match({
+                false => Err(
+                    "zen run needs a target when build.zen declares zero or multiple executables"
+                ),
+                true  => planned.exes.get(0).match({
+                    None      => Err("build.zen declares no executable target"),
+                    Ok(found) => Ok(Ok(found)),
+                }),
+            }),
+        }),
+    })
+}
+
+build_selected = (
+    env      : Env,
+    a        : Alloc,
+    job      : ProjectArgs,
+    planned  : BuildPlan,
+    selected : Res<ExeNode>
+) Res<i32, AllocError> {
+    code ::= 0;
+    planned.exes.loop((h, exe) {
+        wanted = selected.match({
+            None       => true,
+            Ok(chosen) => chosen.name.eq(exe.name),
+        });
+        wanted.then(() {
+            build_exe(env, a, job, planned, exe).try().match({
+                None  => { code = 1; h.break(); },
+                Ok(_) => {},
+            });
+        });
+    });
+    (planned.exes.len == 0).then(() {
+        println("zen: build.zen declared no executable target");
+        code = 1;
+    });
+    Ok(code)
+}
+
+build_and_run = (
+    env      : Env,
+    a        : Alloc,
+    job      : ProjectArgs,
+    planned  : BuildPlan,
+    selected : Res<ExeNode>
+) Res<i32, AllocError> {
+    selected.match({
+        None       => Ok(1),
+        Ok(target) => build_exe(env, a, job, planned, target).try().match({
+            None           => Ok(1),
+            Ok(executable) => run_program(env, a, job, executable.view()),
+        }),
+    })
+}
+
+build_exe = (
+    env     : Env,
+    a       : Alloc,
+    job     : ProjectArgs,
+    planned : BuildPlan,
+    exe     : ExeNode
+) Res<Res<String>, AllocError> {
+    output    = output_path(a, job.root, planned.target, exe.name, exe.spec.out)
+        .try();
+    generated = a.String("{}.c", output.view()).try();
+    ensure_parent(env, a, generated.view()).try().match({
+        false => Ok(None),
+        true  => compile_exe(env, a, job, exe, generated.view()).try().match({
+            false => Ok(None),
+            true  => ensure_parent(env, a, output.view()).try().match({
+                false => Ok(None),
+                true  => link_exe(
+                    env,
+                    a,
+                    job,
+                    planned,
+                    exe.spec.deps,
+                    generated.view(),
+                    output.view()
+                ).try().match({
+                    true  => Ok(Ok(output)),
+                    false => Ok(None),
+                }),
+            }),
+        }),
+    })
+}
+
+compile_exe = (
+    env       : Env,
+    a         : Alloc,
+    job       : ProjectArgs,
+    exe       : ExeNode,
+    generated : str
+) Res<bool, AllocError> {
+    source = project_path(a, job.root, exe.spec.src.text).try();
+    parent = Path(source.view()).parent().value_or(Path(job.root));
+    root  ::= parent.text;
+    entry ::= Path(source.view()).name();
+
+    // A conventional src/ tree is one module namespace. Starting at the
+    // entry's immediate directory would make sibling modules unreachable.
+    src_root = project_path(a, job.root, "src").try();
+    prefix   = a.String("{}/", src_root.view()).try();
+    source.view().starts_with(prefix.view()).then(() {
+        root  = src_root.view();
+        entry = source.view().slice(prefix.view().len, source.view().len);
+    });
+    args = BuildArgs(
+        root: root,
+        emission: Emission.CFile(generated),
+        entry: entry,
+        std_root: job.std_root,
+        ffi: true
+    );
+    Ok(run_once(env, a, args).try() == 0)
+}
+
+link_exe = (
+    env       : Env,
+    a         : Alloc,
+    job       : ProjectArgs,
+    planned   : BuildPlan,
+    deps      : Vec<Dep>,
+    generated : str,
+    output    : str
+)
+            Res<bool, AllocError> {
+    argv ::= a.Vec<str>();
+    argv.add("cc").try();
+    argv.add("-O2").try();
+    argv.add("-std=c99").try();
+    argv.add(generated).try();
+    deps.loop((h, dep) {
+        add_dep(a, job.root, planned, dep.name, argv).try();
+    });
+    add_std_floors(env, a, job.std_root, generated, argv).try();
+    argv.add("-o").try();
+    argv.add(output).try();
+    run_captured(env, a, argv)
+}
+
+add_dep = (
+    a       : Alloc,
+    root    : str,
+    planned : BuildPlan,
+    name    : str,
+    argv    :: Vec<str>
+) Res<(), AllocError> {
+    planned.libs.find((node) { node.name.eq(name) }).match({
+        None       => {},
+        Ok(native) => add_link_options(
+            a,
+            root,
+            native.spec.paths,
+            native.spec.libs,
+            argv
+        ).try(),
+    });
+    planned.externs.find((node) { node.name.eq(name) }).match({
+        None         => {},
+        Ok(external) => {
+            source = project_path(a, root, external.spec.src.text).try();
+            argv.add(source.view()).try();
+            add_link_options(
+                a,
+                root,
+                external.spec.paths,
+                external.spec.libs,
+                argv
+            ).try();
+        },
+    });
+    planned.imports.find((node) { node.name.eq(name) }).match({
+        None         => {},
+        Ok(imported) => imported.spec.libraries.loop((h, lib) {
+            option = a.String("-l{}", lib).try();
+            argv.add(option.view()).try();
+        }),
+    });
+    Ok(())
+}
+
+add_link_options = (
+    a     : Alloc,
+    root  : str,
+    paths : Vec<str>,
+    libs  : Vec<str>,
+    argv  :: Vec<str>
+) Res<(), AllocError> {
+    paths.loop((h, path) {
+        resolved = project_path(a, root, path).try();
+        option   = a.String("-L{}", resolved.view()).try();
+        argv.add(option.view()).try();
+    });
+    libs.loop((h, lib) {
+        option = a.String("-l{}", lib).try();
+        argv.add(option.view()).try();
+    });
+    Ok(())
+}
+
+// Native implementations used by std travel with the toolchain, not each
+// project's build file. Generated calls identify the floors that survived
+// reachability, matching the compiler test harness's link contract.
+add_std_floors = (
+    env       : Env,
+    a         : Alloc,
+    std_root  : str,
+    generated : str,
+    argv      :: Vec<str>
+) Res<(), AllocError> {
+    env.fs.read(a, generated).match({
+        Err(_)     => Ok(()),
+        Ok(source) => {
+            source.view().contains("zg_proc_").then(() {
+                proc_c = join_path(a, std_root, "std/proc/proc.c").try();
+                argv.add(proc_c.view()).try();
+            });
+            source.view().contains("SSL_").then(() {
+                argv.add("-lssl").try();
+                argv.add("-lcrypto").try();
+            });
+            Ok(())
+        },
+    })
+}
+
+run_captured = (env: Env, a: Alloc, argv: Vec<str>)
+               Res<bool, AllocError> {
+    env.proc.run_argv(a, "", argv).match({
+        Err(_)     => {
+            println("zen: could not start `{}`", argv.get(0).match({
+                Ok(value) => value, None => "process",
+            }));
+            Ok(false)
+        },
+        Ok(result) => {
+            (!result.out.view().is_empty()).then(
+                () { println("{}", result.out.view()); }
+            );
+            (!result.err.view().is_empty()).then(
+                () { println("{}", result.err.view()); }
+            );
+            Ok(result.code == 0)
+        },
+    })
+}
+
+ensure_parent = (env: Env, a: Alloc, path: str) Res<bool, AllocError> {
+    Path(path).parent().match({
+        None       => Ok(true),
+        Ok(parent) => {
+            argv ::= a.Vec<str>();
+            argv.add("mkdir").try();
+            argv.add("-p").try();
+            argv.add(parent.text).try();
+            run_captured(env, a, argv)
+        },
+    })
+}
+
+run_program = (env: Env, a: Alloc, job: ProjectArgs, program: str)
+              Res<i32, AllocError> {
+    argv ::= a.Vec<str>();
+    argv.add(program).try();
+    Range(job.args_at, job.argv.len).loop((h, i) {
+        job.argv.get(i).match({
+            Ok(arg) => argv.add(arg).try(),
+            None    => {},
+        });
+    });
+    env.proc.run_argv_inherit(a, "", argv).match({
+        Err(_)   => { println("zen: could not run `{}`", program); Ok(1) },
+        Ok(code) => Ok(code),
+    })
+}
+
+output_path = (
+    a      : Alloc,
+    root   : str,
+    target : Target,
+    name   : str,
+    chosen : Res<Path>
+) Res<String, AllocError> {
+    chosen.match({
+        Ok(path) => project_path(a, root, path.text),
+        None     => a.String(
+            "{}/build/{}-{}/{}",
+            root,
+            target.os.stable_name(),
+            target.arch.stable_name(),
+            name
+        ),
+    })
+}
+
+project_path = (a: Alloc, root: str, path: str) Res<String, AllocError> {
+    (path.len > 0 && path.index(0) == '/').match({
+        true  => a.String(path),
+        false => join_path(a, root, path),
+    })
+}

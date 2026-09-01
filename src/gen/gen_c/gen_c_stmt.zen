@@ -1,21 +1,8 @@
-// src/gen/gen_c/gen_c_stmt.zen
 // What a statement is in C, and where a value goes.
-// C HAS STATEMENTS AND EXPRESSIONS AND ZEN DOES NOT: every Zen block
-// is a value, and every Zen conditional is one too. So this file owns
-// the bridge — `Dest`, which says where a value is going, and
-// `deliver`, which puts it there. A form that cannot be a C expression
-// — a `.match`, a `.try()`, a block used as a value — is handed
-// STRAIGHT to its destination rather than through a temporary, which
-// is what keeps a `.match` in return position from declaring a
-// variable per arm.
-// THE DESTINATION'S TYPE WINS. A value being written somewhere takes
-// the type of the place it is written to. That is "a literal's type
-// comes from its context" one level up, and it is what makes a match
-// in return position build the enclosing function's own `Res`.
-// SEMA IS ASKED FIRST FOR EVERY STATEMENT, and that is not politeness:
-// `stmt_type` is what binds a statement's locals into the checker and
-// memoizes its types, so the emission below reads answers rather than
-// computing them.
+// C separates statements and expressions while every Zen block is a value.
+// Dest records where that value goes. Forms that cannot be C expressions lower
+// directly into their destination. Destination types provide context for
+// literals and joins, and statements are typed before emission.
 
 Expr, ExprId, BlockId, Block, Stmt, Bind = std.ast
 Decl = std.ast
@@ -85,12 +72,7 @@ value_stmt_index = (blk: Block) usize {
     })
 }
 
-// A NESTED BLOCK IS A VALUE TOO, and sema has always said so:
-// `stmt_type` types a `Block` statement with `block_type`, so
-// `f = () i32 { { 11 } }` is an `i32` to the checker. Reading only
-// `Expr` here made it nothing to the backend — `(void)(11)` and a bare
-// `return;` — which is sema and gen disagreeing about a body's value
-// with gen winning silently (#764).
+// A nested Block statement can be the enclosing block's value.
 last_expr_index = (blk: Block) usize {
     blk.stmts.get(blk.stmts.len - 1).match({
         None  => blk.stmts.len,
@@ -106,11 +88,7 @@ wants_value* = (dst: Dest) bool {
     dst.match({ Discard => false, Return => true, Into(_) => true })
 }
 
-// A BLOCK THAT DESTROYS NOTHING CLOSES EXACTLY AS IT ALWAYS DID, which
-// is what keeps every program without a `Drop` type or a `@scope`
-// byte-for-byte where it was. Only a block with cleanup pending has to
-// care where its value is written, and it is the statements that have
-// just been lowered that say whether there is any.
+// Only blocks with pending cleanup need destination-aware closing.
 close_block = (
     be   :: CBackend,
     blk  : Block,
@@ -213,18 +191,8 @@ spilled_return = (
     be.fmt("return {};\n", tmp.view())
 }
 
-// A BINDING THE BLOCK IS HANDING OUT, and only a bare name can be one.
-// Dropping it here would free what the caller is about to read; a
-// larger expression has been COPIED into the destination by now, and a
-// binding it merely read is still this block's to destroy.
-// IT IS THE EXPRESSION `close_value` DELIVERS, NOT THE ONE THE AUTHOR
-// PUNCTUATED. `Block.value` holds only a tail written without a `;`, so
-// reading it alone exempted the binding in the `a` spelling and nothing
-// at all in `a;` — the arena the block handed out was dropped by the
-// arm that produced it, and the next `Vec.add` bumped through freed
-// pages. `tail` is `tail_index`'s answer and says both things at once:
-// which statement is the value, and — when it is `stmts.len` — that a
-// `Discard` asked for none, so nothing is exempt.
+// Preserve a bare binding handed out as the block value. tail identifies both
+// semicolon and non-semicolon value spellings; Discard preserves nothing.
 keep_name = (be :: CBackend, blk: Block, tail: usize) str {
     blk.value.match({
         Ok(e) => be.bare_name(e),
@@ -459,14 +427,8 @@ lower_bind = (be :: CBackend, s: Stmt, b: Bind, ctx: Ctx)
     Ok(());
 }
 
-// ZEN WRITES A DECLARATION AND A STORE THE SAME WAY, so which one this
-// is depends on what is already in scope: a second `x = ..` on a name
-// already bound, with no written type and no `::=`, is an ASSIGNMENT.
-// Declaring it instead is not a cosmetic difference. `i ::= 0; loop(()
-// { i < 3 }, (h) { i = i + 1; })` emitted a fresh `zu_l1i_2` per pass
-// and the condition kept reading the original — a loop that never ends,
-// from C that compiles. The rule is the reference backend's, verified
-// against it.
+// An untyped immutable bind to a name already bound in this frame is a store;
+// written types and ::= introduce declarations.
 bind_name = (be :: CBackend, name: str, b: Bind, ty: TyId, ctx: Ctx)
             Res<(), AllocError> {
     be.is_store(name, b).match({
@@ -475,11 +437,7 @@ bind_name = (be :: CBackend, name: str, b: Bind, ty: TyId, ctx: Ctx)
     })
 }
 
-// BOUND IN THIS BODY, not bound anywhere on the stack. An inlined
-// callee's bindings sit on top of its caller's, so the whole-stack
-// question answered `true` for a caller's name and turned the callee's
-// own `held = 77` into a store into the CALLER's `held` — which the
-// caller then read back after the call had returned.
+// Store detection is frame-local so inlined callee names may shadow callers.
 is_store = (be :: CBackend, name: str, b: Bind) bool {
     written = b.type.match({ Ok(_) => true, None => false });
     (b.mutable == false) && (written == false) && be.bound_in_frame(name)
@@ -531,22 +489,9 @@ named_slot_type = (be :: CBackend, target: ExprId) Res<TyId> {
     })
 }
 
-// A BINDING, AND ONLY A BINDING, IS WHAT RAII TRACKS. "The compiler
-// calls drop when a BINDING leaves scope" — never a temporary, never a
-// parameter (passing a Drop value to a parameter is a borrow), never a
-// match arm's binder, which names part of a value somebody else still
-// owns. This is the one place a binding is introduced with storage of
-// its own, so it is the one place that registers one.
-// AFTER the value has landed, because the drop list is walked backwards
-// and a binding built from an earlier one has to die first.
-// AND THE NAME COMES INTO SCOPE AFTER THE VALUE TOO, which is why this
-// reserves the C name and publishes the slot separately instead of
-// calling `declare`. `k: i32 ::= k + 1` shadowing an outer `k` had the
-// new slot in scope while its own initialiser was lowered, so the `k`
-// in `k + 1` read the storage being declared — `zg_add_i32(zu_l1k_2,
-// 1, ..)` on a variable nothing had assigned, answering stack garbage
-// that differed run to run. The storage is still emitted first: C wants
-// the declarator above the assignment, and only RESOLUTION had to wait.
+// RAII tracks owned bindings, not temporaries, parameters, or match binders.
+// Publish and register a binding only after its initializer lands so shadowing
+// initializers resolve outer names and reverse drop order remains valid.
 declare_local = (be :: CBackend, name: str, b: Bind, ty: TyId, ctx: Ctx)
                 Res<(), AllocError> {
     n = be.reserve(name).try();
@@ -566,21 +511,9 @@ declare_local = (be :: CBackend, name: str, b: Bind, ty: TyId, ctx: Ctx)
     Ok(());
 }
 
-// `x = v;` -- THE STORE IS HALF OF OWNERSHIP TOO. A slot whose type has
-// a Drop impl OWNS whatever it holds, so a bare-name store onto one
-// destroys the value it displaces before the new value lands. The
-// target's own expression text is rendered first, then the RHS goes
-// into a temporary: COMPUTE (the RHS may read the very value being
-// retired -- `s = f(s)`), DROP (behind the entry's live flag, so a
-// moved-out slot emits nothing), RE-ARM (a store creates no binding;
-// the fresh entry is the slot's own), STORE.
-// EVERY tracked-store RHS lands in the temporary, not only the forms
-// that must spill: rendering a call as text would put nothing in flight
-// and the call would execute at the store line, BELOW the drop, reading
-// a retired value. Only a BARE NAME names tracked storage -- a member
-// or index target writes a field nobody tracks here, which is why
-// lsp_built.zen drops its arena by hand above its reassignment and must
-// not see a second drop.
+// A store to a tracked Drop binding evaluates the RHS first, drops the
+// displaced value, rearms the slot, then stores. Members and indices are not
+// tracked as independent bindings here.
 assign_target = (be :: CBackend, b: Bind, ty: TyId, ctx: Ctx)
                 Res<(), AllocError> {
     be.tree.expr_at(b.target).kind.match({

@@ -1,59 +1,7 @@
-// DIAGNOSTICS ARE PUBLISHED, GROUPED, AND TAKEN BACK.
-//
-// `design_lsp.md` §7's L1 gate, third bullet, driven end to end: a
-// session over framed JSON-RPC, a real build behind it, and the frames
-// the server sent unprompted read back and printed.
-//
-// It asserts FIVE things, and each of them is a different way for a
-// first language server to be wrong:
-//
-//   - AN ERROR IS PUBLISHED AT ALL. Batch one opens a buffer with an
-//     unclosed `(` in it and the parse diagnostic comes back as a
-//     `publishDiagnostics` notification. Until today the editor showed
-//     nothing, ever.
-//
-//   - IT IS GROUPED BY FILE, AND ALL THREE PHASES ARE IN IT.
-//     `app/shape.zen` is opened as a second buffer with a SEMA fault
-//     where `app.zen` has a PARSE one, and each arrives in its OWN
-//     notification against its OWN uri. A build reports across the
-//     whole program; publishing another file's errors against the open
-//     document would be a wrong answer, and a wrong answer is worse
-//     than no answer. Sema's come off the `Checker` and the parser's
-//     off the `Build`, so a server that read only one of the two would
-//     lose a whole line here.
-//
-//   - THE NOTE SURVIVES. The parse diagnostic carries a `Note` — a
-//     second place to look, WITH a span — and it comes out as
-//     `relatedInformation` rather than being flattened into the
-//     sentence, which would throw the span away.
-//
-//   - AN ERROR THAT IS FIXED IS TAKEN BACK. Batch two closes the paren
-//     and drops the undefined name from the other buffer, and BOTH
-//     files receive an EMPTY list. The protocol has no "remove": an
-//     empty list is the only way to clear one, and a server that
-//     publishes only what it finds leaves errors the user has already
-//     fixed on screen forever. That is the classic first-implementation
-//     bug and it is worse than publishing nothing at all.
-//
-//     The two files clear by DIFFERENT ROUTES and that is deliberate:
-//     `app.zen` is the document the build was triggered by, which is
-//     always published; `shape.zen` is not, and is cleared only because
-//     the server remembered it was showing an error. Delete either half
-//     and one of the two lines below keeps a diagnostic.
-//
-//   - TWO CHANGES COST ONE BUILD. Batches one and two each carry two
-//     document notifications and each produces ONE round of
-//     notifications. A server that built per message would print twice
-//     as many frames in both.
-//
-// AND BATCH THREE IS THE MITIGATION: the same bytes sent again produce
-// no build and no frames at all. It is the only thing this server can
-// do about the per-keystroke cost, and `lsp_diag.zen` says why a timed
-// debounce is not implementable here.
-//
-// THE FRAMING IS UNWRAPPED AND NOT PRINTED — a `Content-Length` header
-// carries a CR and a `.expected` may not (docs/TESTING.md). Every byte
-// of the envelope is `a_session_is_answered_frame_by_frame`'s subject.
+// End-to-end diagnostic publication: parse and sema faults are grouped by URI,
+// parse notes retain related locations, corrected files receive empty lists,
+// and a batch of document changes triggers one publication round. Repeating
+// identical bytes produces no frames. The test prints JSON bodies, not framing.
 
 str, String = std.text
 Alloc, AllocError = std.mem
@@ -61,24 +9,13 @@ Server, serve = lsp.lsp_serve
 write_frame, frame_at = lsp.lsp_frame
 write_text = std.json
 
-// THE BUFFER, TORN. The `(` opened in the body never closes, which is
-// what a file being edited looks like most of the time — and it is the
-// one parse diagnostic that carries a NOTE, because `expect_close`
-// anchors on the OPENING delimiter and says separately where the parser
-// actually gave up. That second span is the `relatedInformation` below.
+// The unclosed parenthesis produces a parse diagnostic with a related span.
 BROKEN*: str = "Point = app.shape\n\nnear = (q: Point, n: i32) i32 {\n    s = (q.x + n;\n    s\n}\n"
 
-// The same buffer, with the `(` closed — which is to say, never
-// opened: the expression it wrapped needed no parentheses.
+// The corrected buffer.
 FIXED*: str = "Point = app.shape\n\nnear = (q: Point, n: i32) i32 {\n    s = q.x + n;\n    s\n}\n"
 
-// THE SECOND BUFFER, and its fault is SEMA's where the first one's is
-// the PARSER's — so the two halves of the diagnostics story travel in
-// one notification round. `missing` is no name in scope.
-//
-// IT IS A BUFFER AND NOT A FILE ON DISK because `tests/run.py` compiles
-// every module it stages, so a wrong one on disk fails the test before
-// the test runs. An editor supplies wrong programs the same way.
+// A second in-memory buffer carries a sema fault in the same round.
 SHAPE_BROKEN*: str = "Point* = {\n    x*: i32,\n    y*: i32,\n}\n\narea* = (p: Point) i32 {\n    p.x * missing\n}\n"
 
 // The same module with the undefined name gone.
@@ -89,10 +26,7 @@ SHAPE*: str = "Point* = {\n    x*: i32,\n    y*: i32,\n}\n"
 URI*: str = "file://src/app/app.zen"
 SHAPE_URI*: str = "file://src/app/shape.zen"
 
-// THE WORKSPACE IS NOT THE COMPILATION ROOT. The work directory is the
-// workspace; the root the documents are compiled against is `src`,
-// computed by `zen_path.root_for` climbing out of `src/app`, which holds
-// its own `app.zen`.
+// The workspace contains the src compilation root.
 ROOT_URI*: str = "file://."
 
 INITIALIZED*: str = "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}"
@@ -101,8 +35,7 @@ main = (env: Env) Res<i32, AllocError> {
     a ::= env.mem.alloc();
     s ::= a.Server(env);
 
-    // TWO DOCUMENTS OPENED IN ONE BATCH, and only the last of them is
-    // edited from here on. One build answers for both.
+    // One build answers for both documents opened in this batch.
     first ::= a.String().try();
     open_session(a, first).try();
     write_frame(INITIALIZED, first).try();
@@ -115,8 +48,7 @@ main = (env: Env) Res<i32, AllocError> {
         first.view()
     ).try();
 
-    // ONE BATCH, TWO CHANGES, and only the second of them is the
-    // document the notifications are triggered by.
+    // Both corrections share one document-change batch.
     second ::= a.String().try();
     change_doc(a, SHAPE_URI, SHAPE, second).try();
     change_doc(a, URI, FIXED, second).try();
@@ -129,12 +61,9 @@ main = (env: Env) Res<i32, AllocError> {
     Ok(0);
 }
 
-// --- the requests ------------------------------------------------------
+// Requests.
 
-// `rootUri` IS WHAT MAKES THIS A BUILD. Without it the server has no
-// workspace and publishes nothing at all, which is `lsp_diag.zen`'s
-// refusal rather than a gap: a document checked as a lone module reports
-// every imported name as undefined.
+// rootUri selects workspace checking rather than a standalone document.
 open_session = (a: Alloc, into :: String) Res<(), AllocError> {
     body ::= a.String().try();
     body.add(
@@ -145,11 +74,7 @@ open_session = (a: Alloc, into :: String) Res<(), AllocError> {
     write_frame(body.view(), into)
 }
 
-// A `didOpen`'s text is a field OF the `textDocument`; a `didChange`'s
-// is `contentChanges[0].text` beside it. Two functions and not one with
-// a flag, because that difference is the whole of what a client gets
-// wrong here — and this test got it wrong first, which the server read
-// as a document opened with no bytes at all.
+// didOpen carries text inside textDocument.
 open_doc = (a: Alloc, uri: str, text: str, into :: String)
            Res<(), AllocError> {
     body ::= a.String().try();
@@ -163,8 +88,7 @@ open_doc = (a: Alloc, uri: str, text: str, into :: String)
     write_frame(body.view(), into)
 }
 
-// FULL SYNC: `contentChanges[0].text` IS the whole new buffer, because
-// `initialize` advertised `textDocumentSync: 1`.
+// Full sync carries the complete buffer in contentChanges[0].text.
 change_doc = (a: Alloc, uri: str, text: str, into :: String)
              Res<(), AllocError> {
     body ::= a.String().try();
@@ -178,7 +102,7 @@ change_doc = (a: Alloc, uri: str, text: str, into :: String)
     write_frame(body.view(), into)
 }
 
-// --- the session -------------------------------------------------------
+// Session output.
 
 // One batch through the server, and every frame it produced.
 batch = (s :: Server, a: Alloc, what: str, input: str) Res<(), AllocError> {
@@ -189,9 +113,7 @@ batch = (s :: Server, a: Alloc, what: str, input: str) Res<(), AllocError> {
     Ok(());
 }
 
-// Every frame's body, one per line. Nothing is filtered: the reply to
-// `initialize` is printed beside the notifications, because a count that
-// silently dropped a frame would be a count nothing could check.
+// Print every frame body so frame count and ordering remain observable.
 walk = (out: str) () {
     from  ::= 0;
     seen  ::= 0;

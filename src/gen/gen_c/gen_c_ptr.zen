@@ -1,32 +1,6 @@
-// src/gen/gen_c/gen_c_ptr.zen
-// The raw floor: what a `Ptr<T>` member is in C.
-// `mem_ptr.zen` writes ten signatures and no bodies, and says why:
-// "the bodies belong to the backend: gen_c lowers a Ptr<T> to a `T*`
-// and these members to dereference, indexed store, pointer arithmetic
-// and memcpy. They are written as signatures because there is nothing
-// underneath to write them in — this is the one module in std that
-// cannot implement itself." So this file is those nine bodies, and it
-// is not an optimisation: without it `Vec`, `String` and `str` have no
-// way to touch memory at all.
-// A `Ptr<T>` IS A `T *`. Sema has no pointer kind — a `Ptr<T>` arrives
-// as an ordinary `Named` — but `gen_c_type.ctype` spells it as C's own
-// pointer rather than as the struct the declaration describes, because
-// `str`'s `data` field has to be the same word the runtime floor's
-// `zg_str` holds. One representation and no second spelling.
-// `to<U>` CHANGES THE ELEMENT TYPE, and that is the whole of it. Every
-// later `read`, `write`, `bytes` and `copy_from` scales by the element,
-// so a `to<U>` that answered with the receiver's own type would leave
-// them scaling by `T` — `Arena.realloc` reads its `usize` header through
-// exactly that, and as a no-op the read is ONE BYTE and every `Vec`
-// whose buffer reaches 256 bytes silently loses the rows written before
-// each grow. That bug cost this project a day and is recorded in
-// docs/LEXER_BOOTSTRAP_FIXES.md §1; the `targs` read below is what
-// stops it happening again.
-// SCALING IS `sizeof` AND NOT A NUMBER THE COMPILER KNOWS. `bytes` is
-// "the only way anything in std can ask how big a T is", and C already
-// answers it — so the answer is spelled in the emitted program rather
-// than computed here, and a layout this backend never modelled cannot
-// disagree with the one `cc` chose.
+// C lowering for the bodiless Ptr<T> operations. Ptr<T> is represented as T*;
+// pointer movement scales by the element type and `to<U>` changes that type.
+// Element byte sizes are emitted with sizeof so they agree with C layout.
 
 ExprId, Access, Call, TypeId = std.ast
 AllocError = std.mem

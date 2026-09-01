@@ -1,26 +1,11 @@
-// src/gen/gen_c/gen_c_expr.zen
-// What an expression is in C.
-// Every lowering here has one shape: statements go to the backend's
-// buffer, and the C EXPRESSION naming the result goes to the caller's
-// buffer. `gen_c_stmt.zen` owns where that result ends up; `gen_c_flow.zen`
-// owns the two forms that cannot be C expressions at all.
-// A spilling form where C wants a value is put in a temporary — the one
-// non-shape-for-shape thing this file does: `deliver` hands a spill
-// straight to its destination (already a place), but an argument is
-// not one, so `spill_temp` makes one. `spills` asks whether a node IS a
-// spill (`deliver`'s question); `spills_anywhere` asks whether one hides
-// inside it, which short-circuiting needs since a hoisted `.try()` runs
-// regardless of the left side — `gen_c_op.zen` owns that rule.
-// This file also answers WHICH ARGUMENTS RUN WHEN: Zen orders a call's
-// arguments left to right and C does not, so `holds` names the positions
-// that have to be put in a temporary to keep that promise, and
-// `value_held` puts them there. The `argument order` block below is the
-// whole rule.
-// Operators are `gen_c_op.zen`'s subject.
-// Sema is the only source of a type: where `type_of` answers, its
-// answer is used; where it does not (call, match, record), the
-// context's expected type is used; with neither, an `Untyped` fault is
-// raised rather than a guess.
+// Expression lowering. Statements are emitted to the backend buffer and the
+// C expression naming their result is written to the caller's buffer. Forms
+// that cannot remain expressions spill into temporaries.
+//
+// Zen evaluates call arguments left to right while C leaves their order
+// unspecified. The ordering helpers below hold effectful positions in
+// temporaries. Sema remains the authority for types; an absent semantic and
+// contextual type is reported as `Untyped`.
 
 ExprId, Block, Span = std.ast
 Decl, Consume = std.ast
@@ -117,45 +102,14 @@ call_spills = (be: CBackend, c: Call) bool {
 }
 
 // argument order
-// ZEN EVALUATES ARGUMENTS LEFT TO RIGHT. C LEAVES THE ORDER OF A CALL'S
-// ARGUMENTS UNSPECIFIED, so every argument written straight into one C
-// call expression hands the decision to the C compiler — and gcc takes
-// it right to left. `three(d.tick(), d.tick(), d.tick())` answered 210.
-// THE FIX IS A TEMPORARY, NOT A REWRITE. A HELD argument is written as a
-// declaration and an assignment ahead of the call and appears in the call
-// as its own name — the transform `spill_temp` already performs for a
-// `.try()` in argument position, through the same door.
-// IT IS NOT DONE EVERYWHERE. Spilling every argument of every call costs
-// a sixth of the emitted C and `make build` pays for that twice. Three
-// questions narrow it to the shapes where the difference can be seen:
-//   - the call must have TWO OR MORE argument positions, a receiver
-//     counting as one: with a single position there is nothing to
-//     reorder against;
-//   - some position must CONTAIN A CALL, because nothing else in an
-//     argument runs — and a receiver is a position too, so the question
-//     is asked of it as well;
-//   - a position is held while a call is still to its RIGHT, and a
-//     position that RUNS is held while anything at all is: an inline
-//     call's effects and an inline read after it are C's to order, and
-//     gcc ran `two(bump(d, 100), d.n)`'s read first — 1000 against the
-//     left-to-right 1100. Only the rightmost POSITION may stay inline:
-//     by the time it runs everything else already has, and nothing
-//     follows it.
-// On this tree that is a few hundred of 8,389 call sites.
-// THE OPERANDS OF `+` AND OF EVERY OTHER INFIX OPERATOR were left out
-// deliberately — denser population, cost to be measured first — and are
-// now held under their own gate, `infix_operand_held` below: #737.
+// A position is held while a call remains to its right. A position that
+// itself calls is also held while any later position remains. The rightmost
+// position can stay inline because nothing follows it.
 
 // Whether the position at signature index `pos` must be held. `first` is
 // how many positions the receiver took, so an argument at argument-index
 // `i` asks with `i + first`, and a receiver asks with `0` and `1`.
-// The split is `gen_c_array.zen`'s `elem_held` asked of a call's
-// positions: held while a call is still to the RIGHT (`pos` before the
-// last calling position), and held when the position ITSELF runs while
-// anything at all follows it — the half #717's fix missed, and the one
-// `two(bump(d, 100), d.n)` shows: the rightmost CALLING argument stayed
-// inline beside the read, and gcc took the read first. The rightmost
-// POSITION alone may stay inline with a call inside: nothing follows it.
+// This is the call equivalent of `gen_c_array.zen`'s `elem_held`.
 holds* = (be: CBackend, c: Call, pos: usize, first: usize) bool {
     be.reorderable(c, first) && (
         (pos < (be.last_call_arg(c) + first)) || (
@@ -221,11 +175,7 @@ any_arg_calls = (be: CBackend, c: Call) bool {
     got
 }
 
-// The index of the LAST argument containing a call — the position after
-// which nothing is left to run.
-// `later` is a named helper and not a `.then` in the loop body: a loop
-// binding read inside a nested closure does not resolve,
-// docs/SEMA_BOOTSTRAP_FIXES.md §10.
+// The index of the last argument containing a call.
 last_call_arg = (be: CBackend, c: Call) usize {
     at ::= 0;
     c.args.loop((h, i, a) { at = later(at, i, be.has_call(a.value)); });
@@ -236,41 +186,17 @@ later = (at: usize, i: usize, yes: bool) usize {
     yes.match({ true => i, false => at })
 }
 
-// The same rule for an OPERATOR'S LEFT OPERAND: it is held when EITHER
-// operand contains a call, and only then — the `any_arg_calls` question
-// asked of two positions instead of N. The right may always stay inline,
-// since nothing follows it.
-// BOTH HALVES, because order is readable in both directions. A call on
-// the right of a read (`b.n + d.tick()`) is #737's own shape. A call on
-// the LEFT of a read (`d.tick() + b.n`) is the same coin flipped: Zen
-// runs the tick first and reads `b.n` after it, and an unheld pair lets
-// gcc load `b.n` before ever calling — `infix_order.zen`'s `mixed` line
-// answered 0 that way. Only when NOTHING runs on either side (`1 + 2`,
-// `b.n * 100`) is the freedom unobservable and both operands stay
-// inline, which keeps the gate off the common arithmetic.
+// The binary-operator form of the same ordering rule. The left operand is
+// held whenever either operand contains a call; the right has nothing after
+// it and may remain inline.
 infix_operand_held* = (be: CBackend, b: Binary) bool {
     be.has_call(b.lhs) || be.has_call(b.rhs)
 }
 
-// Whether a CALL hides anywhere inside. Not the spilling question and
-// not a weaker form of it: `d.tick()` spills nothing, and it is the
-// whole reason argument order is observable at all.
-// An unrecognised form answers YES, for `spills_anywhere`'s reason read
-// one step on: wrong in this direction costs a temporary, wrong the
-// other way is a program running its effects in whatever order the C
-// compiler felt like.
-// ITERATIVE, ON A WORKLIST, AND THE WORKLIST IS THE POINT. The first
-// #737 patch walked this recursively, and `corpus/lex/long_single_line`
-// -- one `+` chain ten thousand terms long -- overflowed the C stack
-// and took the compiler to SIGSEGV (exit 139), with three `corpus/lsp/*`
-// aborting beside it: the recursion is linear in OPERAND DEPTH, and
-// neither flat syntax nor the parser bounds that. The parity gate
-// caught it where `make build` could not. An EXPLICIT Vec costs one
-// page from the arena per question and cannot overflow.
-// An `add` that cannot allocate also answers YES. It cannot honestly
-// answer NO -- "no" is the answer that lets gcc order effects -- so it
-// degrades toward holding, the direction this predicate already degrades
-// in.
+// Whether a call occurs anywhere below `id`. The iterative walk handles
+// arbitrarily deep expression trees without consuming the C stack. Unknown
+// forms and allocation failure conservatively answer true, which may add a
+// temporary but cannot expose C's unspecified evaluation order.
 has_call* = (be: CBackend, id: ExprId) bool {
     be.has_call_walk(id).match({
         Ok(found) => found,
@@ -278,20 +204,14 @@ has_call* = (be: CBackend, id: ExprId) bool {
     })
 }
 
-// THE WALK, which can fail only through the arena: `add` cannot find a
-// page and every step propagates. `has_call` turns that failure into
-// YES -- it cannot honestly answer NO, since "no" is the answer that
-// lets gcc order effects, so it degrades toward holding, the direction
-// this predicate already degrades in.
+// The allocating worklist walk used by `has_call`.
 has_call_walk = (be: CBackend, id: ExprId) Res<bool, AllocError> {
     work ::= be.alloc.Vec<ExprId>();
     work.add(id).try();
     found ::= false;
     loop(() { found == false && work.len > 0 }, (h) {
-        // not `.take(..).try()`: this Res's miss is `None`, and no rule
-        // widens that into `AllocError`. The miss is unreachable while
-        // the guard holds -- nothing else pops -- so it answers YES and
-        // stops, which also keeps the walk terminating under any input.
+        // A miss is unreachable while the guard holds; conservatively stop
+        // with `found` if the collection nevertheless reports one.
         popped = work.take(work.len - 1);
         popped.match({
             Ok(at) => be.tree.expr_at(at).kind.match({
@@ -402,20 +322,12 @@ sema_source = (be :: CBackend, id: ExprId, ctx: Ctx)
     })
 }
 
-// The frame that declared a binding is the authority on its type, not
-// sema's memo — the memo is keyed by node id alone, so an answer cached
-// while lowering `Vec<Diag>.get` was read back for `Vec<TyId>.get`,
-// emitting a call to the first symbol with the second's receiver. `cc`
-// caught it; two types of one width would have hidden it.
+// The lowering frame is authoritative for local types because one generic
+// node id may be instantiated at several concrete types.
 // A handle and a closure are not values and have no type to give: `h`
 // is a pair of labels, a lambda is a body to inline — both left to the
 // paths that know what they are.
-// A field read from one is the same rule one node up: `e.key` inside
-// `Map<K, V>.confirms` derives from `e`'s type and the declaration, both
-// held by the frame, so the memo has only a poisoned entry to give.
-// Every instantiation of `confirms` called `str.eq`, including keys
-// typed `ExprId` — swapping which map was built first swapped which
-// `eq` every one of them called.
+// Field reads inherit the same rule from their base and its declaration.
 local_answer = (be :: CBackend, id: ExprId) Res<Res<TyId>, AllocError> {
     be.tree.expr_at(id).kind.match({
         Name(n)   => Ok(be.named_slot(n.text)),
@@ -463,15 +375,9 @@ keep_known = (be :: CBackend, ty: TyId) Res<TyId> {
     })
 }
 
-// `Ptr`'s members ARE the backend, so sema has no body to check and
-// answers `p.to<u8>()` with a `Ptr` whose element nothing settled — not
-// unknown, carries no `Var`, so nothing downstream questions it. A
-// local declared at that type is a C pointer at the wrong stride:
-// `src.back(8)` moved back thirty-two bytes, `realloc` read a length
-// nobody wrote, and every row before the last grow was silently
-// dropped. It compiled; the differential oracle caught it.
-// So the backend answers first for exactly these members, the same
-// authority it already has over lowering them.
+// Backend-intrinsic `Ptr` members have no semantic body from which to infer
+// their result element. The backend answers those result types before sema so
+// pointer arithmetic uses the concrete element width.
 ptr_answer = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
              Res<Res<TyId>, AllocError> {
     be.tree.expr_at(id).kind.match({
@@ -616,19 +522,9 @@ declared_call_type = (be :: CBackend, name: str, ctx: Ctx, want: TyId)
     })
 }
 
-// The print sugar names no function, so the walk above finds nothing
-// and falls back to `want` (`Unknown` at every question worth asking).
-// Its value IS unit: `gen_c_print.lower_print` writes the console calls
-// as statements and hands back `0` as a placeholder, correct only where
-// the value is discarded.
-// Answering `()` makes that placeholder unreachable. `Unknown` agrees
-// with everything, so `gen_c_hoist.needs_hoist` used to read a
-// `println` reaching `Res<(), E>` as "already fits" and emit `return
-// 0;` from a function returning a struct — exactly what that file
-// exists to stop. With unit as the answer the lift fires instead, and
-// `write_res_payload` runs the print for effect before building `Ok`.
-// Under the zero-def arm rather than in front of the walk, because a
-// module declaring its own `println` means its own (`gen_c_call.is_sugar`).
+// Print sugar names no declaration but evaluates to unit. This rule applies
+// only after declaration lookup, so a module-local `println` retains its own
+// declared result type.
 sugar_call_type = (be :: CBackend, name: str, want: TyId)
                   Res<TyId, AllocError> {
     is_print(name).match({

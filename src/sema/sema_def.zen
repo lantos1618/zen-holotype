@@ -1,29 +1,7 @@
-// src/sema/sema_def.zen
-// What a name means, and who is allowed to ask.
-//
-// `defs_of(name)` is the second query DESIGN.md names, and it returns a
-// LIST rather than a definition. That is not a hedge — it is what
-// overloading is: "resolution is on declared parameter types and arity",
-// so a name in scope denotes a candidate SET and choosing between them
-// is the call site's job, not resolution's.
-//
-// THE `*` GATE, in one sentence: a name crosses a module boundary
-// exactly when it is starred, and re-export is an import whose bindings
-// are starred. So there is no second mechanism to implement — following
-// an import to the module that declares the name, and filtering by
-// `exported` at every hop, is the whole of it. A folder root is a file
-// of starred bindings, so the chain is routinely two or three hops deep
-// and `std.core` reaches `std.core.result` through exactly this walk.
-//
-// Module and whole-program names are indexed once. Bucket insertion keeps
-// source order because overload and impl resolution observe it.
-//
-// OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
-// is "what a name means", and every query below is that one question
-// asked of a different scope — a module's own table, the imports it
-// follows, the prelude it never wrote, which module a dotted path
-// denotes, which bindings the `*` gate refused. They all read `tables`;
-// a split would put the store in one file and its readers in another.
+// Indexed module graph and name resolution. `defs_of` returns every overload
+// visible under a name; call resolution chooses among them. Names cross a
+// module boundary only through starred declarations or re-exports. Source
+// order is retained for overload and impl resolution.
 
 Ast, Module, Decl, Ident, Span, QualifiedName, Member = std.ast
 Import, Impl, Enum = std.ast
@@ -89,10 +67,8 @@ WorldIndex = {
     members :: Map<DeclId, Map<str, Vec<usize>>>,
 }
 
-// The one module every other module imports without saying so.
-// `bootstrap/modules.py` names the same string, and it has to be the
-// same string: the two compilers must agree about which module is
-// ambient or a program means different things to each.
+// The module every other module imports implicitly. Bootstrap must use the
+// same spelling.
 PRELUDE*: str = "std.core"
 
 // The same file, spelled the long way (`index_of` gives the rule).
@@ -640,9 +616,7 @@ World* = {
         Ok(());
     }
 
-    // The star and the name are asked INSIDE the helper, not in a `.then`
-    // around the call: SEMA_BOOTSTRAP_FIXES.md §10's workaround, and §10
-    // now records that gap CLOSED, to be re-tested before removal.
+    // Follow imports only when the binding exports the requested variant.
     variant_each = (self: @Self, tree: Ast, t: ModuleTable, name: str,
                     hits :: Vec<Def>, seen :: Vec<usize>, reexport: bool)
                    Res<(), AllocError> {

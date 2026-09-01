@@ -1,23 +1,5 @@
-// src/sema/sema_cycle.zen
-// What a module may not depend on.
-//
-// Two rules about the module GRAPH rather than about any node in it,
-// which is why they are here and not in `sema_decl.zen`'s walk: nobody
-// asks a declaration either question.
-//
-// AN IMPORT CYCLE IS NOT ONE OF THEM, and this compiler must not report
-// one. `ast_node.zen` is a single file precisely because "declarations
-// hold expressions, expressions hold types, a type holds an expression"
-// is one strongly connected component, and `std.core.display` needing
-// `String` from `std.text` while `std.text` wants `Display` for `str` is
-// a cycle in this tree's own standard library. A whole-program compiler
-// merges the graph: a type and a function have no initialisation order
-// to get wrong. `bootstrap/modules.py` allows them deliberately, and the
-// two compilers have to draw this line in the same place or a program
-// means different things to each.
-//
-// A CYCLE IN TOP-LEVEL CONSTANTS is the different thing that stays an
-// error, and it is what "import cycle" names:
+// Module-graph checks. Ordinary module import cycles are legal in a
+// whole-program compilation; cycles among top-level constant values are not:
 //
 //     even.zen:  seed_odd = odd.odd        seed_even* = seed_odd + 1
 //     odd.zen:   seed_even = even.even     seed_odd*  = seed_even + 1
@@ -27,26 +9,9 @@
 // diagnostic is anchored on the IMPORT — because the dependency is what
 // the program means and the import is what the author wrote.
 //
-// A MODULE IMPORTING ITSELF is the second rule, and it is not a cycle to
-// untangle but a typo: the one thing an import does is reach outside the
-// file, and this one names the file it is written in. Its own sentence
-// for that reason, and checked without building a graph at all.
-//
-// THESE RENDER RATHER THAN RAISE, the one place this folder's "a
-// diagnostic is a value" shape does not fit. `sema_diag.zen` carries
-// four payload shapes and states that "a fifth shape would be a sign
-// that a check is doing two things" — and a cycle's payload is a LIST OF
-// MODULE NAMES, exactly that fifth shape. So the sentence is built here,
-// where the list is, and handed to the driver as text in the same
-// `String` sema's own diagnostics were rendered into. If a second check
-// ever wants a list payload, that is the second-caller rule firing and
-// `SemaFault` should grow one.
-//
-// OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
-// is one question — what may a module depend on — and the two rules are
-// the two ways to answer it wrong. They share the hard part, deciding
-// whether a written import path denotes a given module (`names_module`),
-// and they share where the reader is sent, which is that import.
+// A direct self-import is diagnosed separately as a typo. Cycle diagnostics
+// render here because their payload is an ordered list of modules rather than
+// one of SemaFault's scalar payload shapes.
 
 Ast, Module, Decl, Expr, Import, Pos, Span, ExprId, nowhere = std.ast
 Alloc, AllocError = std.mem
@@ -204,7 +169,7 @@ cycle_at = (
     out  :: String
 ) Res<usize, AllocError> {
     onward = reach_from(a, es, mi).try();
-    holds_index(onward, mi).match({
+    mi.is_in(onward).match({
         false => Ok(0),
         true  => report_component(a, tree, w, es, mi, onward, out),
     })
@@ -268,7 +233,7 @@ add_if_reaches = (
     comp :: Vec<usize>
 ) Res<(), AllocError> {
     back = reach_from(a, es, j).try();
-    holds_index(back, mi).match({
+    mi.is_in(back).match({
         false => Ok(()),
         true  => comp.add(j),
     })
@@ -406,7 +371,7 @@ open_edge = (
     order :: Vec<usize>,
     prev  :: Vec<usize>
 ) Res<(), AllocError> {
-    (holds_index(comp, to) && !holds_index(order, to)).match({
+    (to.is_in(comp) && !to.is_in(order)).match({
         false => Ok(()),
         true  => { order.add(to).try(); prev.add(at) },
     })
@@ -457,7 +422,7 @@ reach_from = (a: Alloc, es: Vec<Edge>, start: usize)
 
 step_reach = (e: Edge, from: usize, seen :: Vec<usize>, front :: Vec<usize>)
              Res<(), AllocError> {
-    (e.from == from && !holds_index(seen, e.to)).match({
+    (e.from == from && !e.to.is_in(seen)).match({
         false => Ok(()),
         true  => { seen.add(e.to).try(); front.add(e.to) },
     })
@@ -698,16 +663,4 @@ names_module = (w: World, path: str, mi: usize) bool {
 // one format and not three hand-spelled writes.
 write_where = (out :: String, at: Span) Res<(), AllocError> {
     out.fmt("{}:{}: ", at.file, at.start)
-}
-
-holds_index = (v: Vec<usize>, x: usize) bool {
-    Range(0, v.len).find((k) {
-        v.get(k).match({
-            Ok(y) => y == x,
-            None  => false,
-        })
-    }).match({
-        Ok(_) => true,
-        None  => false,
-    })
 }

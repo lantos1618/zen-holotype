@@ -1,23 +1,12 @@
 // src/gen/gen_c/gen_c_threads.zen
-// The threads capability in C — lowering and floor in one file, the
-// shape `gen_c_clock.zen` set, so the call site and the C it names
-// cannot drift apart.
+// C floor and lowering for Threads.sleep, Threads.spawn, and Thread.join.
 // `Threads.sleep` is bodiless in `std/env/env.zen`: the authority
 // itself, reached only as `env.threads`, and its floor is `nanosleep`.
 // `Threads.spawn` and `Thread.join` are the same kind of member, and
 // their floor is pthreads.
-// The floors are POSIX, not C99, so the feature-macro block is the
-// clock's; the emission of each static is its own flag, because a
-// program that sleeps must not be handed an uncalled function to warn
-// about, and one that only sleeps must not be handed `<pthread.h>`.
-// NO FAILURE MODE A CALLER ACTS ON in `sleep`. `nanosleep` answers EINTR
-// when a signal lands mid-sleep; a Zen program has no signal handling to
-// interrupt, so the retry loop is all there is and the signature
-// answers unit, not Res. `spawn` and `join` DO have failure modes —
-// `SpawnFailed` and `Panicked` are what `ThreadError` is for.
-// THE RECEIVER IS NOT LOWERED, exactly as `env.clock` never lowers the
-// Env it resolved through: `env.threads` is a field read of a record
-// whose slots this path does not call.
+// POSIX helpers are emitted only when used. Sleep retries EINTR and returns
+// unit; spawn and join report ThreadError. Capability receivers carry
+// authority only and emit no C value.
 
 ExprId, Call, Arg, Lambda, Access, TypeId = std.ast
 AllocError = std.mem
@@ -47,8 +36,7 @@ settled = gen.gen_c.gen_c_settle
 // the floors
 // ---------------------------------------------------------------------
 
-// THE SLEEP FLOOR: `nanosleep`, emitted only for a program that sleeps —
-// an uncalled `static` is a warning.
+// `nanosleep`, emitted only for a program that sleeps.
 emit_threads* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     be.uses_threads().match({
         false => Ok(()),
@@ -77,7 +65,7 @@ write_sleep = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     out.line().try();
 }
 
-// THE SPAWN FLOOR: pthreads, and nothing else. The create and join calls
+// The pthread floor. Create and join calls
 // are written at the call sites themselves; all a program that spawns
 // needs here is the header, with the clock's feature-macro dance in
 // front of it (`gen_c_clock.zen` says why the `#undef` is load-bearing).
@@ -97,8 +85,8 @@ emit_spawn_floor = (out :: Emit) Res<(), AllocError> {
     Ok(());
 }
 
-// THE CAPTURE RECORDS, emitted where `emit_scope` emits the defer ones:
-// AFTER the types, because a record field names them. Unlike a deferred
+// Capture records are emitted after types because their fields name those
+// types. Unlike a deferred
 // closure's record — storage the block owns — a spawned closure's record
 // is heap memory: the thread outlives the frame that wrote the captures,
 // so the frame cannot be the storage (law 1 is why the signature takes
@@ -114,7 +102,7 @@ emit_spawn_envs* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
 }
 
 // ---------------------------------------------------------------------
-// THE LOWERING: `env.threads.sleep(ms)`
+// Lowering `env.threads.sleep(ms)`.
 // ---------------------------------------------------------------------
 // Sleep answers unit, but the lowering stands where an expression was,
 // so the statement is written and `0` is left where the value goes —
@@ -137,12 +125,10 @@ lower_sleep* = (
 }
 
 // ---------------------------------------------------------------------
-// THE LOWERING: `env.threads.spawn(a, body)`
+// Lowering `env.threads.spawn(a, body)`.
 // ---------------------------------------------------------------------
-// A SPAWNED CLOSURE IS THE SECOND closure in the language that becomes a
-// real C function — `gen_c_scope.zen`'s deferred closure is the first,
-// and this file walks exactly its path: capture walk, record, lifted
-// body, one trampoline. The differences are the floor's own:
+// A spawned closure becomes a capture record, lifted body, and pthread
+// trampoline. Unlike a deferred closure:
 //   - the record is MALLOC'D, not block storage — the thread outlives
 //     the frame, so the frame cannot hold the captures;
 //   - the body ANSWERS, so the lifted function returns the body's
@@ -150,10 +136,9 @@ lower_sleep* = (
 //     for `pthread_join` to hand back — which is also why `Thread`
 //     carries only `id`: the result travels through the join, not
 //     through the handle;
-//   - `T` is settled by the closure's DECLARED return type, which is
-//     why a spawn body must write one — sema never walks a lambda body,
-//     and the floor needs the type to size the copy.
-// THE Alloc ARGUMENT IS NOT LOWERED. It is the authority the signature
+//   - `T` is settled by the closure's declared return type, which the floor
+//     needs to size the copy.
+// The Alloc argument is not lowered. It is the authority the signature
 // demands (law 2: an escaping closure needs its own memory, so the
 // caller must be holding an allocator to say `spawn`), and the floor's
 // mechanism is `malloc` — wiring the arena's pages into the thread's
@@ -563,7 +548,7 @@ write_spawn_thread = (be :: CBackend, ret: TyId, tty: TyId, pt: str, dst: str)
 }
 
 // ---------------------------------------------------------------------
-// THE LOWERING: `t.join()`
+// Lowering `t.join()`.
 // ---------------------------------------------------------------------
 // `pthread_join` on the handle's `id`, and the thread's answer read out
 // of the pointer it returns — the copy the trampoline made. THE TYPE IS

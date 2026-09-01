@@ -1,35 +1,6 @@
-// src/gen/gen_c/gen_c_state.zen
-// What the C backend holds while it works.
-// The split is `sema_check.zen`'s and for its reason: STATE here,
-// BEHAVIOUR in the files beside it, so the dependency points one way
-// and a lowering rule never has to import the thing lowering it.
-// FIVE THINGS, and each one exists to keep the output a pure function
-// of the input:
-//   - THE TYPE WORKLIST is two parallel `Vec`s and not a `Map`, because
-//     it is EMITTED. A `Map` cannot be walked in an order that survives
-//     a different insertion sequence, and `gen_emit.order` sorts these
-//     by mangled name — which is `tcode`, a pure function of the type.
-//   - THE LOCAL SCOPE is a stack with marks, exactly as sema's is, plus
-//     a per-function list of every name ever declared. The second one
-//     is what gives a shadowing binding its number: `zu_l1x` and
-//     `zu_l1x_2` are two C names for two Zen bindings that share a
-//     spelling, and the number counts declarations rather than depth so
-//     that leaving and re-entering a block cannot reuse one.
-//   - THE TEMPORARY COUNTER is reset at every function, so a function's
-//     temporaries depend on its own body and on nothing that was
-//     compiled before it.
-//   - THE HELPER SET records which integer types a checked operation
-//     was emitted for, so the runtime carries one family per type the
-//     program actually uses rather than all ten.
-//   - THE BODY BUFFER is scratch. Bodies are lowered first because
-//     lowering is what discovers which types and which helpers the
-//     program needs; the translation unit is assembled afterwards, in
-//     the order C requires.
-// THE CHECKER IS TAKEN, NOT BORROWED. `Checker` owns `Vec`s and `Map`s,
-// so a copy diverges from the original the first time either grows —
-// the same reason `Parser` holds the `Ast` rather than handing it back.
-// Hand it in at construction and read every answer back off the
-// backend.
+// Mutable state shared by C lowering modules. Worklists and emitted sets use
+// stable insertion data, then sort by mangled name before output. Per-function
+// locals and temporary counters are reset at each body boundary.
 
 Ast, ExprId, Span = std.ast
 str, String = std.text
@@ -46,26 +17,13 @@ GenDiag, GenFault, render_gen = gen.gen_diag
 sym_gen = gen.gen_name
 LocalSlot, Closure, LoopFrame, DropEntry, BlockFrame = gen.gen_c.gen_c_frame
 
-// One member function reached through a dot, and the receiver it was
-// reached at.
-// A `Def` cannot carry it: a member is not a top-level declaration and
-// `World` never mints one for it. So the identity is written out —
-// `qname` is the TYPE's qualified name plus the member's, which is what
-// makes two types' `get` two symbols without a counter.
-// AND THE SIGNATURE, because neither a name nor an arity is an identity
-// here. A queue entry carrying only the NAME lowered `Cursor`'s `peek()`
-// and `peek(ahead)` as one — the first body under both symbols, so one C
-// symbol was defined twice and the other never. An ARITY is a projection
-// and fails the same way: `Display` declares a `toString` taking a sink
-// and a sealed one taking an allocator, both at arity two. What
-// separates them is exactly what `sym_fn` mangles — the declared
-// parameter types, receiver included — so the queue carries that and not
-// a count of it.
+// A member queue entry carries its full receiver-inclusive signature because
+// neither a member name nor its arity uniquely identifies an overload.
 MethodRef* = {
     self_ty*: TyId,
     decl*: DeclId,   // the declaration that owns the member
     name*: str,
-    sig*: Vec<TyId>, // declared parameter types, RECEIVER INCLUDED
+    sig*: Vec<TyId>, // declared parameter types, receiver included
     qname*: str,
 
 }
@@ -74,11 +32,7 @@ MethodRef* = {
 // that distinction rather than guessing an origin from a mangled name.
 FnOrigin* = Generated | Source(Span)
 
-// The caller's open blocks and pending drops, set aside while a lifted
-// closure body lowers. A spawned closure becomes a function of its own,
-// and a `.try()` inside it unwinds to depth 0 — which must be the
-// THUNK's depth 0, not main's, or the early return runs the caller's
-// drops in a function that has no such locals.
+// Saved while a lifted closure lowers with its own cleanup depth.
 Cleanup* = {
     blocks*: Vec<BlockFrame>,
     drops*: Vec<DropEntry>,
@@ -88,185 +42,91 @@ CBackend* = {
     tree*: Ast,
     check* :: Checker,
 
-    // where a body is lowered. Scratch, one per function.
+    // Scratch output for the current function.
     buf :: Emit,
 
     diags :: Vec<GenDiag>,
 
-    // the types this program needs a C definition for
+    // Types requiring a C definition, keyed by mangled name.
     type_names* :: Vec<String>,
     type_ids* :: Vec<TyId>,
     type_done* :: Vec<bool>,
 
-    // the integer types a checked `+ - * / %` was emitted for
+    // Integer types requiring checked-arithmetic helpers.
     helper_types* :: Vec<String>,
 
-    // The print floor is emitted only for a program that prints, exactly
-    // as the checked-arithmetic families are emitted only for the types a
-    // program computes on.
+    // Demand flags for independently emitted runtime families.
     print_used :: bool,
-
-    // stderr's family, its own flag and not `print_used`: a program that
-    // only narrates must not carry stdout's helpers either.
     stderr_used :: bool,
-
-    // The float scratch the buffer door's intrinsic writer renders into,
-    // its own flag and not `print_used`: a program that formats a float
-    // into a buffer never touches the console family (#809).
     fbuf_used :: bool,
-
-    // The two POSIX headers the FS floor needs are the one place the
-    // emitted C leaves C99, so a program that never opens a file must not
-    // pay for them.
     fs_used :: bool,
-
-    // Its own flag and not `fs_used`: the stdin floor is plain C99
-    // `fread` and the filesystem floor is the POSIX one — a program that
-    // reads a pipe must not be handed `<sys/stat.h>` for it.
     stdin_used :: bool,
-
-    // `getenv` is C99 too, and its floor is `static` — a program that
-    // never reads a variable must not be handed an uncalled function to
-    // warn about.
     env_used :: bool,
-
-    // Its own flag and not `stdin_used`: the clock floor is POSIX too,
-    // but it owns `<time.h>` and its feature-macro terms, which no other
-    // floor shares — a program that measures itself must not pay for
-    // them.
     clock_used :: bool,
-
-    // Its own flag and not `clock_used`: the sleep floor is POSIX too,
-    // but a program that sleeps without measuring must not be handed an
-    // uncalled static to warn about.
     threads_used :: bool,
 
-    // Its own flag and not `threads_used`: the spawn floor is pthreads,
-    // and a program that only sleeps must not be handed `<pthread.h>`
-    // for it. The records are one capture record per spawned closure
-    // that has captures, heap-owned because the thread outlives the
-    // frame that spawned it; the count is what names them.
+    // Spawn capture records are heap-owned because the thread may outlive
+    // the spawning frame.
     spawn_used :: bool,
     spawn_envs :: Vec<String>,
     spawn_sites :: usize,
 
-    // Actor lowering owns a distinct pthread family: one long-lived worker
-    // per actor, plus concrete actor/message records discovered at spawn and
-    // send sites. Definitions are buffered until the header/type section is
-    // assembled, as closure capture records are above.
+    // Actor definitions are buffered until the header/type section.
     actor_used :: bool,
     actor_defs :: Vec<String>,
     actor_sites :: usize,
 
-    // the functions to lower, and the ones already lowered. A QUEUE
-    // rather than a list of every declaration because the walk is
-    // reachability-driven — `gen_c_decl.zen`'s header says why.
+    // Reachable free functions and methods waiting to be lowered.
     fn_queue* :: Vec<Def>,
-    // the member functions reached through a dot. A second queue and
-    // not a second kind of `Def`: a member has no top-level declaration
-    // to mint one from, and `World` is the wrong place to teach that.
     m_queue* :: Vec<MethodRef>,
-    // WHAT EACH QUEUED THING IS INSTANTIATED AT, parallel to the queue
-    // beside it: a queue entry is a `(declaration, instantiation)` pair.
-    // Carried rather than re-derived, because the symbol written at the
-    // call site and the symbol written above the body have to be the
-    // same bytes.
+    // Instantiations are parallel to their queues.
     fn_insts :: Vec<Inst>,
     m_insts :: Vec<Inst>,
-    // the instantiation the function CURRENTLY being lowered is at.
-    // Empty for everything that is not generic, which is what makes
-    // `subst` cost one field read on the common path.
+    // Instantiation of the function currently being lowered.
     inst* :: Inst,
     fn_seen :: Vec<String>,
     fn_names* :: Vec<String>,
     fn_protos* :: Vec<String>,
     fn_bodies* :: Vec<String>,
     fn_origins :: Vec<FnOrigin>,
-    // WHICH TRANSLATION UNIT EACH LOWERED FUNCTION BELONGS TO, parallel
-    // to the three above and holding the MODULE INDEX of the body being
-    // lowered when the function was kept. One file per module is 185
-    // files of ~600 lines rather than one of 110,000, which a C
-    // compiler compiles in parallel and a compiler cache can skip.
-    //
-    // A single-file emission never reads it. A thunk lands in the unit
-    // of the first body that needed one, which is where the emission
-    // order already puts its NUMBER, so this is no less deterministic
-    // than the symbol is.
+    // Module index of each lowered body; unused in single-file emission.
     fn_units* :: Vec<usize>,
     // the unit the lowering is writing into right now
     unit :: usize,
-    // `false`: every function is `static` and the translation unit is
-    // the whole program. `true`: a function is visible to the units
-    // beside it, which is the one thing splitting the program costs.
+    // Multi-unit output makes lowered functions externally visible.
     externs :: bool,
 
-    // KEPT FOR BACKWARD COMPATIBILITY. Bodyless non-generic free
-    // functions are now always lowered as foreign C symbols; `--ffi` is
-    // still parsed and this field is still set, but lowering no longer
-    // checks it.
+    // Parsed for compatibility; bodyless free functions are always foreign.
     ffi* :: bool,
-    // The raw C symbols an FFI call referenced, and the `extern <ret>
-    // name(params)` prototype for each, deduplicated by symbol. Emitted
-    // in the prototype section above the bodies; never a definition,
-    // because a foreign symbol is defined by the C library, not here.
+    // Foreign symbols and prototypes, deduplicated by symbol.
     extern_names* :: Vec<String>,
     extern_protos* :: Vec<String>,
 
-    // Headers owned by reachable loader-created C modules. Complete
-    // include lines preserve the binding's order and dedupe at first use.
+    // Headers required by reachable C bindings.
     c_headers* :: Vec<String>,
 
     // per function
     locals :: Vec<LocalSlot>,
     declared :: Vec<String>,
-    // the loops open at this point in the lowering, innermost last
+    // Active loop and block stacks, innermost last.
     loops :: Vec<LoopFrame>,
-    // the blocks open at this point, innermost last, and every binding
-    // they must destroy, flat and in DECLARATION order. One `Vec` with
-    // a mark per block rather than a `Vec` of `Vec`s, which is the
-    // shape the local scope stack above already uses.
     blocks :: Vec<BlockFrame>,
     drops :: Vec<DropEntry>,
-    // The block record and its runtime are emitted only for a program
-    // that defers, on the same rule as `print_used` above.
     scope_used :: bool,
-    // one capture record per deferred closure that has captures, and
-    // the count of closures lifted so far, which is what names them.
-    // The count is program-wide rather than per function because the
-    // thunks are program-wide: they are `static` functions of the one
-    // translation unit, like every other function here.
-    //
-    // `defer_env_ids` IS NOT `0..defer_envs.len` and cannot be derived:
-    // a closure that captures nothing gets a site number and no record,
-    // so the records are a SUBSET of the sites and the union over them
-    // has to name the numbers that exist.
+    // Captureless deferred closures still consume a site id, so
+    // `defer_env_ids` cannot be derived from the record count.
     defer_envs :: Vec<String>,
     defer_env_ids :: Vec<usize>,
     defer_sites :: usize,
-    // every lambda bound during this function, appended and never
-    // popped: a `LocalSlot` names one by index and the index has to
-    // outlive the scope the name was visible in, because the body is
-    // lowered after the frame has been rewound past it.
+    // Lambdas remain addressable after their lexical scope is rewound.
     closures :: Vec<Closure>,
-    // how many callees are open at this point. A bound, so a callee
-    // that inlines itself reports rather than not terminating.
+    // Current inline depth.
     depth* :: usize,
-    // WHERE THE BODY BEING LOWERED BEGINS in `locals`. Inlining stacks
-    // a callee's bindings on top of its caller's without hiding them,
-    // and one decision must not see through the join: "a second `x =
-    // ..` on a name already bound is an assignment" is a rule about one
-    // function's own body, and read across the join it made an inlined
-    // callee's `held = 77` store into a CALLER's `held` — for the rest
-    // of the caller, not just for the call. Zero while a real function's
-    // body is being lowered, which is what makes the common path free.
+    // First local belonging to the current inlined body.
     floor* :: usize,
     tmp* :: usize,
 
     alloc*: Alloc,
-
-    // -----------------------------------------------------------------
-    // what came out
-    // -----------------------------------------------------------------
 
     diag_count* = (self: @Self) usize { self.diags.len }
 
@@ -285,9 +145,7 @@ CBackend* = {
         self.diags.add(GenDiag(file: file, span: span, fault: fault))
     }
 
-    // A fault raised against an expression, which is where almost every
-    // one of them is raised. Saves each call site the two-line walk
-    // back to the node for its position.
+    // Report at an expression's source span.
     report_expr* = (self :: @Self, id: ExprId, fault: GenFault)
                    Res<(), AllocError> {
         node = self.tree.expr_at(id);
@@ -298,12 +156,7 @@ CBackend* = {
 
     world* = (self: @Self) World { self.check.world }
 
-    // -----------------------------------------------------------------
-    // the type worklist
-    // -----------------------------------------------------------------
-
-    // The name is the identity, because the name IS the type: `tcode` is
-    // injective, so two types share a name exactly when they are one.
+    // Mangled type names are injective and serve as worklist keys.
     type_index* = (self: @Self, name: str) Res<usize> {
         Range(0, self.type_names.len).find((i) {
             self.type_names.get(i).match({
@@ -338,14 +191,7 @@ CBackend* = {
         })
     }
 
-    // -----------------------------------------------------------------
-    // the checked-arithmetic helpers
-    // -----------------------------------------------------------------
-
-    // A FAMILY and not a single helper: the eight are written by one
-    // rule, and splitting them would make the runtime depend on which
-    // operators a program happened to use — a lot of conditional
-    // emission to save a few lines.
+    // Emit the complete checked-arithmetic family for each used primitive.
     need_helpers* = (self :: @Self, prim: str) Res<(), AllocError> {
         self.has_helpers(prim).match({
             false => self.add_helpers(prim),
@@ -368,75 +214,33 @@ CBackend* = {
         self.helper_types.add(owned)
     }
 
-    // -----------------------------------------------------------------
-    // the print floor
-    // -----------------------------------------------------------------
-
     need_print* = (self :: @Self) () { self.print_used = true; }
 
     uses_print* = (self: @Self) bool { self.print_used }
-
-    // -----------------------------------------------------------------
-    // the stderr floor
-    //
-    // A SECOND FLAG, NOT THE FIRST REUSED. `emit_print` writes stdout's
-    // family, `emit_stderr` stderr's; sharing one bit would make a
-    // program that only narrates carry every stdout helper it never
-    // calls.
-    // -----------------------------------------------------------------
 
     need_stderr* = (self :: @Self) () { self.stderr_used = true; }
 
     uses_stderr* = (self: @Self) bool { self.stderr_used }
 
-    // -----------------------------------------------------------------
-    // the buffer float's scratch (#809)
-    //
-    // A THIRD FLAG, for the same reason the second exists: a program
-    // that formats a float into a String never calls the console, and
-    // the scratch is emitted beside that family only because the two
-    // spellings of a number belong in one file.
-    // -----------------------------------------------------------------
-
     need_fbuf* = (self :: @Self) () { self.fbuf_used = true; }
 
     uses_fbuf* = (self: @Self) bool { self.fbuf_used }
-
-    // -----------------------------------------------------------------
-    // the filesystem floor
-    // -----------------------------------------------------------------
 
     need_fs* = (self :: @Self) () { self.fs_used = true; }
 
     uses_fs* = (self: @Self) bool { self.fs_used }
 
-    // -----------------------------------------------------------------
-    // the stdin floor
-    // -----------------------------------------------------------------
-
     need_stdin* = (self :: @Self) () { self.stdin_used = true; }
 
     uses_stdin* = (self: @Self) bool { self.stdin_used }
-
-    // -----------------------------------------------------------------
-    // the environment floor
-    // -----------------------------------------------------------------
 
     need_env* = (self :: @Self) () { self.env_used = true; }
 
     uses_env* = (self: @Self) bool { self.env_used }
 
-    // -----------------------------------------------------------------
-    // the clock floor
-    // -----------------------------------------------------------------
-
     need_clock* = (self :: @Self) () { self.clock_used = true; }
 
     uses_clock* = (self: @Self) bool { self.clock_used }
-
-    // -----------------------------------------------------------------
-    // the threads floor
-    // -----------------------------------------------------------------
 
     need_threads* = (self :: @Self) () { self.threads_used = true; }
 
@@ -461,10 +265,6 @@ CBackend* = {
         self.spawn_envs.get(i)
     }
 
-    // -----------------------------------------------------------------
-    // the actor floor
-    // -----------------------------------------------------------------
-
     need_actor* = (self :: @Self) () { self.actor_used = true; }
 
     uses_actor* = (self: @Self) bool { self.actor_used }
@@ -484,13 +284,7 @@ CBackend* = {
         self.actor_defs.get(i)
     }
 
-    // -----------------------------------------------------------------
-    // the block stack, and what each block must destroy
-    //
-    // `gen_c_own.zen` owns the RULE; this owns the storage, exactly as
-    // the loop stack below is stored here and read there.
-    // -----------------------------------------------------------------
-
+    // Cleanup storage; `gen_c_own` owns destruction policy.
     need_scope* = (self :: @Self) () { self.scope_used = true; }
 
     uses_scope* = (self: @Self) bool { self.scope_used }
@@ -566,28 +360,12 @@ CBackend* = {
         self.drops.add(e)
     }
 
-    // -----------------------------------------------------------------
-    // writing a body
-    //
-    // The buffer is NOT an exported field: `*` on a field means
-    // readable outside the module and "mutation only ever goes through
-    // exported methods", so these six are that. They also keep the
-    // lowering files from knowing that a body is written through an
-    // `Emit` at all.
-    // -----------------------------------------------------------------
-
+    // Body-buffer operations keep Emit storage private to the backend.
     write* = (self :: @Self, s: str) Res<(), AllocError> { self.buf.bytes(s) }
 
     writeln* = (self :: @Self, s: str) Res<(), AllocError> { self.buf.say(s) }
 
-    // `be.fmt("zg_scope {};\n{}.zg_n = 0;\n", v, v)` — five `write`s as
-    // one. Declared not defined, like every format door: `{}` resolves
-    // by the ARGUMENT'S type, so the call is expanded where it is
-    // written. Every piece goes through the receiver's raw floor and answers
-    // exactly what `write` answers, so nothing is converted — which is
-    // what lets an `AllocError` body call it at all. NO IMPLICIT
-    // NEWLINE, and a hole must be a `str`: `gen_c_floor.zen` holds the
-    // contract.
+    // Format into the body buffer without an implicit newline.
     fmt* = (self :: @Self, fmt: str, args: ...) Res<(), AllocError>
 
     newline* = (self :: @Self) Res<(), AllocError> { self.buf.line() }
@@ -598,16 +376,12 @@ CBackend* = {
 
     text* = (self: @Self) str { self.buf.view() }
 
-    // `dst = value;`. Built on the six above rather than a seventh way
-    // into the buffer, and a method because every lowering already has
-    // the backend — three files each wrote this statement out under a
-    // name of its own (`assign`, `set_line`, `write_assign`).
+    // Emit one assignment statement.
     set_line* = (self :: @Self, dst: str, value: str) Res<(), AllocError> {
         self.fmt("{dst} = {value};\n")
     }
 
-    // A fresh buffer, so each function's body is a function of its own
-    // source and of nothing lowered before it.
+    // Start a fresh function body buffer.
     open_buf* = (self :: @Self) Res<(), AllocError> {
         self.buf = self.alloc.Emit().try();
         Ok(());
@@ -624,20 +398,8 @@ CBackend* = {
 
     put_buf* = (self :: @Self, held: Emit) () { self.buf = held; }
 
-    // -----------------------------------------------------------------
-    // the function worklist
-    // -----------------------------------------------------------------
-
     // Queue a function for lowering, once.
-    //
-    // THE MANGLED SYMBOL IS THE IDENTITY and the qualified name is not,
-    // for two reasons that arrived together: `loop` has seven declarations
-    // under one qualified name and they are six functions, and
-    // `Vec<i32>()` and `Vec<str>()` are two emissions of one declaration.
-    // The symbol separates both, because it carries the signature and
-    // the type arguments — which is the same string the call site just
-    // wrote, so a queue hit means the caller is calling something
-    // already queued and never something merely named alike.
+    // The mangled symbol includes signature and instantiation and is the key.
     need_function* = (self :: @Self, d: Def, inst: Inst, sym: str)
                      Res<(), AllocError> {
         self.seen_function(sym).match({
@@ -655,8 +417,7 @@ CBackend* = {
         }).match({ Ok(_) => true, None => false })
     }
 
-    // Turn the FFI escape hatch on for this emission. Called by the
-    // driver when `--ffi` was passed, once, before lowering.
+    // Record the compatibility FFI flag for this emission.
     enable_ffi* = (self :: @Self) () { self.ffi = true; }
 
     need_extern* = (self :: @Self, name: str, proto: String)
@@ -707,10 +468,7 @@ CBackend* = {
         })
     }
 
-    // Queue a member function for lowering, once. The same `fn_seen`
-    // set as a free function's, because the same rule applies and the
-    // two name spaces cannot collide: a method's qualified name has a
-    // TYPE where a function's has a module.
+    // Queue a member once using the shared emitted-symbol set.
     need_method* = (self :: @Self, m: MethodRef, inst: Inst, sym: str)
                    Res<(), AllocError> {
         self.seen_function(sym).match({
@@ -719,12 +477,7 @@ CBackend* = {
         })
     }
 
-    // Claim a thunk's symbol, once. A thunk is not a Zen declaration —
-    // it is the shim between an erased slot and the function an impl
-    // supplies — so it has no queue entry, only a name that must be
-    // written exactly once. The SAME set as a function's, because a
-    // thunk is named after the function it calls and `zg_v` can never
-    // collide with `zu_f`.
+    // Claim a generated thunk symbol without adding a declaration queue row.
     need_thunk* = (self :: @Self, sym: str) Res<bool, AllocError> {
         self.seen_function(sym).match({
             true  => Ok(false),

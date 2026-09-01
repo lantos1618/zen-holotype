@@ -1,27 +1,10 @@
-// src/sema/sema_static.zen
-// `Type.NAME` — what a type's own name reaches, and what it still owes.
-//
-// SPLIT FROM `sema_member.zen` (what a dot reaches on a VALUE, via a
-// receiver/impl/bound/`Found`): a variant, primitive constant, or
-// module member here comes from the DECLARATION alone — this was the
-// half of that 800-line file never about a dot.
-//
-// TWO ENTRIES: `static_access` is `Type.NAME` as a call's callee —
-// `Slot.Left(cell)` resolves through it, a payload-carrying variant
-// answering with the FUNCTION that builds one. `static_value` is the
-// same access standing alone, wanting a value with no argument list. A
-// union's member is complete in the first position, incomplete in the
-// second, so the rule can't live in the shared half: refusing in
-// `variant_type` would reject every legitimate construction.
+// Static `Type.NAME` resolution. A payload variant denotes its constructor as
+// a callee, but cannot stand alone without the value its union member carries.
 
 Expr, ExprId, Access = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
-// `Types` is imported for the STORE, not a name used below: the
-// bootstrapper resolves `c.types.fn_ty(..)` only when the field's type
-// is in scope, so dropping it as "unused" reddens
-// `overload_resolution_reads_the_signature`.
 TyId = sema.sema_ty
 is_integer, is_float = sema.sema_ty
 SemaFault, TypeFault = sema.sema_diag
@@ -32,19 +15,8 @@ module_named_by, module_access = sema.sema_module
 value_access = sema.sema_member
 union_carrier = sema.sema_union
 
-// `Error.IoError` written where a value goes. Every union member
-// carries a value of the type it names (that's what `A | B` means), so
-// a bare member is a tag beside bytes nobody wrote — nothing to hand
-// back.
-//
-// Asked here and not in `variant_type`, since a union member IS
-// constructible: `Error.IoError(e)` reaches `static_access` below
-// without passing through this function, and a rule one step earlier
-// would reject every `Ok(..)`, `Err(..)` and enum construction.
-//
-// A nominal enum's payload variant differs: `Slot.Left` names a
-// function, a function is a value, so `union_carrier` poisons for it
-// and the access falls straight through.
+// Reject a bare union member that requires a carried value. Construction is
+// handled by static_access and remains valid.
 static_value* = (
     c    :: Checker,
     id   : ExprId,
@@ -60,10 +32,7 @@ static_value* = (
     })
 }
 
-// The smallest offending node is the access, so `node.span` and not the
-// name after the dot: `IoError` alone isn't the mistake — reading it
-// off `Error` without a value is — and not the enclosing `Err(..)`
-// either, which is written correctly.
+// Diagnose the complete access, which is the smallest invalid expression.
 needs_value = (
     c       :: Checker,
     node    : Expr,
@@ -83,12 +52,7 @@ needs_value = (
     c.types.unknown()
 }
 
-// A variant, or a constant on a type. "That access form already exists —
-// `Shape.Unit`, `Os.Macos` — so this adds a spelling, not a concept."
-//
-// A module is asked first since it isn't a type at all: `sh = shape`
-// binds a name whose base has no members, variants or constants, and
-// every question below would uselessly answer "no such field".
+// Resolve modules before type variants, primitive constants, and members.
 static_access* = (
     c    :: Checker,
     id   : ExprId,

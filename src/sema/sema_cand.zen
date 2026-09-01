@@ -1,28 +1,6 @@
-// src/sema/sema_cand.zen
-// WHICH DECLARATIONS A NAME OFFERS, and which of them a call fits.
-//
-// `sema_call.zen` owns what a call MEANS — the four callee forms, the
-// receiver, the recorded answer. This file owns the two questions it
-// asks in the middle and neither is about a call: what is in the
-// candidate set, and does an argument list match a signature.
-//
-// A CANDIDATE SET IS A SET BECAUSE OVERLOADING IS. "Resolution is on
-// declared parameter types and arity", so a name denotes a list and
-// choosing is the call site's job — which is `sema_def.zen`'s reason
-// for `defs_of` returning one, said one layer up where the signatures
-// are resolved.
-//
-// AND IT HAS A SECOND SOURCE, which is DESIGN.md's own sentence:
-// "importing a type pulls its world along: its methods, its trait
-// impls, and exported ufcs functions (a free function whose first param
-// is the type is callable as a method)". Only a DOT asks for that half,
-// and only a function whose first parameter IS the receiver's type
-// answers — the first parameter is what makes a free function a method,
-// and sharing the name never was.
-//
-// A SIGNATURE IS RESOLVED IN THE MODULE THAT DECLARES IT, with the
-// declaration's own type parameters in scope, or `<T>(a: T)` reports
-// its own `T` as an undefined name.
+// Candidate collection and signature matching. A dot also considers exported
+// UFCS functions whose first parameter accepts the receiver. Signatures resolve
+// in their declaring module with their own type parameters in scope.
 
 Decl, Function, TParam = std.ast
 AllocError = std.mem
@@ -39,22 +17,10 @@ satisfies_bound = sema.sema_bound
 type_from_ast, param_type = sema.sema_denote
 pack_elem, pack_slot = sema.sema_vararg
 
-// ---------------------------------------------------------------------
-// candidates
-// ---------------------------------------------------------------------
+// Candidate collection.
 
-// THE FUNCTIONS THAT TRAVELLED WITH THE RECEIVER'S TYPE.
-//
-// "Importing a type pulls its world along: its methods, its trait
-// impls, and exported ufcs functions." A free function whose first
-// parameter is `u32` came along with `u32`, so the module it was
-// written in need never have been imported — which is how `to_usize`,
-// on no prelude line, is a method on every integer in the tree.
-//
-// ONLY A DOT ASKS. `recv` is `None` for `f(x)`, so an ordinary call
-// still sees only what its own module imported and the `*` gate is
-// exactly as tight as it was. The first parameter is the whole gate, as
-// the header says.
+// A dot includes exported UFCS functions travelling with the receiver type;
+// ordinary calls remain limited to declarations visible in their module.
 travelled_cands* = (
     c    :: Checker,
     name : str,
@@ -104,27 +70,9 @@ keep_travelled = (c :: Checker, k: Cand, rty: TyId, out :: Vec<Cand>)
     })
 }
 
-// AN IMPL OF THE DECLARED BOUND IS THE RECEIVER'S TYPE, and the gate
-// read `t.eq(rty)`, which says it is not.
-//
-// DESIGN.md's own first line of every program is what falls through:
-// `alloc ::= env.mem.alloc()` is an `Arena`, `Vec* = <T>(a: Alloc)
-// Vec<T>` declares an `Alloc`, and "the call surface is identical —
-// `alloc.Vec<i32>()` either way" is only true if `Arena.impl(Alloc, ..)`
-// counts here. `value_fits` already counts it for arguments one and up;
-// parameter zero was the one place that did not.
-//
-// Nothing showed while every caller also imported the function — that
-// path is `cands_of` and never asks this. It shows the moment a program
-// imports the TYPE and not the function: `alloc.Parser(lexed, tree)`
-// found no candidate at all, fell through to `construct_or_fail`, and
-// was built as a nominal type of its own name with no fields — which is
-// why the diagnostic named `tree` and not `Parser`.
-//
-// `satisfies_bound` and NOT `assignable`: "an impl of it, or the same
-// type, and nothing else". A receiver may not reach a `<T>(a: T)`
-// through a type variable's leniency, because a bare parameter would
-// swallow every receiver in the program.
+// A receiver fits either the declared type itself or an implemented bound.
+// General assignability is too permissive here because an unconstrained type
+// parameter would make every function a receiver candidate.
 takes_receiver = (c :: Checker, k: Cand, rty: TyId) Res<bool, AllocError> {
     k.params.get(0).match({
         None  => Ok(false),
@@ -223,23 +171,10 @@ tparam_bounds = (c :: Checker, tp: TParam, ctx: Ctx, out :: Vec<TBound>)
     Ok(());
 }
 
-// ---------------------------------------------------------------------
-// matching
-// ---------------------------------------------------------------------
+// Signature matching.
 
-// A NAMED ARGUMENT SUPPLIES A FIELD AND NEVER A PARAMETER, so a call
-// written with one matches no function at all.
-//
-// AST_CONTRACT.md gives `name: value` to construction and to an impl's
-// supplied field; a call's arguments are positional. Without this,
-// `Vec(alloc: a)` — the body of `Vec`'s own constructor — resolves to
-// the CONSTRUCTOR rather than to the struct, because the function takes
-// one `Alloc` and so does the call. Sema answered `Vec<T>` either way,
-// so nothing showed until a backend was able to lower it: the emitted
-// C is a function calling itself with its own argument, which is
-// unbounded recursion with no diagnostic anywhere. It is the same shape
-// as the variadic mismatch that built a `String` positionally, and it
-// is why this rule is checked before an instantiation is trusted.
+// Named arguments supply construction or impl fields; function arguments are
+// positional, so a named actual matches no function candidate.
 matches* = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
            Res<bool, AllocError> {
     any_named(actuals).match({
@@ -270,27 +205,8 @@ fixed_matches = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
     })
 }
 
-// `...` IS NOT A PARAMETER, it is the statement that the list does not
-// end. So `(a: Alloc, fmt: str, args: ...)` takes two arguments and
-// then any number, and arity is a MINIMUM rather than an equality.
-//
-// Without this, `alloc.String("{}", x)` matched NOTHING — three actuals
-// against a candidate reporting three parameters, one of which is the
-// `...` — and fell through to `construct_or_fail`, which found the
-// `String` STRUCT of the same name and built one positionally. The
-// mistake was silent and it was not a diagnostic: the call typed as
-// `String` where the declaration says `Res<String, AllocError>`, so
-// every `.try()` on it lost its operand's type and every `.view()` on
-// the result was unresolvable.
-//
-// Only the FIXED PREFIX is checked when the tail is the bare `...`. What
-// the rest may be is type-directed — `text_string.zen` says the call is
-// expanded where it is written — and a check on arguments whose types the
-// language has not settled would be inventing a rule.
-//
-// A `vararg<T>` TAIL DOES SAY WHAT THE REST MAY BE, which is the whole
-// difference between the two spellings, so its swallowed arguments go
-// through `pack_sig_fits` and are checked against `T`.
+// A bare `...` makes arity a minimum and leaves its tail type-directed. A
+// vararg<T> tail additionally checks every swallowed actual against T.
 variadic_matches = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
                    Res<bool, AllocError> {
     pack_slot(c.types, cand.params).match({
@@ -308,16 +224,8 @@ marker_matches = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
     })
 }
 
-// THE ONE IMPLEMENTATION OF "THESE ACTUALS AGAINST A SIGNATURE THAT ENDS
-// IN A PACK", read by both entry points. `off` is the signature index of
-// actual zero — 0 for a free function, 1 for a member whose parameter
-// zero is the receiver, which is `sema_call.zen`'s `recv_off` by the same
-// name. Without one implementation the two would drift, and a call the
-// checker accepted at one arity would be emitted at another.
-//
-// `slot < off` is an associated function whose only parameter is a pack,
-// reached through the receiver path: there is no receiver to occupy
-// position zero, so no argument list fits.
+// Shared pack matching. off is zero for free calls and one when parameter zero
+// is a receiver. A receiver path cannot fit a signature containing only a pack.
 pack_sig_fits* = (
     c       :: Checker,
     ps      : Vec<TyId>,
@@ -360,11 +268,8 @@ prefix_then_pack = (
     Ok(ok && tail);
 }
 
-// TWO READINGS OF ONE SLOT, and `vararg` not nesting (`sema_vararg.zen`)
-// is what keeps them apart: a run of `T` values, or exactly ONE value
-// that is already a `vararg<T>` being FORWARDED. Forwarding is what a
-// bare `...` cannot do at all — it carries no type to pass on — and here
-// it is ordinary assignability, not a case of its own.
+// A vararg slot accepts a run of elements or one compatible vararg forwarded
+// unchanged.
 pack_tail_fits = (
     c       :: Checker,
     actuals : Vec<Actual>,
@@ -460,18 +365,7 @@ fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError> {
     })
 }
 
-// Assignable, or an impl of the bound the parameter names.
-//
-// The second is not a conversion and not a fallback: "a bound is just
-// which struct's shape do I need", so an `Arena` is acceptable where
-// `Alloc` is declared exactly because `Arena.impl(Alloc, ..)` exists
-// and the promise was already kept at the impl. Without it `main`'s own
-// `alloc ::= env.mem.alloc()` — the first line of every program in the
-// language — cannot be passed to anything.
-//
-// It runs second because it is the expensive one: `satisfies_bound`
-// searches the impls of a type, and `assignable` is a `u32` compare in
-// the case that dominates.
+// Try direct assignability before the more expensive bound-impl search.
 value_fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError> {
     c.assignable(a.ty, p).match({
         true  => Ok(true),
@@ -479,26 +373,8 @@ value_fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError> {
     })
 }
 
-// THE SAME QUESTION A `Cand` IS ASKED, ASKED OF A METHOD'S SIGNATURE.
-//
-// A method reaches resolution as a `Found` and not a `Cand` — it came
-// from a type's member table rather than from a module's declarations —
-// but "resolution is on declared parameter types AND arity" is one rule
-// and it must be one implementation, or a method and a ufcs function
-// resolve by different laws while DESIGN.md says they are the same
-// thing. `all_fit` is that implementation and this is the receiver
-// shifted off the front.
-//
-// PARAMETER ZERO IS THE RECEIVER and no argument corresponds to it: "a
-// method is a UFCS function whose first parameter happens to be named
-// `self`", so a call site's arity is one less than the signature's and
-// the comparison starts at one. The receiver is not re-checked here
-// because the member table is what found it — it is already known to be
-// a member of that type.
-//
-// A MEMBER MAY END IN A PACK, and then the arity is a minimum here too —
-// `pack_sig_fits` with the offset the paragraph above names, so `b.widest(1,
-// 9, 4)` and `sum(1, 9, 4)` are one rule read twice rather than two.
+// Methods use the same signature fit as UFCS candidates, offset by receiver
+// parameter zero. Pack tails retain minimum-arity behavior.
 recv_sig_fits* = (c :: Checker, ps: Vec<TyId>, actuals: Vec<Actual>)
                  Res<bool, AllocError> {
     pack_slot(c.types, ps).match({

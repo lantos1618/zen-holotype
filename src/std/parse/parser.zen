@@ -241,15 +241,7 @@ Parser* = {
         Ok(());
     }
 
-    // Success, spelled with its error type.
-    //
-    // BOOTSTRAPPER BUG, reported with a reproducer: `Ok(())` alone is a
-    // `Res<()>`, a DIFFERENT TYPE from `Res<(), AllocError>`, so a
-    // `.match` whose every arm is a bare `Ok(())` is typed without an
-    // error channel. `.try()`ing that inside a function that has one
-    // emits C reading an `Err` field off a struct with no such field,
-    // and nothing says so until `cc` does. So every arm meaning
-    // "nothing to do here" says which `Res` it is.
+    // Success explicitly typed with the parser's allocation error channel.
     nothing* = (self: @Self) Res<(), AllocError> { Ok(()) }
 
     // An empty span at the cursor, for a poison node: it stands where
@@ -620,13 +612,9 @@ Parser* = (a: Alloc, lexed: Lexed) Parser {
 // ninety-one parsers with ninety-one trees are ninety-one id spaces and
 // an `ExprId` from one means nothing to a `Checker` holding another.
 //
-// It is a VALUE and not a reference, and that is the protocol: the
-// driver hands the tree in, the parser adds this module's nodes to its
-// copy, and the driver reads `p.tree` back before building the next
-// parser. One owner at a time, in sequence — the same fact `Checker`
-// relies on when it takes the finished tree by value
-// (SEMA_BOOTSTRAP_FIXES.md §12). Two parsers alive at once over one
-// tree would diverge the first time either `Vec` grew.
+// It is a value rather than a reference: the driver hands the tree in,
+// reads `p.tree` back, then constructs the next parser. Only one parser may
+// own a given tree at a time because a growing `Vec` can relocate storage.
 Parser* = (a: Alloc, lexed: Lexed, tree: Ast) Parser {
     origin = Span(
         file: lexed.source.file,

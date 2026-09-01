@@ -1,26 +1,7 @@
 // src/std/core/loop/loop_find.zen
-// the loop words that delete guards, and the two that allocate.
-//
-// "A `.then` inside a loop is usually a missing loop word" - these
-// are the words it's missing. find stops at the first match; filter
-// keeps every match; map keeps a value per element.
-//
-// SPLIT OUT BY NAME, NOT OVERLOADED. map and filter take an Alloc, so
-// they can't overload loop: a generic `init: A` swallows a concrete
-// `alloc: Alloc`, so fold's `(range, init, body)` and a hypothetical
-// `(range, alloc, body)` are the same signature to resolution. A
-// different name says which ones allocate (law 1: the signature answers).
-//
-// find takes no Alloc, so it returns Res<T>, not a collection — a miss
-// is None, not a trap. UNLIKE loop_iter.zen, all three are written out
-// as ordinary Zen over the primitive, proof h.break is a general
-// feature, not a privilege granted to one name.
-
-// Vec crosses a folder boundary, the one dependency this module has
-// that its siblings don't: map/filter return Vec, so std.core.loop
-// knows std.collections. Matches PLAN.md 0.6's build order (Vec at
-// step 3, loop family at step 5) — why the Range impl for Vec lives
-// over there, not here.
+// Derived loop operations. find returns the first match without allocating;
+// filter and map take an Alloc and return Vecs. Their distinct names avoid an
+// overload collision with fold's generic accumulator parameter.
 Res, Ok, None = std.core.result
 then          = std.core.bool
 Alloc         = std.mem
@@ -38,12 +19,8 @@ find*<R: Range<T>, T> = (range: R, pred: (value: T) bool) Res<T> {
     })
 }
 
-// every element the predicate accepts, in order — nothing matching is
-// an empty Vec, NOT a None (the walk succeeded, it kept nothing). None
-// is reserved for the one real failure: Vec couldn't grow. Res<Vec<T>>
-// has no Err channel for AllocError, and law 4 forbids inventing one,
-// so the break below IS out-of-memory from the outside — a caller that
-// needs to act on it writes `.ok_or(..)`, the required form.
+// Every accepted element in order. No matches yields an empty Vec; None means
+// allocation failed.
 filter*<R: Range<T>, T> = (range: R, alloc: Alloc, pred: (
     value : T
 ) bool) Res<Vec<T>> {

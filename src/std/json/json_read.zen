@@ -1,31 +1,9 @@
-// src/std/json/json_read.zen
-// JSON in. A recursive-descent reader over bytes, into `json_write`'s
-// arena.
+// Recursive-descent JSON reader into the shared `Jsons` arena. Syntax faults
+// carry the byte offset at which parsing failed. Allocation is represented by
+// `NoMemory` because this API exposes one nominal error type.
 //
-// SPLIT FROM THE WRITER BY PREFIX FAMILY, not taste: the two halves
-// share only the value type, are read at different times, and together
-// exceed the size a file here is allowed to be.
-//
-// MOVED HERE FROM `src/lsp/lsp_json_read.zen` beside the writer — same
-// stranger test, same second caller, and a reader is even less an LSP
-// concept than a writer is. The error surface below is its own question
-// (`JsonFault` carries a byte offset, and one day a `FromJson` hangs
-// off it); moving it does not decide that question, it only gives the
-// module a home that is not a protocol.
-//
-// A REJECTION CARRIES A BYTE OFFSET, every time (`TESTING.md:17`: "a
-// rejection with the wrong span is a failure"), so every `JsonFault`
-// variant but one carries a `usize`.
-//
-// ONE NOMINAL ERROR AND NOT A UNION: `PLAN.md:200` puts error unions
-// outside the seed subset (the same choice `FsError` made), hence
-// `NoMemory` beside `AllocError`'s own. Becomes
-// `Res<JsonId, JsonFault | AllocError>` when unions arrive.
-//
-// THIS READER DOES NOT RECOVER: the first fault stops it and the caller
-// answers `-32700 ParseError` — guessing at the rest of a corrupt frame
-// would resynchronise onto a non-boundary and surface the failure three
-// requests later as an unrelated one.
+// Parsing stops at the first fault; consumers must not attempt to resume at an
+// unknown boundary in the remaining bytes.
 
 str, String, push_utf8 = std.text
 Vec = std.collections
@@ -311,14 +289,8 @@ Reader* = {
         })
     }
 
-    // `\uXXXX`, and the surrogate PAIR that follows it when the first
-    // half is a high surrogate. RECOMBINING THE PAIR IS THE STEP THAT
-    // GETS SKIPPED (`design_lsp.md:174`): skip it and a `😀` becomes two
-    // invalid codepoints, reappearing two layers later as an off-by-one
-    // column — done here, and the corpus test has an emoji in it. A LONE
-    // SURROGATE is a fault, not a replacement character: it cannot be
-    // encoded as UTF-8, and U+FFFD would hand downstream a document that
-    // is not the one sent.
+    // Decode `\uXXXX`, combining a high and low surrogate when present. A
+    // lone surrogate is invalid rather than silently replaced with U+FFFD.
     unicode = (self :: @Self, out :: String) Res<(), JsonFault> {
         hi = self.four_hex().try();
         (hi >= SURROGATE_HI_MIN && hi <= SURROGATE_HI_MAX).match({
@@ -470,9 +442,5 @@ SURROGATE_LO_MAX*: u32 = 57343     // DFFF
 SURROGATE_SPAN*: u32 = 1024
 ASTRAL_BASE*: u32 = 65536
 
-// UTF-8's OWN boundaries are NOT written here. They were once — eight
-// constants under this file's own spellings, beside the encoder that used
-// them — and they were the same eight numbers `std.text.text_utf8`
-// already declared for its decoder. A fix to either set could not reach
-// the other, so the encoder moved next to its inverse and the numbers are
-// declared once. `push_utf8` above comes from `std.text`.
+// UTF-8 boundary policy and encoding are owned by `std.text`; `push_utf8`
+// keeps this reader consistent with the decoder.

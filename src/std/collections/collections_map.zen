@@ -1,23 +1,15 @@
 // src/std/collections/collections_map.zen
-// Map<K, V>. the hash finds the row fast, eq confirms the key: hashes
-// alone return wrong values on collision.
+// Map<K, V>. Hash narrows the search and Eq confirms collisions.
 //
 // TWO VECS — the whole design:
 //   entries   every key and value, dense, in INSERTION order
 //   slots     the index: open-addressed, linearly probed, holding
 //             positions in `entries` and nothing else
 //
-// so a lookup hashes, reduces to one slot, reads one or two entries
-// instead of walking all of them. Alternatives cost more: entries
-// stored IN the slots would move a whole K/V on every rehash and tie
-// observable order to the hash; a Vec per bucket is a nested generic
-// plus an allocation per bucket.
-//
-// ITERATION ORDER IS INSERTION ORDER, defined not incidental: `set`
+// Iteration order is insertion order: `set`
 // appends a new key and overwrites an existing one in place, so no row
 // ever moves. Probe order (a function of the hash) never reaches the
-// surface — which is what lets gen_c emit byte-identical C for a
-// Map iteration (TESTING.md, determinism).
+// surface.
 
 Alloc, AllocError = std.mem
 Range = std.core.range
@@ -89,21 +81,7 @@ Map*<K: Eq + Hash, V> = {
     // what a Map is made of is not part of what a Map is.
     len* = (self: @Self) usize { self.entries.len }
 
-    // the key/value walk. ITS OWN NAME, not a seventh `loop` overload:
-    // against the ranged-with-index form it is the same arg count and
-    // the same three-parameter body with a concrete first parameter
-    // where the overload is generic — exactly what DESIGN.md's
-    // overloading section rules out ("a generic parameter swallows a
-    // concrete one"; reported there as a doc bug). Same trade `map`
-    // took: a Map hands out TWO things per pass, a Range one — never
-    // one word, so the name says which you get.
-    //
-    // ORDINARY ZEN OVER THE PRIMITIVE, like find/filter/map
-    // (loop_find.zen): entries walks through Vec's Range impl, in
-    // insertion order — the order this file's header commits to, since
-    // set appends a new key and overwrites an existing one in place,
-    // so no row ever moves. Nothing here allocates and nothing here
-    // fails, so the walk is a bare (), not a Res.
+    // Walk key/value pairs in insertion order without allocating.
     pairs* = (self: @Self, body: (
         h     : LoopHandle,
         key   : K,
@@ -280,9 +258,6 @@ empty_slots = (a: Alloc, n: usize) Res<Vec<usize>, AllocError> {
 // length-checked) but handled anyway: AllocError is the one failure
 // this module speaks.
 //
-// `.ok_or` (the specified spelling) can't be used here: at T = () it
-// reports a false `unresolved name value` (docs/SEMA_BOOTSTRAP_FIXES.md
-// §1), and `Res<()>` is exactly what Vec.set returns
 put = <T>(v :: Vec<T>, i: usize, value: T) Res<(), AllocError> {
     v.set(i, value).match({
         None  => Err(AllocError.OutOfMemory),

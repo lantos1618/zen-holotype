@@ -1,29 +1,6 @@
-// src/sema/sema_apply.zen
-// What a call APPLIES its callee to: the type arguments, and what a
-// construction is applied to.
-//
-// `sema_call.zen` answers which declaration a call means. That is one
-// question and this is a second one asked of the same node, because a
-// call to `<T>(x: T) T` picks a declaration AND a `T`, and only the
-// first of the two is resolution. Splitting them is what keeps
-// "resolution is on declared parameter types and arity" a rule about
-// arity and types, with nothing about inference folded into it.
-//
-// TWO SOURCES, AND THE WRITTEN ONE WINS. `alloc.Vec<Unit>()` names its
-// argument outright; `alloc.realloc(p, n)` says it only through
-// `p: Ptr<T>` against a `Ptr<u8>`. `Inst.bind` keeps the first binding,
-// so ordering the two sources IS the precedence rule and there is no
-// second mechanism.
-//
-// A PARAMETER NEITHER SOURCE REACHES STAYS FREE, and nothing here
-// reports it. A candidate is TRIED before it is chosen — `keep_matching`
-// runs this over overloads the program never used — so a diagnostic
-// raised from inside would name a declaration nobody called. The refusal
-// belongs at the consumer, which is what `has_var` is for and why the
-// backend asks it before it writes a symbol.
-//
-// A CONSTRUCTION IS APPLIED TOO, and for the same reason: a nominal type
-// at some arguments, never a bare head. `construct` gives the two forms.
+// Generic argument inference for calls and construction. Explicit type
+// arguments take precedence over bindings inferred from value arguments.
+// Unresolved parameters remain free until a consumer requires a concrete type.
 
 Expr, ExprId, Call, Arg = std.ast
 Decl, Enum, Struct, TypeId, Impl = std.ast
@@ -337,9 +314,8 @@ enum_tparam_vars = (c :: Checker, d: Decl, owner: str, out :: Vec<TyId>)
     })
 }
 
-// The payload against the first argument's settled type. A variant with
-// no argument written keeps the bare enum — the shape `variant_ctor`
-// answered before this existed — rather than inventing a unit binding.
+// Unify a variant payload with its first argument. A nullary variant leaves
+// the enum's type parameters unbound.
 payload_says = (
     c    :: Checker,
     call : Call,
@@ -401,12 +377,7 @@ decl_tparams = (c :: Checker, d: Def, out :: Vec<TyId>)
     })
 }
 
-// A GENERIC ENUM IS CONSTRUCTED TOO — `Opt.Some(41)` builds an `Opt<T>`
-// through its payload variant, exactly as `Box(held: 7)` builds a
-// `Box<T>` through its fields. Reading tparams off `Struct` alone left
-// the variant ctor holding a bare head: the let typed as unsubstituted
-// `Opt` while the callee monomorphised to `Opt<i32>`, and cc rejected
-// the call (issue 738).
+// Collect type parameters from generic structs and enums alike.
 decl_tparams_of = (c :: Checker, d: Def, dec: Decl, out :: Vec<TyId>)
                   Res<(), AllocError> {
     dec.kind.match({

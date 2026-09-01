@@ -1,10 +1,12 @@
-// env.proc.run spawns a shell, captures stdout/stderr, and returns the
-// child's exit code. This test exercises the capability end-to-end.
+// The legacy command-string path and both structured argv paths share the
+// process capability. Shell metacharacters in argv remain ordinary text.
 
 AllocError = std.mem
+ProcError = std.proc
 
 main = (env: Env) Res<i32, AllocError> {
-    out = env.proc.run(env.mem.alloc(), "", "echo hello world").match({
+    a   = env.mem.alloc();
+    old = env.proc.run(a, "", "echo hello world").match({
         Ok(r)  => {
             println("code={}", r.code);
             println("out={}", r.out.view());
@@ -20,5 +22,60 @@ main = (env: Env) Res<i32, AllocError> {
             1
         },
     });
-    Ok(out)
+
+    args ::= a.Vec<str>();
+    args.add("printf").try();
+    args.add("%s|%s\n").try();
+    args.add("hello world").try();
+    args.add("$HOME; exit 9").try();
+    captured = env.proc.run_argv(a, "", args).match({
+        Ok(r)  => {
+            println("argv-code={}", r.code);
+            println("argv-out={}", r.out.view());
+            0
+        },
+        Err(e) => {
+            show_error(e);
+            1
+        },
+    });
+
+    inherited ::= a.Vec<str>();
+    inherited.add("false").try();
+    direct = env.proc.run_argv_inherit(a, "", inherited).match({
+        Ok(code) => {
+            println("inherit-code={}", code);
+            0
+        },
+        Err(e)   => {
+            show_error(e);
+            1
+        },
+    });
+
+    empty ::= a.Vec<str>();
+    invalid = env.proc.run_argv(a, "", empty).match({
+        Ok(r)            => {
+            println("empty-code={}", r.code);
+            1
+        },
+        Err(SpawnFailed) => {
+            println("empty=spawn-failed");
+            0
+        },
+        Err(e)           => {
+            show_error(e);
+            1
+        },
+    });
+
+    Ok(old + captured + direct + invalid)
+}
+
+show_error = (e: ProcError) () {
+    e.match({
+        SpawnFailed => println("spawn failed"),
+        WaitFailed  => println("wait failed"),
+        ReadFailed  => println("read failed"),
+    })
 }

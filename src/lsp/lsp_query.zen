@@ -1,5 +1,5 @@
-// The checked program state a position query reads. A standalone query sees
-// one buffer; a workspace query sees that buffer as an overlay on its build.
+// Creates checked state for either one buffer or a workspace build with an
+// unsaved-buffer overlay.
 
 str = std.text
 Map = std.collections
@@ -34,14 +34,30 @@ CheckedBuild* = {
     c*: Checker,
 }
 
+WorkspaceCheck* = {
+    b*: Build,
+    c*: Checker,
+}
+
+check_workspace* = (
+    env   : Env,
+    a     : Alloc,
+    root  : str,
+    entry : str,
+    docs  : Map<str, str>
+) Res<WorkspaceCheck, AllocError> {
+    b ::= a.Build(env, root);
+    b.set_std_root(std_root_for(env, a));
+    c = b.whole(entry, docs).try();
+    Ok(WorkspaceCheck(b: b, c: c))
+}
+
 check_build* = (env: Env, a: Alloc, workspace: str, path: str, text: str)
                Res<CheckedBuild, AllocError> {
     root = root_for(env, a, workspace, path);
     rel  = relative_to(root, path);
     docs ::= a.Map<str, str>();
     docs.set(path, text).try();
-    b ::= a.Build(env, root);
-    b.set_std_root(std_root_for(env, a));
-    c = b.whole(rel, docs).try();
-    Ok(CheckedBuild(root: root, rel: rel, c: c));
+    checked = check_workspace(env, a, root, rel, docs).try();
+    Ok(CheckedBuild(root: root, rel: rel, c: checked.c));
 }

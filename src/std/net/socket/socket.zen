@@ -116,17 +116,6 @@ SocketFd* = {
     }
 }
 
-c_text = (a: Alloc, text: str, fault: SocketFault)
-         Res<Vec<u8>, SocketFault> {
-    out ::= a.Vec<u8>();
-    out.reserve(text.len + 1).try(fault);
-    Range(0, text.len).loop((h, i) {
-        out.add(text.index(i)).try(fault);
-    });
-    out.add(0).try(fault);
-    Ok(out)
-}
-
 hints = (a: Alloc, fault: SocketFault) Res<Vec<AddrInfo>, SocketFault> {
     out ::= a.Vec<AddrInfo>();
     out.add(AddrInfo(
@@ -163,7 +152,7 @@ addresses = (
 }
 
 resolve_addr* = (a: Alloc, host: str) Res<ResolvedAddr, SocketFault> {
-    host_c ::= c_text(a, host, SocketFault.ReadFault).try();
+    host_c ::= host.c_text(a).try(SocketFault.ReadFault);
     run    ::= addresses(
         a,
         host_c.ptr(),
@@ -206,9 +195,9 @@ Socket* = {
 
     tcp_connect* = (a: Alloc, host: str, port: u16)
                    Res<Socket, SocketFault> {
-        host_c ::= c_text(a, host, SocketFault.ConnectFault).try();
+        host_c ::= host.c_text(a).try(SocketFault.ConnectFault);
         port_text = a.String("{}", port).try(SocketFault.ConnectFault);
-        port_c ::= c_text(a, port_text.view(), SocketFault.ConnectFault).try();
+        port_c ::= port_text.view().c_text(a).try(SocketFault.ConnectFault);
         run    ::= addresses(
             a,
             host_c.ptr(),

@@ -1,6 +1,5 @@
-// src/lsp/lsp_uri.zen
-// The protocol names documents by URI; Fs opens paths. Keep that
-// conversion here so every LSP feature agrees about the same document.
+// Converts document URIs to filesystem paths and compiler paths back to local
+// file URIs.
 
 str, String = std.text
 Alloc, AllocError = std.mem
@@ -8,9 +7,6 @@ Alloc, AllocError = std.mem
 FILE_SCHEME*: str = "file://"
 REMOTE_SCHEME: str = "vscode-remote://"
 
-// This borrowed form handles conversions that need no new bytes. Paths
-// and unknown schemes stay unchanged rather than risking a wrong file.
-// Percent decoding needs owned output, which this interface cannot make.
 path_of* = (uri: str) str {
     uri.starts_with(FILE_SCHEME).match({
         true  => uri.slice(FILE_SCHEME.len, uri.len),
@@ -21,8 +17,6 @@ path_of* = (uri: str) str {
     })
 }
 
-// VS Code Remote runs the server on the remote host. Its URI authority
-// selects that host; only the absolute path is meaningful to its Fs.
 remote_path = (uri: str) str {
     tail = uri.slice(REMOTE_SCHEME.len, uri.len);
     tail.find('/').match({
@@ -31,8 +25,6 @@ remote_path = (uri: str) str {
     })
 }
 
-// URI output currently targets local file clients. A remote URI base
-// must be retained by Server before this can reproduce its authority.
 uri_at* = (a: Alloc, root: str, rel: str) Res<str, AllocError> {
     out ::= a.String("{}{}/{}", FILE_SCHEME, root, rel).try();
     Ok(out.view());

@@ -1,27 +1,8 @@
-// src/gen/gen_c/gen_c_member.zen
 // What a call through a DOT is.
-// `gen_c_call.zen` owns `f(a)`; this file owns `x.f(a)`, which DESIGN.md
-// makes three readings of one rule — "a method is a UFCS function whose
-// first parameter happens to be named `self`". `Shape.Circle(c)` is a
-// VARIANT (a payload variant IS the function that builds one),
-// `s.is_empty()` a MEMBER the receiver's type declares, `v.push(x)` a
-// FREE FUNCTION whose first parameter is the receiver's type —
-// "importing a type pulls its world along ... exported ufcs functions".
-// SEMA ALREADY DECIDES BETWEEN THEM and this file asks — `base_of`,
-// `members_of` — rather than re-deciding. The one answer it cannot read
-// back is WHICH DECLARATION a call resolved to (`Cand` carries a
-// signature and no `DeclId`), so `pick_member` re-derives it from the
-// AST by calling `recv_sig_fits`, THE CHECKER'S OWN predicate: the seam
-// is narrowed, not closed — the two can disagree about inputs, not
-// about the rule. Closing it means `call_memo` keying a `MemberId`
-// (`sema_id.zen` already names one) rather than a `DeclId`, which
-// cannot name a member.
-// A MEMBER FUNCTION IS AN ORDINARY FUNCTION with the receiver as its
-// first parameter, and its symbol is `sym_fn`'s rule with the type's
-// qualified name as one more segment — what makes two types' `get` two
-// symbols without a counter. WHAT THIS FILE REFUSES it refuses BY NAME:
-// a `GenFault` with a position, never C that compiles but means
-// something else.
+// gen_c_call owns f(a); this file owns variants, declared members, and exported
+// UFCS functions reached as x.f(a). Sema supplies type/member facts and this
+// lowering reuses the checker's signature-fit predicate when selecting a
+// declaration. Member symbols include the qualified receiver type.
 
 ExprId, Decl, Struct, Member = std.ast
 Function, Param, Access, Call, Arg = std.ast
@@ -51,8 +32,8 @@ ctype, is_unit = gen.gen_c.gen_c_type
 expr, ty_of, want_of = gen.gen_c.gen_c_expr
 has_call, holds = gen.gen_c.gen_c_expr
 unsettled = gen.gen_c.gen_c_mono
-lower_plain_call, write_arg, write_call_args = gen.gen_c.gen_c_call
-write_arg_at = gen.gen_c.gen_c_call
+lower_plain_call, write_call_args = gen.gen_c.gen_c_call
+write_arg, write_arg_at = gen.gen_c.gen_c_arg
 handle_depth, lower_handle_call = gen.gen_c.gen_c_handle
 inlines, inline_method = gen.gen_c.gen_c_inline
 is_ptr_member, lower_ptr_member = gen.gen_c.gen_c_ptr
@@ -407,17 +388,8 @@ supplied_member = (
     })
 }
 
-// which of two members of one name
-// "Resolution is on declared parameter types AND arity" (DESIGN.md,
-// Overloading) — a backend reading only arity answers whichever the
-// member table listed first. `Display` declares a `toString` taking a
-// sink and a sealed one taking an allocator, both arity two;
-// `p.toString(alloc)` once lowered to the sink symbol with the
-// allocator passed as a `Sink` of NULL function pointers. `cc` caught
-// it only because the two return types differ — two overloads agreeing
-// on return type would have been silent.
-// ONE CANDIDATE IS NOT A CHOICE, so the common call pays only the arity
-// test; the header says why the predicate here is the checker's own.
+// Select overloaded members by declared parameter types and arity. A single
+// member needs only the arity check.
 
 pick_member = (be :: CBackend, c: Call, s: Site, found: Vec<Member>, ctx: Ctx)
               Res<Res<Member>, AllocError> {

@@ -1,30 +1,7 @@
-// src/gen/gen_c/gen_c_loop.zen
-// The one construct that has no Zen definition anywhere.
-// `src/std/core/loop/loop_iter.zen` declares seven signatures with no
-// bodies: "a loop is the one thing that cannot be written in a
-// language whose only control flow is `.match`, `.loop` and
-// recursion" — writing `loop` in terms of `loop` is circular, and by
-// recursion makes "compiles to a plain C for-loop" depend on a
-// tail-call optimisation nobody gates. So the backend IS the body of
-// all six.
-// THE OVERLOAD IS READ OFF THE DECLARATION'S OWN PARAMETER NAMES, never
-// the lambda at the call site: `loop_iter.zen` writes the body's
-// parameter list — `(h: LoopHandle, index: usize, value: T)` — and
-// which of `index`, `value`, `acc` appear is the whole difference
-// between the six. `(h, i)` binds to `value` on the two-parameter form
-// and to `index` on the counted one; only the declaration knows which.
-// `h.break(v)` AND `h.next()` ARE `goto`s, NOT C's `break`/`continue`
-// — `gen_c_handle.zen` argues why, and owns both verbs.
-// WHAT IS BEING WALKED IS `gen_c_range.zen`'S SUBJECT, NOT THIS ONE:
-// whether a range stores its bounds or an impl supplies them, and what
-// one pass hands out, are RANGE questions; this file only asks for the
-// answers.
-// WHAT THIS FILE DOES NOT LOWER, IT REFUSES BY NAME — a fold, a body
-// written somewhere other than the call site, a range whose element
-// nothing settles.
-// LOOPS NEVER ALLOCATE — the signature, not a promise: no declaration
-// in `loop_iter.zen` takes an `Alloc`, and `index`, `value`, `acc` are
-// plain automatic storage.
+// Backend implementation of the bodiless loop overloads. Parameter roles come
+// from the resolved declaration, not the call-site lambda: the same `(h, i)`
+// spelling may bind an index or a value. Loop control uses backend labels, and
+// range storage and pass values remain owned by gen_c_range.
 
 ExprId, Lambda = std.ast
 Function, Param = std.ast
@@ -48,11 +25,12 @@ has_var = sema.sema_inst
 expr, ty_of = gen.gen_c.gen_c_expr
 Dest, block = gen.gen_c.gen_c_stmt
 supplies_bounds = gen.gen_c.gen_c_range
-bind_text, is_res = gen.gen_c.gen_c_range
+bind_text = gen.gen_c.gen_c_range
+is_res = gen.gen_c.gen_c_type
 lower_supplied = gen.gen_c.gen_c_range
 array_of, lower_array_walk = gen.gen_c.gen_c_array
 
-// the lowering
+// Lowering.
 
 // `args` is the call's arguments with the receiver, if there was one,
 // already at the front: `range.loop(body)` and `loop(range, body)` are
@@ -131,8 +109,7 @@ lower_shaped = (
     })
 }
 
-// THE FOUR NON-FOLD SHAPES, and the branch between them is what the
-// arguments before the body are:
+// Non-fold shapes are selected by the arguments before the body:
 //   nothing        while true
 //   a `() bool` or bool expression
 //                  while cond, tested BEFORE each pass
@@ -181,10 +158,7 @@ lower_led = (
     })
 }
 
-// A range whose bounds an impl supplies carries no accumulator yet, so
-// it's refused BY NAME rather than walked: `gen_c_range.zen`'s own pass
-// would discard the body's value — a fold that compiles and returns its
-// seed, the one outcome a backend may not produce.
+// Impl-supplied ranges do not yet support fold accumulators.
 lower_impl_walk = (
     be   :: CBackend,
     id   : ExprId,
@@ -302,8 +276,7 @@ write_cond_body = (be :: CBackend, lam: Lambda, brk: usize, ctx: Ctx)
     Ok(());
 }
 
-// a range
-// HALF-OPEN, and the counter is the index space. `Range(0, 5)` is five
+// Ranges are half-open. The counter is the index space: `Range(0, 5)` is five
 // passes; `index` counts PASSES and `value` is what the range holds, so
 // over `Range(10, 13)` they are 0,1,2 and 10,11,12 — one name for both
 // would make the two indistinguishable exactly when the range does not
@@ -322,11 +295,7 @@ lower_range = (
 ) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
     rty     = be.ty_of(one, ctx, unknown).try();
-    // A FIXED ARRAY IS ASKED ABOUT FIRST because it satisfies `Range`
-    // intrinsically: it stores no `start` and no `end`, and it has no
-    // declaration for an impl to live on, so neither of the two readings
-    // below would find it. `gen_c_array.zen` says why that is the only
-    // way `[T, N]` can satisfy anything.
+    // Fixed arrays satisfy Range intrinsically and have no declaration or impl.
     be.array_of(rty).match({
         Ok(a) => be.lower_array_walk(
             sh,
@@ -382,19 +351,8 @@ lower_range_impl = (
     })
 }
 
-// WHAT THE LOOP EVALUATES TO IS THE BACKEND'S ANSWER, NOT SEMA'S.
-// `loop<R: Range<T>, T>` returns `Res<T>` and nothing settles `T` — it's
-// reachable only through the closure, and a closure infers FROM a
-// signature rather than into one. Sema hands back `Res<q>` (the
-// mangler's word for an undecided type argument); emitting that as-is
-// is how `h.break(v)` in one loop and another become one C type.
-// WHERE THE ELEMENT COMES FROM IS THE SHAPE'S OWN ANSWER. A range that
-// supplies no `at` walks its own index space, so its element is
-// `usize`. A shape that takes NO RANGE has no index space and no item:
-// there the body's `h.break(v)` arguments are the only thing in the
-// program that says what `T` is, so they are the element
-// (`broken_element`, gen_c_shape.zen) — settling `usize` for them is
-// how a negative payload read back unsigned (#784).
+// Settle the loop payload from its range element or break values when sema's
+// generic Res payload remains open. A range without at yields usize.
 lower_settled = (
     be   :: CBackend,
     id   : ExprId,
@@ -498,14 +456,10 @@ assign_member = (be :: CBackend, target: str, base: str, member: str)
     be.fmt("{target} = {base}.{};\n", sym.view())
 }
 
-// the parts every shape shares
+// Shared loop machinery.
 
-// The loop's own value, and the frame `h.break` reads.
-// "The loop evaluates to the final acc — or to `h.break(value)`, which
-// is what makes the two forms one thing rather than two." A loop
-// nothing broke out of evaluates to `None`; the temporary is
-// initialised to it before the first pass rather than left to whatever
-// the frame held.
+// A loop starts with None and changes its frame result on normal fold
+// completion or h.break(value).
 open_result* = (be :: CBackend, want: TyId, out :: String)
               Res<LoopFrame, AllocError> {
     brk = be.next_tmp();
@@ -611,11 +565,8 @@ handle_name = (lam: Lambda) str {
     lam.params.get(0).match({ Ok(p) => p.name.text, None => "h" })
 }
 
-// THE BODY'S PARAMETERS AFTER `h`, AND WHICH IS WHICH IS THE
-// DECLARATION'S ANSWER (see header): `index`/`value` are not
-// interchangeable (see the half-open note above). A range that supplies
-// no `at` walks its own index space, where the value IS the counter —
-// what makes `Range(0, 5)` a bare C for-loop.
+// Bind parameters after h according to the resolved declaration. A range with
+// no at uses the counter as its value.
 bind_threaded = (
     be      :: CBackend,
     sh      : Shape,
@@ -742,10 +693,7 @@ close_pass* = (be :: CBackend, st: LoopFrame, counter: str, fold: Fold)
     }).try();
     be.dedent();
     be.writeln("}").try();
-    // A FOLD THAT RAN TO THE END HAS AN ANSWER and a walk does not: the
-    // result was seeded `None` before the first pass, and this is the
-    // one place it becomes `Ok(acc)`. It is written BEFORE the break
-    // label, so `h.break(v)` — which jumps past it — still wins.
+    // Write normal fold completion before the break label so h.break wins.
     be.write_fold_result(st, fold).try();
     be.write_label("brk", st.brk).try();
     be.writeln(": ;").try();

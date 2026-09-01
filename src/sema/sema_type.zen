@@ -1,30 +1,6 @@
-// src/sema/sema_type.zen
-// THE TYPE OF AN EXPRESSION — the question DESIGN.md names first.
-// `type_of(id)` is what an expression IS, memoized on the node's id
-// (what `ast_id.zen` made ids `Eq + Hash` for, and what
-// `sema_check.zen` holds the `Map` for), so a second ask is a lookup
-// and an LSP hover is not a recompile.
-//
-// EVERY FUNCTION HERE IS A FREE FUNCTION ON `Checker` — DESIGN.md: "the
-// two forms are the same function" — so `c.type_of(id, ctx)` still
-// reads as a method; that's what makes this a file instead of four
-// hundred more lines of the engine. One subject, "what is this value":
-// the forms that grew their own subject have left (`Match`, `Access`,
-// `Call`, the trap rule, `.try()`, and — when the cap said so — the
-// written-type query, now `sema_denote.zen`), and `sema_check.zen`
-// imports nothing from here — the engine holds state, this behaviour.
-//
-// A BLOCK IS A VALUE TOO, so block and statement typing are here and
-// not in a file of their own: "the value is the trailing expression
-// written without a `;`, or — DESIGN.md — a `;`-terminated tail" is an
-// answer to this file's one question, asked one node down.
-//
-// Module cycles are NOT a compile error, tested rather than assumed
-// (two sibling modules calling each other's functions, and it runs):
-// `AST_CONTRACT.md` — "an import cycle is not a problem a whole-program
-// compiler has". Expression typing IS mutually recursive here (`Call`
-// needs `type_of`, `type_of` needs `Call`), so the cycle is the shape
-// of the problem, not a smell.
+// Expression and block typing. `type_of` memoizes by `ExprId`; blocks use
+// their trailing expression as their value. Calls, matches, member access,
+// `.try()`, and written types delegate to their focused modules.
 
 Expr, ExprId, Literal = std.ast
 Decl, Const = std.ast
@@ -151,22 +127,9 @@ array_lit_type* = (c :: Checker, a: ArrayLit, ctx: Ctx)
     c.types.array(elem, a.elems.len)
 }
 
-// `[i32, 4](2, 3, 5, 7)` — the type is WRITTEN, so the arguments are
-// checked against its element rather than asked what they are. A count
-// mismatch isn't caught here: `check_assign` sees one type, not an
-// assignment to it.
-//
-// "CHECKED AGAINST ITS ELEMENT" WAS THE COMMENT, NOT THE CODE: every
-// element was typed and dropped, so `[i32, 2](1, 3000000000)` wrapped
-// to -1294967296 unreported — in both compilers, so no differential run
-// could catch it. An element is the one place a literal meets a type
-// with no assignment, parameter, or field name in sight.
-//
-// AN ARM IS AN ELEMENT, so the same walk asks a match written here what
-// it asks a literal (`sema_hoist.check_arms`). The element type is the
-// position's word here in the way a parameter or a field is elsewhere —
-// and with no name to blame it on, an element is the position where a
-// wrong value is hardest to read back out of the program.
+// A fixed array's written element type is the expected type for each value.
+// Check literal bounds and match-arm agreement here because no assignment,
+// parameter, or field check surrounds an array element.
 fixed_array_type* = (c :: Checker, f: FixedArray, ctx: Ctx)
                    Res<TyId, AllocError> {
     ty   = c.type_from_ast(f.type, ctx).try();

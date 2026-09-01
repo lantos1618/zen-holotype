@@ -1,29 +1,6 @@
-// src/gen/gen_c/gen_c_env.zen
-// The environment capability in C — lowering and floor in one file, the
-// shape `gen_c_stdin.zen` set, so the call site and the C it names
-// cannot drift apart.
-// `Env.var` is bodiless in `std/env/env.zen`: the authority itself, and
-// its floor is `getenv`. WHY IT IS A CALL AND NOT A FIELD: the `Env`
-// handed to `main` is a C compound literal written by `gen_c_main.zen`
-// BEFORE `main` runs, and a `Map<str, str>` field there could only be
-// the zeroed one C's rule leaves behind — `slots.len == 0`, so `get`
-// answers None for every key the shell really did export. Filling it
-// is not a matter of writing more initialiser: a `Map.set` allocates
-// and the only allocator door is `env.mem.alloc()` INSIDE `main`;
-// `emit_main` runs after `emit_bodies`, so the backend cannot even ask
-// for the `Map<str, str>.set` instantiation the call would name.
-// The bytes are BORROWED, process-lifetime, exactly like an `argv` row:
-// `getenv` hands back a pointer into the environment block, nothing is
-// copied and nothing is freed. That is what lets this capability have
-// no `Alloc` in its signature and therefore, by law 1, no memory.
-// `getenv` needs a NUL and a `str` has none, so the name is copied into
-// a buffer sized FROM THE NAME (#814). It was a fixed 4096-byte buffer,
-// and a name at or past the cap returned the same zeroed `zg_str` the
-// unset path returns -- "name too long" and "variable not set" were one
-// answer, exit 0. Linux `getenv` has no name limit, so any cap here is
-// one Zen invents; there is none now. The VLA dies with the frame, so
-// the probe still allocates nothing it must free and keeps its no-Alloc
-// signature.
+// C lowering and runtime floor for bodiless Env.var. `getenv` returns borrowed,
+// process-lifetime bytes. Its NUL-terminated name buffer is sized from the
+// input, preserving the capability's allocation-free signature.
 
 Call = std.ast
 AllocError = std.mem
@@ -62,10 +39,7 @@ write_env = (out :: Emit) Res<(), AllocError> {
         "static zg_str zg_env_var(const unsigned char *p, size_t n) {"
     ).try();
     out.indent();
-    comment(
-        out,
-        "sized from the name: a cap here would make \"too long\" and \"not set\" one answer (#814)"
-    ).try();
+    comment(out, "getenv name storage is sized from the input").try();
     out.say("char buf[n + 1];").try();
     out.say("zg_str got;").try();
     out.say("char *v;").try();

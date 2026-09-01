@@ -1,25 +1,23 @@
-// src/std/core/hash.zen
-// hashing — the other half of Map's bound: the hash finds the row
-// fast, eq confirms the key.
+// Hashing for keyed collections. A hash narrows the search; Eq confirms keys
+// that collide.
 //
 // nothing is imported or impl'd here: a trait sits BELOW the types
 // that satisfy it, so an impl lives with the type — str's impl beside
 // Hash would make std.core depend on std.text and invert the module graph
 
-// UNSEEDED, deliberately: a seeded hasher makes probe order differ
-// between runs, and byte-identical output across runs is a gate here
-// (TESTING.md, determinism). Multiply-add rather than FNV because Zen
-// has no xor/shift operators — only wrapping arithmetic, which a hash
-// wants anyway.
+// Fixed parameters keep iteration and generated output deterministic.
+HASH_SEED: u64 = 5381
+HASH_MULT: u64 = 1000003
+
 Hasher* = {
-    state :: u64 = 5381,
+    state :: u64 = HASH_SEED,
 
     write_u8* = (self :: @Self, byte: u8) () {
-        self.state = self.state *% 1000003 +% byte.to_u64();
+        self.state = self.state *% HASH_MULT +% byte.to_u64();
     }
 
     write_u64* = (self :: @Self, value: u64) () {
-        self.state = self.state *% 1000003 +% value;
+        self.state = self.state *% HASH_MULT +% value;
     }
 
     finish* = (self: @Self) u64 {
@@ -28,8 +26,6 @@ Hasher* = {
 }
 
 Hash* = {
-    // required (`=` with no body): DESIGN.md's default is an @meta
-    // field-wise walk, stage 5 — outside the seed subset. The hasher
-    // is scratch, so this hands back the u64 rather than leaving it there.
+    // The hasher is scratch, so implementations return the finished value.
     hash* = (self: @Self, hasher :: Hasher) u64
 }

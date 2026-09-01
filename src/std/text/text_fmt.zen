@@ -1,9 +1,6 @@
-// src/std/text/text_fmt.zen
-// the {} format machinery: the parser that reads a format string, and the
+// The {} format machinery: the parser that reads a format string, and the
 // writers for the primitives a {} can land on.
-//
-// THE FORMAT LANGUAGE, IN FULL — no width, no precision, no index
-// (DESIGN.md):
+// The format language has no width, precision, or positional index:
 //
 //   {}      a hole. The next argument, written through its toString.
 //   {name}  a hole too. The binding `name` has WHERE THE HOLE IS
@@ -15,26 +12,18 @@
 //           expecting that trailing `{` to print), and a lone `}` is a
 //           literal byte.
 //
-// A `{` FOLLOWED BY AN IDENTIFIER CHARACTER ALWAYS MEANT A HOLE, so
+// A `{` followed by an identifier character starts a hole, so
 // `{p.x}` and `{f()}` are REFUSED and not printed. A hole is not an
 // expression language; the escape is the fix at such a site.
 //
-// NO TWO RULES COLLIDE AT ONE POSITION, and the walk is LEFT TO RIGHT
+// No two rules collide at one position, and the walk is left to right
 // and never backs up, so which rule is tested first cannot change what a
 // format means: `{}}` is a hole then a literal `}`, `{{}` is two literal
 // braces, and `{{name}}` is a `{`, the bytes `name` and a `}` rather than
-// a named hole (`docs/design_fmt.md` §2 argues it;
-// `corpus/std/a_doubled_brace_writes_one` pins it).
-//
-// THE COST A CONVERSION LANE OWES: a byte writer reads no format
-// meaning, so `String.add("]}}")` writes two braces and
-// `String.fmt("]}}")` writes one — what "expanded at the call site" means,
-// and a silent change of output for anyone turning one into the other.
-// Every doubled brace in `src/lsp/` is under a corpus expectation (§2 holds the
-// mutation table), so a lane reaching bytes that are NOT pinned that way
-// owes the escape at that site.
-//
-// WHERE THE PARSE HAPPENS: nowhere at runtime. `add` is expanded where
+// a named hole.
+// Byte writes do not interpret braces: String.add("]}}") writes two closing
+// braces, while String.fmt("]}}") writes one.
+// Formatting is expanded at the call site rather than parsed at runtime. `fmt`
 // it is WRITTEN — the compiler steps `fmt_next` over the format string,
 // emitting a literal write per run, `arg.toString(out)` per positional
 // hole, and for a named one the write it would have emitted after
@@ -43,13 +32,12 @@
 // holes/arguments is a compile error rather than a `?` — a missing
 // binding reported at THE HOLE'S OWN POSITION (`design_fmt.md` §3).
 //
-// THE STEPS BELOW CARRY THE NAME BUT NEVER RESOLVE IT. That needs a
+// Steps carry a named hole but do not resolve it. Resolution needs a
 // scope, and a `str` has none; the two backend walks
 // (`gen_c_print.fmt_at`, `bootstrap/gen_c.py`'s `fmt_pieces`) are where
 // that half lives. What this file is the reference for is WHERE THE RUNS
 // AND HOLES ARE and which spelling each hole is — and it has to carry the
-// name to say that at all, or a reference parser that reported `{n}` as
-// literal bytes would be a reference to a language nobody implements.
+// name to distinguish it from literal bytes.
 
 str = std.text.text_str
 Sink, WriteError = std.core.io
@@ -229,22 +217,13 @@ add_bool* = (out :: Sink, v: bool) Res<(), WriteError> {
     });
 }
 
-// THE BUFFER DOOR MATCHES THE TERMINAL DOOR, ON PURPOSE (#809).
-// `println("{}", x)` has rendered a float with C's `%g` since the
-// terminal door first lowered one, so a buffer door saying anything
-// else would make one language two: `println(buf.view())` would
-// disagree with `println("{}", x)` about the same number, and the
-// disagreement -- not either spelling alone -- is the bug. `%g` drops
+// Buffer and terminal formatting use the same C `%g` float representation. It drops
 // trailing zeros, goes exponent past six significant digits, and
 // spells non-finite values as C does; what it costs is digits beyond
 // six, and the hole that asks for more (`{e}`, a width, a precision)
 // does not exist yet to carry them.
 //
-// BODILESS, LIKE `to_f64`: a float's digits cannot be reached from Zen
-// yet -- no float-to-int primitive to loop over (`std.core.num`
-// declares lossless widening only) and no libc bridge to call -- so
-// the body this declaration promises is the BACKEND's, which renders
+// This is bodiless because the backend renders
 // `%g` into scratch and hands the bytes to the sink's own `write`. A
-// second renderer anywhere else would be a second answer to what a
-// float looks like, and the corpus pins exactly one.
+// second renderer would create a conflicting representation.
 add_f64* = (out :: Sink, v: f64) Res<(), WriteError>

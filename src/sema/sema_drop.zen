@@ -1,19 +1,6 @@
-// src/sema/sema_drop.zen
 // A value the compiler drops may not be copied.
-//
-// Fourth of `sema_own.zen`'s rule siblings: one question asked off the
-// walk that file owns. The compiler calls drop exactly once, so
-// `g = f` on a Drop type cannot copy — both would drop.
-//
-// ONLY A PLACE IS A COPY: a call result is fresh and unnamed elsewhere,
-// and passing a place to a parameter borrows rather than moves. So a
-// bare name on the right of a binding is all this rule checks.
-//
-// An impl OF Drop, not a method named `drop` on the type itself (that
-// one doesn't run at scope exit) — and only in the module that declares
-// the type, since orphan impls are unwritable.
-//
-// Fail-open on an unknown type, for `sema_own.zen`'s reason.
+// Only places can be copied; call results are fresh and parameters borrow.
+// Drop is recognized through its impl in the type's declaring module.
 
 Expr, Bind, Impl, Span = std.ast
 Record = std.ast.ast_node
@@ -32,13 +19,7 @@ check_drop_copy* = (c :: Checker, o :: Own, b: Bind, ctx: Ctx)
     node = c.tree.expr_at(b.value);
     node.kind.match({
         Name(n) => c.drop_copy_of_name(o, node, n.text),
-        // A LITERAL'S ELEMENTS ARE NOT CHECKED HERE, and that is deliberate
-        // rather than unfinished. Reading `Buf(.., alloc: alloc)` as two live
-        // owners refuses the tree's most common idiom -- a handle passed as a
-        // construction argument -- and turned three green suites red. Whether
-        // storing a Drop handle into a record is a second owner or a move is
-        // a question about what construction MEANS, and it wants an answer
-        // before it wants an implementation. See sema_own.zen's ctor note.
+        // Construction arguments follow constructor ownership rules.
         _       => Ok(()),
     })
 }

@@ -1,74 +1,14 @@
-// src/lsp/lsp_colour.zen
-// `textDocument/semanticTokens/full` — the colours, from the compiler's
-// own lexer, and from its checker when a clean build is in hand.
-//
-// NAMED FOR WHAT IT PRODUCES AND NOT FOR THE REQUEST: the lexical half of
-// every answer comes from `scan` and a `TokenKind`, with no `Checker`, no
-// build, no disk read and no import resolved; the semantic half
-// reclassifies `Ident` tokens only, and only the ones `lsp_names.zen`
-// marked from sema's own memos. The two halves can never disagree about
-// what a token IS, because the tokens are the lexer's either way — which
-// is also the whole answer to "why not a TextMate grammar"
-// (`docs/design_lsp.md` §2 and §6, `editors/README.md`).
-//
-// SO THE LEXICAL HALF ANSWERS WHERE NOTHING ELSE DOES: an unsaved buffer,
-// no workspace, even a file that does not parse — one with lexical faults
-// still has tokens (`src/std/lex/lex.zen`'s contract) and they are all
-// still coloured. The semantic half rides the one build diagnostics ran
-// (`lsp_diag.zen`); where that build says nothing — no workspace, a
-// change not yet settled, a program with faults — the lexical answer is
-// what remains, so a file that does not compile never goes grey.
-//
-// THE FIVE THINGS A SEMANTIC-TOKENS SERVER GETS WRONG, each argued in
-// `design_lsp.md` §2 and each a line of code below:
-//
-//   1. THE ENCODING IS DELTAS FROM THE PREVIOUS TOKEN, and
-//      `deltaStartChar` is relative only when the two share a line —
-//      `Painter` below is exactly those two numbers.
-//   2. `character` AND `length` ARE UTF-16 CODE UNITS, not bytes and not
-//      codepoints; `lsp_pos.zen` is the only file that converts.
-//   3. A MULTI-LINE TOKEN IS SPLIT, ONE RUN PER LINE, since the encoding
-//      cannot express one otherwise; a zero-length run (a blank line in a
-//      block comment) is not emitted at all.
-//   4. `tokenType` IS AN INDEX INTO THE ADVERTISED LEGEND, so `index_of`
-//      and `write_legend` are one fact said twice and must agree — both
-//      below, same order, and the corpus test prints both halves.
-//   5. `Ident` IS ONE KIND AND COLOUR WANTS SEVERAL — AND THIS FILE DOES
-//      NOT GUESS. Colouring by capitalisation would be a SECOND, WRONG
-//      specification of what a name means, so the lexer's answer is
-//      `variable` and the sharper one is sema's (`lsp_names.zen`, off a
-//      clean build's memos) or it is nothing.
-//
-// DELIMITERS ARE NOT COLOURED — the same refusal one step down: `(`,
-// `)`, `[`, `]`, `{`, `}`, `,`, `;`, `.`, `:` are structure, not meaning.
-// Operators proper (arithmetic, comparison, logical, binding) are
-// `operator`.
-//
-// EVERY VARIANT OF `TokenKind` IS LISTED IN `colour_of`, with no `_`
-// arm, so a token shape added to `src/std/lex/` fails this file to compile
-// rather than arriving quietly uncoloured.
+// LSP semantic tokens use UTF-16 lengths and positions relative to the
+// preceding token. The order in `write_legend` must match `index_of`.
 
 str, String = std.text
 Vec, Ordered = std.collections
 Alloc, AllocError = std.mem
 Range = std.core
 scan, Source, Token, TokenKind = std.lex
-write_decimal = lsp.lsp_frame
-// `written()` is `Ok(())` with the writer's error type already on it, so
-// a match arm that writes nothing sits beside one that writes something.
 write_text, written, obj, arr, Nest = std.json
 step_at, units_of = lsp.lsp_pos
 
-// The legend, in order. A `tokenType` on the wire is a position in this
-// list, so the ORDER BELOW IS THE WIRE FORMAT. `Text` is the legend's
-// `string`, spelled differently only because `TokenKind.Str` is matched
-// in the same file.
-//
-// NINE AND NOT MORE: every standard LSP type name this server cannot
-// honestly produce (`property`, `method`, `typeParameter`) is left out,
-// so a theme is never told to prepare a colour it will never see. The
-// last three are sema's answers (`lsp_names.zen`), appended so the six
-// lexical indices did not move.
 Colour* = Keyword
     | Text
     | Number
@@ -79,7 +19,6 @@ Colour* = Keyword
     | Function
     | Parameter
 
-// A colour's index in the legend. THE NUMBERS THE WIRE CARRIES.
 index_of* = (colour: Colour) usize {
     colour.match({
         Keyword   => 0,
@@ -94,9 +33,6 @@ index_of* = (colour: Colour) usize {
     })
 }
 
-// A colour's name in the legend. STANDARD LSP TOKEN TYPE NAMES, all
-// nine — inventing `zenKeyword` would leave output grey until the user
-// wrote a `semanticTokenColorCustomizations` block.
 name_of* = (colour: Colour) str {
     colour.match({
         Keyword   => "keyword",
@@ -111,12 +47,6 @@ name_of* = (colour: Colour) str {
     })
 }
 
-// The legend as `initialize` advertises it, written by walking the
-// variants IN INDEX ORDER, checkable against `index_of`.
-//
-// NO MODIFIERS: `declaration`, `readonly`, `static` and the rest are
-// facts about what a name MEANS beyond its kind, which neither the
-// lexer nor the memos `lsp_names.zen` reads record.
 write_legend* = (out :: String) Res<(), AllocError> {
     legend ::= obj(out).try();
     legend.key("tokenTypes", out).try();
@@ -137,23 +67,12 @@ write_legend* = (out :: String) Res<(), AllocError> {
     legend.close(out)
 }
 
-// One name in the legend, in the order this file declares. The index a
-// `tokenType` carries IS this position, so the nine calls above are the
-// order and there is no second list to keep in step with them.
 listed = (colour: Colour, types :: Nest, out :: String)
          Res<(), AllocError> {
     types.next(out).try();
     write_text(name_of(colour), out)
 }
 
-// WHAT EACH TOKEN SHAPE IS COLOURED, and `None` for shapes this file
-// will not colour, in the order `src/std/lex/lex_token.zen` declares them.
-//
-// `Ident` IS `variable` AND THAT IS THE LEXICAL ANSWER (item 5) — the
-// one the semantic half overrides name by name, never wholesale. `Char`
-// is `string` since the legend has no character type; `number` would be
-// a guess about what one byte meant. `Eof` SPANS NOTHING, by
-// construction.
 colour_of* = (kind: TokenKind) Res<Colour> {
     kind.match({
         Ident        => Ok(Colour.Variable),
@@ -207,57 +126,34 @@ colour_of* = (kind: TokenKind) Res<Colour> {
     })
 }
 
-// --- the encoding ------------------------------------------------------
-
-// WHERE THE PREVIOUS TOKEN STARTED — the entire state the encoding
-// needs. Begins at line 0, character 0 rather than "nothing yet": the
-// protocol measures the first token's deltas from the origin, so the
-// same subtraction handles the first token with no special case. The
-// separator between runs is the data array's own `Nest`, passed down to
-// `put`, so the painter counts nothing itself.
 Painter = {
     line :: usize,
     character :: usize,
 
-    // A forward-only UTF-16 cursor through the source. Tokens arrive in
-    // lexical order, so rescanning from byte zero for each token made a
-    // full semantic-token answer quadratic in the document size.
     source_at :: usize,
     source_units :: usize,
 
-    // One run, as five integers. `length` is already in UTF-16 units and
-    // `colour` is already an index — both conversions happen before this
-    // method, so nothing here converts twice. The comma before all but
-    // the first run is `runs.next`'s to place.
     put = (self :: @Self, line: usize, character: usize, length: usize,
            colour: Colour, runs :: Nest, out :: String) Res<(), AllocError> {
         runs.next(out).try();
-        delta_line = line - self.line;
-        // THE ONE BRANCH IN THE WHOLE ENCODING: a token on the same line
-        // as its predecessor measures from that predecessor's start; one
-        // on a later line measures from the start of its own line.
+        delta_line      = line - self.line;
         delta_character = (delta_line == 0).match({
             true  => character - self.character,
             false => character,
         });
-        write_decimal(delta_line, out).try();
+        out.write_usize(delta_line).try();
         out.add(",").try();
-        write_decimal(delta_character, out).try();
+        out.write_usize(delta_character).try();
         out.add(",").try();
-        write_decimal(length, out).try();
+        out.write_usize(length).try();
         out.add(",").try();
-        write_decimal(index_of(colour), out).try();
-        // The modifier set, always empty — see `write_legend`.
+        out.write_usize(index_of(colour)).try();
         out.add(",0").try();
         self.line      = line;
         self.character = character;
         Ok(());
     }
 
-    // A token, as one run per line it covers. THE FIRST RUN'S CHARACTER
-    // IS CONVERTED AND EVERY LATER ONE IS ZERO: a run beginning because
-    // a newline ended the last one starts at the first byte of its line
-    // — paid once per token, not once per line.
     paint = (self :: @Self, text: str, token: Token, colour: Colour,
              runs :: Nest, out :: String) Res<(), AllocError> {
         stop = token.span.end.offset;
@@ -268,8 +164,6 @@ Painter = {
             upto = break_in(text, from, stop);
             self.run(text, line, character, from, upto, colour, runs, out)
                 .try();
-            // Past the `\n`, which belongs to neither run: it is inside
-            // the token's bytes and colours nothing.
             from      = upto + 1;
             line      = line + 1;
             character = 0;
@@ -277,9 +171,6 @@ Painter = {
         Ok(());
     }
 
-    // UTF-16 column at `upto`, advancing over each source byte at most
-    // once across the whole token stream. A newline starts a new column;
-    // malformed UTF-8 follows `lsp_pos.step_at`'s one-byte rule.
     character_at = (self :: @Self, text: str, upto: usize) usize {
         loop(self.source_at < upto, (h) {
             (text.index(self.source_at) == '\n').match({
@@ -297,9 +188,6 @@ Painter = {
         self.source_units
     }
 
-    // One line's worth, unless empty — a blank line inside a block
-    // comment is a real run of zero units, not worth the client's
-    // trouble.
     run = (self :: @Self, text: str, line: usize, character: usize,
            from: usize, upto: usize, colour: Colour, runs :: Nest,
            out :: String)
@@ -318,8 +206,6 @@ Painter = {
     }
 }
 
-// The first `\n` in `from..stop`, or `stop`. What splits a multi-line
-// token, and the only place this file looks at a byte.
 break_in = (text: str, from: usize, stop: usize) usize {
     Range(from, stop).find((i) { text.index(i) == '\n' }).match({
         Ok(i) => i,
@@ -327,19 +213,12 @@ break_in = (text: str, from: usize, stop: usize) usize {
     })
 }
 
-// --- the semantic half -------------------------------------------------
-
-// ONE NAME SEMA SETTLED, and the colour it settled to. File ownership
-// lives in `lsp_built`'s per-file map rather than being repeated on every
-// row. `line`/`col` are the name's own start, 1-based with a BYTE column.
 Classed* = {
     line*: usize,
     col*: usize,
     colour*: Colour,
 }
 
-// A row sorts before another by its start — the whole of the order
-// `sort_classes` below puts the semantic-token list in.
 Classed.impl(Ordered, {
     before = (self: @Self, other: @Self) bool {
         self.line < other.line
@@ -347,10 +226,6 @@ Classed.impl(Ordered, {
     }
 })
 
-// What sema said about the name starting at `line:col`, or nothing.
-// `names` MUST BE SORTED on that pair — `sort_classes` below is the
-// sort, and `lsp_diag.zen`'s `classes_for` is the one caller of both,
-// so the order the search requires is written beside it.
 classed_at = (names: Vec<Classed>, line: usize, col: usize) Res<Classed> {
     lo ::= 0;
     hi ::= names.len;
@@ -381,27 +256,10 @@ is_start = (cl: Classed, line: usize, col: usize) bool {
     cl.line == line && cl.col == col
 }
 
-// In place, by (line, col) — a file carries hundreds of classified
-// names, not millions, which is why the order is std's one sort.
 sort_classes* = (names :: Vec<Classed>) Res<(), AllocError> {
     names.sort()
 }
 
-// --- the answer --------------------------------------------------------
-
-// `text` coloured, as the protocol's reply body: `{"data":[..]}`. `name`
-// is the CLIENT'S URI verbatim, as `hover_at` uses it.
-//
-// `names` IS THE SEMANTIC HALF, and an empty one is the lexical answer:
-// every `Ident` starts from `colour_of` and only a row naming its exact
-// start overrides it, so every state `lsp_diag.zen`'s `classes_for`
-// answers empty for degrades to the same honest colours.
-//
-// A LEX FAULT IS NOT REPORTED HERE AND NOT ALLOWED TO STOP ANYTHING:
-// `scan` hands back every token it could read plus every fault found;
-// `lsp_diag.zen` says the faults out loud. A server that went grey the
-// moment a quote was opened would be worse than one with no colour at
-// all.
 write_tokens* = (
     a     : Alloc,
     name  : str,
@@ -430,9 +288,6 @@ write_tokens* = (
     answer.close(out)
 }
 
-// The lexer's answer, with sema's where sema spoke. ONLY AN `Ident` IS
-// EVER OVERRIDDEN — a keyword sema knows nothing about keeps its colour,
-// and an identifier sema said nothing about stays `variable`.
 settled = (token: Token, lexical: Colour, names: Vec<Classed>) Colour {
     token.kind.match({
         Ident => classed_at(
@@ -447,8 +302,6 @@ settled = (token: Token, lexical: Colour, names: Vec<Classed>) Colour {
     })
 }
 
-// A 1-based line as the wire's 0-based one. Line 0 cannot come out of
-// the lexer, but clamps anyway — same reason `lsp_pos.zen` clamps.
 zero_based = (line: usize) usize {
     (line == 0).match({ true => 0, false => line - 1 })
 }

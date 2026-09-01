@@ -1,27 +1,6 @@
-// src/sema/sema_supply.zen
-// What an IMPL supplies through a dot. `sema_member.zen` answers what a
-// dot reaches; this file answers the half a type's own declaration
-// didn't provide.
-//
-// The type's own members are storage and win outright — layout is fixed
-// at declaration, so it can't depend on which impls are linked. An
-// impl's members are computed ("you satisfy requirements, you never
-// impl storage"): re-evaluated on read, read-only, non-addressable,
-// invisible to layout — the whole of `Found.computed`.
-//
-// An impl lives with the type, not the trait: `Impl.target` is an
-// `Ident`, not a qualified type, so the search is over one module's
-// impls and a same-named type elsewhere is never confused for this one.
-//
-// A bound's members are read in the bound's own scope — stated three
-// times below because three readers need it. `Slot<T> = { held*: T }`
-// declares `T`, so reading its members without `T` bound reports `T` as
-// undefined; `enter_*_tvars` is that binding, always a push/release pair.
-//
-// What an impl OWES is `sema_bound.zen`'s subject, not this one: this
-// file asks what an impl provides, that one whether it provided
-// everything promised. A required member with no body is absent here, a
-// diagnostic there.
+// Member values supplied by impls. Declared storage members take precedence;
+// impl-supplied members are computed, read-only, non-addressable, and excluded
+// from layout. Bound members resolve in the bound declaration's generic scope.
 
 Span = std.ast
 Decl, Struct, Impl, Member, Field = std.ast
@@ -87,13 +66,8 @@ impl_supplies = (
 // TYPE is the bound's, never the supplied expression's:
 // `width: self.radius * 2.0` is an f64 because `Rect` said f64.
 //
-// A name is an overload set, not a member, so this adds one `Found` per
-// declaration, never one per impl. Bug found the hard way: `Display`
-// declares two `toString`s (a sink form and a sealed allocating one),
-// and the type of the name used to fold over the members keeping only
-// the LAST match — so the set of two arrived as one, and every
-// `p.toString(buffer)` typed as `Res<String, WriteError>` while the
-// backend correctly called the form returning `Res<(), WriteError>`.
+// A name is an overload set, so this adds one `Found` per declaration rather
+// than collapsing the set to one impl entry.
 supplied = (
     c    :: Checker,
     n    : TyNamed,
@@ -135,8 +109,6 @@ supplied_types = (
     c.member_types(bound, kept, self_ty, out)
 }
 
-// A named helper rather than a `.then` inside the loop body:
-// docs/SEMA_BOOTSTRAP_FIXES.md §10, now recorded CLOSED there.
 keep_reachable = (
     m             : Member,
     name          : str,

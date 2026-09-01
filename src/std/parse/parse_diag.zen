@@ -1,17 +1,10 @@
 // src/std/parse/parse_diag.zen
 // What a rejection is.
 //
-// "A compiler is mostly a diagnostics engine that occasionally emits
-// code" (TESTING.md), so this is not an afterthought hung off the
-// parser — it is the parser's other output, and it has the same
-// weight as the tree.
+// Parser diagnostics follow three contracts:
 //
-// THREE RULES, and every one of them is testable:
-//
-//   ONE MISTAKE, ONE DIAGNOSTIC. A missing `=>` is one message, not
-//   one per token the parser then failed to understand. The recovery
-//   in parser.zen exists to keep that promise; `.count` files in
-//   tests/must-fail bound it, per TESTING.md.
+//   ONE MISTAKE, ONE DIAGNOSTIC. Recovery prevents one missing token from
+//   cascading into a message for every following token.
 //
 //   ANCHORED WHERE THE FIX GOES, not where the parser noticed. An
 //   unclosed `(` points at the OPENING delimiter — end of file names
@@ -23,18 +16,6 @@
 //   declaration must not stop the file, or the second mistake is only
 //   ever found on the second run.
 //
-// WHERE THIS BELONGS, EVENTUALLY. Apply STYLE.md's stranger test: "a
-// message, a span, and a place to look instead" names no module. It is
-// not a parser type, it is a compiler type, and `lex`, `sema` and
-// `gen` will all want it. The second caller has arrived — `zen build`
-// holds one `Vec` of these for the whole program, converting a
-// `lex.lex_diag.Diag` into one — and the type still did not move:
-// candidates are `ast` (owes nothing to either phase) or a new
-// `zen_diag` (would make the parser depend on the driver), and the
-// rename spans `parse`, `zen` and `lsp`, so it belongs in its own
-// change. A FOURTH struct with these three fields, invented to avoid
-// that rename, is the duplication this note exists to prevent.
-
 Pos, Span = std.ast.ast_span
 // which of two positions comes first, from the file that already had to
 // decide it for an editor's cursor; `truncated` asks it of an anchor.
@@ -78,23 +59,8 @@ diag_at* = (message: str, span: Span, note_message: str, note_span: Span) Diag {
     )
 }
 
-// THE WHOLE DIAGNOSTIC, SAID — and the note is part of it.
-//
-// The driver used to print `d.message` and stop, so every note this
-// module built was collected, carried in a `Vec`, and dropped on the
-// floor. `diag_at` has exactly one caller — `expect_close`, the one case
-// where the anchor is deliberately NOT where the parser stopped — so the
-// dropped half was exactly the half that says where the parser DID stop.
-//
-// HERE AND NOT IN THE DRIVER, for the reason `sema_diag.zen` puts
-// `render` beside its `Diag`: how a diagnostic reads is a fact about the
-// diagnostic. A second consumer — `zen lsp` — wants the same two spans
-// and sentences as VALUES off the fields; this is the one consumer that
-// wants a terminal.
-//
-// INDENTED UNDER THE SENTENCE, which is the shape `bootstrap.py`'s
-// `render` already uses for a note, so the two compilers say a
-// two-position diagnostic the same way.
+// Print the complete terminal form, including an indented secondary note.
+// Other consumers read the same fields directly.
 say* = (self: Diag) () {
     println("{}:{}: {}", self.span.file, self.span.start, self.message);
     self.note.match({
@@ -108,28 +74,9 @@ say* = (self: Diag) () {
     });
 }
 
-// THE FILE ENDING IS THE MISTAKE, and whatever the parser wanted next is
-// only how it found out.
-//
-// "expected `=` or `::=` after a declaration's name" is true of a file
-// that stops after an identifier, but it's advice nobody can act on: no
-// line is left to put the `=` on. `tests/must-fail/lex/eof_in_identifier`
-// and `eof_in_number` truncate in different places and both must say they
-// were truncated — `the deleted bootstrapper reader` names EOF in both, and since a
-// must-fail test asserts a substring of what the compiler says, only a
-// sentence both compilers can produce is a test both can run.
-//
-// TWO FACTS HOLD, AND THE SECOND IS THE WHOLE RULE. `ended` says nothing
-// is left to read; `at` says where the sentence anchors. Per this file's
-// third rule (anchor where the fix goes), a diagnostic pointing EARLIER
-// than the end has already named a token the author WROTE — `Shape =
-// Circle | Square |` anchors on the bar, since a bar promising a variant
-// is the mistake regardless of what follows (`must-fail/parse/
-// enum_trailing_bar`). Only a sentence with nowhere earlier to point is
-// about the ending.
-//
-// `expect_close` never reaches this: it anchors on the OPENING delimiter,
-// earlier by construction.
+// Replace a token-specific message with the EOF message only when the parser
+// has no earlier written token to anchor. Delimiter errors retain their
+// opening-token anchor.
 truncated* = (message: str, at: Span, ended: bool, end: Pos) str {
     (ended && !before(at.start, end)).match({
         true  => "unexpected end of file: a file ends between declarations, and this one ends inside one",

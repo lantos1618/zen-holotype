@@ -1,28 +1,5 @@
-// tests/corpus/env/fs_lock_survives_a_move_across_frames.zen
-// ISSUE 752, the half the two tests beside this one cannot see: a Lock
-// MOVED INTO ANOTHER FRAME. `fs_lock_excludes_until_released` keeps every
-// Lock in main's own block; `fs_lock_missing_parent_names_the_reason`
-// keeps none at all. Neither exercises DESIGN.md's Drop law where it
-// actually bites -- "the compiler calls drop exactly once", at the end
-// of whatever frame LAST holds the value, and a move is spelled
-// `consume` at the call site. A backend that dropped AT THE MOVE (or
-// copied the Lock and dropped per binding) passes both of those tests.
-//
-// The lock itself is the oracle, because flock refuses a second
-// INDEPENDENT open even from this same process (measured: the sibling
-// test's "second lock refused: exists"). Three observations pin the
-// whole contract:
-//
-//   held        -- taken in main.
-//   still held  -- probed from INSIDE swallow, after `consume l`: the fd
-//                  travelled WITH the value into the callee's frame and
-//                  nobody released it at the move. A drop-at-the-move
-//                  prints "released too early" here instead.
-//   relocked    -- after swallow has returned, one more lock succeeds:
-//                  the release ran exactly once, LATE, at the callee's
-//                  scope exit. A drop that never ran fails here as
-//                  Exists ("never released"); two drops would close the
-//                  fd twice and risk unlocking a stranger's descriptor.
+// A consumed Lock remains held in the callee and is released exactly once at
+// that frame's exit, allowing the caller to acquire it again afterward.
 
 FsError = std.env
 Lock = std.env

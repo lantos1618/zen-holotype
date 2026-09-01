@@ -1,9 +1,5 @@
-// src/lsp/lsp_serve.zen
-// The server: lifecycle, a document overlay, and a dispatch table.
-// Full-sync document notifications update an in-memory overlay. Requests use
-// that overlay and the shared build, unsupported methods return `-32601`, and
-// requests after shutdown are refused. Transport framing lives elsewhere;
-// `one` handles one JSON message and `serve` handles a buffer of frames.
+// Owns LSP session state and routes one decoded JSON-RPC message at a time.
+// Full-sync document contents are retained as an in-memory build overlay.
 
 str, String = std.text
 Vec, Map = std.collections
@@ -11,21 +7,17 @@ Range = std.core
 Alloc, AllocError, Arena = std.mem
 Checker = sema.sema_check
 Jsons, JsonId, written, read = std.json
-FrameFault, frame_at, write_frame, write_decimal = lsp.lsp_frame
+FrameFault, frame_at, write_frame = lsp.lsp_frame
 Hover, hover_at, hover_in, hover_with = lsp.lsp_hover
 definition_at, definition_in, definition_with = lsp.lsp_def
 Sym, symbols_at, write_symbols = lsp.lsp_symbol
 write_edits = lsp.lsp_fmt
 Item, MemberCache, complete_at, complete_shared = lsp.lsp_compl
 sort_items, write_items = lsp.lsp_compl
-// Semantic token output and the legend advertised during initialization.
 write_tokens = lsp.lsp_colour
-// Diagnostics policy and the build shared by settled queries.
 Diagnostics, Shared = lsp.lsp_diag
-// Quick fixes are derived from the same build as diagnostics.
 write_actions = lsp.lsp_action
 relative_to = zen.zen_path
-// Wire request and response helpers.
 method_of, params_of, param, string_at, number_at = lsp.lsp_reply
 result, failed, parse_error, write_hover, write_target = lsp.lsp_reply
 write_capabilities = lsp.lsp_reply
@@ -33,44 +25,30 @@ RpcFault, own_str = lsp.lsp_reply
 request_of = lsp.lsp_reply
 path_of = lsp.lsp_uri
 
-// Session state. Open-buffer bytes are owned by `docs_arena`, which is
-// replaced as a unit after full-sync edits.
 Server* = {
     a: Alloc,
 
-    // Queries use the same environment capabilities as the compiler driver.
     env: Env,
 
-    // Full-sync edits replace whole buffers. Their bytes live in this
-    // replaceable arena so old versions do not accumulate for the session.
     docs_arena :: Arena,
 
-    // Workspace path from `rootUri`; empty means single-file behavior.
     workspace :: str = "",
 
     docs :: Map<str, str>,
 
-    // Open documents in stable order for building the complete overlay.
     open :: Vec<str>,
 
-    // Published-diagnostic state and pending work.
     notes :: Diagnostics,
 
-    // The prefix-free candidate set for the last canonical dot completion.
-    // Its temporary Checker dies after a miss; only labels stay cached.
     members :: MemberCache,
 
-    ready :: bool,        // `initialize` has been answered
-    stopping :: bool,     // `shutdown` has been answered
+    ready :: bool,
+    stopping :: bool,
 
-    // Once set, no further work is accepted.
     stopped* = (self: @Self) bool { self.stopping }
 
-    // Observable for the corpus performance invariant.
     completion_builds* = (self: @Self) usize { self.members.builds }
 
-    // Route one message. `t` owns request-local parsing and reply scratch;
-    // session state must allocate from `self.a` or the document arena.
     one* = (self :: @Self, t: Alloc, body: str, out :: String)
            Res<(), AllocError> {
         tree ::= t.Jsons();
@@ -79,7 +57,6 @@ Server* = {
             Err(f)  => parse_error(f, msg),
             Ok(req) => self.route(t, tree, req, msg),
         }).try();
-        // Notifications produce no reply frame.
         msg.is_empty().match({
             true  => written(),
             false => write_frame(msg.view(), out),
@@ -89,14 +66,12 @@ Server* = {
     route = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, msg :: String)
             Res<(), AllocError> {
         method = method_of(tree, req);
-        // Presence of `id`, rather than the method name, identifies a request.
         tree.field(req, "id").match({
             None    => self.notified(tree, req, method),
             Ok(rid) => self.requested(t, tree, req, method, rid, msg),
         })
     }
 
-    // Requests before initialization receive `-32002`.
     requested = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
                  method: str, rid: JsonId, msg :: String)
                 Res<(), AllocError> {
@@ -112,7 +87,6 @@ Server* = {
         })
     }
 
-    // `request_of` performs method-string classification once.
     answered = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
                 method: str, rid: JsonId, msg :: String)
                Res<(), AllocError> {
@@ -133,7 +107,6 @@ Server* = {
         })
     }
 
-    // `rootUri` is optional; without it queries use single-file behavior.
     initialized = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
                    rid: JsonId, msg :: String) Res<(), AllocError> {
         self.members.invalidate();
@@ -147,7 +120,6 @@ Server* = {
         result(tree, rid, caps.view(), msg)
     }
 
-    // Echo the unsupported method in the error for actionable client logs.
     unknown = (self :: @Self, t: Alloc, tree: Jsons, rid: JsonId, method: str,
                msg :: String) Res<(), AllocError> {
         why ::= t.String().try();
@@ -157,7 +129,6 @@ Server* = {
         failed(tree, rid, RpcFault.MethodNotFound, why.view(), msg)
     }
 
-    // Lifecycle and cancellation notifications need no reply.
     notified = (self :: @Self, tree: Jsons, req: JsonId, method: str)
                Res<(), AllocError> {
         handled: Res<Res<(), AllocError>> = loop<Res<(), AllocError>>((h) {
@@ -178,8 +149,6 @@ Server* = {
         handled.match({ Ok(done) => done, None => written() })
     }
 
-    // Watcher events invalidate only closed files; open files come from the
-    // overlay and already changed through `didChange`.
     watched = (self :: @Self, tree: Jsons, req: JsonId)
               Res<(), AllocError> {
         changes = param(tree, req, "changes");
@@ -217,7 +186,6 @@ Server* = {
         self.remember(string_at(tree, doc, "uri"), string_at(tree, doc, "text"))
     }
 
-    // Full sync replaces the buffer with `contentChanges[0].text`.
     changed = (self :: @Self, tree: Jsons, req: JsonId) Res<(), AllocError> {
         uri   = string_at(tree, param(tree, req, "textDocument"), "uri");
         edits = param(tree, req, "contentChanges");
@@ -228,7 +196,6 @@ Server* = {
         self.remember(uri, text)
     }
 
-    // Closing removes the overlay so later builds read the file from disk.
     closed = (self :: @Self, tree: Jsons, req: JsonId)
              Res<(), AllocError> {
         doc = param(tree, req, "textDocument");
@@ -258,7 +225,6 @@ Server* = {
         self.notes.closed(stable, next)
     }
 
-    // Missing text is distinct from an empty document.
     remember = (self :: @Self, uri: str, text: str) Res<(), AllocError> {
         uri.is_empty().match({
             true  => written(),
@@ -266,7 +232,6 @@ Server* = {
         })
     }
 
-    // Unchanged bytes preserve both the document arena and cached build.
     stored = (self :: @Self, uri: str, text: str) Res<(), AllocError> {
         self.docs.get(uri).match({
             None     => self.changed_to(uri, text),
@@ -321,8 +286,6 @@ Server* = {
         Ok(())
     }
 
-    // Settle diagnostics after a drained batch. Shutdown suppresses further
-    // work and unsolicited notifications.
     settled* = (self :: @Self, t: Alloc, out :: String) Res<(), AllocError> {
         self.stopping.match({
             true  => written(),
@@ -337,7 +300,6 @@ Server* = {
         })
     }
 
-    // Document queries require an open URI; an unknown URI receives `-32602`.
     unopened = (self :: @Self, tree: Jsons, rid: JsonId, msg :: String)
                Res<(), AllocError> {
         failed(
@@ -357,8 +319,6 @@ Server* = {
         character = number_at(tree, where, "character");
         self.docs.get(uri).match({
             None     => self.unopened(tree, rid, msg),
-            // Use the shared workspace build when available, otherwise check
-            // the open module alone.
             Ok(text) => {
                 body ::= t.String().try();
                 self.workspace.is_empty().match({
@@ -383,8 +343,6 @@ Server* = {
         })
     }
 
-    // Semantic classifications come from the settled build; an empty set
-    // requests lexical fallback.
     coloured = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
                 rid: JsonId, msg :: String) Res<(), AllocError> {
         uri = string_at(tree, param(tree, req, "textDocument"), "uri");
@@ -399,7 +357,6 @@ Server* = {
         })
     }
 
-    // Snapshot the session inputs shared by workspace-backed queries.
     build_for = (self :: @Self, path: str, t: Alloc) Res<Shared, AllocError> {
         self.notes.shared(
             self.env,
@@ -411,7 +368,6 @@ Server* = {
         )
     }
 
-    // Ensure and query the shared build for hover information.
     shared_hover = (self :: @Self, t: Alloc, uri: str, text: str,
                     line: usize, character: usize, body :: String)
                    Res<(), AllocError> {
@@ -447,7 +403,6 @@ Server* = {
         })
     }
 
-    // Emit hover information or protocol `null` when no symbol is present.
     write_hovered = (self :: @Self, h: Hover, body :: String)
                     Res<(), AllocError> {
         h.found.match({
@@ -456,7 +411,6 @@ Server* = {
         })
     }
 
-    // Definition and completion follow the same workspace selection as hover.
     defined = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
                msg :: String) Res<(), AllocError> {
         uri       = string_at(tree, param(tree, req, "textDocument"), "uri");
@@ -495,7 +449,6 @@ Server* = {
         path = path_of(uri);
         sh   = self.build_for(path, t).try();
         sh.c.match({
-            // Fall back to the per-request path if no shared build is present.
             None  => {
                 qa ::= self.env.mem.alloc();
                 write_target(
@@ -530,7 +483,6 @@ Server* = {
         })
     }
 
-    // Document symbols use only the open buffer's syntax tree.
     outlined = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
                 msg :: String) Res<(), AllocError> {
         uri = string_at(tree, param(tree, req, "textDocument"), "uri");
@@ -546,7 +498,6 @@ Server* = {
         })
     }
 
-    // Formatting uses the open buffer and returns no edits on refusal.
     formatted = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
                  rid: JsonId, msg :: String) Res<(), AllocError> {
         uri = string_at(tree, param(tree, req, "textDocument"), "uri");
@@ -560,8 +511,6 @@ Server* = {
         })
     }
 
-    // Code actions use diagnostics from the settled build; without one the
-    // correct response is an empty action list.
     acted = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
              msg :: String) Res<(), AllocError> {
         uri   = string_at(tree, param(tree, req, "textDocument"), "uri");
@@ -612,7 +561,6 @@ Server* = {
         })
     }
 
-    // Dot completion uses patched text and caches prefix-free candidates.
     completed = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
                  rid: JsonId, msg :: String) Res<(), AllocError> {
         uri       = string_at(tree, param(tree, req, "textDocument"), "uri");
@@ -663,7 +611,6 @@ Server* = {
         path = path_of(uri);
         sh   = self.build_for(path, t).try();
         done = sh.c.match({
-            // The patched per-request build handles this fallback.
             None  => false,
             Ok(c) => self.shared_completion(
                 c,
@@ -759,9 +706,6 @@ server_with_docs = (a: Alloc, env: Env, docs_arena :: Arena) Server {
     )
 }
 
-// Every frame in `input`, answered into `out`.
-// A malformed frame stops processing because the next frame boundary cannot
-// be recovered safely. Buffer-driven sessions use the session arena.
 serve* = (s :: Server, input: str, out :: String) Res<(), AllocError> {
     at    ::= 0;
     going ::= true;
@@ -771,19 +715,13 @@ serve* = (s :: Server, input: str, out :: String) Res<(), AllocError> {
             Ok(fr) => { at = fr.next; s.one(s.a, fr.body, out).try(); },
         });
     });
-    // Settle once after the complete buffered batch.
     s.settled(s.a, out)
 }
 
-// A framing fault is reported to the caller's stream, not to a client
-// (which cannot be replied to if it cannot be framed).
 frame_fault = (f: FrameFault, out :: String) Res<(), AllocError> {
     out.add("lsp: bad frame at byte ").try();
-    write_decimal(f.byte(), out).try();
+    out.write_usize(f.byte()).try();
     out.add(" (").try();
     out.add(f.why()).try();
     out.add(")\n")
 }
-
-// The arena string-copy the document store and the workspace keep is
-// `lsp_reply.zen`'s `own_str` — the folder's only one.

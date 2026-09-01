@@ -1,8 +1,15 @@
 // src/std/proc/proc.zen
-// Safe process execution over the native floor.
+// Process execution over the native floor.
+//
+// `run_argv` captures stdout and stderr; `run_argv_inherit` leaves stdin,
+// stdout, and stderr connected to the parent. Both execute an argument vector
+// directly, so metacharacters in arguments have no shell meaning. The vector
+// must name a program at index zero and cannot contain embedded NUL bytes.
+// `run` retains the original `/bin/sh -c` interface for compatibility.
 
 Alloc, AllocError, Ptr, null_ptr = std.mem
 str, String, str_at = std.text
+Vec = std.collections
 Res, ok_or = std.core
 
 zg_proc_run = (
@@ -13,6 +20,24 @@ zg_proc_run = (
     out_len  : Ptr<usize>,
     err_buf  : Ptr<Ptr<u8>>,
     err_len  : Ptr<usize>
+) i32
+
+zg_proc_run_argv = (
+    cwd      : str,
+    argv     : Ptr<str>,
+    argc     : usize,
+    code_out : Ptr<i32>,
+    out_buf  : Ptr<Ptr<u8>>,
+    out_len  : Ptr<usize>,
+    err_buf  : Ptr<Ptr<u8>>,
+    err_len  : Ptr<usize>
+) i32
+
+zg_proc_run_argv_inherit = (
+    cwd      : str,
+    argv     : Ptr<str>,
+    argc     : usize,
+    code_out : Ptr<i32>
 ) i32
 
 free = (p: Ptr<()>) ()
@@ -41,45 +66,96 @@ string_from_c = (a: Alloc, p: Ptr<u8>, n: usize) Res<String, ProcError> {
     Ok(s);
 }
 
+Capture = {
+    code  : Ptr<i32>,
+    out   : Ptr<Ptr<u8>>,
+    out_n : Ptr<usize>,
+    err   : Ptr<Ptr<u8>>,
+    err_n : Ptr<usize>,
+}
+
+capture_slots = (a: Alloc) Res<Capture, ProcError> {
+    code ::= a.create<i32>().try(ProcError.ReadFailed);
+    code.write(0, 0);
+    out ::= a.create<Ptr<u8>>().try(ProcError.ReadFailed);
+    out.write(0, null_ptr<u8>());
+    out_n ::= a.create<usize>().try(ProcError.ReadFailed);
+    out_n.write(0, 0);
+    err ::= a.create<Ptr<u8>>().try(ProcError.ReadFailed);
+    err.write(0, null_ptr<u8>());
+    err_n ::= a.create<usize>().try(ProcError.ReadFailed);
+    err_n.write(0, 0);
+    Ok(Capture(code: code, out: out, out_n: out_n, err: err, err_n: err_n))
+}
+
+capture_result = (a: Alloc, slots: Capture, rc: i32)
+                 Res<ProcOutput, ProcError> {
+    (rc == 0).match({
+        false => Err(proc_error(rc)),
+        true  => {
+            out_p = slots.out.read(0);
+            err_p = slots.err.read(0);
+            string_from_c(a, out_p, slots.out_n.read(0)).match({
+                Err(e)    => {
+                    free(err_p.to<()>());
+                    Err(e)
+                },
+                Ok(out_s) => string_from_c(
+                    a,
+                    err_p,
+                    slots.err_n.read(0)
+                ).match({
+                    Err(e)    => Err(e),
+                    Ok(err_s) => Ok(ProcOutput(
+                        code: slots.code.read(0),
+                        out:  out_s,
+                        err:  err_s
+                    )),
+                }),
+            });
+        },
+    })
+}
+
 Process* = {
     run* = (self: @Self, a: Alloc, cwd: str, cmd: str) Res<ProcOutput, ProcError> {
-        code_p ::= a.create<i32>().try(ProcError.ReadFailed);
-        code_p.write(0, 0);
-        out_p_p ::= a.create<Ptr<u8>>().try(ProcError.ReadFailed);
-        out_p_p.write(0, null_ptr<u8>());
-        out_n_p ::= a.create<usize>().try(ProcError.ReadFailed);
-        out_n_p.write(0, 0);
-        err_p_p ::= a.create<Ptr<u8>>().try(ProcError.ReadFailed);
-        err_p_p.write(0, null_ptr<u8>());
-        err_n_p ::= a.create<usize>().try(ProcError.ReadFailed);
-        err_n_p.write(0, 0);
+        slots = capture_slots(a).try();
+        rc    = zg_proc_run(
+            cwd,
+            cmd,
+            slots.code,
+            slots.out,
+            slots.out_n,
+            slots.err,
+            slots.err_n
+        );
+        capture_result(a, slots, rc)
+    }
 
-        rc = zg_proc_run(cwd, cmd, code_p, out_p_p, out_n_p, err_p_p, err_n_p);
+    run_argv* = (self: @Self, a: Alloc, cwd: str, argv: Vec<str>)
+                Res<ProcOutput, ProcError> {
+        slots = capture_slots(a).try();
+        rc    = zg_proc_run_argv(
+            cwd,
+            argv.ptr(),
+            argv.len,
+            slots.code,
+            slots.out,
+            slots.out_n,
+            slots.err,
+            slots.err_n
+        );
+        capture_result(a, slots, rc)
+    }
 
+    run_argv_inherit* = (self: @Self, a: Alloc, cwd: str, argv: Vec<str>)
+                        Res<i32, ProcError> {
+        code ::= a.create<i32>().try(ProcError.ReadFailed);
+        code.write(0, 0);
+        rc = zg_proc_run_argv_inherit(cwd, argv.ptr(), argv.len, code);
         (rc == 0).match({
+            true  => Ok(code.read(0)),
             false => Err(proc_error(rc)),
-            true  => {
-                code  = code_p.read(0);
-                out_p = out_p_p.read(0);
-                out_n = out_n_p.read(0);
-                err_p = err_p_p.read(0);
-                err_n = err_n_p.read(0);
-
-                string_from_c(a, out_p, out_n).match({
-                    Err(e)    => {
-                        free(err_p.to<()>());
-                        Err(e)
-                    },
-                    Ok(out_s) => string_from_c(a, err_p, err_n).match({
-                        Err(e)    => Err(e),
-                        Ok(err_s) => Ok(ProcOutput(
-                            code: code,
-                            out:  out_s,
-                            err:  err_s
-                        )),
-                    }),
-                });
-            },
         })
     }
 }

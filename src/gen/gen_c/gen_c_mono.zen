@@ -1,26 +1,7 @@
-// src/gen/gen_c/gen_c_mono.zen
-// Monomorphisation: what the backend does with a type parameter.
-// C has no generics, so a generic function is emitted ONCE PER DISTINCT
-// SET OF TYPE ARGUMENTS, with the arguments in its mangled name.
-// `sema_inst.zen` already answers what each parameter became, at a call
-// site and a generic receiver both; this file is the three things a
-// BACKEND has to do that sema does not:
-//   - READ THE ANSWER BACK. `inst_at` is `Checker.resolved_inst` with the
-//     empty instantiation for a miss, so a non-generic call and a generic
-//     one go down one path.
-//   - PUT THE PARAMETERS BACK IN SCOPE while a DECLARED type is read.
-//     Sema resolves `(a: Alloc) Vec<T>` with `T` bound, then forgets;
-//     the backend asks again later and must rebind it or `T` is an
-//     undefined name. `enter_tparams` is that, always paired with
-//     `leave_tparams`.
-//   - REFUSE AN OPEN TYPE. A `Var` that reaches `tcode` mangles to one
-//     letter, so two instantiations would become one symbol and `cc`
-//     would silently pick whichever body it saw last. `has_var` is asked
-//     before anything is emitted, and the fault names the function.
-// Order is DECLARATION ORDER, nothing else: an `Inst` is two parallel
-// lists filled from `tparams`, never a `Map`, so the `I` section of a
-// symbol is a pure function of the instantiation — the property the
-// fixpoint stands on.
+// Backend monomorphisation. Each distinct type-argument list gets one C symbol.
+// This reads sema's instantiation, re-enters declaration type parameters while
+// reading written types, and rejects open types before mangling. Inst entries
+// remain in declaration order for deterministic names.
 
 Decl, Enum, Struct, TParam, ExprId = std.ast
 AllocError = std.mem
@@ -80,10 +61,7 @@ decl_vars_of = (c :: Checker, d: Def, x: Decl, out :: Vec<TyId>)
 
 // The type parameters a DECLARATION reads: struct or enum, in
 // declaration order. An enum's variants carry its parameters exactly as
-// a struct's fields do (`Opt<T> = Some(T)`), and a backend that read
-// only `Struct` mangled every instantiation of a generic enum into one
-// symbol — see `gen_c_impl.generic_enum`, whose refusal this branch is
-// what retires (issue 738).
+// a struct's fields do (`Opt<T> = Some(T)`).
 decl_tparams_of = (c :: Checker, d: Def, x: Decl, out :: Vec<TyId>)
                   Res<(), AllocError> {
     x.kind.match({

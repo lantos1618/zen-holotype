@@ -1,27 +1,6 @@
-// src/gen/gen_c/gen_c_type.zen
-// What a Zen type is in C: how it is SPELLED, and which types a
-// program needs at all.
-// `gen_c_layout.zen` is the other half — what the spelling refers to.
-// The two are separated because a backend needs the spelling at every
-// parameter and the definition exactly once per type, which is why the
-// worklist between them exists.
-// THE WORKLIST IS TWO PARALLEL `Vec`s KEYED BY MANGLED NAME, and the
-// name IS the identity: `tcode` is injective, so two types share a name
-// exactly when they are one type. It is closed to a fixpoint before
-// anything is emitted, because resolving a struct's fields discovers
-// more types.
-// `Res` IS STRUCTURAL HERE, and that follows sema rather than
-// diverging from it: `TyRes(value, error, form)` carries no
-// declaration, because "`Res<T>` and `Res<T, E>` are two arities of one
-// name and sema asks which form it has at every `.try()`". It still
-// answers to the library's name — `std.core.result.Res` — so a
-// structural `Res` and a declared one are one C type.
-// A UNION IS STRUCTURAL FOR THE SAME REASON AND NEEDS THE SAME
-// TREATMENT. `A | B` written inline, or a set sema inferred, has no
-// declaration to carry a layout — where a NAMED error set is already
-// covered, because gen_c's whole representation of a set is the
-// declared enum. So a structural union is a queued type like any other
-// and gets the enum's shape: a tag and a union of its members.
+// C spelling and worklist ownership for Zen types. `gen_c_layout` emits each
+// queued definition once. Structural `Res` and union types are queued like
+// named types and use the same tag-and-payload representation.
 
 Decl, Struct, Enum, Variant, Member = std.ast
 COpaque, CTypeBinding = std.ast
@@ -118,6 +97,27 @@ is_ptr_named* = (n: TyNamed) bool { n.name.eq("Ptr") }
 // Beside `is_ptr_named` because it is the same question: the two named
 // types spelled the runtime floor's way, not their declaration's.
 is_scope_named* = (n: TyNamed) bool { n.name.eq("Scope") }
+
+// The element named by Ptr<T>. Pointer representation is owned here, so
+// lowerings do not need to reopen TyNamed independently.
+pointee* = (be :: CBackend, id: TyId) Res<TyId> {
+    be.types().at(id).match({
+        Named(n) => n.args.get(0),
+        _        => None,
+    })
+}
+
+// The success type carried by Res<T, ...>, when this is a Res type.
+res_value* = (be :: CBackend, id: TyId) Res<TyId> {
+    be.types().at(id).match({
+        Res(r) => Ok(r.value),
+        _      => None,
+    })
+}
+
+is_res* = (be :: CBackend, id: TyId) bool {
+    be.types().at(id).match({ Res(_) => true, _ => false })
+}
 
 ptr_ctype = (be :: CBackend, n: TyNamed, out :: String)
             Res<(), AllocError> {
@@ -516,13 +516,8 @@ field_type* = (be :: CBackend, m: Member, ctx: Ctx, inst: Inst)
     })
 }
 
-// A variant's payload type.
-// Two readings, and DESIGN.md decides between them by what the names
-// MEAN: `Shape = Circle(Circle) | Unit` is nominal and a payload is
-// written, while `Error = AllocError | IoError` is "a union of existing
-// types" and each variant carries a value OF the type it names — so
-// `WriteError.IoError` records WHICH IoError, where tag-only it would
-// record only that there was one.
+// A variant's payload type. Nominal enums carry only an explicitly written
+// payload; error unions carry the type named by each variant.
 variant_type* = (
     be   :: CBackend,
     n    : TyNamed,
@@ -536,25 +531,10 @@ variant_type* = (
     })
 }
 
-// The type a bare variant name denotes, when it denotes one. Nothing
-// when the name is not a type in the declaring module, which is the
-// nominal reading and the common one.
-// THE QUESTION IS ABOUT THE DECLARATION AND NOT ABOUT ONE VARIANT.
-// DESIGN.md: `A | B` is a union of existing types when EVERY variant
-// names a type in scope, and a nominal enum otherwise. Asked one
-// variant at a time it has a different answer, and the difference is
-// not academic — it is how `TokenKind` came to carry a trait. Sixty
-// variants, exactly one of which (`Eq`, the `=` token) collides with a
-// prelude export, and that one silently took `std.core.eq.Eq` as its
-// payload: three dead words in every token the compiler lexes, and a
-// union member no code path ever reads or writes.
-// DESIGN.md names this collision and says it "must be reported, not
-// silently reinterpreted". Two modules had already worked around it by
-// renaming — `ast_node.zen` writes `Equal`, `sema_def.zen` suffixes
-// every variant with `Def` — which is the workaround DESIGN.md predicts
-// and not the rule. Deciding per declaration is the rule, and it costs
-// nothing: the scan stops at the first variant that is not a bare type
-// name, which for a nominal enum is normally the first variant.
+// The union reading belongs to the whole declaration. `A | B` carries values
+// only when every variant names a type; otherwise the whole declaration is
+// nominal. Deciding per variant would let a coincidental visible type name
+// silently change one tag's layout.
 union_member_type = (be :: CBackend, n: TyNamed, v: Variant) Res<TyId> {
     union_reading(be.check, n.decl).match({
         false => None,

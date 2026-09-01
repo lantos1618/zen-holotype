@@ -78,11 +78,9 @@ u64* = {
     BITS*: usize = 64,
 }
 
-// usize is the target's pointer width — the one property here that
-// isn't a language constant. Both DESIGN.md architectures
-// (Builder.arch: X86_64/Arm64) are 64-bit; a 32-bit target changes
-// only this declaration. No corpus test may print a usize extreme,
-// same reason.
+// usize follows the target pointer width. Current supported architectures are
+// 64-bit; a 32-bit target must change this declaration and backend metadata
+// together.
 usize* = {
     MIN*: usize = 0,
     MAX*: usize = 18446744073709551615,
@@ -120,8 +118,8 @@ to_u64* = (self: u16) u64
 to_u64* = (self: u32) u64
 to_usize* = (self: u32) usize
 
-// usize is the pointer width and every DESIGN.md target is 64-bit, so
-// OUT of usize is lossless wherever Zen runs; u8/u16 fit any pointer
+// usize is 64-bit on every current target, so conversion out is lossless;
+// u8/u16 fit any pointer
 // width. u64 -> usize is NOT declared here: lossless only beside this
 // declaration, it stays a narrowing — a Res-returning function written
 // on purpose, like every other.
@@ -160,15 +158,13 @@ pow2* = (self: usize) usize {
     power;
 }
 
-// The same matrix as BOUNDS, so generic code can name "widens to u32":
+// The same matrix as the declarations, so generic code can name a widening:
 // one behavior per target, each impl supplying the intrinsic declared
 // above. Nothing here adds a conversion — the declarations above are
 // still the whole list. A bound travels with the type's impls, so the
 // prelude needs the behavior NAMES, not the impls.
-// The fields are `widen_*`, never `to_*`: a field named `to_u32` would
-// give `x.to_u32()` two answers — this member and the free function —
-// and the two compilers resolve that collision differently (the law
-// behind make ufcs, which does not read impl members)
+// Bound fields use `widen_*` so they do not collide with concrete `to_*`
+// functions in an overload set.
 ToU16* = { widen_u16* = (self: @Self) u16 }
 ToU32* = { widen_u32* = (self: @Self) u32 }
 ToU64* = { widen_u64* = (self: @Self) u64 }
@@ -210,7 +206,7 @@ i32.impl(ToF64, { widen_f64 = to_f64 })
 
 f32.impl(ToF64, { widen_f64 = to_f64 })
 
-// EQUALITY, SO A PRIMITIVE CAN BE THE SUBJECT OF `<T: Eq>`. Every
+// Primitive equality allows numeric types to satisfy `<T: Eq>`. Every
 // integer already compares — `a == b` is C's own operator and stays
 // that way, because `scalar_eq` (sema_bound.zen) and the backend both
 // answer "every primitive but `str` and `()`" before any impl is
@@ -218,13 +214,13 @@ f32.impl(ToF64, { widen_f64 = to_f64 })
 // emitted C; what they buy is `b.is_in([' ', '\t'])` and every other
 // `<T: Eq>` bound, which until now rejected `u8` outright.
 //
-// HERE AND NOT IN std.core.eq, and that is not a filing preference: an
+// These impls live here rather than std.core.eq because an
 // impl is only ever consulted through the module that DECLARES its
 // target, so `u8.impl(Eq, ..)` is only real in the file that writes
 // `u8* = {..}`. Written next to the trait it would compile clean and be
-// invisible — the silence `SemaFault.OrphanImpl` now ends.
+// invisible.
 //
-// NO FLOAT IMPL, deliberately. `NaN == NaN` is false, so an `f64` is
+// No float impl: `NaN == NaN` is false, so an `f64` is
 // not equal to itself and `xs.is_in([x])` would answer "no" about a
 // value that IS in the list. That is the wrong-answer-that-compiles
 // shape, and a float wanting membership should say what it means about

@@ -1,19 +1,5 @@
-// src/gen/gen_c/gen_c_clock.zen
-// The clock capability in C — lowering and floor in one file, so the
-// call site and the C it names cannot drift apart.
-// `Clock`'s two members are bodiless in `std/env/env.zen`: the authority
-// itself, reached only as `env.clock`, and their floor is
-// `clock_gettime`. That floor is POSIX and not C99 — unlike the stdin
-// floor's plain `fread` — so its `needs` flag is its own (a program that
-// measures itself must not be handed `<time.h>`'s feature-macro terms)
-// and `_POSIX_C_SOURCE` is defined BEFORE `<time.h>`: a late definition
-// after any standard header has included `<time.h>` leaves
-// `clock_gettime` unprototyped, which strict C rejects.
-// NO FAILURE MODE, AND SO NO ORDINALS. `Fs`'s floor answers by ordinal
-// because a path can miss; a clock read on Linux cannot fail in a way a
-// caller acts on, which is why the Zen signature answers a bare
-// `Duration` and this file writes no error chain. A failure here is the
-// platform's, not the program's.
+// C floor and lowering for the Clock capability. Clock reads return Duration;
+// failures are platform failures and are not exposed as Zen error ordinals.
 
 Call = std.ast
 AllocError = std.mem
@@ -26,17 +12,8 @@ CBackend = gen.gen_c.gen_c_state
 ctype = gen.gen_c.gen_c_type
 comment = gen.gen_c.gen_c_runtime
 
-// THE FLOOR: `clock_gettime`, emitted only for a program that reads one
-// clock — an uncalled `static` is a warning. One helper per authority:
-//   since_start -> CLOCK_MONOTONIC, for measuring. A span since an
-//   unspecified epoch, never compared across processes.
-//   unix        -> CLOCK_REALTIME, the wall clock, separately, because
-//   the two are different authorities and conflating them is how a leap
-//   second breaks a timer.
-// Both answer the same shape — whole seconds into a u64 run, nanoseconds
-// into another — and the caller adds them at its own width. The seconds
-// multiply out through u64 arithmetic, where `unix`'s 1e9 * seconds
-// fits with room to spare; there is no overflow path to report.
+// Emit only when used. since_start uses CLOCK_MONOTONIC; unix uses
+// CLOCK_REALTIME. Both return nanoseconds in u64 arithmetic.
 emit_clock* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     be.uses_clock().match({
         false => Ok(()),
@@ -45,32 +22,14 @@ emit_clock* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
 }
 
 write_clock = (be :: CBackend, out :: Emit) Res<(), AllocError> {
-    // THE FEATURE MACRO GOES FIRST, before every standard header —
-    // glibc's headers decide what `_POSIX_C_SOURCE` exposes at the
-    // moment `<time.h>` is first included, so a definition after the
-    // banner's includes leaves `clock_gettime` and `CLOCK_MONOTONIC`
-    // undeclared, which strict C rejects. THE `#undef` IS LOAD-BEARING:
-    // a redefinition after any header defined the macro silently (a
-    // diagnostic on conforming compilers, a warning here) changes
-    // nothing, and `#undef` first makes this definition the one that
-    // counts. The banner stays untouched: a program that never reads a
-    // clock must not learn about POSIX at all, and one that does gets
-    // exactly this much of it.
+    // Replace any earlier feature level before including the POSIX clock API.
     out.say("#undef _POSIX_C_SOURCE").try();
     out.say("#define _POSIX_C_SOURCE 200809L").try();
     comment(
         out,
         "the clock floor is POSIX, not C99 - hence the macro above"
     ).try();
-    // GLIBC ONLY RE-READS: the __USE_* answers were computed from the
-    // old _POSIX_C_SOURCE when the banner's includes pulled features.h
-    // in first, and a redefinition alone changes nothing; dropping the
-    // include guard makes glibc recompute them so <time.h> declares
-    // clock_gettime on its second read. Elsewhere there is no
-    // features.h and plain _POSIX_C_SOURCE + <time.h> is the whole
-    // recipe. __GLIBC__ is already defined here on glibc — features.h
-    // ran during the banner. Verified against `-std=c11 -Wall -Werror`
-    // with and without each line.
+    // glibc caches feature selection, so force features.h to recompute it.
     out.say("#if defined(__GLIBC__)").try();
     out.say("#undef _FEATURES_H").try();
     out.say("#include <features.h>").try();
@@ -100,15 +59,8 @@ write_read = (be :: CBackend, out :: Emit, fn: str, which: str)
     Ok(());
 }
 
-// THE LOWERING: `env.clock.since_start()` / `env.clock.unix()`
-// THE RECEIVER IS NOT LOWERED, exactly as `env.out.println` never lowers
-// the Env it resolved through: `env.clock` is a field read of a record
-// whose slots this path does not call, so evaluating it would emit a
-// value nothing reads.
-// The value is built AS A COMPOUND LITERAL, not spilled into a
-// temporary: the call stands wherever it was written, and an argument
-// stays a pure C expression — the property `zg_print_str` buys printing
-// and `lower_probe` buys `exists`.
+// Clock receivers carry authority only and emit no C value. A read remains a
+// compound-literal expression so it can be used directly as an argument.
 lower_clock_read* = (
     be   :: CBackend,
     c    : Call,

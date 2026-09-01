@@ -11,13 +11,15 @@ str = std.text
 Vec = std.collections
 Range = std.core
 Env = std.env
-BuildArgs, BuildFlags, build_options = std.build
+BuildArgs, ProjectArgs, BuildFlags, build_options = std.build
 FLAG_EMIT_C, ZEN_STD_ENV = std.build
-Options, options, is_word, arg_at = std.cli
+Options, options, is_word, arg_at, OPTIONS_END = std.cli
 
 // Usage carries the offending word; Missing carries a required option that
 // was absent. Later distinguishes a recognized command from a typo.
 Cli* = Build(BuildArgs)
+     | Project(ProjectArgs)
+     | Run(ProjectArgs)
      | Fmt(FmtJob)
      | Later(str)     // test / lsp — named, and not yet written
      | Usage(str)     // the word that made no sense; empty means nothing was said
@@ -49,9 +51,8 @@ FmtJob* = {
 // argv[0] is the program and argv[1] is the command.
 ARGS*: usize = 2
 
-USAGE*: str = "usage: zen build <root> [--entry <file>] [--std <path>] [--ffi] [--symbol-map <file>] --emit-c -o <file.c>\n       zen build <root> [--entry <file>] [--std <path>] [--ffi] [--symbol-map <file>] --emit-c-dir <dir>\n       zen fmt [--check] <file.zen>..."
+USAGE*: str = "usage: zen build [<project-or-target>]\n       zen run [<project-or-target>] [-- <args>...]\n       zen build <root> [--entry <file>] [--std <path>] [--ffi] [--symbol-map <file>] --emit-c -o <file.c>\n       zen build <root> [--entry <file>] [--std <path>] [--ffi] [--symbol-map <file>] --emit-c-dir <dir>\n       zen fmt [--check] <file.zen>..."
 
-COMMAND_BUILD: str = "build"
 COMMAND_FMT: str = "fmt"
 COMMAND_TEST: str = "test"
 COMMAND_LSP: str = "lsp"
@@ -69,9 +70,10 @@ cli* = (env: Env, argv: Vec<str>) Res<Cli, AllocError> {
 
 command = (env: Env, a: Alloc, argv: Vec<str>, name: str)
           Res<Cli, AllocError> {
-    name.eq(COMMAND_BUILD).match({
-        true  => job_of(env, a, argv),
-        false => not_build(a, argv, name),
+    name.match({
+        "build" => job_of(env, a, argv),
+        "run"   => project_of(env, a, argv, true),
+        _       => not_build(a, argv, name),
     })
 }
 
@@ -157,7 +159,50 @@ job_of = (env: Env, a: Alloc, argv: Vec<str>) Res<Cli, AllocError> {
             None     => (),
         });
     });
-    Ok(verdict(parsed, scan.bad));
+    parsed.compiles_source().match({
+        true  => Ok(verdict(parsed, scan.bad)),
+        false => project_of(env, a, argv, false),
+    })
+}
+
+project_of = (env: Env, a: Alloc, argv: Vec<str>, run: bool)
+             Res<Cli, AllocError> {
+    first = arg_at(argv, ARGS);
+    root   ::= ".";
+    target ::= "";
+    at     ::= ARGS;
+    (!first.is_empty() && !first.eq(OPTIONS_END)).then(() {
+        project_marker(env, a, first).match({
+            true  => { root = first; },
+            false => { target = first; },
+        });
+        at = at + 1;
+    });
+    arg_at(argv, at).eq(OPTIONS_END).then(() { at = at + 1; });
+    bad = (!run && at < argv.len).match({
+        true  => arg_at(argv, at),
+        false => "",
+    });
+    bad.is_empty().match({
+        false => Ok(Cli.Usage(bad)),
+        true  => {
+            job = ProjectArgs(
+                root: root,
+                target: target,
+                std_root: std_root_for(env, a),
+                argv: argv,
+                args_at: at
+            );
+            run.match({ true => Ok(Cli.Run(job)), false => Ok(Cli.Project(job)) })
+        },
+    })
+}
+
+project_marker = (env: Env, a: Alloc, root: str) bool {
+    a.String("{}/build.zen", root).match({
+        Err(_)     => false,
+        Ok(marker) => env.fs.exists(marker.view()),
+    })
 }
 
 verdict = (args: BuildFlags, bad: str) Cli {

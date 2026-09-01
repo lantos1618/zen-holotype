@@ -1,39 +1,9 @@
-// src/sema/sema_match.zen
-// `.match` — the only control flow there is, and the one check that is a
-// correctness property rather than a lint.
+// Pattern normalization, arm typing, and exhaustive-match checking.
 //
-// DESIGN.md: "Match is always exhaustive, in every position: cover every
-// case or write `_`. There is no partial form, so a missing arm is never
-// ambiguous between 'deliberate' and 'forgot'."
-//
-// THE ALGORITHM IS MARANGET'S USEFULNESS: one function, used twice,
-// rather than two ad-hoc walks. `useful(matrix, q)` asks "is there a
-// value this row matches that no row above it matches":
-//   - asked of each arm against the arms before it: `false` means an
-//     UNREACHABLE ARM.
-//   - asked of `_` against every arm: `true` means some value reaches no
-//     arm — NOT EXHAUSTIVE, and the same call names which case.
-//
-// Coverage over nested patterns falls out rather than being a second
-// rule: `Left(Full(n))` covering part of `Left` is a statement about a
-// COLUMN, and specialisation turns a column into its payload's columns.
-// `tests/corpus/sema/match_nested.zen` is the test a top-level variant
-// walk cannot pass. A pattern has at most one sub-pattern — the AST's
-// shape, not a simplification (`Variant.payload` is one type,
-// `Destructure.binder` is one pattern) — so the matrix never grows a
-// column it did not have.
-//
-// NEVER INVENT A DIAGNOSTIC OUT OF MISSING INFORMATION. When the
-// scrutinee's type is poison, a hole, or an unsubstituted type
-// parameter, there is no case list, so every name in a pattern reads as
-// a binder — which covers everything and makes every arm after the
-// first unreachable. `docs/SEMA_BOOTSTRAP_FIXES.md` §8 is twenty-three
-// confidently wrong diagnostics from exactly that, so both checks are
-// skipped there.
-//
-// Normalisation, usefulness and arm-binding stay one file because all
-// three read the same pattern arena; splitting them would pass it across
-// a module boundary three times to keep one structure private to none.
+// Coverage uses Maranget's usefulness algorithm. An arm is unreachable when
+// it adds no value beyond preceding rows; a wildcard that remains useful after
+// all rows proves the match is incomplete. Poison and unresolved scrutinee
+// types skip coverage because they provide no trustworthy case set.
 
 Expr, ExprId, Span, Literal, nowhere = std.ast
 Pattern, PatName, Destructure, PatternId = std.ast
@@ -94,6 +64,42 @@ Pats* = {
 
     wild* = (self :: @Self, span: Span) Res<usize, AllocError> {
         self.add(wild_pat(span))
+    }
+
+    // Booleans are finite constructors; other literals retain their text.
+    norm_literal = (self :: @Self, node: Pattern, l: Literal)
+                   Res<usize, AllocError> {
+        l.kind.match({
+            Bool => self.add(ctor_pat(l.text, node.span)),
+            _    => self.add(lit_pat(l.text, node.span)),
+        })
+    }
+
+    // Missing payload syntax behaves as a wildcard payload.
+    sub_index = (self :: @Self, head: Pat) Res<usize, AllocError> {
+        head.has_sub.match({
+            false => self.wild(head.span),
+            true  => Ok(head.sub),
+        })
+    }
+
+    complete = (self: @Self, has: bool, m: PatMatrix, cases: Vec<Case>) bool {
+        has && self.all_roots_present(m, cases)
+    }
+
+    all_roots_present = (self: @Self, m: PatMatrix, cases: Vec<Case>) bool {
+        Range(0, cases.len).find((i) {
+            cases.get(i).match({
+                Ok(cs) => self.root_present(m, cs.name) == false,
+                None   => false,
+            })
+        }).match({ Ok(_) => false, None => true })
+    }
+
+    root_present = (self: @Self, m: PatMatrix, name: str) bool {
+        Range(0, m.n).find((r) {
+            head_is_ctor(self.at(m.at(r, 0)), name)
+        }).match({ Ok(_) => true, None => false })
     }
 }
 
@@ -177,19 +183,9 @@ norm_pattern* = (c :: Checker, ps :: Pats, pid: PatternId, ty: TyId, ctx: Ctx)
     })
 }
 
-// `Ok(n)`, `Left(Full(n))`: the sub-pattern is normalised against the
-// PAYLOAD's type, which is what makes nesting work at all.
-//
-// `Member(leaf)` against a SET gets the two-level reading before that
-// question is asked. A set's cases are its MEMBERS, so a single-level
-// ctor named `Member` covers the member and swallows every arm after it
-// — issue #735 made a union-of-enums match impossible to discriminate.
-// When the parenthesised name IS a case of the member's own type the
-// arm stays exactly the two levels it always was (`Member(pe)` binds,
-// `Member(NotANumber)` narrows one level down); when it names nothing
-// there the arm is `Member(wild)` and the spelling is the backend's to
-// read. Everything on a nominal enum keeps the old shape: there
-// `Member` IS the leaf's own type.
+// Sub-patterns are normalized against the constructor payload. For a union of
+// enums, `Member(Leaf)` becomes a member constructor containing the leaf
+// pattern; nominal enums keep their ordinary single-constructor shape.
 norm_destructure = (
     c    :: Checker,
     ps   :: Pats,
@@ -234,14 +230,8 @@ norm_set_ctor = (
     ps.add(sub_pat(member, sub, node.span))
 }
 
-// A nullary case if the type declares one by that name, a binder otherwise.
-//
-// AGAINST A SET there is one reading before that question: `Member.Leaf`
-// where `Leaf` is a case of the MEMBER `Member` names is the same arm as
-// `Member(Leaf)`, so it normalises to the same two-level ctor. Spelled
-// any other way it would be a binder wearing a qualified name — a
-// catch-all whose only symptom was later arms reported unreachable,
-// which is exactly what issue #735 reports.
+// A declared nullary case remains a constructor; other names are binders.
+// `Member.Leaf` on a union of enums normalizes like `Member(Leaf)`.
 norm_name = (
     c    :: Checker,
     ps   :: Pats,
@@ -313,34 +303,10 @@ norm_member_dot = (
     })
 }
 
-// A BINDER SPELLED LIKE A CONSTANT IS REPORTED, NOT REINTERPRETED.
-// `LIMIT => ..` where `LIMIT = 3` is in scope reads as a comparison and
-// is a wildcard wearing the constant's spelling: it matches every value,
-// the constant is never read, and the only trace is that a LATER arm
-// goes unreachable — which names the consequence and never the cause.
-//
-// Giving it the meaning the author meant is the tempting fix and the
-// wrong one: a pattern's meaning would then depend on what names happen
-// to be in scope, so a new top-level constant could silently turn an
-// existing binder into a comparison. `sema_join.zen`'s header states the
-// rule this follows — inventing a meaning "would hide the mistake rather
-// than report it".
-//
-// A LOCAL WINS FIRST, exactly as `name_type` resolves a bare name: a
-// binder shadowing a local is ordinary shadowing, and the constant is
-// not what that name means there.
-//
-// AN UPPER-CASE NAME WITH NO OWNER AT ALL IS REFUSED. An arm spelling a
-// name that is no case of the scrutinee, no constant, nothing — binds
-// everything all the same: the match answers that arm for every value
-// and reads as exhaustive because a binder covers every value (issue
-// 798; `FsError.Exists` answered "is already locked" for every
-// filesystem error until its sites were patched). The shape decides it,
-// not scope: binders are lower-case everywhere else, so an upper-case
-// first byte here is a variant somebody mistyped or forgot to declare,
-// never a binder asking to be born. The arm still normalises as a
-// binder so one mistake makes one diagnostic and no cascade; the
-// reported fault alone refuses the build.
+// Locals may bind normally even when a constant has the same spelling.
+// Otherwise an uppercase name that is neither a case nor a qualified member is
+// reported: treating it as a wildcard binder would make the remaining arms
+// unreachable and incorrectly mark the match exhaustive.
 norm_binder = (
     c    :: Checker,
     ps   :: Pats,
@@ -389,16 +355,6 @@ names_const = (c :: Checker, text: str, ctx: Ctx) Res<bool, AllocError> {
     Ok(c.const_def(text, ctx).try().match({ Ok(_) => true, None => false }))
 }
 
-// `true` and `false` are the two cases of `bool`, so a boolean literal
-// is a case and not a literal — which is what makes a two-armed boolean
-// match exhaustive without a `_`.
-norm_literal = (ps :: Pats, node: Pattern, l: Literal) Res<usize, AllocError> {
-    l.kind.match({
-        Bool => ps.add(ctor_pat(l.text, node.span)),
-        _    => ps.add(lit_pat(l.text, node.span)),
-    })
-}
-
 is_case* = (c :: Checker, ty: TyId, name: str) Res<bool, AllocError> {
     cases ::= c.alloc.Vec<Case>();
     c.cases_of(ty, cases).try();
@@ -440,8 +396,7 @@ check_coverage = (
     })
 }
 
-// Poison, a hole, and an unsubstituted type parameter all mean "no case
-// list" — see the header, and SEMA_BOOTSTRAP_FIXES.md §8.
+// Poison, holes, and unsubstituted parameters have no reliable case list.
 checkable* = (c: Checker, sty: TyId) bool {
     (c.is_unknown(sty) || c.is_infer(sty) || c.is_var(sty)) == false
 }
@@ -632,13 +587,6 @@ useful_ctor = (
     c.useful(ps, sm, q2, t2)
 }
 
-sub_index = (ps :: Pats, head: Pat) Res<usize, AllocError> {
-    head.has_sub.match({
-        false => ps.wild(head.span),
-        true  => Ok(head.sub),
-    })
-}
-
 // A literal has no case list — an `i32` cannot be enumerated — so a
 // literal column keeps only the rows that could still match it.
 useful_lit = (
@@ -671,29 +619,10 @@ useful_wild = (
     ty0 = head_ty(types);
     cases ::= c.alloc.Vec<Case>();
     has = c.cases_of(ty0, cases).try();
-    complete(has, ps, m, cases).match({
+    ps.complete(has, m, cases).match({
         false => c.useful_default(ps, m, q, types),
         true  => c.useful_split(ps, m, q, types, cases),
     })
-}
-
-complete = (has: bool, ps: Pats, m: PatMatrix, cases: Vec<Case>) bool {
-    has && ps.all_roots_present(m, cases)
-}
-
-all_roots_present = (ps: Pats, m: PatMatrix, cases: Vec<Case>) bool {
-    Range(0, cases.len).find((i) {
-        cases.get(i).match({
-            Ok(cs) => ps.root_present(m, cs.name) == false,
-            None   => false,
-        })
-    }).match({ Ok(_) => false, None => true })
-}
-
-root_present = (ps: Pats, m: PatMatrix, name: str) bool {
-    Range(0, m.n).find((r) {
-        head_is_ctor(ps.at(m.at(r, 0)), name)
-    }).match({ Ok(_) => true, None => false })
 }
 
 head_is_ctor = (p: Pat, name: str) bool {
@@ -913,11 +842,8 @@ emit_row = (
 // arm values
 // ---------------------------------------------------------------------
 
-// Every arm produces the match's value, and the match's type is their
-// join. A bare `Ok(..)` arm is `Open` (error set undecided), so an arm
-// beside it that IS decided settles the whole match — the bootstrapper
-// once got this wrong by taking the FIRST arm's type unconditionally
-// (`docs/SEMA_BOOTSTRAP_FIXES.md` §7).
+// Every arm produces the match's value, and the match's type is their join.
+// A bare `Ok(..)` arm is `Open`, so an adjacent settled arm supplies its form.
 arm_types = (
     c    :: Checker,
     ps   :: Pats,
@@ -958,20 +884,8 @@ arm_body_type = (c :: Checker, mt: Match, i: usize, ctx: Ctx)
     })
 }
 
-// `Ok => (n) { n }` — the payload written to the RIGHT of the arrow,
-// where it is a closure literal and not a binder. DESIGN.md:152:
-// "arms are `pattern => expr`", "payloads bind in the pattern:
-// `Ok(n) => n`". The form parses, so only sema can refuse it, and
-// refusing it needs the arm to be worth SOMETHING: `expr_kind`
-// answers poison for a closure because a call's signature usually
-// supplies its types, and here no signature is coming — an arm is a
-// value, and the match settles its context. So the closure is worth
-// its shape, written into the memo the same way `compute_expr` would,
-// because `sema_hoist.zen` reads the arm's type back from there.
-//
-// It was poison until 2026-08-10, poison agrees with everything, and
-// the form reached the backend to be told "codegen does not lower this
-// yet" — the wrong phase naming the wrong law.
+// A closure on the value side of an arm has no call signature to infer from.
+// Record its shape so invalid arm values are rejected before code generation.
 arm_value_type = (c :: Checker, id: ExprId, ctx: Ctx)
                  Res<TyId, AllocError> {
     c.tree.expr_at(id).kind.match({

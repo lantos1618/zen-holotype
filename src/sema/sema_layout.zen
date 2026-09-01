@@ -7,7 +7,7 @@
 
 Decl, Struct, Member, Field = std.ast
 Ident, Pos, TypeId = std.ast
-AllocError = std.mem
+Alloc, AllocError = std.mem
 Vec = std.collections
 Range = std.core
 DeclId = sema.sema_id
@@ -25,141 +25,148 @@ Frame = {
     site: Ident,
 }
 
-// Every struct in the program, each walked at most once.
+// State for one whole-program layout walk.
+Layout = {
+    path :: Vec<Frame>,
+    done :: Vec<DeclId>,
+
+    all = (self :: @Self, c :: Checker) Res<(), AllocError> {
+        Range(0, c.world.count()).loop((h, mi) {
+            self.module(c, mi).try();
+        });
+        Ok(())
+    }
+
+    module = (self :: @Self, c :: Checker, mi: usize) Res<(), AllocError> {
+        c.world.table_at(mi).match({
+            None  => Ok(()),
+            Ok(t) => self.table(c, t),
+        })
+    }
+
+    table = (self :: @Self, c :: Checker, t: ModuleTable)
+            Res<(), AllocError> {
+        t.defs.loop((h, d) { self.root(c, d).try() });
+        Ok(())
+    }
+
+    root = (self :: @Self, c :: Checker, d: Def) Res<(), AllocError> {
+        c.struct_of(d.id).match({
+            None  => Ok(()),
+            Ok(s) => self.enter(c, d.id, s, s.name),
+        })
+    }
+
+    enter = (self :: @Self, c :: Checker, id: DeclId, s: Struct, site: Ident)
+            Res<(), AllocError> {
+        contains(self.done, id).match({
+            true  => Ok(()),
+            false => self.walk(c, id, s, site),
+        })
+    }
+
+    walk = (self :: @Self, c :: Checker, id: DeclId, s: Struct, site: Ident)
+           Res<(), AllocError> {
+        self.path.add(Frame(id: id, site: site)).try();
+        s.members.loop((h, m) { self.field(c, m).try() });
+        self.path.take(self.path.len - 1);
+        self.done.add(id).try();
+        Ok(())
+    }
+
+    // Constants and methods occupy no per-instance storage.
+    field = (self :: @Self, c :: Checker, m: Member) Res<(), AllocError> {
+        m.kind.match({
+            Field(f) => self.typed(c, f),
+            _        => Ok(()),
+        })
+    }
+
+    typed = (self :: @Self, c :: Checker, f: Field) Res<(), AllocError> {
+        f.type.match({
+            None  => Ok(()),
+            Ok(t) => self.edge_from_top(c, t, f.name),
+        })
+    }
+
+    // Field types resolve in the module of the struct atop the path.
+    edge_from_top = (self :: @Self, c :: Checker, t: TypeId, site: Ident)
+                    Res<(), AllocError> {
+        self.path.get(self.path.len - 1).match({
+            None   => Ok(()),
+            Ok(fr) => self.edge_from(c, fr, t, site),
+        })
+    }
+
+    // Resolving `Ptr<Node>` yields `Ptr`, so pointer fields stop the path.
+    edge_from = (
+        self :: @Self,
+        c     :: Checker,
+        fr    : Frame,
+        t     : TypeId,
+        site  : Ident
+    ) Res<(), AllocError> {
+        poison = c.types.unknown().try();
+        ctx    = Ctx(fr.id.module.to_usize(), poison);
+        ty     = c.type_from_ast(t, ctx).try();
+        named_decl(c, ty).match({
+            None     => Ok(()),
+            Ok(next) => self.step(c, next, site),
+        })
+    }
+
+    step = (self :: @Self, c :: Checker, next: DeclId, site: Ident)
+           Res<(), AllocError> {
+        index_on(self.path, next).match({
+            Ok(k) => self.close(c, k, site),
+            None  => self.descend(c, next, site),
+        })
+    }
+
+    descend = (self :: @Self, c :: Checker, next: DeclId, site: Ident)
+              Res<(), AllocError> {
+        c.struct_of(next).match({
+            None  => Ok(()),
+            Ok(s) => self.enter(c, next, s, site),
+        })
+    }
+
+    // Diagnose the earliest source edge in the cycle for a stable result.
+    close = (self :: @Self, c :: Checker, k: usize, site: Ident)
+            Res<(), AllocError> {
+        blame ::= site;
+        Range(k + 1, self.path.len).loop((h, i) {
+            blame = earlier(blame, site_at(self.path, i, blame));
+        });
+        c.report(
+            blame.span.file,
+            blame.span,
+            SemaFault.InfiniteSize(NameFault(name: blame.text))
+        ).try();
+        self.seal(k).try();
+        Ok(())
+    }
+
+    // Mark all structs in the cycle to avoid rotated duplicate diagnostics.
+    seal = (self :: @Self, k: usize) Res<(), AllocError> {
+        Range(k, self.path.len).loop((h, i) {
+            self.path.get(i).match({
+                None   => Ok(()),
+                Ok(fr) => self.done.add(fr.id),
+            }).try();
+        });
+        Ok(())
+    }
+}
+
+Layout = (a: Alloc) Layout {
+    Layout(path: a.Vec<Frame>(), done: a.Vec<DeclId>())
+}
+
+// Reject every by-value struct cycle in the program.
 check_layout* = (c :: Checker) Res<(), AllocError> {
-    path ::= c.alloc.Vec<Frame>();
-    done ::= c.alloc.Vec<DeclId>();
-    Range(0, c.world.count()).loop((h, mi) {
-        c.module_layout(mi, path, done).try();
-    });
-    Ok(());
-}
-
-module_layout = (
-    c    :: Checker,
-    mi   : usize,
-    path :: Vec<Frame>,
-    done :: Vec<DeclId>
-) Res<(), AllocError> {
-    c.world.table_at(mi).match({
-        None  => Ok(()),
-        Ok(t) => c.table_layout(t, path, done),
-    })
-}
-
-table_layout = (
-    c    :: Checker,
-    t    : ModuleTable,
-    path :: Vec<Frame>,
-    done :: Vec<DeclId>
-) Res<(), AllocError> {
-    t.defs.loop((h, d) { c.root_layout(d, path, done).try() });
-    Ok(());
-}
-
-// A struct already walked is skipped, which is what makes this linear
-// rather than a walk per path: if a struct sits on a cycle, the walk
-// that started at it found it, so arriving a second way adds nothing.
-root_layout = (
-    c    :: Checker,
-    d    : Def,
-    path :: Vec<Frame>,
-    done :: Vec<DeclId>
-) Res<(), AllocError> {
-    c.struct_of(d.id).match({
-        None  => Ok(()),
-        Ok(s) => enter(c, d.id, s, s.name, path, done),
-    })
-}
-
-enter = (
-    c    :: Checker,
-    id   : DeclId,
-    s    : Struct,
-    site : Ident,
-    path :: Vec<Frame>,
-    done :: Vec<DeclId>
-) Res<(), AllocError> {
-    contains(done, id).match({
-        true  => Ok(()),
-        false => c.walk(id, s, site, path, done),
-    })
-}
-
-walk = (
-    c    :: Checker,
-    id   : DeclId,
-    s    : Struct,
-    site : Ident,
-    path :: Vec<Frame>,
-    done :: Vec<DeclId>
-) Res<(), AllocError> {
-    path.add(Frame(id: id, site: site)).try();
-    s.members.loop((h, m) { field_edge(c, m, path, done).try() });
-    path.take(path.len - 1);
-    done.add(id).try();
-    Ok(());
-}
-
-// Only a field: a struct-body constant is one value per type and a
-// function member is code, neither storage the layout must account for.
-field_edge = (
-    c    :: Checker,
-    m    : Member,
-    path :: Vec<Frame>,
-    done :: Vec<DeclId>
-) Res<(), AllocError> {
-    m.kind.match({
-        Field(f) => c.typed_edge(f, path, done),
-        _        => Ok(()),
-    })
-}
-
-typed_edge = (
-    c    :: Checker,
-    f    : Field,
-    path :: Vec<Frame>,
-    done :: Vec<DeclId>
-) Res<(), AllocError> {
-    f.type.match({
-        None  => Ok(()),
-        Ok(t) => c.edge_from_top(t, f.name, path, done),
-    })
-}
-
-// A written type means what it means where it was written, so the
-// module used is the one the struct atop the path was declared in.
-edge_from_top = (
-    c    :: Checker,
-    t    : TypeId,
-    site : Ident,
-    path :: Vec<Frame>,
-    done :: Vec<DeclId>
-) Res<(), AllocError> {
-    path.get(path.len - 1).match({
-        None   => Ok(()),
-        Ok(fr) => c.edge_from(fr, t, site, path, done),
-    })
-}
-
-// `type_from_ast` is the one reading of a written type, so a field
-// written `Ptr<Node>` answers `Ptr` here, never `Node` — the indirection
-// rule falls out of the type instead of being spelled a second time.
-edge_from = (
-    c    :: Checker,
-    fr   : Frame,
-    t    : TypeId,
-    site : Ident,
-    path :: Vec<Frame>,
-    done :: Vec<DeclId>
-) Res<(), AllocError> {
-    poison = c.types.unknown().try();
-    ctx    = Ctx(fr.id.module.to_usize(), poison);
-    ty     = c.type_from_ast(t, ctx).try();
-    named_decl(c, ty).match({
-        None     => Ok(()),
-        Ok(next) => step(c, next, site, path, done),
-    })
+    state ::= c.alloc.Layout();
+    state.all(c)
 }
 
 named_decl = (c: Checker, ty: TyId) Res<DeclId> {
@@ -167,73 +174,6 @@ named_decl = (c: Checker, ty: TyId) Res<DeclId> {
         Named(n) => Ok(n.decl),
         _        => None,
     })
-}
-
-step = (
-    c    :: Checker,
-    next : DeclId,
-    site : Ident,
-    path :: Vec<Frame>,
-    done :: Vec<DeclId>
-) Res<(), AllocError> {
-    index_on(path, next).match({
-        Ok(k) => c.close(k, site, path, done),
-        None  => c.descend(next, site, path, done),
-    })
-}
-
-descend = (
-    c    :: Checker,
-    next : DeclId,
-    site : Ident,
-    path :: Vec<Frame>,
-    done :: Vec<DeclId>
-) Res<(), AllocError> {
-    c.struct_of(next).match({
-        None  => Ok(()),
-        Ok(s) => enter(c, next, s, site, path, done),
-    })
-}
-
-// The blame is the earliest field on the cycle, not whichever the walk
-// happened to arrive by: `Room -> Door -> Room` is one mistake however
-// reached, so the diagnostic must land the same place either way — the
-// walk order is a pure function of the source, so two runs agree.
-//
-// The cycle's edges are the frames after `k`, plus the one that closes
-// it. Frame `k` was entered by an edge from outside the cycle, so its
-// site is not part of it.
-close = (
-    c    :: Checker,
-    k    : usize,
-    site : Ident,
-    path :: Vec<Frame>,
-    done :: Vec<DeclId>
-) Res<(), AllocError> {
-    blame ::= site;
-    Range(k + 1, path.len).loop((h, i) {
-        blame = earlier(blame, site_at(path, i, blame));
-    });
-    c.report(
-        blame.span.file,
-        blame.span,
-        SemaFault.InfiniteSize(NameFault(name: blame.text))
-    ).try();
-    seal(k, path, done).try();
-    Ok(());
-}
-
-// Every struct on the cycle, marked reported, so the walk from its
-// other end skips it — "one mistake, one diagnostic."
-seal = (k: usize, path: Vec<Frame>, done :: Vec<DeclId>)
-       Res<(), AllocError> {
-    Range(k, path.len).loop((h, i) {
-        path.get(i).match({
-            None   => Ok(()),
-            Ok(fr) => done.add(fr.id),
-        }).try();
-    });
-    Ok(());
 }
 
 // ---------------------------------------------------------------------

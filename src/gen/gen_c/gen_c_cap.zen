@@ -1,22 +1,6 @@
-// src/gen/gen_c/gen_c_cap.zen
-// The members whose BODY IS THE BACKEND.
-// `Mem.alloc`, `Mem.page`, `Mem.release` and the four `Fs` declares are
-// written in std with a signature and no body — env.zen says why: they
-// are the authority itself. "A capability's floor is the target
-// language's", and for C that floor is `malloc`, `free`, `stat`,
-// `fopen`. `gen_c_print.zen` says the same about `Console.println`;
-// this file writes the memory three, `gen_c_fs.zen` the other four.
-// NOT A SPECIAL CASE BOLTED ONTO MEMBER DISPATCH — the SAME rule
-// `println` obeys, one level lower: a bodiless member is either a
-// capability whose floor this file writes, or a refusal
-// `gen_c_member.zen` reports by name. Nothing else can be true of it —
-// a symbol for a bodiless declaration is a symbol nothing defines.
-// WHY THE BACKEND MAY WRITE AN ArenaState'S FIELDS. `mem_arena.zen`
-// keeps `ArenaState` unexported ("what an arena is made of is not part
-// of what an arena is"), yet this file writes three of its fields
-// anyway — licensed by one thing: the memory ENTERS THE PROGRAM here.
-// `Mem.alloc` is the only door; the alternative is a second, hidden,
-// hand-written C arena std would have to agree with.
+// C implementations of bodiless capability methods. Memory capability
+// lowering initializes the private ArenaState representation at its allocation
+// boundary; other capability floors remain in their subject-specific files.
 
 ExprId, Function, Access, Call = std.ast
 AllocError = std.mem
@@ -27,7 +11,7 @@ sym_member, sym_gen = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
 sub = gen.gen_c.gen_c_mono
-ctype, request_type, declared_ret, field_of = gen.gen_c.gen_c_type
+ctype, request_type, declared_ret, field_of, pointee = gen.gen_c.gen_c_type
 expr = gen.gen_c.gen_c_expr
 arg_text = gen.gen_c.gen_c_arg
 temp, payload_type = gen.gen_c.gen_c_flow
@@ -128,12 +112,8 @@ capability_owner = (be :: CBackend, n: TyNamed) str {
         .match({ true => n.name, false => "" })
 }
 
-// the entry point
-
-// `Scope.defer` takes the short path because its whole lowering is
-// about the CLOSURE it was handed — the declared types the four below
-// need say nothing about that. `scope.zen` declares it `= sig` with no
-// body: "the compiler supplies the block".
+// Scope.defer and the two actor operations need call-site information that the
+// common typed-capability path does not carry.
 lower_capability* = (
     be   :: CBackend,
     kind : CapabilityKind,
@@ -149,16 +129,10 @@ lower_capability* = (
 ) Res<(), AllocError> {
     kind.match({
         ScopeDefer    => be.lower_defer(id, c, a, ctx, out),
-        // Actor spawn's type parameter is inferred from its argument and
-        // appears in the result. The checked call type is therefore the
-        // authoritative instantiated result, not the open declaration.
+        // Spawn's checked call type contains the argument-inferred result.
         ActorSpawn    => be.lower_actor_spawn(id, c, a, rty, ctx, out),
         ActorStop     => be.lower_actor_stop(a, rty, ctx, out),
-        // `join` is generic in a parameter NOTHING settles — its `T`
-        // lives only in the return type — so the typed path's
-        // `cap_ret` would request a type with a free variable in it.
-        // Its lowering reads the type off the call site's expectation
-        // instead, which is what `want` carries here.
+        // Thread.join's T occurs only in its return, so `want` settles it.
         ThreadsJoin   => be.lower_join(id, c, a, rty, want, ctx, out),
         NotCapability => be.unsupported(id, "an unclassified capability", out),
         _             => be.lower_typed_capability(
@@ -189,10 +163,7 @@ lower_typed_capability = (
 ) Res<(), AllocError> {
     ret = be.cap_ret(rty, mi, f).try();
     be.request_type(ret).try();
-    // `Fs.read`'s FIRST written parameter is an `Alloc` per its
-    // DECLARED type — the argument arrives as an Arena, and lowering it
-    // at its own type would hand the buffer's owner an arena where the
-    // two-word handle belongs. Law 7: the declaration decides.
+    // Fs.read receives the declared Alloc handle, not the Arena argument type.
     aty = be.cap_param(rty, mi, f).try();
     be.lower_capability_kind(kind, id, c, a, rty, ret, aty, ctx, out)
 }
@@ -485,15 +456,5 @@ prev_text = (be :: CBackend, c: Call, ctx: Ctx, out :: String)
     c.args.get(1).match({
         None  => out.add("NULL"),
         Ok(a) => expr(be, a.value, ctx, unknown, out),
-    })
-}
-
-// What a `Ptr<T>` points AT. Sema has no pointer kind — a `Ptr<T>`
-// arrives as an ordinary `Named` — so this is its first type argument
-// and nothing more.
-pointee = (be :: CBackend, ty: TyId) Res<TyId> {
-    be.check.types.at(ty).match({
-        Named(n) => n.args.get(0),
-        _        => None,
     })
 }

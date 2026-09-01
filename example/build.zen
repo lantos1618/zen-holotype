@@ -1,14 +1,10 @@
-// example/build.zen
-// build files are zen programs; b is the Builder from std.build.
-// b is `::` because b.add / b.exe / b.test mutate the graph
+// Build files are Zen programs. The mutable Builder records the target graph.
 
 Budget, Builder, BuildError, Function, Package = std.build
 Bencher, Tester = std.test
 seconds = std.core.time
 
-// packages are declared here as plain data — build files are
-// programs, so there is no separate manifest format. hash-locked,
-// and the cli edits these lines for you: `zen add json`
+// Packages are hash-locked values; `zen add json` can add this declaration.
 json_pkg = Package(
     url: "https://github.com/zen-pkgs/json",
     version: "0.3.1",
@@ -17,32 +13,24 @@ json_pkg = Package(
 
 build = (b :: Builder) Res<(), BuildError> {
 
-    // build programs branch on the target by matching b.os right
-    // here. no cfg annotations, no ifdef
+    // Target-specific configuration is ordinary Zen control flow.
     lib_paths = b.os.match({
         Macos   => ["/opt/homebrew/lib"],
         Linux   => ["/usr/local/lib"],
         Windows => ["C:/sodium/lib"],
     });
 
-    // EVERY TARGET CALL IS `.try()`d. b.add/lib/extern hand back a
-    // `Res<Dep, BuildError>` and the `deps` lists below want a `Dep`,
-    // so dropping the `.try()` puts the Result itself in the graph;
-    // b.exe/test/bench return `Res<(), BuildError>`, and a build
-    // whose fetch failed has to stop rather than carry on wiring
+    // Target constructors return Res, so failures propagate through the build.
     json = b.add("json", json_pkg).try();
 
-    // Lib.src is the ZEN-SIDE BINDING, not the C: `libs` names what
-    // to link and `paths` where to find it, so the .c never appears
+    // Lib.src is the Zen binding; libs and paths describe the linker input.
     libsodium = b.lib("libsodium", {
         src: Path("src/sodium.zen"),
         libs: ["sodium"],
         paths: lib_paths,
     }).try();
 
-    // Extern is the other answer to "where's the code from" — c
-    // sources compiled alongside the tree. extern_add.c IS `add`, so
-    // there is no system library to find and no path to search
+    // Extern compiles C sources alongside the Zen tree.
     extern_add = b.extern("extern_add", {
         src: Path("src/extern_add.c"),
         libs: [],
@@ -54,11 +42,7 @@ build = (b :: Builder) Res<(), BuildError> {
         _       => "",
     });
 
-    // deps are wired per target: main.zen may import from pkg only
-    // what this list declares. `out` spells the default,
-    // build/{os}-{arch}/{name}, which a formatted Path builds — it
-    // takes b.alloc, because no allocation is hidden, and its
-    // AllocError is why BuildError had to widen. .gitignore covers build/
+    // A target may import only from the dependencies declared here.
     b.exe("example", {
         src: Path("src/main.zen"),
         deps: [json, libsodium, extern_add],
@@ -67,22 +51,7 @@ build = (b :: Builder) Res<(), BuildError> {
         ),
     }).try();
 
-    // test discovery is code, not compiler magic: walk the parsed
-    // module tree and keep every function whose single parameter
-    // is a Tester. change the filter, change what a test is.
-    //
-    // `functions` TAKES THE ALLOCATOR: gathering the walk into a Vec
-    // allocates, and nothing here allocates without being handed an
-    // Alloc. Its AllocError is one of the two reasons BuildError is
-    // `BuildFault | AllocError`. std.build declares the signature and
-    // the build driver supplies it; std/ast has the body already
-    // (ast_node.zen:613), so @meta deletes a declaration rather than
-    // changing this line.
-    //
-    // The FILTER is still stage 5. `f.params` is not on the stand-in
-    // `Function`, and `p.type == Tester` wants a type as a value —
-    // both wait on @meta, and both are quiet today only because a
-    // lambda body is not type-checked (ISSUES.md).
+    // Test discovery is a module walk filtered by the Tester parameter.
     tests ::= b.alloc.Vec<Function>();
     b.module(Path("src")).functions(b.alloc).try().loop((h, f) {
         (f.params.len == 1 && f.params.get(0).try().type == Tester)
@@ -94,16 +63,14 @@ build = (b :: Builder) Res<(), BuildError> {
         deps: [json, libsodium, extern_add],
     }).try();
 
-    // benches: same walk, different filter
+    // Bench discovery uses the same walk with a Bencher filter.
     benches ::= b.alloc.Vec<Function>();
     b.module(Path("src")).functions(b.alloc).try().loop((h, f) {
         (f.params.len == 1 && f.params.get(0).try().type == Bencher)
             .then(() { benches.add(f).try() });
     });
 
-    // budgets live here, in code, reviewed like code. allocs_op
-    // and bytes_op are deterministic, so over budget FAILS the
-    // build; ns_op is wall clock and rides a rolling median
+    // Allocation budgets are deterministic; timing uses a rolling median.
     b.bench("example_bench", {
         benches: benches,
         budgets: [
@@ -116,9 +83,7 @@ build = (b :: Builder) Res<(), BuildError> {
         ],
     }).try();
 
-    // and the build budgets itself, so it never quietly grows.
-    // UFCS spelling: Duration.seconds is a type lookup and seconds
-    // is not a member (std/core/time.zen says this in as many words)
+    // The build also carries its own time budget.
     b.budget(seconds(60));
 
     Ok(());

@@ -1,25 +1,6 @@
-// src/std/parse/parse_expr.zen
-// Expressions: precedence, the postfix chain, and the three places one
-// `(` or one `[` has two readings.
-//
-// PRECEDENCE IS CLIMBED, NOT RECURSED THROUGH. `a + b + c + ..` is a
-// left-nested spine, and a parser that recurses once per operator
-// stack-overflows on a long one — which is exactly what happened to
-// the Python bootstrapper and had to be folded into a loop. So the
-// loop below extends the left operand in place and recurses only on
-// the RIGHT, where the nesting is the author's and the depth guard
-// covers it.
-//
-// DESIGN.md STATES NO PRECEDENCE AT ALL. grammar.js D1 settled it as
-// C-like and every operator left-associative, and this file follows
-// that table rather than inventing a second one. `+%` sits at exactly
-// the precedence of `+` and `*%` at that of `*`: they are the same
-// operation with a different overflow rule, not a different binding
-// strength. tests/corpus/parse/prec_*.zen gates one pair each.
-//
-// THE THREE AMBIGUITIES, all decided by a bounded scan to a matching
-// delimiter and one token past it — never by backtracking, and never
-// by what the elements turn out to mean:
+// Expression parsing: precedence climbing, postfix chains, and ambiguous
+// delimiters. Binary chains and postfix chains are iterative so AST depth does
+// not consume parser stack. Ambiguities use bounded lookahead:
 //
 //   `(..)` is a LAMBDA if `{` or a return type follows, otherwise a
 //   parenthesized expression. Grammar D15a makes a return type
@@ -35,13 +16,6 @@
 //   requires it: a `Try` parsed as a call "creates a name that must be
 //   special-cased everywhere it could be shadowed".
 //
-// OVER 500 LINES, JUSTIFIED: STYLE.md asks for a reason rather than a
-// split, and the reason is that what's left is ONE subject — precedence,
-// the postfix chain and the primaries are three sections of one grammar
-// rule, mutually recursive through `expr`. `parse_expr1`/`parse_expr2`
-// would cut one subject in half, "worse than the file you started with,
-// because now neither name means anything". The bounded scans left for
-// parse_lookahead.zen, which parse_decl.zen needed too.
 
 AllocError = std.mem
 Span, Ident, no_trivia = std.ast.ast_span
@@ -203,11 +177,7 @@ unary_expr = (p :: Parser, m: Mark, op: UnOp) Res<ExprId, AllocError> {
     );
 }
 
-// `!!ok`, `--n`. The one recursion in the unary chain, and so the one
-// place it can be charged — `unary_at` is also the ordinary way into
-// `postfix` and charging it would tax every expression twice. A
-// thousand `-`s used to parse without complaint and leave a thousand
-// `Unary` nodes for sema to recurse into and die on.
+// Charge each recursive unary operand without charging ordinary postfix entry.
 unary_operand = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     p.enter().try();
     id = p.too_deep.match({
@@ -233,11 +203,8 @@ unary_operand = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
 // dies on them. The depth bound exists for the whole pipeline
 // (parser.zen says so), so it has to count what is BUILT.
 //
-// It is also what stopped `((((..))))` from crashing: past the limit
-// `primary` hands back a poison node without consuming, and this loop
-// used to read every remaining `(` as a call on it — thousands of
-// `Call`s deep, from a parser that had already reported the file as
-// too deep and stopped descending.
+// Once `primary` returns poison at the depth limit, the chain stops instead of
+// wrapping unconsumed postfix tokens around it.
 postfix = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     base    ::= p.primary(m).try();
     links   ::= 0;

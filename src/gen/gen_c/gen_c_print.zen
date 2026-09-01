@@ -1,40 +1,6 @@
-// src/gen/gen_c/gen_c_print.zen
-// The console writes: the sugar `println`/`print`, and the bound
-// `env.out.println`/`env.out.errorln`.
-// DESIGN.md bends exactly one law here and says so out loud:
-// "`println(...)` is sugar for `<the Env in scope>.out.println(...)`,
-// resolved BY TYPE, not by the name of the binding." So the sugar names
-// no function — there is nothing for `gen_name` to find — and the thing
-// it routes to, `Console.println`, is DECLARED WITHOUT A BODY for the
-// same reason `Fs.read` is: there is nothing underneath to write it in.
-// A capability's floor is the target language's, and for C that floor is
-// `fwrite` and `fprintf`.
-// SO THE SUGAR BOTTOMS OUT IN WRITES, which is the answer
-// `bootstrap/gen_c.py` reached and the one the corpus already agrees
-// with: `{}` on an integer is decimal with no separators, and `println`
-// appends exactly one newline.
-// THE CONSOLE HAS TWO MEMBERS, ONE STREAM EACH (env.zen): stdout for
-// the program's answer, stderr for the program talking about itself.
-// They share everything this file does — the format walk, the argument
-// types, the newline — and differ in the C family the bytes leave
-// through: `zg_print_*` writes stdout, `zg_eprint_*` writes stderr.
-// The families are parallel on purpose, and every place that picks
-// between them picks with `pair`, so the two names sit together and a
-// missing stderr twin is visible at a glance.
-// THE `Env`-IN-SCOPE CLAUSE IS NOT ENFORCED HERE, and that is a refusal
-// rather than an oversight. "No Env in scope is a compile error" cannot
-// be applied by this file without rejecting the corpus that pins its
-// behaviour: `tests/corpus/cli/`'s `show = (a: Alloc, argv: Vec<str>)`
-// and `tests/corpus/gen_zen/`'s `report = (a: Alloc, label: str, text:
-// str)` both print, and neither has an `Env` binding in scope — the
-// `Env` is `main`'s, frames above. Enforcing the clause is a NAME
-// RESOLUTION rule and belongs in `src/sema/`, the only place that could
-// say which `Env` a nested frame is entitled to. A backend raising it
-// would be a second, worse copy of a rule sema has not written.
-// NOTHING HERE ALLOCATES ON THE EMITTED SIDE. `toString` takes a `Sink`
-// precisely so printing a value needs no buffer, and a `str` prints
-// through `zg_print_str`, which takes the fat value itself — no
-// temporary, so an argument stays a pure C expression.
+// Lower `print`/`println` and Console writes to the C output floors. Format
+// holes are type-directed; non-primitive values write through `Display`.
+// Output helpers do not allocate in the generated program.
 
 ExprId, Literal = std.ast
 Call, Arg, Span, Pos = std.ast
@@ -51,24 +17,15 @@ is_c_integer, is_signed, ctype = gen.gen_c.gen_c_type
 expr, ty_of, named_hole = gen.gen_c.gen_c_expr
 console_display, stderr_console = gen.gen_c.gen_c_display
 
-// The sugar's two spellings, and the only two. `print` is `println`
-// without the newline; nothing else in the prelude reaches the console
-// unnamed.
+// `print` omits the trailing newline.
 is_print* = (name: str) bool { name.eq("println") || name.eq("print") }
 
-// The console's own two members, one per stream. Not the sugar's set:
-// bare `errorln(..)` resolves to nothing, by the same clause that makes
-// bare `println(..)` sugar — the sugar exists only where DESIGN.md
-// writes it.
+// Console exposes one newline-writing member per stream.
 is_console_print* = (name: str) bool {
     name.eq("println") || name.eq("errorln")
 }
 
-// The stream a console member writes into. Reached only with a name
-// `is_console_print` answered to: stdout is the program's answer,
-// stderr is the program talking about itself, and a caller redirects
-// them apart — `2>/dev/null` silences errorln and touches nothing
-// println wrote.
+// Keep stdout and stderr independently redirectable.
 stream_of = (name: str) str {
     name.eq("println").match({
         true  => "stdout",
@@ -76,9 +33,7 @@ stream_of = (name: str) str {
     })
 }
 
-// One name per stream, from a parallel pair. The two families are
-// identical but for the FILE and the `e` in the name, so every selector
-// below is this function with two literals side by side.
+// Select matching helpers from the stdout/stderr runtime families.
 pair = (stream: str, stdout: str, stderr: str) str {
     stream.eq("stderr").match({
         true  => stderr,
@@ -86,33 +41,15 @@ pair = (stream: str, stdout: str, stderr: str) str {
     })
 }
 
-// `println("a {} b", x)` — the pieces of the format and the values
-// between them, one write each. A print is a STATEMENT SEQUENCE whose
-// value is unit, so the writes go to the body and `0` goes to the
-// caller's expression buffer.
+// Writes are statements; the expression result is unit.
 lower_print* = (be :: CBackend, c: Call, name: str, ctx: Ctx, out :: String)
                Res<(), AllocError> {
     write_pieces(be, c, name, "stdout", ctx).try();
     out.add("0")
 }
 
-// `env.out.println(..)` / `env.out.errorln(..)` — THE SAME FLOOR,
-// REACHED THROUGH THE RECORD INSTEAD OF THROUGH THE SUGAR.
-// The two spellings name ONE call — the header's DESIGN.md quote — and
-// must bottom out in one place. Writing the bound form as a call
-// through `Console`'s slot is not a second implementation of it, it is
-// a broken one: the slot's `args: ...` has no C spelling, `ctype` falls
-// back to `int`, and `cc` rejects the `zg_str` handed to it. A variadic
-// parameter cannot be lowered as a parameter, so it is expanded here,
-// where the argument types are still known, for both spellings.
-// AND IT ANSWERS `Ok`. The sugar's value is unit and this one's is the
-// declared `Res<(), IoError>`, because a program may write `.try()` on
-// it. `zg_print_bytes` has no failure to report, so `Ok` is the honest
-// answer — a tag and nothing else, since a `()` payload is no storage.
-// THE RECEIVER IS NOT LOWERED, exactly as the sugar never lowers the
-// `Env` it resolved through: `env.out` is a field read of a record whose
-// slots this path does not call, so evaluating it would emit a value
-// nothing reads.
+// Console calls share the same variadic expansion, but return their declared
+// `Res<(), IoError>` as `Ok`. The authority-only receiver has no C value.
 lower_console_print* = (
     be   :: CBackend,
     c    : Call,
@@ -158,9 +95,7 @@ write_args = (
     })
 }
 
-// A leading string literal is a FORMAT and the rest are its values.
-// Anything else is just a value, and so is everything after it:
-// `println(s)` prints `s`.
+// Only a leading string literal is interpreted as a format.
 write_from = (
     be     :: CBackend,
     c      : Call,
@@ -174,8 +109,7 @@ write_from = (
     })
 }
 
-// The raw source slice of a string literal, quotes included, when the
-// argument is one.
+// Return the raw, quoted source slice of a string literal.
 format_of = (be :: CBackend, id: ExprId) Res<str> {
     be.tree.expr_at(id).kind.match({
         Literal(l) => literal_format(l),
@@ -190,8 +124,7 @@ literal_format = (l: Literal) Res<str> {
     })
 }
 
-// Every value argument from `from` on, in order, with nothing between
-// them.
+// Write every value argument from `from` onward.
 write_values = (
     be     :: CBackend,
     c      : Call,
@@ -218,18 +151,8 @@ write_value_at = (
     })
 }
 
-// the format
-// The literal's RAW slice is walked, never a decoded copy: Zen's escape
-// set is `\n \t \r \0 \\ \' \"` and every one of those is a C escape
-// with the same meaning, so a piece travels into the emitted C unchanged
-// and only its LENGTH has to be counted. That is the decision
-// `lower_str_literal` makes, for the same reason — and it is why a `\\`
-// is stepped over two bytes at a time here: a backslash that escapes a
-// brace must not open a hole.
-// A DOUBLED BRACE IS THE ONE PLACE A CHUNK IS NOT THE RAW SLICE, and it
-// still is: `{{` ends the run ON THE FIRST BRACE and resumes past the
-// second, so the emitted C carries one `{` because the slice handed to
-// it holds one. No decoded copy, no second escape table.
+// Walk the raw literal so Zen escapes can pass unchanged to equivalent C
+// escapes. Doubled braces end a chunk inside the pair and emit one brace.
 
 write_format = (
     be     :: CBackend,
@@ -258,10 +181,7 @@ write_format = (
     Ok(());
 }
 
-// An argument with no hole left is a compile error at the call — the
-// walk has spent every hole and something is still queued. The two
-// values would be appended with no separator and read as one number,
-// which is the corrupting case the issue names.
+// Report arguments left after the final hole.
 write_surplus = (
     be     :: CBackend,
     c      : Call,
@@ -281,7 +201,7 @@ write_surplus = (
     })
 }
 
-// What one position turned out to be, written into the console.
+// Write the action classified at one format position.
 write_what = (
     be     :: CBackend,
     c      : Call,
@@ -304,9 +224,7 @@ write_what = (
     })
 }
 
-// `{name}`, written into the console through the printer its type picks —
-// the same choice a positional hole makes, because the two spellings
-// differ in where the value came FROM and in nothing after that.
+// Named and positional holes share type-directed value writing.
 write_named = (
     be     :: CBackend,
     id     : ExprId,
@@ -328,13 +246,8 @@ write_named = (
     })
 }
 
-// one position in a format string, classified
-// FOUR THINGS CAN BE AT A `{` and ONE function decides which, so that
-// `println` and every sink door cannot drift apart on the answer. The
-// arithmetic is here too: `keep` is where the run BEFORE this position
-// ends and `next` is where the walk resumes. They differ only for a
-// doubled brace, whose run ends inside the pair — the one case that was
-// easy to get wrong once per walk.
+// Classification shared with sink formatting. `keep` ends the preceding
+// chunk and `next` resumes the scan.
 
 FmtWhat* = Byte           // an ordinary byte: the literal run goes on
          | Hole           // `{}`, filled by the next argument
@@ -348,15 +261,12 @@ FmtAt* = {
     next*: usize,     // where the walk resumes
 }
 
-// A `Byte` is the run continuing, and every other answer ends it.
+// Only `Byte` continues the current literal chunk.
 ends_run* = (at: FmtAt) bool {
     at.what.match({ Byte => false, _ => true })
 }
 
-// ONLY A POSITIONAL HOLE CONSUMES AN ARGUMENT. A named one carries its
-// own value, so there is nothing for it to take, and counting it would
-// make `fmt("{a} {}", x)` claim two arguments while one was written. THE
-// TWO SPELLINGS THEREFORE MIX FREELY, in any order.
+// Named holes carry their own value; only positional holes consume arguments.
 arguments_taken* = (what: FmtWhat) usize {
     what.match({ Hole => 1, _ => 0 })
 }
@@ -368,10 +278,7 @@ fmt_at* = (raw: str, i: usize, end: usize) FmtAt {
     })
 }
 
-// `{{` and `}}`, the escapes. Asked AFTER `is_hole` and it makes no
-// difference: the two cannot both hold at one position — `{{` is not
-// `{}` — so the order they are tested in cannot change what a format
-// means.
+// Doubled braces are literal escapes.
 at_no_hole = (raw: str, i: usize, end: usize) FmtAt {
     is_doubled_brace(raw, i, end).match({
         true  => FmtAt(what: FmtWhat.Pair, keep: i + 1, next: i + 2),
@@ -379,12 +286,7 @@ at_no_hole = (raw: str, i: usize, end: usize) FmtAt {
     })
 }
 
-// A `{` FOLLOWED BY AN IDENTIFIER CHARACTER always meant a hole, so
-// `{p.x}` and `{f()}` are REFUSED and not printed. A format hole is not
-// an expression language, and the cost of assuming otherwise is not a
-// missing feature but a near miss that prints itself — the class of
-// wrong answer nobody reads twice. `{{p.x}` is the escape at such a
-// site and the diagnostic says so.
+// A named hole accepts an identifier, not an arbitrary expression.
 at_no_pair = (raw: str, i: usize, end: usize) FmtAt {
     opens_name(raw, i, end).match({
         false => FmtAt(what: FmtWhat.Byte, keep: i, next: i + step_of(raw, i)),
@@ -403,8 +305,7 @@ at_ident = (raw: str, i: usize, end: usize, j: usize) FmtAt {
     })
 }
 
-// The index one past the last byte of a literal's body: its raw slice
-// without the closing quote.
+// Index after the literal body, before the closing quote.
 body_end* = (raw: str) usize {
     (raw.len > 1).match({ true => raw.len - 1, false => 1 })
 }
@@ -423,10 +324,7 @@ opens_name = (raw: str, i: usize, end: usize) bool {
         && raw.index(i + 1).is_ident_start()
 }
 
-// The index one past the last identifier byte at or after `from`. THE
-// IDENTIFIER GRAMMAR IS `std.core.byte`'S and is not restated: a name in
-// a format hole is a name, and two spellings of "what a name is" is
-// exactly the drift this file avoids everywhere else.
+// Use the language's identifier predicates for named holes.
 ident_end = (raw: str, from: usize, end: usize) usize {
     j ::= from;
     loop(() { (j < end) && raw.index(j).is_ident_cont() }, (h) {
@@ -435,28 +333,15 @@ ident_end = (raw: str, from: usize, end: usize) usize {
     j
 }
 
-// The sentence a `{` that opened nothing gets. Named once because both
-// walks raise it and a must-fail expectation reads whichever compiler ran.
+// Stable diagnostics shared by console and sink formatting.
 NOT_A_HOLE* : str = "a format hole is {} or {name}, and this is neither"
 
-// The sentence a hole with no argument left gets, at the hole's own
-// position — the missing direction of the format/argument arity law.
 HOLE_WITHOUT_ARGUMENT* : str = "a format hole with no argument left"
 
-// The sentence an argument with no hole left gets, at the argument — the
-// surplus direction of the same law.
 ARGUMENT_WITHOUT_HOLE* : str = "an argument with no format hole left"
 
-// a fault at the HOLE'S own position
-// Not at the format string's, which is where every other backend fault
-// about a format lands — and for a hole that is not good enough: a
-// diagnostic pointing at the opening quote of a forty-byte format leaves
-// the reader to count bytes.
-// A STRING LITERAL CANNOT SPAN SOURCE LINES — a raw newline inside one is
-// `LexFault.UnterminatedString` — so a byte offset into the raw slice IS
-// a column offset, exactly, and the line never moves. The raw slice
-// counts the opening quote as byte 0 and `span.start.col` is that quote's
-// column, so the two indexes already agree.
+// Format faults point at the offending byte. String literals cannot span
+// source lines, so a raw byte offset is also a column offset.
 
 report_in_format* = (
     be    :: CBackend,
@@ -480,12 +365,7 @@ step_of = (raw: str, i: usize) usize {
     (raw.index(i) == '\\').match({ true => 2, false => 1 })
 }
 
-// A hole with no argument left is a compile error at the hole's own
-// position, which is the law `text_fmt.zen`'s header states: the two
-// brace bytes in user output are a plausible-looking corrupt answer, the
-// exact class this tree refuses everywhere else. The surplus direction —
-// an argument with no hole left — is refused beside it, after the walk,
-// by the same law.
+// A hole without a value is a compile error at the hole.
 write_hole = (
     be     :: CBackend,
     c      : Call,
@@ -506,8 +386,7 @@ write_hole = (
     })
 }
 
-// One literal chunk, and nothing at all when the chunk is empty —
-// `println("{}", x)` emits one write and not three.
+// Empty literal chunks emit no call.
 write_piece = (
     be     :: CBackend,
     raw    : str,
@@ -531,7 +410,7 @@ write_chunk = (be :: CBackend, piece: str, stream: str) Res<(), AllocError> {
     )
 }
 
-// How many bytes a raw piece denotes: each escape counts once.
+// Each raw escape denotes one output byte.
 decoded_bytes* = (piece: str) usize {
     n ::= 0;
     i ::= 0;
@@ -542,10 +421,7 @@ decoded_bytes* = (piece: str) usize {
     n
 }
 
-// one value
-// The write a `{}` becomes is chosen by the ARGUMENT'S TYPE and by
-// nothing else: DESIGN.md's `{}` carries no format spec, so there is
-// nothing else to read.
+// A hole's writer is selected solely by the argument type.
 
 write_value = (
     be     :: CBackend,
@@ -581,9 +457,7 @@ write_typed = (
     })
 }
 
-// The runtime helper a primitive prints through, into the stream the
-// call was made against. Empty means there is none, and `write_display`
-// below is where such a value goes.
+// Empty means the value must use Display rather than a primitive helper.
 printer* = (prim: str, stream: str) str {
     prim.eq("str").match({
         true  => pair(stream, "zg_print_str", "zg_eprint_str"),
@@ -619,8 +493,7 @@ signed_printer = (prim: str, stream: str) str {
     })
 }
 
-// The C cast an argument takes on the way in. A `str` and a `bool` are
-// already the parameter's type and take none.
+// `str` and `bool` already match their helper parameter types.
 cast_of* = (prim: str) str {
     prim.eq("str").match({
         true  => "",
@@ -651,10 +524,7 @@ write_write = (be :: CBackend, fn: str, cast: str, text: str)
     be.fmt("{fn}({cast}({text}));\n")
 }
 
-// A value this backend has no primitive write for prints through its
-// own `toString`, into the console the call was made against —
-// `gen_c_display.zen` holds that path and the record it hands over. A
-// type that supplies none is where the diagnostic finally is.
+// Non-primitive values write through Display.
 write_display = (
     be     :: CBackend,
     arg    : ExprId,
@@ -671,8 +541,7 @@ write_display = (
     })
 }
 
-// A value with no write. Reported at the ARGUMENT rather than at the
-// call: the call is fine and one of its arguments is not.
+// Report an unwritable value at its argument.
 print_fault = (be :: CBackend, arg: ExprId) Res<(), AllocError> {
     be.report_expr(arg, GenFault.Unsupported("printing a value of this type"))
 }

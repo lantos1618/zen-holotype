@@ -1,42 +1,12 @@
-// src/sema/sema_recv.zen
 // Who is allowed to write through a name.
 //
-// `sema_own.zen` answers who OWNS a value; this answers the other half
-// of DESIGN.md's ownership section. A move is a fact about the PATH to a
-// node (a flow walk); a receiver requirement is a fact about a
-// DECLARATION checked against the path at one call site, so nothing
-// here accumulates — every function below is a question with an answer.
+// `::` marks a receiver that mutates its own bytes. The requirement is
+// shallow and composes through every link in the receiver path.
 //
-// `::` on a receiver is not a special rule: it's the ordinary binding
-// marker on the ordinary first parameter (`self :: @Self` and `v ::
-// Vec<T>` read the same `Param.mutable`), and it is SHALLOW — it means
-// the method writes the receiver's own bytes and nothing more, so a
-// handle's methods stay `:` even when they change the world (`Alloc.raw`
-// allocates, `Env.spawn` starts an actor, neither writes the two words
-// it was reached through). The test: whether a bitwise copy of the
-// receiver would see the change.
-//
-// The requirement composes down the path: every link from the binding
-// to the receiver must permit the write. A `:` field holding a `Vec`
-// refuses a `::` method, since a copy of the struct would not see the
-// write; a `:` field holding an `Alloc` accepts every method on it,
-// since none of them asks for the write — same marker, opposite
-// answers, decided by the bitwise-copy test.
-//
-// One site, one walk — it used to be two, and the second was untyped.
-// `sema_decl.zen` now walks every member body, so both reported the same
-// write twice. Measured, not assumed: the deleted walk's case is covered
-// by the typed walk through strictly more expression forms, and its own
-// `::`-receiver rule even missed an impl-body write, reading fields off
-// the impl rather than the target. Removing it cost the suite one
-// sentence and no position; that sentence survives in `refuse_link`
-// below, naming the METHOD rather than the binding, since that is where
-// the `::` permitting the write has to go.
-//
-// A call is not the only write: `p.x = 1` asks the same composed
-// question, answered by the third rule below. Writes go through
-// `check_write_place`, walked from `sema_own.zen` where targets are
-// already told from values.
+// A `:` field containing a `Vec` therefore cannot call a mutating Vec method,
+// while capability values such as `Alloc` remain usable because their methods
+// do not mutate the capability handle itself. Direct assignments use the same
+// receiver-path check as method calls.
 
 Expr, ExprId = std.ast
 Struct, Member, Function = std.ast

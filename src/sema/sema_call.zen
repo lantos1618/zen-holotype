@@ -1,52 +1,12 @@
-// src/sema/sema_call.zen
-// What a call means, and which declaration it means.
-//
-// DESIGN.md, Overloading: "Resolution is on declared parameter types AND
-// arity, and a closure's type is its full signature. There is no
-// carve-out: `loop` overloads on `(h: LoopHandle, value: T)` versus
-// `(h: LoopHandle, index: usize, value: T)` for exactly the reason
-// `toString` overloads on a buffer versus an allocator."
-//
-// So a closure argument is matched on its PARAMETER COUNT and not waved
-// through. That single line is why `loop` can be one name with seven
-// declarations, and a resolver that treated every closure as
-// interchangeable would make five of them unreachable.
-//
-// PARAMETER NAMES ARE NOT IDENTITY. `TyFn` carries no names, so two
-// candidates differing only in them are one signature and there is
-// nothing to compare — which is exactly why declaring both is an error
-// AT THE DECLARATION, naming both. A call site cannot be where that is
-// discovered, because at a call site the two are indistinguishable; the
-// call is only what triggers the check.
-//
-// A GENERIC PARAMETER SWALLOWS A CONCRETE ONE. `<A>(init: A, ..)` and
-// `(alloc: Alloc, ..)` can never be told apart, so they may not be
-// overloads — which is why DESIGN.md gives the allocating loop variant
-// its own name, `map`. `swallows` below is that rule, and it is careful
-// in the one way the bootstrapper records paying for: only a type
-// parameter belonging to the CANDIDATE BEING TESTED is a wildcard.
-// Without that, `loop<R, T>(range: R, ..)` and `loop<K, V>(map:
-// Map<K,V>, ..)` look interchangeable, and the prelude declares both.
-//
-// OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
-// is "which declaration does this call mean", and the declaration-site
-// rules are the same question asked without a call. `same_signature`,
-// `swallows` and `matches` are three readings of one predicate — "can a
-// call site tell these apart" — and splitting them would leave that rule
-// in a module that cannot see what distinguishing them means.
-//
-// A LAMBDA ARGUMENT'S BODY IS TYPED AFTER RESOLUTION AND NOT BEFORE IT.
-// "A closure passed to a function whose signature is already known
-// infers its parameter types from that signature" — so the arity is all
-// resolution reads, and the body is walked once the candidate is picked
-// and its parameters are known (`arg_lambdas`, `lambda_body`). Walked at
-// all only since then: `own_lambda` had entered `l.body` from the day it
-// was written and the type walk had no equivalent, so every statement
-// inside every closure in the language was checked by nothing.
+// Call typing and overload resolution. Candidates are distinguished by
+// declared parameter types and arity; parameter names are not identity.
+// Candidate-owned type variables may match concrete arguments, but type
+// variables from unrelated candidates are not wildcards. Lambda bodies are
+// typed after resolution supplies their parameter types.
 
 Expr, ExprId, Call, Arg, Access, Lambda, Param, Span, Paren, nowhere = std.ast
 Ast = std.ast.ast_arena
-AllocError = std.mem
+Alloc, AllocError = std.mem
 Vec = std.collections
 str = std.text
 Range = std.core
@@ -127,6 +87,282 @@ Actual* = {
     span*: Span,
 }
 
+// State shared by every phase of one call-site check. Keeping the syntax,
+// context, and typed arguments together prevents name and member resolution
+// from relaying the same six values through each branch.
+CallCheck = {
+    id: ExprId,
+    node: Expr,
+    call: Call,
+    ctx: Ctx,
+    actuals :: Vec<Actual>,
+
+    run = (self :: @Self, c :: Checker) Res<TyId, AllocError> {
+        callee = call_callee(c.tree, self.call);
+        callee.kind.match({
+            Access(a) => self.member(c, a),
+            Name(n)   => self.named(c, n.text),
+            _         => self.indirect(c),
+        })
+    }
+
+    load_actuals = (self :: @Self, c :: Checker) Res<(), AllocError> {
+        c.actuals_of(self.call.args, self.ctx, self.actuals)
+    }
+
+    named = (self :: @Self, c :: Checker, name: str)
+            Res<TyId, AllocError> {
+        self.load_actuals(c).try();
+        is_res_ctor(name).match({
+            true  => c.res_ctor_type(name, self.actuals),
+            false => self.print_or_call(c, name),
+        })
+    }
+
+    print_or_call = (self :: @Self, c :: Checker, name: str)
+                    Res<TyId, AllocError> {
+        is_print_sugar(name).match({
+            true  => c.print_type(self.call),
+            false => self.local_or_decl(c, name),
+        })
+    }
+
+    local_or_decl = (self :: @Self, c :: Checker, name: str)
+                    Res<TyId, AllocError> {
+        c.lookup(name).match({
+            None  => self.decl(c, name, None, self.actuals),
+            Ok(b) => self.local_signature(c, b.ty),
+        })
+    }
+
+    local_signature = (self :: @Self, c :: Checker, ty: TyId)
+                      Res<TyId, AllocError> {
+        settled = c.instantiate_sig(self.id, ty, self.actuals).try();
+        self.signature(c, settled, 0)
+    }
+
+    // Resolve a declaration candidate, then fall back to construction.
+    decl = (
+        self    :: @Self,
+        c       :: Checker,
+        name    : str,
+        recv    : Res<TyId>,
+        actuals : Vec<Actual>
+    ) Res<TyId, AllocError> {
+        cands ::= c.alloc.Vec<Cand>();
+        c.cands_of(self.ctx.module, name, cands).try();
+        c.travelled_cands(name, recv, cands).try();
+        // Free-form UFCS also considers argument zero as the receiver.
+        recv.match({
+            Ok(_) => Ok(()),
+            None  => actuals.get(0).match({
+                None  => Ok(()),
+                Ok(a) => c.travelled_cands(name, Ok(a.ty), cands),
+            }),
+        }).try();
+        c.first_matching(cands, actuals).try().match({
+            Ok(k) => self.chosen(c, k, actuals),
+            None  => self.construct_or_fail(c, name, recv, cands),
+        })
+    }
+
+    construct_or_fail = (
+        self  :: @Self,
+        c     :: Checker,
+        name  : str,
+        recv  : Res<TyId>,
+        cands : Vec<Cand>
+    ) Res<TyId, AllocError> {
+        defs ::= c.alloc.Vec<Def>();
+        c.world.defs_of(self.ctx.module, name, defs).try();
+        type_def_of(defs).match({
+            None  => self.unresolved(c, name, recv, cands),
+            Ok(d) => self.construct_def(c, d),
+        })
+    }
+
+    unresolved = (
+        self  :: @Self,
+        c     :: Checker,
+        name  : str,
+        recv  : Res<TyId>,
+        cands : Vec<Cand>
+    ) Res<TyId, AllocError> {
+        recv.match({
+            Ok(ty) => c.no_such_method(self.call, name, ty),
+            None   => c.no_overload(self.node, name, cands),
+        })
+    }
+
+    construct_def = (self :: @Self, c :: Checker, d: Def)
+                    Res<TyId, AllocError> {
+        c.alias_module(d.id).match({
+            None   => construct(c, self.id, self.call, d, self.ctx),
+            Ok(mi) => c.module_not_a_value(self.node.span, d.name, mi),
+        })
+    }
+
+    chosen = (self :: @Self, c :: Checker, k: Cand, actuals: Vec<Actual>)
+             Res<TyId, AllocError> {
+        c.resolve_call(self.id, k.id).try();
+        c.check_bounds(k, actuals, self.node.span).try();
+        off = recv_off(self.call, actuals);
+        c.arg_literals(self.call.args, k.params, off).try();
+        ret = c.instantiate(self.id, self.call, k, actuals, self.ctx).try();
+        params ::= c.alloc.Vec<TyId>();
+        c.settled_params(self.id, k, params).try();
+        c.arg_lambdas(self.call.args, params, off, self.ctx).try();
+        c.args_handle_check(self.call.args, params, off, self.ctx).try();
+        Ok(ret)
+    }
+
+    member = (self :: @Self, c :: Checker, ac: Access)
+             Res<TyId, AllocError> {
+        c.callee_access.set(self.call.callee, true).try();
+        c.meta_member_call(self.id, self.node, self.call, ac, self.ctx)
+            .try().match({
+                Answered(ty) => Ok(ty),
+                Ordinary     => self.ordinary_member(c, ac),
+            })
+    }
+
+    ordinary_member = (self :: @Self, c :: Checker, ac: Access)
+                      Res<TyId, AllocError> {
+        c.tree.expr_at(ac.base).kind.match({
+            Meta(_) => c.meta_refused(c.tree.expr_at(ac.base)),
+            _       => {
+                b = base_of(c, ac.base, self.ctx).try();
+                b.is_type.match({
+                    true  => self.static_member(c, ac, b.ty),
+                    false => self.receiver(c, ac, b),
+                })
+            },
+        })
+    }
+
+    static_member = (self :: @Self, c :: Checker, ac: Access, ty: TyId)
+                    Res<TyId, AllocError> {
+        got = c.static_access(
+            self.call.callee,
+            self.node,
+            ac,
+            ty,
+            self.ctx
+        ).try();
+        c.sig_lambdas(self.call, got, 0, self.ctx).try();
+        c.is_case(ty, ac.name.text).try().match({
+            true  => c.variant_call_type(self.call, ty, ac.name.text, self.ctx),
+            false => c.fn_ret(self.node, got),
+        })
+    }
+
+    receiver = (self :: @Self, c :: Checker, ac: Access, b: Base)
+               Res<TyId, AllocError> {
+        c.opaque(b.ty).match({
+            true  => c.types.unknown(),
+            false => self.known_receiver(c, ac, b),
+        })
+    }
+
+    known_receiver = (self :: @Self, c :: Checker, ac: Access, b: Base)
+                     Res<TyId, AllocError> {
+        self.load_actuals(c).try();
+        found ::= c.alloc.Vec<Found>();
+        c.members_of(b.ty, ac.name.text, found).try();
+        first_hidden(found, self.ctx.module).match({
+            Ok(f) => c.hidden_member(ac, f),
+            None  => self.reachable(c, ac, b, found),
+        })
+    }
+
+    reachable = (
+        self  :: @Self,
+        c     :: Checker,
+        ac    : Access,
+        b     : Base,
+        found : Vec<Found>
+    ) Res<TyId, AllocError> {
+        c.refuse_actor_payloads(b.ty, self.actuals).try();
+        (found.len > 0).match({
+            true  => {
+                got = self.method(c, found).try();
+                self.actuals.get(0).match({
+                    None    => Ok(got),
+                    Ok(arg) => c.actor_spawn_ret(
+                        b.ty,
+                        ac.name.text,
+                        arg.ty,
+                        got
+                    ),
+                })
+            },
+            false => self.ufcs(c, ac, b),
+        })
+    }
+
+    method = (self :: @Self, c :: Checker, found: Vec<Found>)
+             Res<TyId, AllocError> {
+        c.pick_fitting(found, self.actuals).try().match({
+            Ok(f) => self.signature(c, f.ty, 1),
+            None  => self.by_arity(c, found),
+        })
+    }
+
+    by_arity = (self :: @Self, c :: Checker, found: Vec<Found>)
+               Res<TyId, AllocError> {
+        c.pick_arity(found, self.actuals.len + 1).match({
+            None  => self.first_found(c, found),
+            Ok(f) => self.signature(c, f.ty, 1),
+        })
+    }
+
+    first_found = (self :: @Self, c :: Checker, found: Vec<Found>)
+                  Res<TyId, AllocError> {
+        found.get(0).match({
+            None  => c.types.unknown(),
+            Ok(f) => self.signature(c, f.ty, 1),
+        })
+    }
+
+    // Free-function method syntax prepends the receiver to the actuals.
+    ufcs = (self :: @Self, c :: Checker, ac: Access, b: Base)
+           Res<TyId, AllocError> {
+        all ::= c.alloc.Vec<Actual>();
+        all.add(Actual(
+            ty: b.ty,
+            is_lambda: false,
+            arity: 0,
+            named: false,
+            span: self.node.span
+        )).try();
+        self.actuals.loop((h, a) { all.add(a).try() });
+        self.decl(c, ac.name.text, Ok(b.ty), all)
+    }
+
+    indirect = (self :: @Self, c :: Checker) Res<TyId, AllocError> {
+        ty = c.type_of(self.call.callee, self.ctx).try();
+        self.signature(c, ty, 0)
+    }
+
+    signature = (self :: @Self, c :: Checker, ty: TyId, off: usize)
+                Res<TyId, AllocError> {
+        c.sig_lambdas(self.call, ty, off, self.ctx).try();
+        c.sig_args_handle_check(self.node, self.call, ty, off, self.ctx).try();
+        c.fn_ret(self.node, ty)
+    }
+}
+
+CallCheck = (a: Alloc, id: ExprId, node: Expr, call: Call, ctx: Ctx)
+            CallCheck {
+    CallCheck(
+        id: id,
+        node: node,
+        call: call,
+        ctx: ctx,
+        actuals: a.Vec<Actual>()
+    )
+}
+
 // ---------------------------------------------------------------------
 // QUERY: the type of a call
 // ---------------------------------------------------------------------
@@ -144,18 +380,11 @@ call_callee_at = (tree: Ast, id: ExprId) Expr {
     })
 }
 
-// `id` is the CALL's own node id, and it is threaded rather than
-// derived: an `Expr` is a value and carries no id, so the only place
-// that knows which node this is, is the query that was asked about it.
-// It is the key `chosen` writes the resolution under.
+// Check one call and record its chosen declaration and instantiation.
 call_type* = (c :: Checker, id: ExprId, node: Expr, call: Call, ctx: Ctx)
              Res<TyId, AllocError> {
-    callee = call_callee(c.tree, call);
-    callee.kind.match({
-        Access(a) => c.member_call(id, node, call, a, ctx),
-        Name(n)   => c.named_call(id, node, call, n.text, ctx),
-        _         => c.indirect_call(node, call, ctx),
-    })
+    check ::= c.alloc.CallCheck(id, node, call, ctx);
+    check.run(c)
 }
 
 actuals_of = (c :: Checker, args: Vec<Arg>, ctx: Ctx, out :: Vec<Actual>)
@@ -209,59 +438,8 @@ value_actual = (c :: Checker, a: Arg, ctx: Ctx) Res<Actual, AllocError> {
 // `f(..)`
 // ---------------------------------------------------------------------
 
-named_call = (
-    c    :: Checker,
-    id   : ExprId,
-    node : Expr,
-    call : Call,
-    name : str,
-    ctx  : Ctx
-) Res<TyId, AllocError> {
-    actuals ::= c.alloc.Vec<Actual>();
-    c.actuals_of(call.args, ctx, actuals).try();
-    is_res_ctor(name).match({
-        true  => c.res_ctor_type(name, actuals),
-        false => c.print_or_call(id, node, call, name, actuals, ctx),
-    })
-}
-
-// THE PRINT SUGAR HAS A TYPE, AND IT IS `()`.
-//
-// `println(..)` is "sugar for `<the Env in scope>.out.println(..)`",
-// and no declaration of that name exists to resolve against — so a call
-// through it fell all the way to `no_overload`, found no candidate at
-// all, stayed silent by the rule above, and was answered with poison.
-// Poison agrees with everything, so `println("x")` was a legal value of
-// whatever type the context asked for. That is the poison mechanism
-// being spent on a value that is not a mistake: the sugar owes no
-// diagnostic, it simply returns nothing, and `()` is the type that says
-// so. `gen_c_print.zen` has said the same all along — "a print is a
-// statement sequence whose value is unit".
-//
-// THE TWO NAMES ARE `gen_c_print.is_print`'s, and they have to be: sema
-// answering `()` for a name the backend does not recognise as a print
-// would hand codegen an unresolved call wearing a real type.
-print_or_call = (
-    c       :: Checker,
-    id      : ExprId,
-    node    : Expr,
-    call    : Call,
-    name    : str,
-    actuals : Vec<Actual>,
-    ctx     : Ctx
-)
-                Res<TyId, AllocError> {
-    is_print_sugar(name).match({
-        true  => c.print_type(call),
-        false => c.local_or_decl_call(id, node, call, name, actuals, ctx),
-    })
-}
-
-// A PRINT IS THE ONE CALL WHOSE ARGUMENTS HAVE NO PARAMETERS TO OWE.
-// No declaration resolves, so `param_literal` never walks them, and a
-// match written here had nothing at all holding its arms together:
-// `println("{}", b.match({ true => 1, false => false }))` compiled and
-// printed the 0 the `match_arms_disagree*` tests exist to stop.
+// Print sugar returns unit and still checks that each argument's match arms
+// agree without a formal parameter type.
 print_type = (c :: Checker, call: Call) Res<TyId, AllocError> {
     call.args.loop((h, a) { c.check_arms_agree(a.value).try() });
     c.types.prim("()")
@@ -298,35 +476,6 @@ first_ty = (c :: Checker, actuals: Vec<Actual>) Res<TyId, AllocError> {
     })
 }
 
-local_or_decl_call = (
-    c       :: Checker,
-    id      : ExprId,
-    node    : Expr,
-    call    : Call,
-    name    : str,
-    actuals : Vec<Actual>,
-    ctx     : Ctx
-)
-                     Res<TyId, AllocError> {
-    c.lookup(name).match({
-        None  => c.decl_call(id, node, call, name, None, actuals, ctx),
-        Ok(b) => c.local_sig_ret(id, node, call, b.ty, actuals, ctx),
-    })
-}
-
-local_sig_ret = (
-    c       :: Checker,
-    id      : ExprId,
-    node    : Expr,
-    call    : Call,
-    ty      : TyId,
-    actuals : Vec<Actual>,
-    ctx     : Ctx
-) Res<TyId, AllocError> {
-    settled = c.instantiate_sig(id, ty, actuals).try();
-    c.sig_ret(node, call, settled, 0, ctx)
-}
-
 // Record how a call instantiates a generic closure parameter for lowering.
 instantiate_sig = (c :: Checker, id: ExprId, ty: TyId, actuals: Vec<Actual>)
                   Res<TyId, AllocError> {
@@ -351,54 +500,6 @@ instantiate_fn_sig = (
     c.subst(ty, inst)
 }
 
-// A declaration of that name: a function to resolve against, or a type
-// to construct.
-//
-// The functions are tried FIRST and the type only when none matches,
-// which is the fix for the bootstrapper's §9: `World* = (a: Alloc, tree:
-// Ast) Res<World, AllocError>` declared beside `World* = { .. }` is the
-// pairing `std.collections` uses for `Vec`, and matching the struct's
-// fields positionally instead of the function is what made three
-// constructors in this folder unwritable.
-decl_call = (
-    c       :: Checker,
-    id      : ExprId,
-    node    : Expr,
-    call    : Call,
-    name    : str,
-    recv    : Res<TyId>,
-    actuals : Vec<Actual>,
-    ctx     : Ctx
-)
-            Res<TyId, AllocError> {
-    cands ::= c.alloc.Vec<Cand>();
-    c.cands_of(ctx.module, name, cands).try();
-    c.travelled_cands(name, recv, cands).try();
-    // THE FREE FORM OF A UFCS NAME REACHES THE SAME FUNCTION THE DOT
-    // DOES (#771). `x.f(a)` arrives as `ufcs_call`, which prepends the
-    // receiver and hands `decl_call` a real `recv` — so the travelled
-    // pool above answers it. But UFCS says those are ONE call surface,
-    // and `f(x)` arrives HERE, where `recv` is `None`: the pool was
-    // never asked, sema answered silence, and CODEGEN refused with
-    // `cannot resolve` — right line, wrong pass. When there is no
-    // receiver the receiver IS argument zero, so ask the SAME pool the
-    // dot asks, through its type. The pool's own gates still hold: only
-    // an exported function whose FIRST parameter takes that type joins,
-    // already-present candidates are not added twice, and `<T>` swallows
-    // nothing it did not swallow at the dot.
-    recv.match({
-        Ok(_) => Ok(()),
-        None  => actuals.get(0).match({
-            None  => Ok(()),
-            Ok(a) => c.travelled_cands(name, Ok(a.ty), cands),
-        }),
-    }).try();
-    c.first_matching(cands, actuals).try().match({
-        Ok(k) => c.chosen_ret(id, node, call, k, actuals, ctx),
-        None  => c.construct_or_fail(id, node, call, name, recv, cands, ctx),
-    })
-}
-
 first_matching = (
     c       :: Checker,
     cands   : Vec<Cand>,
@@ -416,52 +517,7 @@ first_matching = (
     Ok(hit)
 }
 
-construct_or_fail = (
-    c     :: Checker,
-    id    : ExprId,
-    node  : Expr,
-    call  : Call,
-    name  : str,
-    recv  : Res<TyId>,
-    cands : Vec<Cand>,
-    ctx   : Ctx
-)
-                    Res<TyId, AllocError> {
-    defs ::= c.alloc.Vec<Def>();
-    c.world.defs_of(ctx.module, name, defs).try();
-    type_def_of(defs).match({
-        None  => unresolved(c, node, call, name, recv, cands),
-        Ok(d) => c.construct_def(id, node, call, d, ctx),
-    })
-}
-
-// A CALL THROUGH A RECEIVER IS A MEMBER THAT IS NOT THERE, and that is a
-// different sentence from "no overload matches". `b.size()` where `size`
-// belongs to `Bag` has no candidate BECAUSE `size` is not on `Box` — so
-// the diagnostic has to name the type that was asked, and land on the
-// name after the dot rather than on the receiver expression. Reported
-// here whether or not a candidate of the name exists anywhere: for a
-// receiver call this IS the diagnostic, and nothing else in the folder
-// owes one.
-unresolved = (
-    c     :: Checker,
-    node  : Expr,
-    call  : Call,
-    name  : str,
-    recv  : Res<TyId>,
-    cands : Vec<Cand>
-) Res<TyId, AllocError> {
-    recv.match({
-        Ok(ty) => c.no_such_method(call, name, ty),
-        None   => c.no_overload(node, name, cands),
-    })
-}
-
-// A NAME A BOUND DECLARED IS NOT A NAME THE TYPE NEVER HEARD OF, even
-// when no impl supplies it. `alloc.create<Node>()` reaches nothing here
-// and is not a mistake — `gen_c_alloc.zen` writes that body — so this
-// asks `bound_declares` and not the member table, which is the question
-// whose answer is `no` for both.
+// Bound-declared intrinsic methods may be lowered without an ordinary member.
 no_such_method = (c :: Checker, call: Call, name: str, ty: TyId)
                  Res<TyId, AllocError> {
     bound_declares(c, ty, name).try().match({
@@ -486,38 +542,11 @@ report_no_method = (c :: Checker, call: Call, name: str, ty: TyId)
     c.types.unknown()
 }
 
-// The name after the dot. A receiver call always has an `Access` callee
-// — that is what made it one — and the span is read back off the node
-// rather than threaded through six signatures that have no other use
-// for it.
+// Span of the member name in a receiver call.
 callee_name_span = (c: Checker, call: Call) Span {
     c.tree.expr_at(call.callee).kind.match({
         Access(a) => a.name.span,
         _         => nowhere(),
-    })
-}
-
-// CONSTRUCTING IS A RESOLUTION TOO, recorded by `construct` for the same
-// reason a call is: `Checker* = { .. }` beside `Checker* = (a: Alloc,
-// ..)` is two declarations of one name, and which of them a call site
-// meant is decided here and nowhere else.
-//
-// A MODULE IS NOT A CONSTRUCTOR. `is_type_def` answers about a `DefKind`
-// and an alias is a type declaration by kind — but `reseat = vec` aliases
-// a MODULE, and constructing it invented a nominal type of the alias's own
-// name that nothing declares. That is how an unstarred `reseat` inside
-// `vec` became callable through a name that never meant it.
-construct_def = (
-    c    :: Checker,
-    id   : ExprId,
-    node : Expr,
-    call : Call,
-    d    : Def,
-    ctx  : Ctx
-) Res<TyId, AllocError> {
-    c.alias_module(d.id).match({
-        None   => construct(c, id, call, d, ctx),
-        Ok(mi) => c.module_not_a_value(node.span, d.name, mi),
     })
 }
 
@@ -545,31 +574,8 @@ no_overload = (c :: Checker, node: Expr, name: str, cands: Vec<Cand>)
     c.types.unknown()
 }
 
-chosen_ret = (
-    c       :: Checker,
-    id      : ExprId,
-    node    : Expr,
-    call    : Call,
-    k       : Cand,
-    actuals : Vec<Actual>,
-    ctx     : Ctx
-) Res<TyId, AllocError> {
-    c.resolve_call(id, k.id).try();
-    c.check_bounds(k, actuals, node.span).try();
-    c.arg_literals(call.args, k.params, recv_off(call, actuals)).try();
-    ret = c.instantiate(id, call, k, actuals, ctx).try();
-    params ::= c.alloc.Vec<TyId>();
-    c.settled_params(id, k, params).try();
-    c.arg_lambdas(call.args, params, recv_off(call, actuals), ctx).try();
-    c.args_handle_check(call.args, params, recv_off(call, actuals), ctx).try();
-    Ok(ret);
-}
-
-// ONE SEAT FOR THE HANDLE-AS-ARGUMENT REFUSAL. Lambda arguments are
-// skipped — their bodies are already typed through `arg_lambdas`, and a
-// lambda is the one legal inward path for a handle. Every other
-// argument whose settled formal cannot receive handles inward is the
-// bug #782 names: accepted here in silence, `zu_l1h` undeclared in cc.
+// Lambda arguments are the only legal inward path for a loop handle. Other
+// arguments are checked against their settled formal types here.
 args_handle_check = (
     c      :: Checker,
     args   : Vec<Arg>,
@@ -585,10 +591,7 @@ args_handle_check = (
     Ok(());
 }
 
-// `k.params` STILL NAMES THE CALLEE'S OWN `T`, and the caller's body is
-// the one that will be lowered — a `Var` owned by `loop` means nothing
-// to the frame the closure was written in. So the walk reads back what
-// `instantiate` settled and asks about THOSE types.
+// Substitute the chosen call-site arguments into the candidate parameters.
 settled_params = (c :: Checker, id: ExprId, k: Cand, out :: Vec<TyId>)
                  Res<(), AllocError> {
     c.resolved_inst(id).match({
@@ -597,19 +600,7 @@ settled_params = (c :: Checker, id: ExprId, k: Cand, out :: Vec<TyId>)
     })
 }
 
-// A LAMBDA ARGUMENT'S BODY IS STATEMENTS, AND STATEMENTS ARE TYPED.
-// `sema_own.own_lambda` has walked `l.body` since the day it was
-// written; the type walk had no equivalent, so `(h, v) { x: i32 = true;
-// }` was checked by nothing at all while the identical bind one line
-// out was refused.
-//
-// AFTER RESOLUTION, for the reason `arg_literals` is above it: only the
-// chosen candidate knows what `(h, v)` ARE, and typing the body before
-// it is picked would type it against parameters that do not exist yet.
-//
-// ONCE PER LAMBDA, which is why this hangs off the places resolution
-// ENDS rather than off `actual_of`: a second walk is a second copy of
-// every diagnostic in the body.
+// Type each lambda body once, after resolution supplies its parameter types.
 arg_lambdas = (
     c      :: Checker,
     args   : Vec<Arg>,
@@ -633,11 +624,8 @@ arg_lambda = (c :: Checker, id: ExprId, params: Vec<TyId>, i: usize, ctx: Ctx)
     })
 }
 
-// The same shape as `check_body`: mark the scope, bind the parameters,
-// walk, release. What is NOT the same is `ctx` — it is passed through
-// untouched, because a `.try()` in a closure body propagates out through
-// the call and answers to the enclosing `ret`; what the closure itself
-// returns is decided by nothing here.
+// Type a closure in a temporary parameter scope. The enclosing return context
+// is retained because `.try()` propagates through the call.
 lambda_body = (c :: Checker, id: ExprId, l: Lambda, sig: TyId, ctx: Ctx)
               Res<(), AllocError> {
     ptys ::= c.alloc.Vec<TyId>();
@@ -682,11 +670,7 @@ resolve_lambda_inst = (
     Ok(())
 }
 
-// "A closure passed to a function whose signature is already known
-// infers its parameter types FROM that signature" — and a written
-// annotation still wins over it, which is what `param_type` answers.
-// Where the signature says nothing the hole is bound: it agrees with
-// everything, so the parameter reports nothing rather than nonsense.
+// A written parameter type wins; otherwise infer it from the chosen signature.
 lambda_param = (c :: Checker, p: Param, ptys: Vec<TyId>, i: usize, ctx: Ctx)
                Res<TyId, AllocError> {
     p.type.match({
@@ -702,51 +686,20 @@ sig_param = (c :: Checker, ptys: Vec<TyId>, i: usize) Res<TyId, AllocError> {
     })
 }
 
-// A PARAMETER THE CALL DID NOT SETTLE IS POISON, NOT ITS OWN `Var`.
-// `settled_param` is the predicate `param_holds` asks a few lines above,
-// for the same reason: an unsubstituted variable expects nothing of the
-// value, so nothing is checked either way.
-//
-// AND `Checker.expr_memo` IS KEYED BY NODE, so whatever this binds is
-// what `gen_c_op.operand_type` reads back at lowering time — the backend
-// asks sema for the type of an operand rather than deriving it. A `Var`
-// or a hole memoized there is not "no answer", it is an answer the
-// backend cannot lower: `loop<R: Range<T>, T>` settles no `T`, and
-// `(v == 3)` inside its body became "comparing values that are not
-// scalars" for a comparison that lowers perfectly well from the
-// backend's own reading. Poison is the one type it knows to step around.
+// Lowering cannot emit an unsubstituted parameter type; use poison when the
+// call signature has not settled it.
 settled_or_poison = (c :: Checker, ty: TyId) Res<TyId, AllocError> {
     c.settled_param(ty).match({ true => Ok(ty), false => c.types.unknown() })
 }
 
-// WHETHER PARAMETER ZERO HAS AN ARGUMENT, derived and not plumbed:
-// `ufcs_call` prepends the receiver to the ACTUALS resolution matched
-// on, and `actuals_of` is otherwise one-for-one with the written
-// arguments — so the difference is 1 for `x.f(a)` and 0 for `f(a)`.
-//
-// `arg_literals` documented this offset from the day it was written and
-// the one call site passed 0. So `x.f(a)` checked `a` against the
-// RECEIVER's type; `check_literal` is silent when that is not an integer
-// type, which kept an assertion that was already written and already
-// tested inert for every dotted call in the language.
+// UFCS actuals include the receiver; written arguments do not.
 recv_off = (call: Call, actuals: Vec<Actual>) usize {
     actuals.len - call.args.len
 }
 
-// RESOLUTION PICKED THE CANDIDATE ON THE FAMILY, so somebody still has
-// to ask about the value. `fits` is `assignable`, and `assignable` reads
-// "a literal's type comes from its context" as: an `int` agrees with
-// every integer type — which is right about `narrow(3000000000)` being a
-// call to `narrow` and says nothing about 3000000000 not being an i32.
-//
-// AFTER RESOLUTION AND NOT DURING IT. A candidate that a literal
-// overflows is still the candidate the author meant; refusing it during
-// the fit would silently pick a wider overload instead of naming the
-// mistake, and with no wider one in scope would report "no overload
-// matches" for a call whose only fault is one digit too many.
-//
-// `off` IS THE RECEIVER — `recv_sig_fits`' rule, and `recv_off` above
-// is where this call site decides it.
+// Check literal ranges after selecting the overload. Literal family matching
+// chooses the candidate; the chosen parameter width determines whether the
+// value itself fits. `off` skips an implicit receiver.
 arg_literals* = (c :: Checker, args: Vec<Arg>, params: Vec<TyId>, off: usize)
                Res<(), AllocError> {
     i ::= off;
@@ -757,10 +710,7 @@ arg_literals* = (c :: Checker, args: Vec<Arg>, params: Vec<TyId>, off: usize)
     Ok(());
 }
 
-// A VARIADIC CALL HAS NO PARAMETER HERE, and a parameter nobody declared
-// expects nothing of the argument. The length is asked rather than
-// `ty_at`'s `UNRESOLVED`, which is type zero — whichever type that
-// happens to be interned as.
+// Variadic arguments beyond the declared prefix have no expected type.
 param_literal = (c :: Checker, id: ExprId, params: Vec<TyId>, i: usize)
                 Res<(), AllocError> {
     (i < params.len).match({
@@ -769,25 +719,13 @@ param_literal = (c :: Checker, id: ExprId, params: Vec<TyId>, i: usize)
     })
 }
 
-// ONE QUESTION ASKED OF TWO SHAPES: a literal is asked whether it fits
-// the declared type, and a match is several values standing in one
-// place, so every ARM is asked the same thing (`sema_hoist.check_arms`,
-// the rule itself and never a second copy of it). Resolution picked the
-// candidate on the FIRST arm's type and no arm speaks for the rest —
-// which is how `g(b.match({ true => 1, false => false }))` reached an
-// `i32` parameter as a 0 nobody wrote.
+// Apply a parameter's expected type to both direct literals and match arms.
 param_wants = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
     c.check_literal(id, want).try();
     c.param_holds(id, want)
 }
 
-// A PARAMETER DECLARED `T` EXPECTS NOTHING YET, and `assignable` says
-// so — every type reaches an unsubstituted variable. So `id(b.match({
-// true => 1, false => false }))` had a `want` that agreed with both
-// arms, which is the same silence as having no parameter at all. In
-// both cases the arms are their own authority and owe their join, not
-// the declaration. Variadics arrive here through `param_literal`'s
-// other branch for the same reason.
+// Without a settled parameter type, match arms must agree with one another.
 param_holds = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
     c.settled_param(want).match({
         true  => c.check_arms(id, want),
@@ -802,159 +740,6 @@ settled_param = (c: Checker, want: TyId) bool {
 // ---------------------------------------------------------------------
 // `x.f(..)`
 // ---------------------------------------------------------------------
-
-member_call = (
-    c    :: Checker,
-    id   : ExprId,
-    node : Expr,
-    call : Call,
-    ac   : Access,
-    ctx  : Ctx
-) Res<TyId, AllocError> {
-    // THE CALL WRITTEN BESIDE THIS ACCESS IS THE EXEMPTION #772's refusal
-    // reads. Marked BEFORE anything types the callee, because typing it is
-    // what reaches `settled` — through `static_access` when the base names
-    // a type (`Duration.millis(2)`, whose callee resolves as an ordinary
-    // member read first), while a value receiver (`v.grow()`) never passes
-    // `settled` at all. Presence says "read through its call"; absence is
-    // the #772 mistake, a method standing where its return value was wanted.
-    c.callee_access.set(call.callee, true).try();
-    // THE WALK'S OWN CALLS ARE ASKED ABOUT FIRST (`sema_meta.zen`):
-    // the field walk itself, the handle's two verbs, and the instance
-    // projection `recv.at(field)` are the evaluator's questions, not
-    // member calls — one dispatch, answered or handed back `Ordinary`,
-    // so this function and the evaluator cannot drift apart about what
-    // the walk is.
-    c.meta_member_call(id, node, call, ac, ctx).try().match({
-        Answered(ty) => Ok(ty),
-        Ordinary     => c.ordinary_member_call(id, node, call, ac, ctx),
-    })
-}
-
-ordinary_member_call = (
-    c    :: Checker,
-    id   : ExprId,
-    node : Expr,
-    call : Call,
-    ac   : Access,
-    ctx  : Ctx
-) Res<TyId, AllocError> {
-    // A `@meta(..)` BASE IS THE EVALUATOR'S QUESTION BEFORE IT IS A CALL,
-    // and a CALL is all this function ever sees of it: the count's chain
-    // (`@meta(T).fields().len`) is decided one level up, at its `.len`
-    // (`sema_member.member_access` -> `sema_meta.meta_len_chain`), so
-    // whatever still arrives here — a bare `@meta(T).fields()`, or any
-    // other call written on a Meta — is the WALL. Refused by name rather
-    // than resolved: `.fields` binds nowhere, and letting it fall through
-    // would hunt for a free function by that name and answer a name error
-    // instead of the refusal the wall owes.
-    c.tree.expr_at(ac.base).kind.match({
-        Meta(_) => {
-            target = c.tree.expr_at(ac.base);
-            c.meta_refused(target)
-        },
-        _       => {
-            b = base_of(c, ac.base, ctx).try();
-            b.is_type.match({
-                true  => c.static_call(node, call, ac, b.ty, ctx),
-                false => c.receiver_call(id, node, call, ac, b, ctx),
-            })
-        },
-    })
-}
-
-// `Slot.Left(cell)` — a variant carrying a payload IS the function that
-// builds one, so this is an ordinary call through it.
-//
-// ORDINARY, NOT IDENTICAL: a variant ctor's `.ret` is the enum at the
-// declaration's own parameters (`variant_ctor` builds it from `cs.payload`
-// as written), and extracting it raw is how `Opt.Some(41)` typed its let
-// `Opt<Var>` — free parameter mangled into the C symbol. A generic
-// function's call instantiates its return from what the arguments say
-// (`sema_apply.instantiate`); a variant's does the same, in
-// `variant_call_type`. Everything else here keeps `fn_ret`'s answers.
-static_call = (
-    c    :: Checker,
-    node : Expr,
-    call : Call,
-    ac   : Access,
-    ty   : TyId,
-    ctx  : Ctx
-) Res<TyId, AllocError> {
-    got = c.static_access(call.callee, node, ac, ty, ctx).try();
-    c.sig_lambdas(call, got, 0, ctx).try();
-    c.is_case(ty, ac.name.text).try().match({
-        true  => c.variant_call_type(call, ty, ac.name.text, ctx),
-        false => c.fn_ret(node, got),
-    })
-}
-
-receiver_call = (
-    c    :: Checker,
-    id   : ExprId,
-    node : Expr,
-    call : Call,
-    ac   : Access,
-    b    : Base,
-    ctx  : Ctx
-) Res<TyId, AllocError> {
-    c.opaque(b.ty).match({
-        true  => c.types.unknown(),
-        false => c.known_receiver_call(id, node, call, ac, b, ctx),
-    })
-}
-
-// LAW 6 BEFORE OVERLOAD RESOLUTION, and the same gate `sema_member.zen`
-// puts before `pick`. A call resolves its own callee against the member
-// table rather than going through `access_type`, so a method the asking
-// module may not see arrives here and nowhere else — and a rule enforced
-// on `v.grow` but not on `v.grow()` is enforced on the spelling nobody
-// writes. Before, not after: a hidden member is not a candidate that
-// loses to another, and falling through to `ufcs_call` would report it
-// as a name the type does not have.
-known_receiver_call = (
-    c    :: Checker,
-    id   : ExprId,
-    node : Expr,
-    call : Call,
-    ac   : Access,
-    b    : Base,
-    ctx  : Ctx
-)
-                      Res<TyId, AllocError> {
-    actuals ::= c.alloc.Vec<Actual>();
-    c.actuals_of(call.args, ctx, actuals).try();
-    found ::= c.alloc.Vec<Found>();
-    c.members_of(b.ty, ac.name.text, found).try();
-    first_hidden(found, ctx.module).match({
-        Ok(f) => c.hidden_member(ac, f),
-        None  => c.reachable_call(id, node, call, ac, b, found, actuals, ctx),
-    })
-}
-
-reachable_call = (
-    c       :: Checker,
-    id      : ExprId,
-    node    : Expr,
-    call    : Call,
-    ac      : Access,
-    b       : Base,
-    found   : Vec<Found>,
-    actuals : Vec<Actual>,
-    ctx     : Ctx
-) Res<TyId, AllocError> {
-    c.refuse_actor_payloads(b.ty, actuals).try();
-    (found.len > 0).match({
-        true  => {
-            got = c.method_call(node, call, found, actuals, ctx).try();
-            actuals.get(0).match({
-                None    => Ok(got),
-                Ok(arg) => c.actor_spawn_ret(b.ty, ac.name.text, arg.ty, got),
-            })
-        },
-        false => c.ufcs_call(id, node, call, ac, b, actuals, ctx),
-    })
-}
 
 refuse_actor_payloads = (c :: Checker, recv: TyId, actuals: Vec<Actual>)
                          Res<(), AllocError> {
@@ -990,58 +775,8 @@ actor_payload_unsafe = (c: Checker, ty: TyId) bool {
     })
 }
 
-// A method's receiver is its first parameter — "a method is a UFCS
-// function whose first parameter happens to be named `self`" — so the
-// arity a call site sees is one less than the signature's.
-//
-// DECLARED PARAMETER TYPES FIRST, AND ARITY ONLY AS A FALLBACK. This
-// asked arity alone, and arity is the half of the rule that cannot
-// separate `toString(self, out :: Sink)` from `toString(self, a:
-// Alloc)` — both are two. So the answer was whichever the member table
-// listed first, for a name whose whole point is that the ARGUMENT
-// decides. `display.zen` says it where the two are declared: "overload
-// resolution picks between them on the declared parameter type: a buffer
-// or an allocator."
-//
-// The arity fallback is kept and is not laziness: `fits` is a question
-// about types, and where a receiver's type is not settled, or the
-// signature is variadic, it answers `false` for every candidate.
-// Falling back leaves every call that resolves today resolving the same
-// way, so this can only change an answer where a strictly better one
-// exists.
-method_call = (
-    c       :: Checker,
-    node    : Expr,
-    call    : Call,
-    found   : Vec<Found>,
-    actuals : Vec<Actual>,
-    ctx     : Ctx
-) Res<TyId, AllocError> {
-    c.pick_fitting(found, actuals).try().match({
-        Ok(f) => c.sig_ret(node, call, f.ty, 1, ctx),
-        None  => c.by_arity_ret(node, call, found, actuals, ctx),
-    })
-}
-
-by_arity_ret = (
-    c       :: Checker,
-    node    : Expr,
-    call    : Call,
-    found   : Vec<Found>,
-    actuals : Vec<Actual>,
-    ctx     : Ctx
-) Res<TyId, AllocError> {
-    c.pick_arity(found, actuals.len + 1).match({
-        None  => c.first_found_ret(node, call, found, ctx),
-        Ok(f) => c.sig_ret(node, call, f.ty, 1, ctx),
-    })
-}
-
-// The first member whose declared parameters accept these arguments.
-// FIRST and not "the only one": two members accepting the same call is
-// an overload set a call site cannot tell apart, and that is an error AT
-// THE DECLARATION — `check_overloads` names both — because at a call
-// site the two are indistinguishable and there is nothing to report.
+// First member whose declared parameters accept these arguments. Duplicate
+// matching signatures are diagnosed at their declarations.
 pick_fitting = (c :: Checker, found: Vec<Found>, actuals: Vec<Actual>)
                Res<Res<Found>, AllocError> {
     hit: Res<Found> = None;
@@ -1097,89 +832,8 @@ fn_arity_is = (c: Checker, ty: TyId, want: usize) bool {
     c.types.at(ty).match({ Fn(f) => f.params.len == want, _ => false })
 }
 
-first_found_ret = (
-    c     :: Checker,
-    node  : Expr,
-    call  : Call,
-    found : Vec<Found>,
-    ctx   : Ctx
-) Res<TyId, AllocError> {
-    found.get(0).match({
-        None  => c.types.unknown(),
-        Ok(f) => c.sig_ret(node, call, f.ty, 1, ctx),
-    })
-}
-
-// "A free function whose first param is the type is callable as a
-// method." So the receiver becomes argument zero and resolution runs
-// exactly as it does for `f(x, ..)` — there is no second mechanism.
-ufcs_call = (
-    c       :: Checker,
-    id      : ExprId,
-    node    : Expr,
-    call    : Call,
-    ac      : Access,
-    b       : Base,
-    actuals : Vec<Actual>,
-    ctx     : Ctx
-)
-            Res<TyId, AllocError> {
-    all ::= c.alloc.Vec<Actual>();
-    all.add(Actual(
-        ty: b.ty,
-        is_lambda: false,
-        arity: 0,
-        named: false,
-        span: node.span
-    )).try();
-    actuals.loop((h, a) { all.add(a).try() });
-    c.decl_call(id, node, call, ac.name.text, Ok(b.ty), all, ctx)
-}
-
-indirect_call = (c :: Checker, node: Expr, call: Call, ctx: Ctx)
-                Res<TyId, AllocError> {
-    ty = c.type_of(call.callee, ctx).try();
-    c.sig_ret(node, call, ty, 0, ctx)
-}
-
-// A CALL THROUGH A SIGNATURE THAT IS ALREADY A TYPE — a member the
-// table answered with, a local holding a function, a variant
-// constructor, a callee that is an expression. `off` IS THE RECEIVER,
-// as `recv_off` decides it for the resolved-candidate path: a member's
-// first parameter is its `self` and the written arguments start at one.
-//
-// Nothing is instantiated here, so a generic member's own `T` reaches
-// the closure as itself. That is the same type the member's body is
-// checked at, and no worse an answer than the one its declaration gives.
-sig_ret = (
-    c    :: Checker,
-    node : Expr,
-    call : Call,
-    ty   : TyId,
-    off  : usize,
-    ctx  : Ctx
-) Res<TyId, AllocError> {
-    c.sig_lambdas(call, ty, off, ctx).try();
-    c.sig_args_handle_check(node, call, ty, off, ctx).try();
-    c.fn_ret(node, ty)
-}
-
-// THE SAME SEAT AS `chosen_ret`, ONE SURFACE OVER. `keep.add(h)` on a
-// `Vec<LoopHandle>` resolves here, not through `decl_call` — and the
-// refusal that #782 hung on the candidate path never ran, so zen said
-// yes and cc read `zu_l1h` undeclared out of the monomorphised `add`.
-// The signature is already a type, so its parameters ARE the settled
-// formals; the same skip-the-lambda rule applies, and the receiver
-// (`off`) is not an argument and is not asked.
-//
-// THE ONE SKIP THAT IS NOT A LAMBDA ARGUMENT: a callee whose NAME is a
-// local binding holds a body, not a declaration — `body(h, k, v)`
-// inside `map`, `pairs` — and the call is SPLICED
-// (`gen_c_inline.lower_closure_call`), the same legal inward path a
-// lambda argument takes. A member (`keep.add`) or a declaration
-// (`take`) compiles for real and is asked. Fail-open on purpose: a
-// local could only hold a real function through fn pointers, which the
-// backend does not lower.
+// Indirect calls use their settled signature for handle checks. Calls through
+// local closures are inlined, so loop handles may travel through them.
 sig_args_handle_check = (
     c    :: Checker,
     node : Expr,

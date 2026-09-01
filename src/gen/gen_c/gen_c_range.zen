@@ -1,31 +1,7 @@
-// src/gen/gen_c/gen_c_range.zen
-// What a RANGE is, and what one pass of it hands out.
-// `gen_c_loop.zen` owns the loop — which of the seven overloads a call
-// is, where `h.break` lands, and what the body's parameters are bound
-// to. This file owns the other half of the same construct: the thing
-// being walked. They split there because `range.zen` does: "Range" is
-// one name wearing two readings, and BOTH are here —
-//   CONCRETE. `Range(0, 5)` STORES its start and end, so a pass is a
-//   `usize` counter and the walk is a plain C for-loop.
-//   A BOUND. `Vec.impl(Range<T>, { start: 0, end: self.len, at ::= ..
-//   })` SUPPLIES them, so `start` and `end` are expressions read in the
-//   impl's own scope with `self` bound to the range, and a pass is
-//   whatever `at` returns.
-// A `None` FROM `at` ENDS THE WALK, and that is specified rather than
-// defensive: "a container whose length moved under the loop stops
-// rather than reading past itself." It leaves through `h.break`'s own
-// label, so it lands after the closing brace rather than inside
-// whatever construct the body opened.
-// THE BOUND IS RECOGNISED BY ITS SHAPE, never by its name. "A bound is
-// just which struct's shape do I need", so an impl satisfies `Range`
-// exactly when the struct it names declares `start` and `end` — the
-// same question `supplies_bounds` asks of a concrete range, asked of
-// the bound instead. Nothing here matches on the string "Range".
-// AND `at` IS INLINED RATHER THAN CALLED. There is no call node in the
-// source to resolve — the loop wrote it — so the impl's body is run
-// directly with its parameters bound to C text this backend already
-// emitted. `bind_text` is that, and it is the one binding form in the
-// folder that takes bytes rather than an expression id.
+// Range recognition and pass lowering. Concrete Range values store start/end;
+// bound implementations supply start/end expressions and optionally at. None
+// from at ends the walk. Bounds are recognized structurally, and synthesized
+// at calls inline the impl body with parameters bound to emitted C text.
 
 ExprId, Lambda = std.ast
 Function = std.ast
@@ -42,7 +18,7 @@ sym_local, sym_member, sym_variant = gen.gen_name
 RES_PATH = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
-declarator, declared_ret, struct_decl = gen.gen_c.gen_c_type
+declarator, declared_ret, struct_decl, res_value, is_res = gen.gen_c.gen_c_type
 intern_res_open, recv_inst, sub_with = gen.gen_c.gen_c_mono
 enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 Dest, block, deliver = gen.gen_c.gen_c_stmt
@@ -53,7 +29,7 @@ no_fold = gen.gen_c.gen_c_fold
 array_of = gen.gen_c.gen_c_array
 impl_field = gen.gen_c.gen_c_impl
 
-// a range that STORES its bounds
+// A range that stores its bounds.
 
 // Whether the range's own declaration STORES `start` and `end` rather
 // than supplying them through an impl. `Range(0, n)` does; a `Vec` does
@@ -92,12 +68,7 @@ struct_has_field = (s: Struct, name: str) bool {
     got
 }
 
-// a range whose bounds an IMPL supplies
-// The header's second reading, at the site. What the impl supplies is
-// COMPUTED FIELDS — `start` and `end` are expressions read in its own
-// scope with `self` bound to the range, not members to read off a
-// struct — plus `at`, the one thing the trait asks for: "walking is
-// at(start), at(start + 1), .. and a None ends the walk early".
+// A range whose impl supplies computed bounds and an optional at function.
 
 RangeImpl* = {
     decl*: DeclId,      // the RECEIVER's declaration, whose parameters
@@ -124,8 +95,7 @@ named_range_impl = (be :: CBackend, n: TyNamed)
     Ok(found.get(0));
 }
 
-// "An impl lives with the type, not with the trait", so only impls in
-// the module that declares the type are this type's.
+// Only impls in the type's declaring module belong to the type.
 keep_range_impl = (
     be  :: CBackend,
     n   : TyNamed,
@@ -232,10 +202,7 @@ add_if_bodied = (f: Function, out :: Vec<Function>) Res<(), AllocError> {
     f.body.match({ Ok(_) => out.add(f), None => Ok(()) })
 }
 
-// what a range hands out
-// One query, three callers — the loop's own type, the lowering, and
-// `gen_c_settle.zen`'s `find<R: Range<T>, T>` — because a `T` three
-// places disagree about is a C type mismatch nothing reports.
+// Pass type shared by loop typing, lowering, and range-bound settlement.
 
 // The `Res<T>` a pass of this range produces: a `usize` that cannot
 // miss for a range walking its own index space, and whatever `at`
@@ -315,23 +282,9 @@ range_element_type* = (be :: CBackend, rty: TyId)
                       Res<Res<TyId>, AllocError> {
     got = be.range_pass_type(rty).try();
     Ok(got.match({
-        Ok(t) => res_value_of(be, t),
+        Ok(t) => be.res_value(t),
         None  => None,
     }));
-}
-
-res_value_of* = (be :: CBackend, t: TyId) Res<TyId> {
-    be.check.types.at(t).match({
-        Res(r) => Ok(r.value),
-        _      => None,
-    })
-}
-
-// `impl_ctx` needs this for `has_ret`, and it is the same three-line
-// question `gen_c_decl.zen` asks; it lives here so the loop and the
-// range read one answer.
-is_res* = (be :: CBackend, want: TyId) bool {
-    be.check.types.at(want).match({ Res(_) => true, _ => false })
 }
 
 // A range whose `start` and `end` an impl supplies — a `Vec`.
@@ -400,14 +353,8 @@ lower_impl_range = (
     })
 }
 
-// THE SHAPE, AND WHY IT IS NOT `lower_bounded` WITH TWO READS SWAPPED.
-// `start` and `end` are EXPRESSIONS in the impl's own scope, so each of
-// them may need statements of its own before it, which is why `self` is
-// bound to the range temporary once and both are delivered into a
-// declared `usize` rather than written into a C loop head.
-// `at`'s `Res<T>` is the pass, and a tag that is not `Ok` leaves the
-// walk through the same `brk` label `h.break` uses — the header's
-// `None` from `at` ending the walk.
+// Impl bounds may spill, so evaluate them into usize locals with self bound to
+// the range temporary. A non-Ok at result exits through the loop break label.
 lower_impl_walk = (
     be   :: CBackend,
     id   : ExprId,
@@ -422,7 +369,7 @@ lower_impl_walk = (
     out  :: String
 )
                   Res<(), AllocError> {
-    elem    = res_value_of(be, pass).match({ Ok(t) => t, None => pass });
+    elem    = be.res_value(pass).match({ Ok(t) => t, None => pass });
     settled = be.settle_res(want, elem).try();
 
     rng = be.walk_temp(one, rty, ctx).try();
@@ -464,19 +411,12 @@ lower_impl_walk = (
     Ok(());
 }
 
-// walking a range whose bounds an impl supplies
-// The emission, as against the recognition above. `gen_c_loop.zen`
-// calls these in the order a pass runs them.
+// Lower an impl-supplied range in pass order.
 // The impl's `self`, bound to the range temporary. An ordinary local
 // holding a copy: the walk reads the range and never writes it, so
 // there is nothing to write through and no address to take.
-// BOUND AROUND THE IMPL'S OWN EXPRESSIONS AND NOTHING WIDER. The
-// receiver's name is very often `self`, and the loop is very often
-// written inside a method that has one — so a binding held across the
-// walk shadows the enclosing `self` and the BODY's `self.f(..)` reaches
-// the range instead. That compiled and resolved to nothing, which is
-// how it was found; the frame it belongs to is the impl's expression,
-// not the loop.
+// Bind the impl receiver only while lowering its expressions so it cannot
+// shadow an enclosing self in the loop body.
 bind_self = (be :: CBackend, ri: RangeImpl, rty: TyId, rng: str)
             Res<(), AllocError> {
     be.bind_text(be.self_name(ri), rty, rng)

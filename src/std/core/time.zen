@@ -1,12 +1,11 @@
-// std.core.time
-// a span, not a clock — reading the clock is authority (lives on Env);
+// A span, not a clock — reading the clock is authority (lives on Env);
 // describing a duration is arithmetic (lives here).
 //
 // ONE REPRESENTATION: a Duration is a nanosecond count, nothing else.
 // The unit is consumed at construction — `seconds(60)` IS
 // `Duration(ns: 6e10)` — so nothing later can ask which spelling made it.
 //
-// Five constructors, not an enum, because the unit doesn't SURVIVE
+// Five constructors, not an enum, because the unit does not survive
 // construction (unlike `IoError` or `Shape`, which a caller matches on
 // later): `Seconds(1)` and `Millis(1000)` are the same span, so as
 // variants `eq` would need to normalise first, `add` would need to
@@ -20,12 +19,8 @@ Duration* = {
     ns*: u64,
 }
 
-// The unit conversions, in. Each is a ufcs fn over `u64` — `seconds(60)`
-// and `n.seconds()` are the same call. NOT writable: `60.seconds()`
-// (a literal carries no member) or `Duration.seconds(60)` (a comment
-// here used to wrongly claim it was — `Duration.seconds` is a TYPE
-// lookup, for constants/variants, and `seconds` is neither; UFCS puts
-// it on `u64`, its first param, not on `Duration`).
+// Unit constructors are UFCS functions on u64: seconds(n) and n.seconds() are
+// the same call. They are not static Duration members.
 NS_PER_MICRO*  : u64 = 1000
 NS_PER_MILLI*  : u64 = 1000000
 NS_PER_SECOND* : u64 = 1000000000
@@ -37,9 +32,7 @@ millis*  = (n: u64) Duration { Duration(ns: n * NS_PER_MILLI) }
 seconds* = (n: u64) Duration { Duration(ns: n * NS_PER_SECOND) }
 minutes* = (n: u64) Duration { Duration(ns: n * NS_PER_MINUTE) }
 
-// and out. One accessor per constructor — asymmetry is a trap (build
-// from minutes, read only millis, and someone hand-divides and gets
-// it wrong). These TRUNCATE: `millis_of` is whole milliseconds fit,
+// One accessor per constructor. These truncate: `millis_of` is whole milliseconds fit,
 // not rounded — 1500us is 1ms + 500us, not 1.5ms.
 nanos_of*   = (self: Duration) u64 { self.ns }
 micros_of*  = (self: Duration) u64 { self.ns / NS_PER_MICRO }
@@ -47,7 +40,7 @@ millis_of*  = (self: Duration) u64 { self.ns / NS_PER_MILLI }
 seconds_of* = (self: Duration) u64 { self.ns / NS_PER_SECOND }
 minutes_of* = (self: Duration) u64 { self.ns / NS_PER_MINUTE }
 
-// AND HERE AN ENUM IS RIGHT — printing survives construction: two
+// Unit is an enum because presentation survives construction: two
 // callers can disagree about presentation without disagreeing about
 // the span. Keeping it in the VALUE instead would make
 // `Duration(Second, 1)` and `Duration(Milli, 1000)` two
@@ -75,7 +68,7 @@ unit_of* = (self: Duration) Unit {
     });
 }
 
-// how many of that unit, truncating — paired with unit_of for Display,
+// How many of that unit, truncating — paired with unit_of for Display,
 // neither storing the other's answer.
 count_in* = (self: Duration, u: Unit) u64 {
     u.match({

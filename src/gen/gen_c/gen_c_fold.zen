@@ -1,4 +1,3 @@
-// src/gen/gen_c/gen_c_fold.zen
 // Lower fold loops with one automatic accumulator.
 //
 // The seed initializes the accumulator, each iteration writes the body value
@@ -17,7 +16,7 @@ CBackend = gen.gen_c.gen_c_state
 LoopFrame = gen.gen_c.gen_c_frame
 unsupported = gen.gen_c.gen_c_report
 
-ctype, declarator = gen.gen_c.gen_c_type
+ctype, declarator, res_value = gen.gen_c.gen_c_type
 ty_of = gen.gen_c.gen_c_expr
 Dest, deliver = gen.gen_c.gen_c_stmt
 lower_walk, settle_res, bind_element = gen.gen_c.gen_c_loop
@@ -26,8 +25,7 @@ arg_value, recv_of = gen.gen_c.gen_c_shape
 has_var = sema.sema_inst
 literal_default = sema.sema_ty
 
-// The accumulator a fold threads, nothing for the five shapes that do
-// not — one automatic local, threaded by value; see the header.
+// One automatic accumulator, or no accumulator for non-fold loop shapes.
 Fold* = {
     cell*: str,
     ty*: TyId,
@@ -39,8 +37,7 @@ no_fold* = (be :: CBackend) Res<Fold, AllocError> {
     Ok(Fold(cell: "", ty: unknown, has: false));
 }
 
-// The sixth shape, as the header states it: one local seeded before the
-// first pass, and a result a walk does not have.
+// A fold seeds its local before the first pass and produces a result.
 lower_fold* = (
     be   :: CBackend,
     id   : ExprId,
@@ -90,9 +87,8 @@ lower_seeded = (
     })
 }
 
-// The accumulator's type is the SEED's: `init is the answer when there
-// is nothing to fold", so the two are one type by construction. The
-// expectation is the fallback, since a `Res<A>` names it too.
+// The seed determines the accumulator type; an expected Res payload is the
+// fallback while the seed remains unsettled.
 acc_type = (be :: CBackend, seed: ExprId, ctx: Ctx, want: TyId)
            Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
@@ -104,14 +100,7 @@ settled_acc = (be :: CBackend, got: TyId, want: TyId)
               Res<TyId, AllocError> {
     (be.check.is_unknown(got) || has_var(be.check, got)).match({
         false => Ok(got),
-        true  => res_value_of(be, want),
-    })
-}
-
-res_value_of = (be :: CBackend, want: TyId) Res<TyId, AllocError> {
-    be.check.types.at(want).match({
-        Res(r) => Ok(r.value),
-        _      => Ok(want),
+        true  => be.res_value(want).match({ Ok(value) => Ok(value), None => Ok(want) }),
     })
 }
 
@@ -183,9 +172,8 @@ seed_element = (be :: CBackend, seed: ExprId, ctx: Ctx)
     Ok(Ok(settled));
 }
 
-// The seed of the one shape that has one, read off the DECLARATION the
-// call resolved to rather than off the argument count: `loop(cond,
-// body)` also has two arguments and no seed at all.
+// Read the seed from the resolved fold declaration, not argument count;
+// loop(cond, body) also has two arguments.
 seed_arg = (be :: CBackend, id: ExprId) Res<ExprId> {
     be.loop_fn_at(id).match({
         None  => None,
@@ -218,9 +206,7 @@ call_seed = (be :: CBackend, c: Call) Res<ExprId> {
     })
 }
 
-// The result, written before the break label — see the file header.
-// The temporary was seeded `None` before the first pass; this is where
-// it becomes `Ok(acc)`.
+// Normal completion changes the result temporary from None to Ok(acc).
 write_fold_result* = (be :: CBackend, st: LoopFrame, fold: Fold)
                      Res<(), AllocError> {
     (fold.has && st.has_result).match({

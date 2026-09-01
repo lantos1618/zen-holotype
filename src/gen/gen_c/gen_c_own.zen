@@ -1,11 +1,11 @@
 // src/gen/gen_c/gen_c_own.zen
-// EVERY EXIT IS A SCOPE EXIT.
+// Every exit is a scope exit.
 // A block ends four ways: `.try()` returns through it, `h.break()` and
 // `h.next()` jump over it, or it falls off the end. All four must run
 // the same cleanup in the same order, so exactly one function says
 // what leaving a block does (`run_frame`); the four sites call it
 // rather than each remembering.
-// Order is DESIGN.md's: defers run LIFO, ALL of a block's defers run
+// Defers run LIFO, all of a block's defers run
 // before ANY of its drops (defer is registered ON THE BLOCK, drop
 // belongs TO THE VALUE — two stacks, not one interleaved one), and
 // drops then run in REVERSE DECLARATION ORDER (a binding may name what
@@ -15,19 +15,14 @@
 // enclosing block's record is the one storage certainly still alive
 // when the closure runs. This is not escaping-closure support and must
 // not grow into it.
-// ⚠ A LIFTED DEFER THUNK NEEDS NO NAME REMAPPING. The obvious design
-// gives the capture record fields of its own and rewrites every free
-// name in the closure body to `(*env).c0` — a second spelling for a
-// local, plus a `lower_name` hook. Instead, the record's fields carry
-// THE SAME MANGLED C NAMES the enclosing frame uses, and the thunk's
-// prologue re-declares those names as locals copied out of the record:
+// A lifted defer thunk keeps the enclosing frame's mangled names. Its capture
+// record fields use those names and the prologue re-declares local copies:
 //     static void zg_d1(void *zg_p) {
 //         zg_env1 *zg_e = (zg_env1 *)zg_p;
 //         int32_t zu_l1i = zg_e->zu_l1i;      /* the prologue */
 //         ...                                 /* the body, unchanged */
 //     }
-// so the closure body lowers through the ordinary `lower_name` path
-// with ordinary `LocalSlot`s. No remapping layer exists on purpose.
+// The closure body therefore uses ordinary lower_name and LocalSlot paths.
 // NOT DONE HERE: dropping a struct's fields, or a `Vec`'s elements.
 // Drop is not recursive — DESIGN.md gives `Vec.take` as how a
 // `Vec<T>` of Drop values is emptied.
@@ -60,14 +55,8 @@ enter_block* = (be :: CBackend, id: BlockId) Res<(), AllocError> {
     be.open_block(rec)
 }
 
-// THE DECLARATION DECIDES, and here it has to. A match with arms
-// `Ok(0)` and `open_record(be)` needs the two JOINED — an unconstrained
-// `Ok` literal against `Res<usize, AllocError>` — and the self-hosted
-// compiler and `bootstrap/` disagree about that join: bootstrap types
-// the match as the first arm then assigns the second in, emitting C
-// `cc` rejects. This once stopped self-hosting before the corpus ran.
-// Giving the match a function body removes the join: each arm checks
-// against a declared return type instead of its sibling.
+// The declared return type settles both match arms, including the
+// unconstrained Ok literal in the no-record case.
 block_record = (be :: CBackend, id: BlockId) Res<usize, AllocError> {
     be.writes_scope(id).match({
         false => Ok(0),
@@ -249,11 +238,8 @@ write_clear = (be :: CBackend, live: usize) Res<(), AllocError> {
     be.fmt("{} = 0;\n", name.view())
 }
 
-// THE STORE-SIDE MIRROR OF release_binding. `x = v` onto a binding that
-// holds a Drop value destroys what it displaces (issue 733): the store
-// used to overwrite the slot and walk away, so an arena, a file handle
-// or a lock held by the old value leaked -- exit 0, plausible stdout,
-// no diagnostic anywhere.
+// Store-side mirror of release_binding: replacing a Drop value destroys the
+// displaced generation before arming the replacement.
 // A NAME NAMES ONE STORAGE: the nearest tracked entry, the same one
 // release_binding answers through, and the entry carries the index and
 // type its own registration used. An inner shadow's store must not

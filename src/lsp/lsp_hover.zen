@@ -1,21 +1,5 @@
-// src/lsp/lsp_hover.zen
-// The type the checker already settled for the name under a position:
-//
-//     position -> to_pos -> told_at -> a memo -> Types.name_of
-//
-// `ast_named.told_at` covers declarations, written types and expressions;
-// this file only reads the corresponding sema memo. A missing part rejects
-// the whole compound answer, because a partial type is worse than `null`.
-//
-//   Sig      a function's name  -> its declaration, reprinted from the
-//                                  AST's names and the checker's types
-//   OfType   a written type     -> what `type_from_ast` resolved it to,
-//                                  and for a primitive what the prelude
-//                                  declares about it (doc line, members)
-//   OfValue  an expression      -> what `type_of` gave it
-//   Imported an import binding   -> `null`; it has a definition, not a
-//                                   separately memoized value or type
-//   Nothing  everything else    -> `null`, and see below
+// Renders types and signatures already settled by sema. Missing or poisoned
+// semantic information produces a hover whose `found` field is false.
 
 str, String = std.text
 Vec = std.collections
@@ -30,10 +14,6 @@ to_pos, to_wire, WirePos = lsp.lsp_pos
 Tell, told_at = std.ast.ast_named
 check_standalone, check_build = lsp.lsp_query
 
-// What a hover found. `found` is false both for a position covered by
-// nothing and for one whose type the checker never wrote down. `shown`
-// is TEXT AND NOT A TYPE NAME: a function's name answers with its
-// signature.
 Hover* = {
     found*: bool,
     shown*: str,
@@ -41,8 +21,6 @@ Hover* = {
     end*: WirePos,
 }
 
-// The type under a wire position in `text`, and the span to underline.
-// `name` is the client's URI, used verbatim as the standalone file name.
 hover_at* = (a: Alloc, name: str, text: str, line: usize, character: usize)
             Res<Hover, AllocError> {
     c ::= check_standalone(a, name, text).try();
@@ -51,8 +29,6 @@ hover_at* = (a: Alloc, name: str, text: str, line: usize, character: usize)
     said(c, a, text, told_at(c.tree, name, pos))
 }
 
-// Imported names need a workspace build. Its relative module name is what
-// source spans carry, so the lookup uses `checked.rel`, not the URI.
 hover_in* = (
     env       : Env,
     a         : Alloc,
@@ -67,7 +43,6 @@ hover_in* = (
     said(checked.c, a, text, told_at(checked.c.tree, checked.rel, pos))
 }
 
-// The shared slot already owns the checker; this reads it without rebuilding.
 hover_with* = (
     c         : Checker,
     a         : Alloc,
@@ -80,8 +55,6 @@ hover_with* = (
     said(c, a, text, told_at(c.tree, rel, pos))
 }
 
-// A position in nothing is not a failure — hovering a comment or
-// whitespace gets exactly this, turned into `null` by the server.
 no_type* = () Hover {
     Hover(
         found: false,
@@ -91,8 +64,6 @@ no_type* = () Hover {
     )
 }
 
-// The `Tell`, said — one `String`, thrown away unread if the arm could
-// not finish it.
 said = (c : Checker, a: Alloc, text: str, t: Tell) Res<Hover, AllocError> {
     out ::= a.String().try();
     t.match({
@@ -116,8 +87,6 @@ said = (c : Checker, a: Alloc, text: str, t: Tell) Res<Hover, AllocError> {
 
 nothing_found = () Res<Hover, AllocError> { Ok(no_type()) }
 
-// The span converted back out — the ONLY place a hover learns its wire
-// coordinates, `lsp_pos.zen`'s rule obeyed from the outside.
 wired = (text: str, span: Span, known: bool, out :: String)
         Res<Hover, AllocError> {
     Ok(Hover(
@@ -128,21 +97,6 @@ wired = (text: str, span: Span, known: bool, out :: String)
     ));
 }
 
-// --- the three answers -------------------------------------------------
-
-// A WRITTEN TYPE, resolved, and said in full. `type_from_ast`'s memo is
-// keyed on exactly this `TypeId`, so `i32` costs a `Map` lookup. What a
-// PRIMITIVE answers is more than its name: "a prelude declaration of a
-// primitive's name IS that primitive" (DESIGN.md:438), and that
-// declaration is the one place the language has anything to SAY about
-// `i32` — so the answer is the name, its first doc line, and its
-// exported members (`i32 — members: MIN, MAX, BITS`). A primitive the
-// prelude does not declare — and every type in `hover_at`, where there
-// is no prelude at all — still answers the bare RESOLVED name
-// (`Alias = Shape` hovers as `Shape`), which confirms the checker knows
-// it; a name that resolves to nothing answers `null`. Signatures keep
-// the bare name, through `write_ty` below: a reprinted parameter list
-// is no place for a doc comment.
 write_written_ty = (
     c   : Checker,
     id  : TypeId,
@@ -161,9 +115,6 @@ write_ty = (c : Checker, id: TypeId, out :: String) Res<bool, AllocError> {
     })
 }
 
-// The OfType answer for a resolved type: the prim's prelude note when
-// there is one, the declared type's shape when it has one, the plain
-// name otherwise.
 write_ty_named = (c : Checker, id: TyId, out :: String) Res<bool, AllocError> {
     poison_free(c, id).match({
         false => no_answer(),
@@ -175,12 +126,6 @@ write_ty_named = (c : Checker, id: TyId, out :: String) Res<bool, AllocError> {
     })
 }
 
-// THE SAME ANSWER FOR A VALUE, MINUS THE PRIMITIVE'S NOTE. A written
-// `i32` is a reader asking about `i32`, and the prelude's `MIN, MAX,
-// BITS` answers them; a local that HAPPENS to be an `i32` is not that
-// question, and hovering `s` to be told about MIN and MAX is noise on
-// the most common hover there is. A declared type expands either way:
-// "what is in this" is the same question whichever position asked it.
 write_ty_value = (c : Checker, id: TyId, out :: String) Res<bool, AllocError> {
     poison_free(c, id).match({
         false => no_answer(),
@@ -191,16 +136,6 @@ write_ty_value = (c : Checker, id: TyId, out :: String) Res<bool, AllocError> {
     })
 }
 
-// A DECLARED TYPE ANSWERS WITH ITS SHAPE, not with its name. `MyStruct`
-// alone tells a reader what they already typed; what they hovered to
-// find out is what is IN it, and the declaration is right there —
-// `decl_at` off the `TyNamed`'s own `DeclId`, no memo and no second
-// lookup. Same note a primitive gets, for the same reason: the
-// declaration is the one place the language has anything to SAY.
-//
-// THE NAME IS WRITTEN FIRST AND KEPT WHATEVER FOLLOWS. A declaration
-// that cannot be reached is not a reason to answer `null` — the type
-// resolved, which is what the hover was asked.
 write_named = (c : Checker, id: TyId, n: TyNamed, out :: String)
               Res<bool, AllocError> {
     c.types.write_name(id, out).try();
@@ -215,10 +150,6 @@ write_named = (c : Checker, id: TyId, n: TyNamed, out :: String)
     })
 }
 
-// The name first — it is the answer even when the prelude has nothing
-// to add — then the declaration's note. A miss is not a lookup failure
-// worth hiding the name over: `bool` answered exactly "bool" for
-// years, and lone-module hover still does.
 write_prim = (c : Checker, id: TyId, p: Prim, out :: String)
              Res<bool, AllocError> {
     c.types.write_name(id, out).try();
@@ -233,10 +164,6 @@ write_prim = (c : Checker, id: TyId, p: Prim, out :: String)
     })
 }
 
-// ` — `, the declaration's first doc line when it has one, and its
-// exported members — the starred ones, the surface a reader of the
-// hovered module can actually reach (`str`'s `data` is deliberately
-// absent). An unstarred member is the module's own business.
 write_prelude_note = (c : Checker, d: Def, out :: String) Res<(), AllocError> {
     decl_at(c.tree, d.id).match({
         None   => Ok(()),
@@ -244,9 +171,6 @@ write_prelude_note = (c : Checker, d: Def, out :: String) Res<(), AllocError> {
     })
 }
 
-// THE NOTE ITSELF, shared by the two ways in — a prelude primitive's
-// declaration and a named type's own. Reached from a `Decl` rather than
-// from a `Def` because that is the half both have.
 write_decl_note = (c : Checker, dd: Decl, all: bool, out :: String)
                   Res<(), AllocError> {
     doc = doc_block(c.alloc, c.tree, dd.leading).try();
@@ -257,30 +181,15 @@ write_decl_note = (c : Checker, dd: Decl, all: bool, out :: String)
     write_members(c, dd, Shown(joined: joiner(doc), all: all), out)
 }
 
-// WHO THE MEMBER LIST IS FOR, and it is two different readers. A
-// PRIMITIVE'S note documents a public surface — `str`'s `data` is
-// deliberately absent, an unstarred member being the module's own
-// business. A NAMED TYPE'S note answers "what is in this", asked from
-// inside the module that usually declares it, where the starred half
-// alone is an empty popup for the common struct: nothing in
-// `MyStruct = { a: i32 }` is starred, and `MyStruct — ` with nothing
-// after it is worse than no note.
 EXPORTED_ONLY: bool = false
 
 WHOLE_SHAPE: bool = true
 
-// What the member list needs from the note above it: the bytes that
-// join the two, and whether unexported members count. Bundled because
-// they are decided together at one call and neither means anything
-// alone.
 Shown = {
     joined: str,
     all: bool,
 }
 
-// ` — ` opens a note, `; ` continues one, and a SENTENCE THAT ALREADY
-// ENDED gets a space: `…the test one directory up.; members: x: i32`
-// puts a semicolon after a full stop.
 joiner = (doc: str) str {
     (doc.len == 0).match({
         true  => " — ",
@@ -303,21 +212,8 @@ write_members = (c : Checker, dd: Decl, shown: Shown, out :: String)
     Ok(());
 }
 
-// `members: ` labels a struct's list and NOT an enum's: `Fast | Slow`
-// is what the variants ARE, written the way the declaration writes them,
-// and a label in front of it would be describing the punctuation.
 MEMBERS: str = "members: "
 
-// EACH MEMBER WITH ITS TYPE, which is the whole reason to list them:
-// `a, b` names what a reader already sees in the file they are hovering
-// FROM, and `a: i32, b = () i32` is what they opened the popup for.
-//
-// A MEMBER WHOSE TYPE DID NOT RESOLVE KEEPS ITS NAME. The whole-answer
-// rule this file is written against — one unresolved part discards the
-// answer — belongs to a SIGNATURE, where a missing type changes what
-// the signature means. A note is decoration: dropping the hover because
-// one member of nine is poisoned would answer `null` at a position that
-// resolved fine.
 write_member_run = (c : Checker, ms: Vec<Member>, all: bool, body :: String)
                    Res<(), AllocError> {
     list  ::= c.alloc.String().try();
@@ -373,8 +269,6 @@ write_typed = (
     })
 }
 
-// `: i32` when the type resolves, nothing when it does not — written
-// into a scratch first so a half-written suffix never reaches the note.
 write_type_suffix = (c : Checker, ty: Res<TypeId>, body :: String)
                     Res<(), AllocError> {
     ty.match({
@@ -390,17 +284,6 @@ write_type_suffix = (c : Checker, ty: Res<TypeId>, body :: String)
     })
 }
 
-// A function member is its DECLARATION, the same reprint a hover on the
-// name itself answers with — `write_decl_sig` and not a second spelling
-// of it.
-//
-// A SIGNATURE THAT WILL NOT REPRINT FALLS BACK TO THE NAME, which is
-// where the whole-answer rule stops applying. `str`'s members take
-// `@Self`, which has no `type_memo` entry, so the strict reading listed
-// one member of five and silently dropped `is_empty`, `get`, `index`
-// and `slice` — a note that says less than the four-word one it
-// replaced. The name alone is not a guess about a type; it is the
-// member, which is what the list is of.
 write_fn_member = (
     c     : Checker,
     f     : Function,
@@ -426,10 +309,6 @@ write_fn_member = (
     })
 }
 
-// A VARIANT IS ITS PAYLOAD, and an enum with no payloads is still worth
-// listing: `Fast | Slow` is the answer to "what can this be".
-// Unexported is not a question an enum has — a variant carries the
-// declaration's own visibility.
 write_variant_run = (c : Checker, vs: Vec<Variant>, body :: String)
                     Res<(), AllocError> {
     vs.loop((h, i, v) {
@@ -460,29 +339,6 @@ separate = (body :: String) Res<(), AllocError> {
     (body.len() > 0).match({ true => body.add(", "), false => Ok(()) })
 }
 
-// The declaration's prose, and TWO RULES DECIDE WHICH PROSE IT IS.
-//
-// THE BLANK LINE MAKES IT THE DECLARATION'S. A leading run holds
-// everything back to the previous declaration, so the first comment in
-// it is the FILE HEADER whenever the declaration is the first in its
-// module. A `Blank` piece clears what came before it, because a blank
-// line is how this tree already separates a header from what follows.
-//
-// THE FIRST SENTENCE, WHICH IS NOT THE FIRST LINE. Prose wraps, so one
-// line of it answered "The OTHER module. Nothing here is ever hovered;
-// it exists so that" — cut mid-clause, which reads as a broken hover
-// rather than as a short one. But the whole block is not the answer
-// either: `bool`'s prelude comment goes on to explain DESIGN.md:438 to
-// a compiler maintainer, and 400 characters of that is not what a
-// reader hovering `bool` asked.
-//
-// So lines are joined until one ENDS A SENTENCE. `bool`'s first line
-// does and is unchanged; `Point`'s does not and gains the rest of its
-// clause. A block that never terminates gives all of itself, which is
-// the honest reading of a comment with no sentence in it.
-//
-// A bare `//` spacer says nothing and contributes nothing, rather than
-// putting a double space in the middle of a sentence.
 doc_block = (a: Alloc, tree: Ast, run: TriviaRun) Res<str, AllocError> {
     doc ::= a.String().try();
     Range(after_last_blank(tree, run), run.len).loop((h, i) {
@@ -501,18 +357,12 @@ doc_block = (a: Alloc, tree: Ast, run: TriviaRun) Res<str, AllocError> {
     Ok(doc.view());
 }
 
-// Whether the prose so far closes a sentence. Empty is not ended — a
-// block has to say something before it can stop.
 ended = (doc: str) bool {
     (doc.len > 0) && terminal(doc.index(doc.len - 1))
 }
 
 terminal = (b: u8) bool { b.is_in(['.', '!', '?']) }
 
-// Where the declaration's own block starts: one past the last `Blank`,
-// or the beginning when the run has none. Found in its own pass because
-// a `String` here has no `clear` and building the answer twice is
-// cheaper than inventing one.
 after_last_blank = (tree: Ast, run: TriviaRun) usize {
     from ::= 0;
     Range(0, run.len).loop((h, i) {
@@ -545,10 +395,6 @@ comment_text = (text: str) str {
     text.slice(from, text.len);
 }
 
-// AN EXPRESSION, from the memo the checker filled while typing the body.
-// A MISS IS ANSWERED AS "NOTHING", not a made-up type: `design_lsp.md`'s
-// open question 6 leaves unverified whether `expr_memo` covers every
-// expression after `check_all`.
 write_val = (c : Checker, e: ExprId, out :: String) Res<bool, AllocError> {
     c.expr_memo.get(e).match({
         None     => no_answer(),
@@ -556,14 +402,6 @@ write_val = (c : Checker, e: ExprId, out :: String) Res<bool, AllocError> {
     })
 }
 
-// THE ONE PLACE A `TyId` BECOMES TEXT, and the one place poison is
-// stopped. `Ty.Unknown` is what sema interns for "a type I could not
-// compute and have already reported"; `Types.write_name` spells it
-// `<unknown>`, which would show a user a hover naming a type that does
-// not exist — so an unsettled type answers `null` instead. Was the
-// common case before `hover_in`: every imported name resolved to
-// poison, measured at 4/12 answers on a file that imports something vs
-// 10/12 on one that does not, and still applies with no workspace.
 write_ty_id = (c : Checker, id: TyId, out :: String) Res<bool, AllocError> {
     poison_free(c, id).match({
         false => no_answer(),
@@ -571,11 +409,6 @@ write_ty_id = (c : Checker, id: TyId, out :: String) Res<bool, AllocError> {
     })
 }
 
-// Poison anywhere inside this type — STRUCTURAL AND NOT TEXTUAL:
-// checking the rendered name for `<unknown>` would put a second spelling
-// of sema's marker here. `Ty` is a closed nine-variant enum, so the walk
-// is total. `Infer` is NOT poison: `_` in `Res<Cfg, _>` is a hole law 6
-// permits, honest to show a user who wrote one.
 poison_free = (c : Checker, id: TyId) bool {
     c.types.at(id).match({
         Unknown   => false,
@@ -594,17 +427,6 @@ all_poison_free = (c : Checker, ids: Vec<TyId>) bool {
     every;
 }
 
-// A FUNCTION'S NAME ANSWERS WITH ITS DECLARATION, reprinted:
-// `add = (a: i32, b: i32) i32`, not `(i32, i32) i32` (what
-// `Types.write_name` would produce from the function's TYPE) — two
-// signatures differing only in parameter names are one type, so the
-// names come from the AST and are assembled here (`ast_node.zen`:
-// "`(i32, i32) i32` says nothing about which `i32` is which").
-//
-// NOTHING IN IT IS INVENTED, except bounds on type parameters, dropped:
-// `<T: Eq + Hash>` prints as `<T>` (printing a bound's own type members
-// would double the length of the common case) — said here so a reader
-// does not assume `T` is unbounded.
 write_decl_sig = (
     c   : Checker,
     f   : Function,
@@ -640,9 +462,6 @@ write_tparams = (f: Function, out :: String) Res<(), AllocError> {
     })
 }
 
-// A TYPE THAT WAS NOT WRITTEN IS NOT GUESSED. `Param.type` is absent in
-// a closure and `Function.ret` in a lambda; the whole signature is
-// discarded rather than printing `()` and being silently wrong.
 write_opt_ty = (c : Checker, t: Res<TypeId>, out :: String)
                Res<bool, AllocError> {
     t.match({
@@ -651,27 +470,6 @@ write_opt_ty = (c : Checker, t: Res<TypeId>, out :: String)
     })
 }
 
-// The two answers to "did that resolve", as functions so sibling match
-// arms share one type.
 an_answer = () Res<bool, AllocError> { Ok(true) }
 
 no_answer = () Res<bool, AllocError> { Ok(false) }
-
-// --- what is still `null`, on purpose ----------------------------------
-//
-// Listed so nobody rediscovers them — every one is a position a user
-// WILL hover:
-//
-//   - A STRUCT'S OR ENUM'S OWN NAME (`Foo` in `Foo = { .. }`): a
-//     declaration site has no `TypeId`; a USE hovers, the declaration
-//     does not. Fix needs `sema_denote.zen`'s `type_from_ast`.
-//   - A PATTERN BINDER (`n` in `Ok(n) => ..`): no pattern memo,
-//     `Binding` released at scope exit. `design_lsp.md` §2 prices the
-//     fix at L3.
-//   - A TYPE PARAMETER AT ITS DECLARATION (`T` in `<T>`): same shape as
-//     a struct name; `T` used as a type hovers.
-//   - AN IMPORTED NAME, WHEN THERE IS NO WORKSPACE: `hover_in` answers
-//     it; without one `Vec` in `Vec = std.collections` has no type, and
-//     the import declaration's `Imported` result deliberately remains a
-//     definition-only answer either way.
-//   - A CLOSURE'S PARAMETER: `Param.type` is absent by construction.

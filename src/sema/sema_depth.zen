@@ -1,42 +1,10 @@
 // src/sema/sema_depth.zen
-// Why the instantiation set is finite, and where to blame when it is not.
+// Termination checking for generic instantiation. Expanding chains such as
+// `grow<T> -> grow<Vec<T>>` are stopped before monomorphization runs without
+// bound. The diagnostic points at the deepest call whose arguments grow.
 //
-// A monomorphising compiler answers one instantiation at a time, and
-// every single request is legitimate on its own. So nothing downstream
-// can notice that `grow<T>` calling `grow<Vec<T>>` asks for grow<i32>,
-// grow<Vec<i32>>, grow<Vec<Vec<i32>>>, ... forever. Measured on the nine
-// lines of `tests/must-fail/sema/infinite_monomorphisation.zen` before
-// this file existed: 60GB and 113 seconds, and that is the GOOD case,
-// where the machine had the memory to spare. On a smaller one the OS
-// kills the compiler, which is not a diagnostic.
-//
-// THE BLAME RULE IS THE WHOLE DESIGN, and it is why this is a file
-// rather than a counter in `sema_apply.zen`. A counter reports wherever
-// it happens to run out. For
-//
-//     ping<T> -> pong<Vec<T>> -> ping<Vec<T>> -> pong<Vec<Vec<T>>> -> ..
-//
-// that is an arbitrary one of the two calls, and only ONE is the
-// mistake: `pong<Vec<T>>` WIDENS its type argument, while `ping<T>`
-// forwards what it was handed and would be correct beside any other
-// callee. So the chain is kept as a stack and the diagnostic lands on
-// the innermost frame whose type arguments are structurally larger than
-// its caller's — the call the author has to change.
-//
-// A CHAIN RESTARTS AT A CONCRETE ARGUMENT, which is what keeps this
-// affordable. `f<i32>()` inside `g<T>` says nothing about `T`: the
-// callee's instantiation is fixed by the call site. So an edge whose
-// arguments mention none of the caller's parameters is not followed as a
-// continuation — it is a ROOT, walked once in its own right. Divergence
-// needs growth and growth needs the caller's parameter, so no infinite
-// chain is missed, and the walk costs (call sites x budget) rather than
-// the size of the monomorphised program.
-//
-// WHAT IT DOES NOT SEE, stated rather than hidden: a call reached as a
-// METHOD — `v.add(x)` found through `members_of` — records no
-// instantiation, so it is not an edge here. Divergence threaded through
-// a method chain is not caught yet. That direction is a false NEGATIVE
-// and it costs a missing diagnostic, never a wrong one.
+// Calls with concrete arguments start independent roots. Method calls do not
+// yet contribute instantiation edges, so method-only divergence is not covered.
 
 Decl, Struct, Member, Field, Span, nowhere = std.ast
 Alloc, AllocError = std.mem
@@ -52,15 +20,8 @@ Inst, InstEdge, subst, subst_list = sema.sema_inst
 has_var, zip, owner_of = sema.sema_inst
 enter_struct_tvars, member_type = sema.sema_member
 
-// HOW DEEP A CHAIN OF INSTANTIATIONS MAY GO before sema calls it
-// divergence, and it is the bootstrapper's number on purpose. The two
-// implementations have to agree about which programs are legal, and a
-// budget is exactly the kind of knob that would make them disagree on
-// nothing else. `bootstrap/sema.py`'s INSTANTIATION_DEPTH_BUDGET is 24;
-// so is this.
-//
-// A bad program fails the build. It never hangs and it never eats the
-// machine.
+// Maximum instantiation-chain depth before sema reports divergence. Keep this
+// value consistent across compiler implementations.
 DEPTH_BUDGET: usize = 24
 
 // One instantiation on the chain. `size` is the whole reason a frame is
@@ -80,10 +41,26 @@ Frame = {
 Walk = {
     frames :: Vec<Frame>,
     visited :: Map<str, bool>,
-    // ONE DIAGNOSTIC. Divergence is one mistake however many chains run
-    // through it, and a walk that reported per chain would print the
-    // same cycle once per entry into it.
+    // Stop after the first divergence diagnostic.
     done :: bool = false,
+
+    over_budget = (self: @Self) bool { self.frames.len > DEPTH_BUDGET }
+
+    blamed = (self: @Self) usize {
+        n = self.frames.len;
+        Range(1, n).find((i) { self.widens(n - i) }).match({
+            Ok(i) => n - i,
+            None  => n - 1,
+        })
+    }
+
+    widens = (self: @Self, i: usize) bool {
+        self.frame_size(i) > self.frame_size(i - 1)
+    }
+
+    frame_size = (self: @Self, i: usize) usize {
+        self.frames.get(i).match({ Ok(f) => f.size, None => 0 })
+    }
 }
 
 Walk* = (a: Alloc) Walk {
@@ -161,15 +138,13 @@ enter_now = (
 )
             Res<(), AllocError> {
     w.frames.add(Frame(name: name, span: span, size: c.args_size(args))).try();
-    over_budget(w).match({
+    w.over_budget().match({
         true  => c.blame(w),
         false => c.expand(owner, tvars, args, w),
     }).try();
     w.frames.take(w.frames.len - 1);
     Ok(());
 }
-
-over_budget = (w: Walk) bool { w.frames.len > DEPTH_BUDGET }
 
 // The callee's own calls, with its type parameters bound to what this
 // instantiation gave them. Visited once per (declaration, arguments):
@@ -299,7 +274,7 @@ enter_type_now = (
     w    :: Walk
 ) Res<(), AllocError> {
     w.frames.add(Frame(name: name, span: span, size: c.args_size(args))).try();
-    over_budget(w).match({
+    w.over_budget().match({
         true  => c.blame(w),
         false => c.expand_type(id, args, w),
     }).try();
@@ -438,7 +413,7 @@ field_step = (c :: Checker, n: TyNamed, span: Span, w :: Walk)
 // more at fault than the last one.
 blame = (c :: Checker, w :: Walk) Res<(), AllocError> {
     w.done = true;
-    w.frames.get(blamed(w)).match({
+    w.frames.get(w.blamed()).match({
         None  => Ok(()),
         Ok(f) => c.report(
             f.span.file,
@@ -446,25 +421,6 @@ blame = (c :: Checker, w :: Walk) Res<(), AllocError> {
             SemaFault.InstantiationDepth(NameFault(name: f.name))
         ),
     })
-}
-
-// Scanned from the top down, so the first hit is the DEEPEST widening
-// frame. Index 0 is never a candidate: a root has no caller to have
-// outgrown.
-blamed = (w: Walk) usize {
-    n = w.frames.len;
-    Range(1, n).find((i) { widens(w, n - i) }).match({
-        Ok(i) => n - i,
-        None  => n - 1,
-    })
-}
-
-widens = (w: Walk, i: usize) bool {
-    frame_size(w, i) > frame_size(w, i - 1)
-}
-
-frame_size = (w: Walk, i: usize) usize {
-    w.frames.get(i).match({ Ok(f) => f.size, None => 0 })
 }
 
 // ---------------------------------------------------------------------

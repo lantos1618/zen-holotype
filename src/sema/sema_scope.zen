@@ -1,23 +1,6 @@
-// src/sema/sema_scope.zen
-// A block, as a value, that may not leave its block.
-//
-// `@scope` "stands for the enclosing block, exactly as `h: LoopHandle`
-// stands for the enclosing loop" — a value with a lifetime, which
-// nothing else in the language has (every other rule here is about a
-// TYPE or a UNIQUENESS), so it isn't folded into `sema_own.zen` beside
-// the moves.
-//
-// NON-ESCAPING IS A FEATURE, NOT A LIMITATION: a closure registered on
-// a scope keeps its captures in that scope's own storage, which works
-// because the block outlives the closure by construction. Take the
-// restriction away and `defer` needs a heap record, which law 1 forbids
-// without an `Alloc`. Inward is fine: a helper registering cleanup on
-// its caller's block is the whole point.
-//
-// All three ways out are checked here — stored in a struct, returned,
-// captured by an escaping closure. The third needs "which closures
-// escape" and gets a narrow answer; what it doesn't cover is written
-// above `call_escapes` rather than left to be discovered.
+// Lifetime checks for `@scope` values and arena-backed views. A scope value
+// may be used by work that completes inside its block, but may not be returned,
+// stored in longer-lived data, or captured by an escaping closure.
 
 ExprId, BlockId, Block, Call, Struct = std.ast
 Paren, Access, Member, Function, Param, Span, TypeId = std.ast
@@ -329,10 +312,8 @@ type_is_alloc = (c :: Checker, tid: TypeId) bool {
 // AN ARENA-BACKED VIEW MAY NOT OUTLIVE THE ARENA
 //
 // `alloc ::= env.mem.alloc()` makes an ordinary scope-local value, so
-// `Arena.drop` frees its pages at the end of the body that made it. A
-// `str` from `buf.view()` points INTO those pages, so returning it
-// hands the caller freed memory — issue #788, where two calls to the
-// same helper print `a=  b=XY` with exit 0.
+// `Arena.drop` frees its pages at the end of the body. Returning a `str`
+// from `buf.view()` would therefore hand the caller freed memory.
 //
 // PROVENANCE, NOT SYNTAX, which is what makes this different from the
 // three `@scope` rules above: the walk taints a BINDING when its

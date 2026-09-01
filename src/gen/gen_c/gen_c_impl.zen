@@ -1,16 +1,7 @@
 // src/gen/gen_c/gen_c_impl.zen
-// Which function an IMPL supplies for a name, and at what arity.
-// Split out of `gen_c_member.zen` at 796 lines against an 800-line hard
-// cap, and the subject really is a second one: `gen_c_member.zen`
-// answers "what does a dot reach on this receiver", needing a `Site`
-// (the declaration that owns a type's members and its qualified-name
-// symbols). Nothing here needs one — an impl is found by the
-// DECLARATION it targets, so every entry point below takes a `DeclId`.
-// This file imports nothing from `gen_c_member.zen`, so the dependency
-// runs one way with no cycle to arrange around.
-// `by_arity` lives here for the same reason it's used here: an impl is
-// where two members of one name actually turn up, since a bound and a
-// type may each supply one.
+// Resolve functions and computed fields supplied by an impl. Searches are
+// keyed by the declaration the impl targets; receiver-site lookup remains in
+// `gen_c_member.zen`. Overload selection here narrows candidates by arity.
 
 Decl, Struct, Enum, Member, Function, Impl, Field, ExprId = std.ast
 AllocError = std.mem
@@ -23,21 +14,9 @@ tail_is_pack = sema.sema_vararg
 CBackend = gen.gen_c.gen_c_state
 last_is_variadic = gen.gen_c.gen_c_sink
 
-// A type may declare two members of one name. "Resolution is on
-// declared parameter types and arity", and `Cursor.peek()` and
-// `Cursor.peek(n)` are two functions — taking the first one emitted a
-// call to the wrong symbol with the right arguments, a bug `cc` caught
-// but two same-arity overloads would have hidden.
-// Arity is the half a backend can answer without redoing sema's rule.
-// The other half is `gen_c_member.zen`'s `pick_member`, which asks the
-// ARGUMENTS where arity cannot separate the candidates — `Display`
-// declares two `toString`s and both take two parameters.
-// A member of the wrong arity is the wrong member, and this once
-// answered with one: `found.get(0)` was the fallback for every miss, so
-// `Box`'s own `grow(self)` answered `b.grow(10)`, emitting a call to a
-// one-parameter symbol with two arguments ("too many arguments to
-// function ... Box4grow") — hiding the free `grow(b, by)` that
-// DESIGN.md says is in the same overload set.
+// Pick a member with the requested arity. Argument-type disambiguation is
+// handled by `gen_c_member.zen`; an arity miss must not fall back to a
+// differently shaped function.
 by_arity* = (be: CBackend, found: Vec<Member>, arity: usize) Res<Member> {
     Range(0, found.len).find((i) {
         found.get(i).match({
@@ -73,20 +52,9 @@ member_takes = (be: CBackend, m: Member, arity: usize) bool {
     })
 }
 
-// `...` is not a parameter, it's the statement that the list does not
-// end — `sema_cand.zen`'s `variadic_matches` reads it the same way —
-// so a variadic member's arity is a MINIMUM. `String.fmt(self :: @Self,
-// fmt: str, args: ...)` is the one member both `sb.fmt(" and ")` and
-// `sb.fmt("{} is {}", x, y)` reach; counting `...` as a parameter made
-// it unreachable from either.
-// An associated function declares no parameters at all, and asking
-// whether its last one is variadic used to trap on `0 - 1` (a `usize`
-// underflow inside `last_is_variadic`). That guard now lives where the
-// arithmetic is.
-// A `vararg<T>` TAIL IS THE SAME MINIMUM, asked separately because
-// `last_is_variadic` is the FORMAT DOOR's shape and must stay exactly
-// `...`: widening it would let a bodyless three-parameter `add` with a
-// typed pack be lowered as that door.
+// Variadic and `vararg<T>` tails make the declared arity a minimum. Keep the
+// two predicates separate: `last_is_variadic` also identifies the formatter
+// intrinsic, while a typed pack does not.
 fn_takes = (be: CBackend, f: Function, arity: usize) bool {
     (be.last_is_variadic(f) || tail_is_pack(be.tree, f)).match({
         true  => (arity + 1) >= f.params.len,
@@ -226,16 +194,9 @@ type_name = (d: Decl) str {
     })
 }
 
-// A GENERIC ENUM TARGET IS REFUSED, NOT LOWERED. `gen_c_mono.zen` reads
-// a declaration's type parameters off `Struct` alone — `decl_vars_of`,
-// `open_named_decl` and `enter_decl_tparams` all fall through for any
-// other kind — so an enum's `T` would bind to nothing and every
-// instantiation would mangle to one symbol. That is the plausible-wrong
-// -answer shape, so the backend says so instead of emitting it.
-// Nothing reaches this today for a second reason: a generic enum's
-// variant cannot be constructed at all (`codegen cannot resolve
-// `Full``), so no value exists to call a member on. The refusal is here
-// so that whichever is fixed first, this one cannot become silent.
+// Generic enum impls remain unsupported because monomorphisation currently
+// derives declaration parameters only from structs. Lowering one would leave
+// its variables unbound and collapse distinct instantiations onto one symbol.
 generic_enum* = (be :: CBackend, decl: DeclId) bool {
     decl_at(be.tree, decl).match({
         Ok(d) => generic_enum_decl(d),
@@ -271,23 +232,9 @@ impl_fn_at = (be :: CBackend, i: ImplId, name: str, out :: Vec<Member>)
     })
 }
 
-// The impl's own members, then the bound's defaults. "A struct whose
-// fields happen to be functions, used as a bound, is what other
-// languages call a trait", and `A.impl(B, {..})` supplies a value for
-// every field `B` declares — so a bodied member on `B` is a field the
-// bound ALREADY has a value for. `area` comes along free because it
-// "only ever needed a width and a height".
-// Both, not either/or. This once ran the bound only when the impl
-// block supplied nothing of that name — reading a NAME as the unit
-// when `sema_supply.zen` says the unit is an overload SET: `Display`
-// declares a `toString` taking a sink and a sealed one taking an
-// allocator; once an impl supplies the first, the second stops being a
-// candidate. So `p.toString(alloc)` lowered to the sink symbol with an
-// `Alloc` passed as a `Sink` — a record of NULL function pointers —
-// for a call sema had resolved correctly.
-// The order is the answer to an override: an impl entry restating a
-// default comes first and wins every tie below, which is what "the
-// impl supplies it" means.
+// Collect the impl's members followed by bodied defaults from its bound. Both
+// participate in one overload set; impl members lead so an explicit override
+// wins a tie without hiding differently shaped defaults.
 keep_impl_fn = (
     be   :: CBackend,
     i    : ImplId,

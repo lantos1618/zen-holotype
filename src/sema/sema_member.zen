@@ -1,28 +1,6 @@
-// src/sema/sema_member.zen
-// What a dot reaches, and what an impl owes.
-//
-// DESIGN.md: "there are no traits, only structs. A struct whose fields
-// happen to be functions, used as a bound, is what other languages call
-// a trait." So one member lookup serves a field, a constant and a method
-// alike, and a rule limiting bounds to structs-of-functions would reject
-// DESIGN.md's own `Rect` impl — two `f64` fields and one method.
-//
-// YOU SATISFY REQUIREMENTS; YOU NEVER IMPL STORAGE. A field the type
-// declares is storage; a field an impl supplies is COMPUTED — re-evaluated
-// on read, read-only, non-addressable, invisible to layout. `Found.computed`
-// carries this, and the type's own member always wins over an impl's,
-// since layout is fixed at declaration regardless of which impls link in.
-//
-// Covers three sources — the type's own body, its impls, and a type
-// parameter's bounds — compared by one selection rule against one
-// `Found` shape. `sema_bound.zen` covers the different question "what an
-// impl OWES"; `sema_static.zen` covers `Type.NAME`, which has no
-// receiver, impl or bound.
-//
-// THE BOUND IN SCOPE SELECTS, NEVER FILE ORDER: two impls supplying one
-// name is an error unless a generic in scope declares one of the two
-// bounds (`Checker.bounds`). With nothing in scope, the diagnostic names
-// BOTH impls, not just one side.
+// Member lookup across a type body, its impls, and in-scope bounds. A declared
+// field is storage; an impl-supplied field is computed, read-only, and
+// non-addressable. In-scope bounds, never file order, resolve competing impls.
 
 Expr, ExprId, Access, Span, TypeId, nowhere = std.ast
 Struct, Member = std.ast
@@ -514,9 +492,7 @@ not_writable = (c :: Checker, ac: Access, f: Found) Res<(), AllocError> {
     )
 }
 
-// `found.get(0)` written here rather than inline: a `Vec.get` on a
-// locally-bound Vec, inside an expression with an expectation, resolves
-// to `Map.get` at unknown type arguments. docs/SEMA_BOOTSTRAP_FIXES.md §11.
+// Keep the first-result lookup independent of an enclosing expectation.
 first_found* = (found: Vec<Found>) Res<Found> { found.get(0) }
 
 // ---------------------------------------------------------------------
@@ -924,13 +900,8 @@ struct_members = (
     })
 }
 
-// The `T` of `Vec<T>`, in scope in the members `Vec` declares — the same
-// reason a function's type parameters are in scope in its body. Nothing
-// did this for a struct before, so `Vec`'s own `get* = (self: @Self, i:
-// usize) Res<T>` reported `T` as undefined inside the declaration that
-// binds it. Pushes a `Ty.Var`, not the corresponding type ARGUMENT:
-// `TyVar` is nominal on its owner, so the `T` of `Vec` and the `T` of
-// `Map` can never be confused.
+// Enter a struct's type parameters while checking its members. These are
+// owner-qualified Ty.Var values, not the arguments of an instantiation.
 enter_struct_tvars* = (c :: Checker, s: Struct, mi: usize)
                      Res<(), AllocError> {
     owner = owner_of(c, mi, s.name.text).try();

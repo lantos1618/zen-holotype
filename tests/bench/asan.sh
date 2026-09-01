@@ -8,29 +8,12 @@
 # root holding std and the program as main.zen, so the compilation root is
 # the staging directory and never the filesystem.
 #
-# KNOWN-DELIBERATE LEAKS, two of them, both in the startup prologue and both
-# process-lifetime by design: the argv rows (src/gen/gen_c/gen_c_main.zen:156,
-# suppressed by name in tests/bench/lsan.supp) and the root arena state (the
-# first `env.mem.alloc()` in src/zen/zen.zen, reported with its top frame in
-# generated main). LSan suppressions match ANY frame, and every allocation
-# in the program sits under main -- so the arena block cannot be suppressed
-# by name without silencing every real leak. Instead this script reads the
-# report and fails on any leak whose top application frame is NOT one of the
-# two known startup sites. Do not "fix" that by widening the allowlist.
-#
-# THE POSITIVE CONTROL. Hand this script ANY ordinary executable -- a
-# wrapper earlier on PATH, a stale path, a copy of the compiler built with
-# no sanitizer in it -- and the run is spotless, exit 0, indistinguishable
-# from a clean tree: silence cannot tell "the detector found nothing" from
-# "there was no detector". So a run with NO LeakSanitizer report at all is
-# refused (exit 2) rather than believed. The prologue's two deliberate
-# blocks make that safe to demand: an instrumented compiler ALWAYS has
-# something to say here (today the root arena block, classified against the
-# allowlist below), so a silent run means the detector was not running --
-# which is exactly the vacuity a positive control exists to rule out. If
-# the prologue ever stops leaking, this gate refuses loudly instead of
-# passing silently; retire the demand deliberately and write down what
-# replaced it, as tests/asan-canary/main.reports did for #785.
+# THE POSITIVE CONTROL. A clean sanitizer run is meaningful only after proving
+# that this binary is instrumented and this host reports a known leak. The
+# compiler no longer has a deliberate process-lifetime leak, so the control is
+# separate: `nm` must find ASan's initialization hook in zen-asan, then the
+# leak_canary program must produce a LeakSanitizer report under the same host.
+# Only after both facts hold do we trust silence from the compiler itself.
 set -euo pipefail
 
 ZEN_ASAN=${1:-./zen-asan}
@@ -50,7 +33,6 @@ cp "$ROOT/tests/corpus/std/vec_grows_past_eight.zen" "$WORK/src/main.zen"
 
 echo "asan.sh: compiling corpus/std/vec_grows_past_eight under $ZEN_ASAN"
 export ASAN_OPTIONS=detect_leaks=1
-export LSAN_OPTIONS="suppressions=$ROOT/tests/bench/lsan.supp"
 
 set +e
 "$ZEN_ASAN" build "$WORK/src" --emit-c -o "$WORK/out.c" >"$WORK/out.log" 2>&1
@@ -58,49 +40,32 @@ code=$?
 set -e
 cat "$WORK/out.log"
 
-if [ "$code" -eq 0 ]; then
-    echo "asan.sh: exited 0 with no LeakSanitizer report." >&2
-    echo "" >&2
-    echo "asan.sh: THE CANARY IS QUIET. A sanitizer-built compiler always has" >&2
-    echo "  something to report here -- the startup prologue leaks two blocks by" >&2
-    echo "  design, and this script exists to classify them. A spotless run means" >&2
-    echo "  whatever this binary is, NO DETECTOR WAS RUNNING over it: a wrapper," >&2
-    echo "  a stale path, or a build without -fsanitize=address,leak. Silence" >&2
-    echo "  cannot tell 'found nothing' from 'looked for nothing', so this gate" >&2
-    echo "  refuses instead of passing." >&2
+if [ "$code" -ne 0 ]; then
+    echo "asan.sh: $ZEN_ASAN exited $code" >&2
+    exit 1
+fi
+
+if grep -Eq "ERROR: (AddressSanitizer|LeakSanitizer)" "$WORK/out.log"; then
+    echo "asan.sh: sanitizer finding in compiler run" >&2
+    exit 1
+fi
+
+if ! nm -D "$ZEN_ASAN" 2>/dev/null | grep -F '__asan_init' >/dev/null; then
+    echo "asan.sh: $ZEN_ASAN has no ASan initialization hook" >&2
     exit 2
 fi
 
-# Non-zero with no LSan report is a compile error or an ASan memory error:
-# both fail as-is -- they are findings, not vacuity.
-if ! grep -q "LeakSanitizer: detected memory leaks" "$WORK/out.log"; then
-    echo "asan.sh: $ZEN_ASAN exited $code with no leak report; failing as-is" >&2
-    exit 1
+"${CC:-cc}" -std=c99 -O0 -g -fsanitize=address,leak \
+    "$ROOT/tests/bench/leak_canary/main.c" -o "$WORK/asan-canary"
+set +e
+"$WORK/asan-canary" >"$WORK/canary.log" 2>&1
+canary_code=$?
+set -e
+if [ "$canary_code" -eq 0 ] || \
+   ! grep -q "LeakSanitizer: detected memory leaks" "$WORK/canary.log"; then
+    cat "$WORK/canary.log"
+    echo "asan.sh: deliberate leak canary was not reported" >&2
+    exit 2
 fi
 
-# The top application frame of each leak block: the first frame that is not
-# the allocator interceptor.
-tops=$(awk '
-    /^(Direct|Indirect) leak of/ { inblock = 1; got = 0; next }
-    inblock && /^(-|SUMMARY)/     { inblock = 0; next }
-    inblock && !got && / in / {
-        line = $0
-        sub(/.* in /, "", line); sub(/[ (].*/, "", line)
-        if (line !~ /^(malloc|calloc|realloc|strdup)$/) { print line; got = 1 }
-    }
-' "$WORK/out.log" | sort -u)
-
-# zg_argv_vec is suppressed upstream; what may legitimately remain is the
-# root arena state, whose top frame is generated main (the zen main, or C
-# main if the build inlines one step further).
-known='^(main|zu_f3_3zen3zen4mainO1_t4_3std3env3env3Env)$'
-bad=$(printf '%s\n' "$tops" | grep -vE "$known" || true)
-if [ -n "$bad" ]; then
-    echo "asan.sh: leak(s) with unexpected top frame(s): $bad" >&2
-    echo "asan.sh: only the startup prologue may leak; this is a real bug" >&2
-    exit 1
-fi
-
-echo "asan.sh: the detector spoke (LeakSanitizer report present)" \
-    "and only the known process-lifetime startup blocks leaked" \
-    "(argv rows, root arena state -- annotated above, deliberate)"
+echo "asan.sh: compiler run clean; instrumentation hook and deliberate-leak control both present"

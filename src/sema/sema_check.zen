@@ -1,14 +1,7 @@
-// src/sema/sema_check.zen
 // The query engine. Everything else in this folder is a question asked
 // of it.
-//
-// DESIGN.md decision 3: "Sema is memoized queries, not monolithic
-// passes. `type_of(node)`, `defs_of(name)`. This is the same machinery
-// as comptime memoization — build it once." So this file is not a walk
-// that computes everything; it is a table of answers, and a walk that
-// fills it in on demand.
-//
-// THE SHAPE OF A QUERY, and every one of them has it:
+// Sema is a set of memoized queries populated on demand. Each query follows
+// the same shape:
 //
 //     q(self :: @Self, key, ctx) Res<Answer, AllocError> {
 //         self.memo.get(key).match({
@@ -17,28 +10,9 @@
 //         })
 //     }
 //
-// The key is a node id, which is why `ast_id.zen` made ids `Eq + Hash`
-// and why `sema_id.zen` had to invent two more for the families the AST
-// holds by value. Ask `type_of` twice and the second answer costs a
-// `Map` lookup — which is the property an LSP needs, and the reason
-// hover is not a recompile.
-//
-// WHERE THE `Alloc` IS. Law 1 says anything that needs memory takes an
-// `Alloc`, and a memo table needs memory. It is a FIELD, set at
-// construction through `alloc.Checker(tree)` — as `Vec` and `Ast` do,
-// and as DESIGN.md blesses: "that is why `Vec` can store `alloc: Alloc`
-// by value". The law is satisfied where the allocator ENTERS, and every
-// query still says it can allocate the only way a signature can:
-// `Res<_, AllocError>`. A second `Alloc` parameter beside the one its
-// memo table already grows through would be two allocators for one table.
-//
-// A DIAGNOSTIC IS A VALUE (`sema_diag.zen`): the only `Err` in this file
-// is `AllocError`, which is what lets an LSP show four errors instead of
-// the first one.
-//
-// POISON, NOT CASCADE. A query that reports returns `Ty.Unknown`, and
-// `Unknown` is assignable to and from everything. One mistake, one
-// diagnostic.
+// Keys are stable node ids. Checker owns the allocator used by its memo tables;
+// query Err values are allocation failures only. Semantic diagnostics are
+// collected values, and a reported query returns Unknown to prevent cascades.
 
 Ast, ExprId, TypeId, Span = std.ast
 nowhere = std.ast
@@ -56,22 +30,8 @@ Diag, SemaFault, TypeFault = sema.sema_diag
 ExportFault = sema.sema_diag
 Inst, InstEdge = sema.sema_inst
 
-// One name in scope, and what it is.
-//
-// `mutable` is recorded HERE and enforced ELSEWHERE, which is the whole
-// reason it is a field rather than a check. `sema_recv.zen` reads it for
-// the receiver rule and `sema_own.zen` for use-after-move — both walk
-// bodies this file has already typed, so the scope stack is where the
-// fact lives and neither of them has to re-derive it.
-//
-// `param` is the same shape of fact for the LSP: a formal parameter and
-// a `let`-style local paint two colours (`design_lsp.md` §2, L4), and a
-// use site cannot re-derive which it was once the scope is gone.
-//
-// `span` is WHERE THE NAME WAS WRITTEN, and it is here because a
-// diagnostic about two bindings of one name has to name both of them.
-// The declaration is gone by the time the second one is read — the
-// scope stack is the only thing that still remembers it.
+// One scoped name. Mutability feeds receiver/ownership checks, param feeds LSP
+// classification, and span identifies the original binding in diagnostics.
 Binding* = {
     name*: str,
     ty*: TyId,
@@ -80,15 +40,8 @@ Binding* = {
     span*: Span,
 }
 
-// THE ACTIVE FIELD WALK'S TWO BINDERS. M4's `@meta(name: T).fields()
-// .loop((h, field) { .. })` checks its body once per field, and while it
-// does, this row is what a use of `h` or `field` is judged against:
-// `field.name` folds, `recv.at(field)` projects, `h.break()`/`h.next()`
-// are the loop's own verbs, and every other reading is refused
-// (`sema_meta.zen`). The spans are the parameters' OWN, so a body that
-// rebinds either name shadows the row rather than matching it —
-// `lookup` finds the new binding and its span answers for it.
-// `field` is the CURRENT field's name: the comptime half of the row.
+// Binders for the active @meta field walk. Parameter spans distinguish the
+// original binders from shadowing declarations; field is the current field.
 WalkBind* = {
     h_name*: str,
     h_span*: Span,
@@ -97,17 +50,8 @@ WalkBind* = {
     field*: str,
 }
 
-// What a query needs to know that its key does not carry.
-//
-// A node id names a node; it does not say which module the node is in,
-// what `@Self` means there, or what the enclosing function returns. Those
-// are threaded, and they are the reason a query takes a `ctx` beside its
-// key.
-//
-// `ret` and `has_ret` are what `.try()` answers to: "the enclosing
-// function must return a compatible Res", and a closure inherits its
-// caller's, because "a non-escaping closure may return through its
-// caller".
+// Query context not encoded in a node id: module, @Self, and enclosing return.
+// Closures inherit return context because try may return through their caller.
 Ctx* = {
     module*: usize,
     ret*: TyId,
@@ -122,125 +66,50 @@ Checker* = {
     types* :: Types,
     diags :: Vec<Diag>,
 
-    // the memo tables. They key on a node id, which is the whole
-    // reason ids exist rather than node values.
+    // Query results keyed by stable AST node ids.
     expr_memo* :: Map<ExprId, TyId>,
     type_memo* :: Map<TypeId, TyId>,
 
-    // WHAT `@meta(name: Type).name` FOLDED TO. The comptime evaluator's
-    // one answer (`sema_meta.zen`), keyed on the WRITTEN TYPE EXPRESSION,
-    // not on the access node: one syntactic access shape checked under
-    // two instantiations of one generic would otherwise share a row, and
-    // `Box<bool>` would read back `Box<i64>`'s name. Two spellings of one
-    // type are two rows even where their answers agree (`P2`, `Point`) —
-    // what the user WROTE is what folds. Written only on success, so a
-    // miss means "not a fold", never "folded to nothing". The backend
-    // reads it back through `meta_str`, handing over the `Meta` node's
-    // own type field.
+    // Successful `@meta(name: Type).name` folds, keyed by the written type.
     meta_memo* :: Map<TypeId, str>,
 
-    // WHAT `@meta(name: Type).fields().len` FOLDED TO, keyed on the
-    // written type expression for the same reason `meta_memo` above is:
-    // a count is a function of the type. A miss means "not a fold".
-    // The backend reads it back through `meta_count_of`, handing over
-    // the `Meta` node's own type field.
+    // Successful field-count folds, also keyed by the written type.
     meta_count_memo* :: Map<TypeId, usize>,
 
-    // WHICH CALLS ARE THE FIELD WALK, AND THE NAMES THEY UNROLL OVER.
-    // `@meta(name: T).fields().loop((h, field) { .. })` is checked ONCE
-    // PER FIELD at sema time (`sema_meta.meta_walk_chain`) and lowered
-    // as one unrolled block per name — this row is what carries the
-    // name list from the one phase to the other. Keyed on the CALL's
-    // own node: the walk is a fact about a site, not about a type, so
-    // no written-type keying is owed. A miss means "not a walk".
+    // Field-walk calls and the names each call unrolls over.
     meta_walks* :: Map<ExprId, Vec<str>>,
 
-    // WHICH ACCESSES ARE A WALK'S `field.name` READ. The fold itself is
-    // not recorded — the name it folds to changes with every pass, and
-    // the backend reads the CURRENT one off `walk_now` while it lowers
-    // that pass. Presence IS the answer; a miss means the ordinary
-    // member path.
+    // Accesses that read the current field walk's `field.name`.
     meta_name_reads* :: Map<ExprId, bool>,
 
-    // WHICH CALLS ARE A WALK'S INSTANCE PROJECTION `recv.at(field)`.
-    // Same discipline as `meta_name_reads`: the marker is recorded at
-    // sema, the per-pass field type and the field's spelling are
-    // recomputed or read fresh at lowering, from `walk_now`.
+    // Calls that project `recv.at(field)` in a field walk.
     meta_projs* :: Map<ExprId, bool>,
 
-    // THE ACTIVE WALK'S BINDER ROW, while sema checks a pass. A stack
-    // of one by construction — a nested walk is REFUSED rather than
-    // pushed (no recursion into the evaluator, so no step budget is
-    // owed; `docs/design_meta.md` §8) — kept a Vec so the refusal has
-    // something to ask.
+    // Active field-walk binder. Nested walks are rejected.
     walk_stack :: Vec<WalkBind>,
 
-    // THE FIELD THE BACKEND IS LOWERING A PASS FOR. Sema never pushes
-    // here; gen_c does, once per unrolled block, and the two read-back
-    // questions that change answer per pass — the projection's type
-    // (`walk_projection_type`) and the `field.name` fold — read the
-    // top. A stack because a walk body may contain an ordinary loop,
-    // which contains no push of its own: the top stays the walk's.
+    // Field currently lowered by the backend for an unrolled walk pass.
     walk_now :: Vec<str>,
 
-    // RE-CHECK DEPTH. While a walk's body is being checked once per
-    // field, `type_of` must not answer from the memo — the body's nodes
-    // are typed again BECAUSE the answer changes per field — so a
-    // nonzero depth bypasses the memo READ. The write stands
-    // (`compute_expr` is untouched), which is what leaves the last
-    // pass's rows for the backend to start from.
+    // Nonzero while a field-walk body is rechecked with per-field types.
     meta_recheck :: usize,
 
-    // WHICH TYPE SUPPLIED THIS FIELD READ — the bound that promised it,
-    // or the receiver's own declaration. "The bound in scope selects
-    // which impl is in view, never file order" is sema's, and by
-    // lowering the bound is gone. A miss means "ask the old way".
+    // Bound or declaration that supplied a field read.
     supply_memo* :: Map<ExprId, TyId>,
 
-    // WHICH DECLARATION DID THIS CALL MEAN. `sema_id.zen` names this as
-    // one of the three questions a declaration coordinate exists to be
-    // the key of, and it is the one nothing was recording.
-    //
-    // Overload resolution is sema's, and a backend that re-derives it
-    // from `defs_of` is a second, worse copy of the rule — it sees six
-    // declarations of `loop` and can only report an ambiguity sema had
-    // already settled. So the answer is written down where it is
-    // computed, and read back rather than recomputed.
-    //
-    // Only a call that RESOLVED is here. A `Res` constructor names no
-    // declaration, a call through a local names a value and not a
-    // declaration, and a call nothing matched has no answer to record —
-    // a miss means "ask the old way", never "there was no candidate".
+    // Declaration selected for each successfully resolved call.
     call_memo* :: Map<ExprId, DeclId>,
 
-    // WHICH NAME EXPRESSIONS DENOTE A FORMAL PARAMETER. Presence IS the
-    // answer — a miss means a local, a global, or a name nobody
-    // resolved, never "not a parameter". Written where resolution still
-    // holds the scope; read by `design_lsp.md` §2's L4 row.
+    // Name expressions that resolve to formal parameters.
     param_memo* :: Map<ExprId, bool>,
 
-    // WHETHER THIS ACCESS STANDS AS A CALL'S CALLEE. Written by
-    // `call_type` before the callee is typed, read by `settled`
-    // (sema_member.zen): a marked Fn-typed member is being read through
-    // the call written beside it — `W.make()`, `Duration.seconds(2)` —
-    // and an unmarked one is the #772 mistake, a method standing where
-    // its return value was wanted. Presence IS the answer; a miss means
-    // "standing as a value", never "was called".
+    // Access expressions used as a call's callee rather than as values.
     callee_access* :: Map<ExprId, bool>,
 
-    // WHAT DID THIS CALL INSTANTIATE ITS CALLEE WITH. The companion of
-    // `call_memo` and keyed the same way: a call to `<T>(x: T) T` picks
-    // a declaration AND a `T`, and only one of those two was being
-    // written down.
-    //
-    // The memo below is NOT re-keyed by it, and `sema_inst.zen` says
-    // why at length: a generic body is still checked exactly once,
-    // generically. What an instantiation changes is the answer at a
-    // CALL SITE, and `ExprId` already separates two call sites.
+    // Type-argument substitution selected at each generic call site.
     inst_memo* :: Map<ExprId, Inst>,
 
-    // EVERY INSTANTIATION EDGE, in resolution order. The listing
-    // `inst_memo` cannot give: see `InstEdge` above.
+    // Instantiation edges in resolution order.
     edges :: Vec<InstEdge>,
 
     // WHOSE BODY IS BEING CHECKED. The qualified name of the enclosing
@@ -650,8 +519,6 @@ Checker* = {
     bounds_of* = (self: @Self, name: str, out :: Vec<TyId>)
                  Res<(), AllocError> {
         self.bounds.loop((h, b) {
-            // hoisted for docs/SEMA_BOOTSTRAP_FIXES.md §10, which now
-            // records that gap CLOSED, to be re-tested before removal.
             ty = b.ty;
             b.name.eq(name).then(() { out.add(ty).try() });
         });
@@ -748,28 +615,9 @@ Checker* = {
             && self.assignable(g.error, w.error)
     }
 
-    // WHAT NOBODY HAS SUBSTITUTED YET AGREES WITH ANYTHING.
-    //
-    // THE CITATION HERE WENT STALE: this said `sema.zen` states that
-    // generic instantiation does not SUBSTITUTE, and that header now
-    // reads "INSTANTIATION SUBSTITUTES" — `sema_inst.zen` declares
-    // `subst`, called from `sema_apply.instantiated_ret` and
-    // `sema_member.add_own`. Which of the arms below that leaves
-    // load-bearing is a question this file does not answer.
-    //
-    // The argument it was written for: `alloc.Vec<Member>()` answers
-    // `Vec<T>` — untouched — while every `Vec<Member>` parameter in the
-    // program is written concretely. Comparing the two by id says no to
-    // every generic value there is, which is not a check, it is a blanket
-    // rejection, and "never invent a diagnostic out of missing
-    // information" forbids it.
-    //
-    // So a `TyVar` agrees: it is a type nobody has computed. Two
-    // applications of ONE declaration agree when their arguments do, by
-    // this same rule — which carries `Vec<T>` to `Vec<Member>` and still
-    // keeps `Vec<i32>` away from `Vec<str>`. An application against a
-    // bare head — `Range`, from a constructor call that never carried
-    // arguments — has nothing to compare, so the head decides alone.
+    // Unsubstituted variables agree until inference supplies a concrete type.
+    // Applications of the same declaration compare their arguments, while an
+    // application against a bare generic head remains undecided.
     uninstantiated = (self: @Self, got: TyId, want: TyId) bool {
         self.is_var(got) || self.is_var(want) || self.same_applied(got, want)
     }
@@ -795,19 +643,8 @@ Checker* = {
         })
     }
 
-    // TWO APPLICATIONS AGREE WHEN THEIR ARGUMENTS DO. A DIFFERENT ARITY
-    // AGREES ONLY WHERE THE CONTEXT WROTE NO ARGUMENTS: an application of
-    // a generic declaration against a bare head (`Range(0, n)` against
-    // `Range`, whose constructor call never carried arguments) has
-    // nothing on the bare side to compare, so the head decides alone.
-    // THE REVERSE IS A LIE ABOUT WHAT IS IN THE VALUE: a nullary variant
-    // of a generic enum types as the bare head (`variant_value`,
-    // sema_static.zen) with no argument written anywhere, and agreeing
-    // here let `pick(x)` pass sema with `x` carrying `Opt` while `pick`
-    // was monomorphised at `Opt<i32>` — two different structs in C, and
-    // cc the only checker left (issue 738). A declaration that HAS type
-    // parameters wrote them for a reason; nothing agrees with its
-    // application by forgetting them.
+    // Applied types compare every argument. A concrete value cannot forget its
+    // arguments, but an expected bare generic head has no arguments to compare.
     args_agree = (self: @Self, g: Vec<TyId>, w: Vec<TyId>) bool {
         (g.len == w.len).match({
             false => self.wrote_no_args(w),
@@ -937,26 +774,9 @@ Checker* = {
         )
     }
 
-    // A NULLARY VARIANT OF A GENERIC ENUM SETTLES AT THE FIRST POSITION
-    // THAT WROTE ITS ARGUMENTS DOWN. `Opt.None` answers the bare head —
-    // `variant_value` hands it back by design, and a blanket refusal
-    // would take `x.match({ Some(v) => .., None => .. })` down with it —
-    // so nothing about the value names its arguments. When a position
-    // DOES name them (an annotation, a formal's parameter type), that is
-    // the answer nobody else was in a position to give: accept the bare
-    // head there and let the position's type stand.
-    //
-    // ONE DECLARATION, BOTH SIDES, and only where the context decided:
-    // this is not assignability — it is what makes an unannotated
-    // nullary usable at all — so it lives beside `assignable`, asked at
-    // the positions with a written answer (`check_assign`), never inside
-    // `assignable`. The call that consumed `x` wrote nothing; refusing
-    // there is the whole point (issue 738).
-    //
-    // The declaration is compared DIRECTLY, not through `applied_to`:
-    // that reads `args_agree`, whose arity rule this same issue
-    // tightened — routed through it, this question answers false for the
-    // very pair it exists to marry.
+    // A nullary generic variant carries only its declaration. A written
+    // destination may supply its type arguments when both sides name that
+    // declaration; ordinary assignability does not invent them.
     nullary_settles* = (self: @Self, got: TyId, want: TyId) bool {
         self.types.at(got).match({
             Named(g) => (g.args.len == 0) && self.types.at(want).match({
@@ -1151,15 +971,7 @@ is_predicate* = (op: BinOp) bool {
     })
 }
 
-// The two predicates whose operands a comparison's rule never covered:
-// `&&` and `||` short-circuit, and a truth that decides whether the
-// right side runs is a bool's alone — there is no `if`, no cast, no
-// conversion anywhere in the design that gives another type one.
-//
-// THE ONE DEFINITION. `gen_c_op.zen` had an identical copy and imports
-// this one now: what a `BinOp` IS belongs beside `is_predicate`, and
-// two free functions over one receiver are a pick the flat namespace
-// makes unspecified — which is what `make ufcs` says.
+// Logical operators short-circuit and require boolean operands.
 is_logical* = (op: BinOp) bool {
     op.match({ And => true, Or => true, _ => false })
 }

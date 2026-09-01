@@ -1,23 +1,8 @@
 // src/gen/gen_c/gen_c_assoc.zen
-// `Type.name(..)` — a member called with NO receiver.
-// "A struct body may bind a name to a value, read as `Type.NAME`", and a
-// function is a value: `Duration.seconds(2)` is a member read through
-// its type, not a method with the type shoved into the receiver slot —
-// which is what this backend used to do, emitting an undeclared `D2`
-// that no Zen diagnostic named and only `cc` caught.
-// A CONSTRUCTOR IS WHY THE FORM HAS TO EXIST: `seconds = (n: u64)
-// Duration` takes a number and returns the type, so filing it under its
-// first parameter would put `.seconds()` on every integer.
-// THE FIRST PARAMETER IS THE WHOLE TEST, asked of the RESOLVED type, not
-// the written spelling: a parameter that is the receiver's own type is a
-// method ("a UFCS function whose first parameter happens to be named
-// `self`"), whether written `@Self` or spelled out. Anything else,
-// including no parameter, is an associated function; a method reached
-// this way has no spelling in the language and stays a refusal.
-// EVERYTHING ELSE IS `gen_c_member.zen`'S METHOD CALL WITH THE RECEIVER
-// DROPPED: same qualified name, signature, queue entry — the two cannot
-// disagree about which function they mean, and `gen_c_decl.zen` lowers
-// the queued body without knowing which of the two asked for it.
+// Lower `Type.name(..)` and `module.name(..)` calls. A type member is an
+// associated function when its resolved first parameter is not the receiver
+// type; methods remain the receiver-taking path owned by `gen_c_member.zen`.
+// Both paths use the same qualified symbols and queued definitions.
 
 ExprId, Member = std.ast
 Function, Param, Access, Call, Arg = std.ast
@@ -36,7 +21,8 @@ CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
 any_open, recv_inst, inst_open = gen.gen_c.gen_c_mono
 enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
-write_arg_at, signature_of, plain, write_extern = gen.gen_c.gen_c_call
+signature_of, plain, write_extern = gen.gen_c.gen_c_call
+write_arg_at = gen.gen_c.gen_c_arg
 holds = gen.gen_c.gen_c_expr
 construct = gen.gen_c.gen_c_build
 Site, site_of, member_at, method_sig = gen.gen_c.gen_c_member
@@ -371,9 +357,7 @@ emit_assoc_call = (
     Ok(true);
 }
 
-// A named helper rather than a `.then` inside the loop body: a loop
-// binding read inside a nested closure does not resolve.
-// docs/SEMA_BOOTSTRAP_FIXES.md §10.
+// Named helper used by the argument loop.
 write_assoc_arg = (
     be   :: CBackend,
     arg  : Arg,

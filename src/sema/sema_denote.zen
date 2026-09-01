@@ -1,27 +1,6 @@
-// src/sema/sema_denote.zen
-// WHAT A WRITTEN TYPE NODE DENOTES. `ast.Type` is what the author
-// wrote; `type_from_ast(id)` is what it means. The memo makes the
-// two-way trip once per node, which matters because a signature's
-// parameter types are read at every call site (`sema_check.zen` holds
-// the `Map`, keyed on `TypeId` — what `ast_id.zen` made ids `Eq + Hash`
-// for).
-//
-// ITS OWN FILE BECAUSE IT IS ITS OWN QUESTION, in `sema_effect.zen`'s
-// phrase. `sema_type.zen` answers the other one — what an EXPRESSION
-// is — over a disjoint AST family with a memo of its own, and the two
-// meet at four names, listed on the import lines below and nowhere
-// else. `type_from_ast` walks `Type`, `Union`, `Fn`, `Array` and every
-// way a name reaches a declaration (an alias, a type parameter, a
-// generic instantiation); nothing here asks what a value is.
-//
-// EVERY FUNCTION HERE IS A FREE FUNCTION ON `Checker` — DESIGN.md: "the
-// two forms are the same function" — so `c.type_from_ast(id, ctx)`
-// still reads as a method.
-//
-// Module cycles are NOT a compile error, tested rather than assumed:
-// `AST_CONTRACT.md` — "an import cycle is not a problem a whole-program
-// compiler has". `alias_enum` asks `sema_type.def_type` and `sema_type`
-// asks back; that is the shape of the problem, not a smell.
+// Resolution of written type syntax. `type_from_ast` memoizes by `TypeId`
+// and handles primitives, aliases, parameters, applications, functions,
+// unions, and arrays. Expression typing is kept in `sema_type.zen`.
 
 Type, TypeId, Ident, Alias, Enum = std.ast
 Param, ArrayType, FnType = std.ast
@@ -301,13 +280,7 @@ alias_target_of* = (c :: Checker, al: Alias, d: Def) Res<TyId, AllocError> {
     c.type_from_ast(al.target, ctx)
 }
 
-// THE ENUM AN ALIAS NAMES, asked by the backend lowering `Alias.Circle`.
-// The backend used to look the base name up itself; an alias answered
-// `AliasDef` there, so `Alias` was reported as an unresolved value.
-// This asks SEMA instead of walking to the target a second time — two
-// walks that disagreed would write a tag from one enum into a value of
-// another, C that compiles and means something else. `None` when the
-// target is not an enum — a struct alias has no variants to reach.
+// The enum reached through an alias, or `None` for non-enum targets.
 alias_enum* = (c :: Checker, d: Def) Res<TyId> {
     c.def_type(d).match({
         Err(_) => None,

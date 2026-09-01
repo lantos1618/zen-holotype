@@ -1,20 +1,5 @@
-// A SESSION IS ANSWERED FRAME BY FRAME — `design_lsp.md` §7's L1 gate
-// number 2: "a recorded sequence of frames on stdin, the server's
-// frames on stdout compared against a `.expected`".
-//
-// It drives `serve` AS A LIBRARY, the way `tests/corpus/sema_zen/`
-// drives sema: bytes in, bytes out, and the bytes are asserted. There
-// is no process, no pipe and no client — `lsp_serve.zen`'s header says
-// why there cannot be one yet — and that is exactly what makes this
-// testable today. Every byte below is a byte a real client sends.
-//
-// THE REPLIES ARE PRINTED WITH `\r` AND `\n` MADE VISIBLE, so the
-// `.expected` file pins the FRAMING and not merely the JSON. A server
-// emitting `\n\n` instead of `\r\n\r\n`, or a `Content-Length` off by
-// one, produces identical JSON and a different line here — and a real
-// client would simply hang, which is the failure this catches.
-//
-// What it pins, in order:
+// Drive serve as a library and print escaped CR/LF bytes so the expectation
+// covers transport framing as well as JSON. The session covers, in order:
 //
 //   - a request before `initialize` is refused with -32002
 //   - `initialize` answers capabilities, and the gate opens
@@ -31,17 +16,13 @@
 //   - malformed JSON is -32700 and names the byte
 //   - a frame whose header is unreadable stops the session and says so
 //
-// THE HOVER POSITIONS ARE `sema_zen/a_cursor_position_finds_its_node`'s,
-// converted to the wire by hand: that test's Zen `1:30` is this test's
-// wire `0:29`. Asserting one position through two different front doors
-// is what separates "the query is wrong" from "the conversion is
-// wrong" when one of them goes red.
+// Hover positions use zero-based LSP wire coordinates.
 
 str, String = std.text
 Alloc, AllocError = std.mem
 Range = std.core
 Server, serve = lsp.lsp_serve
-write_frame, write_decimal = lsp.lsp_frame
+write_frame = lsp.lsp_frame
 write_text = std.json
 
 // The same one-line module `sema_zen` uses, so a changed hover answer
@@ -59,7 +40,7 @@ DOC2*: str = "pick = (a: bool, b: bool) bool { a || b }\n"
 
 URI*: str = "file:///a.zen"
 
-// --- the requests ----------------------------------------------------
+// Requests.
 
 open_doc = (a: Alloc, text: str, into :: String) Res<(), AllocError> {
     body ::= a.String().try();
@@ -71,7 +52,7 @@ open_doc = (a: Alloc, text: str, into :: String) Res<(), AllocError> {
     write_frame(body.view(), into)
 }
 
-// FULL SYNC: one change, carrying the whole buffer and no range.
+// Full sync carries the whole replacement buffer and no range.
 change_doc = (a: Alloc, text: str, into :: String) Res<(), AllocError> {
     body ::= a.String().try();
     body.add(
@@ -92,20 +73,20 @@ hover = (
 ) Res<(), AllocError> {
     body ::= a.String().try();
     body.add("{\"jsonrpc\":\"2.0\",\"id\":").try();
-    write_decimal(id, body).try();
+    body.write_usize(id).try();
     body.add(
         ",\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":"
     ).try();
     write_text(uri, body).try();
     body.add("},\"position\":{\"line\":").try();
-    write_decimal(line, body).try();
+    body.write_usize(line).try();
     body.add(",\"character\":").try();
-    write_decimal(character, body).try();
+    body.write_usize(character).try();
     body.add("}}}").try();
     write_frame(body.view(), into)
 }
 
-// --- reading the answers ---------------------------------------------
+// Reading the answers.
 
 // The reply stream, with the framing made readable and NOT altered: a
 // real newline is inserted where one frame ends and the next begins, so

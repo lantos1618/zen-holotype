@@ -56,16 +56,6 @@ SSL_shutdown = (ssl: Ptr<u8>) i32
 
 TlsError* = ConnectFailed | TlsFailed | WriteFailed | ReadFailed | Closed
 
-c_text = (a: Alloc, text: str) Res<Vec<u8>, TlsError> {
-    out ::= a.Vec<u8>();
-    out.reserve(text.len + 1).try(TlsError.TlsFailed);
-    Range(0, text.len).loop((h, i) {
-        out.add(text.index(i)).try(TlsError.TlsFailed);
-    });
-    out.add(0).try(TlsError.TlsFailed);
-    Ok(out)
-}
-
 alpn_h2 = (a: Alloc) Res<Vec<u8>, TlsError> {
     out ::= a.Vec<u8>();
     out.add(2).try(TlsError.TlsFailed);
@@ -83,7 +73,7 @@ tls_dial = (a: Alloc, host: str, port: u16, h2: bool)
 
 wrap_socket = (a: Alloc, socket :: Socket, host: str, h2: bool)
               Res<TlsStream, TlsError> {
-    host_c ::= c_text(a, host).try();
+    host_c ::= host.c_text(a).try(TlsError.TlsFailed);
     method = TLS_client_method();
     ctx    = SSL_CTX_new(method);
     ctx.is_null().match({

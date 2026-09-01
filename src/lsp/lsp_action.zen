@@ -1,9 +1,4 @@
-// src/lsp/lsp_action.zen
-// `textDocument/codeAction` — the auto-import quickfix, the only action.
-// Undefined-name diagnostics are matched to modules exporting that name.
-// Each action inserts an unstarred import after existing imports, using the
-// shortest valid re-exporting module path. Unsupported or unavailable cases
-// return an empty action list. Enum variants are not offered directly.
+// Writes auto-import quick fixes for undefined module-level names.
 
 str, String = std.text
 Vec = std.collections
@@ -11,7 +6,6 @@ Alloc, AllocError = std.mem
 Range = std.core
 Pos, Span = std.ast.ast_span
 module_index_of = std.ast.ast_named
-// Strict source-position ordering shared with the AST.
 before = std.ast.ast_find
 Checker = sema.sema_check
 Diag = sema.sema_diag
@@ -20,10 +14,8 @@ ModuleTable = sema.sema_def
 to_pos, to_wire, write_wire, WirePos = lsp.lsp_pos
 written, obj, arr, Nest = std.json
 
-// A name and the module an auto-import would bind it from.
 Action = { name: str, module: str }
 
-// Write actions for undefined names intersecting the requested range.
 write_actions* = (
     c    : Checker,
     t    : Alloc,
@@ -48,7 +40,6 @@ write_actions* = (
     write_offerings(c, t, file, text, uri, found, out)
 }
 
-// Only undefined-name diagnostics in this file and range produce actions.
 offer = (
     c     : Checker,
     t     : Alloc,
@@ -67,7 +58,6 @@ offer = (
     })
 }
 
-// Repeated diagnostics for one name share the same candidate search.
 offer_name = (c: Checker, t: Alloc, name: str, found :: Vec<Action>)
              Res<(), AllocError> {
     found.find((a) { a.name.eq(name) }).match({
@@ -84,8 +74,6 @@ offer_name = (c: Checker, t: Alloc, name: str, found :: Vec<Action>)
     })
 }
 
-// Prefer the folder root when it really re-exports the name; otherwise keep
-// the declaring module's path. Identical import lines are deduplicated.
 offer_def = (
     c     : Checker,
     t     : Alloc,
@@ -102,7 +90,6 @@ offer_def = (
     })
 }
 
-// The same, holding the declaring module's own table.
 offer_at = (
     c     : Checker,
     t     : Alloc,
@@ -113,8 +100,6 @@ offer_at = (
     seen  :: Vec<str>
 ) Res<(), AllocError> {
     spoken = module_display(table.name);
-    // Use the short folder spelling only when its export table contains the
-    // name. `written()` keeps all match arms at the same result type.
     at_root ::= t.Vec<Def>();
     visited ::= t.Vec<usize>();
     offered ::= table.name;
@@ -146,21 +131,14 @@ offer_at = (
     Ok(())
 }
 
-// Source spans and non-empty LSP ranges are half-open. A zero-width range
-// selects the diagnostic containing the cursor.
 covers = (span: Span, from: Pos, upto: Pos) bool {
     empty = from.line == upto.line && from.col == upto.col;
     (empty).match({
-        true  => !after(span.start, from) && before(from, span.end),
+        true  => !before(from, span.start) && before(from, span.end),
         false => before(span.start, upto) && before(from, span.end),
     })
 }
 
-after = (a: Pos, b: Pos) bool {
-    a.line > b.line || (a.line == b.line && a.col > b.col)
-}
-
-// Insert after the last parsed import, or at the start when none exists.
 insert_at = (c: Checker, file: str, text: str) WirePos {
     line ::= 1;
     module_index_of(c.tree, file).match({
@@ -178,7 +156,6 @@ insert_at = (c: Checker, file: str, text: str) WirePos {
     to_wire(text, Pos(line: line, col: 1))
 }
 
-// Serialize the action title, URI, and edit text through JSON escaping.
 write_offerings = (
     c     : Checker,
     t     : Alloc,
@@ -194,7 +171,6 @@ write_offerings = (
     list.close(out)
 }
 
-// Derive the title from the exact edit line so the two spellings stay equal.
 write_action = (
     t    : Alloc,
     a    : Action,
@@ -208,8 +184,6 @@ write_action = (
     line.add(" = ").try();
     line.add(a.module).try();
     line.add("\n").try();
-    // The line is finished before its bytes are read, so the view cannot
-    // outlive a growth of the buffer behind it.
     said = line.view();
     title ::= t.String().try();
     title.add("Import ").try();

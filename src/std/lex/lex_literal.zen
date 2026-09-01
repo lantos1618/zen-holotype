@@ -1,12 +1,6 @@
 // src/std/lex/lex_literal.zen
-// Strings, characters, escapes and numbers — the four shapes that carry a
-// value rather than being one, and every lexical rule DESIGN.md states
-// about them.
-//
-// THE SHAPE OF ALL OF IT IS `REJECT RATHER THAN REINTERPRET`. A scanner
-// that silently picks a reading is how a language ends up with a
-// specification nobody can write down, and the readings it picks are always
-// the ones that hide the bug: `010` meaning 8, `"\q"` meaning `q`.
+// Strings, characters, escapes and numbers. Invalid spellings are rejected
+// rather than reinterpreted (`010` is not octal and `"\q"` is not `"q"`).
 //
 // A FAULT DOES NOT ALWAYS COST A TOKEN. `"a\qb"` is a well-formed string
 // with one bad escape in it, so it reports the escape AND emits the string —
@@ -121,24 +115,9 @@ escape* = (lx :: Lexer) Res<bool, AllocError> {
     lx.cur.bump();
     lx.cur.peek().match({
         None     => { lx.report(LexFault.UnterminatedEscape, from); Ok(true) },
-        // A NEWLINE IS NOT AN ESCAPABLE BYTE, and Zen has no line
-        // continuation. Stepping over it here would carry the literal onto
-        // the next line — the one thing DESIGN.md says a literal may not do —
-        // and would name `\<newline>` an unknown escape, which is a rule the
-        // author did not break at a byte that is not the fix. Left where it
-        // is, the caller reads it and says the true thing at the opening
-        // quote.
-        //
-        // THE ENDING CAN ARRIVE AS TWO BYTES. CRLF is input this tree ships
-        // and reads (`tests/corpus/lex/crlf_line_endings.zen`), and a
-        // backslash before it is the same mistake at the same opening quote —
-        // so the CR travels with its LF and the caller answers the pair
-        // exactly as it answers the LF alone. The cursor's model is
-        // untouched: this is not a second opinion about what ends a line
-        // (`lex_cursor.zen` keeps that, LF only) — it is the escape set
-        // declining to read the ending's first half as the byte it escaped.
-        // A CR anywhere else is ordinary whitespace and falls through to the
-        // arm below, where every unescapable byte lands
+        // Newlines are not escapable and Zen has no line continuation. Keep
+        // LF, or the CR of CRLF, for the caller to report as a literal that
+        // spans a line. A lone CR remains an ordinary unknown escape.
         Ok('\n') => Ok(false),
         Ok('\r') => lx.cur.at_byte(1, '\n').match({
             true  => Ok(false),
@@ -166,8 +145,7 @@ number* = (lx :: Lexer) Res<(), AllocError> {
     lx.cur.bump_while((b) { b.is_digit() });
     whole = lx.since(from);
 
-    // Zen has no octal, so `010` cannot quietly mean 8. Python 3 made this
-    // exact call for this exact reason
+    // Zen has no octal, so a leading zero is rejected rather than re-read.
     has_leading_zero(whole).match({
         true  => lx.report(LexFault.LeadingZero, from),
         false => Ok(()),

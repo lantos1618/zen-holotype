@@ -24,11 +24,16 @@ ctype, request_type = gen.gen_c.gen_c_type
 recv_inst = gen.gen_c.gen_c_mono
 Site, site_of, member_at = gen.gen_c.gen_c_member
 impl_member_of, by_arity = gen.gen_c.gen_c_impl
-by_ref = gen.gen_c.gen_c_call
+by_ref = gen.gen_c.gen_c_arg
 method_sig, member_symbol = gen.gen_c.gen_c_member
 Slot, slots_of, thunk_param = gen.gen_c.gen_c_fat
 
 ConsoleStream = Stdout | Stderr
+
+DISPLAY_MEMBER: str = "toString"
+SINK_NAME: str = "Sink"
+SINK_WRITE: str = "write"
+SINK_WRITE_BYTE: str = "write_byte"
 
 // the call
 
@@ -71,10 +76,10 @@ display_at_site = (
 // `toString`s, and only the sink-taking one can write into a console.
 display_fn = (be :: CBackend, s: Site) Res<Res<Function>, AllocError> {
     found ::= be.alloc.Vec<Member>();
-    member_at(be, s, "toString", found).try();
+    member_at(be, s, DISPLAY_MEMBER, found).try();
     be.sink_form(found).match({
         Ok(f) => Ok(Ok(f)),
-        None  => be.impl_member_of(s.decl, "toString", 2),
+        None  => be.impl_member_of(s.decl, DISPLAY_MEMBER, 2),
     })
 }
 
@@ -215,7 +220,7 @@ display_call = (
     inst = be.recv_inst(ty).try();
     sig ::= be.alloc.Vec<TyId>();
     be.method_sig(ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
-    sym = be.member_symbol(ty, s, "toString", sig, inst).try();
+    sym = be.member_symbol(ty, s, DISPLAY_MEMBER, sig, inst).try();
     out.fmt("{}({text}, ", sym.view()).try();
     write_sink_arg(f, sink, out).try();
     out.add(")")
@@ -253,7 +258,7 @@ stream_sink = (be :: CBackend, out :: String, stream: ConsoleStream)
 // caller that wrote `println("{}", p)` never named it.
 sink_ty = (be :: CBackend) Res<Res<TyId>, AllocError> {
     defs ::= be.alloc.Vec<Def>();
-    be.check.world.prelude_of("Sink", defs).try();
+    be.check.world.prelude_of(SINK_NAME, defs).try();
     defs.get(0).match({
         None  => Ok(None),
         Ok(d) => be.sink_named(d),
@@ -344,7 +349,7 @@ console_name = (
 // The one statement a stdout console slot is. Empty means this backend
 // has no write for that member of `Sink`.
 console_body = (member: str, stream: ConsoleStream) str {
-    member.eq("write").match({
+    member.eq(SINK_WRITE).match({
         true  => stream.match({
             Stdout => "zg_print_str(zg_a0);",
             Stderr => "zg_eprint_str(zg_a0);",
@@ -357,7 +362,7 @@ console_body = (member: str, stream: ConsoleStream) str {
 // calls wide — so it is written from the parameter's own storage. One
 // byte, no copy and no buffer.
 byte_body = (member: str, stream: ConsoleStream) str {
-    member.eq("write_byte").match({
+    member.eq(SINK_WRITE_BYTE).match({
         true  => stream.match({
             Stdout => "zg_print_bytes((const char *)&zg_a0, 1);",
             Stderr => "zg_eprint_bytes((const char *)&zg_a0, 1);",

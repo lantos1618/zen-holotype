@@ -1,24 +1,5 @@
-// src/lsp/lsp_stdio.zen
-// The transport: `Content-Length` frames over a pipe.
-//
-// `lsp_serve.zen` is the server and holds no transport at all — `one`
-// takes bytes and appends bytes. This file is the only thing between it
-// and an editor, small on purpose.
-//
-// THE FRAMING IS NOT REDONE HERE. `lsp_frame.zen` answers "where does
-// this message end", and over a live stream its `Short` and `NoBlank`
-// stop being faults — a header block not yet ended and a body shorter
-// than its own `Content-Length` are bytes still in flight. `partial` is
-// that reading, the ONLY thing this file knows about framing that the
-// framing file does not.
-//
-// NOTHING IS WRITTEN WITH `println`. It appends exactly one `\n` and a
-// frame may not have one — the missing piece `design_lsp.md` section 4
-// named. `print` is the same write without the newline.
-//
-// The server, incoming frame and reply scratch have separate arenas.
-// Once a complete frame is answered, the input Vec retains its capacity
-// but forgets the bytes; neither requests nor replies accumulate.
+// Runs the server over stdin/stdout. Partial envelopes remain buffered until
+// `Content-Length` bytes arrive; notifications produce no output frame.
 
 str, String, str_at = std.text
 Vec = std.collections
@@ -26,20 +7,11 @@ Alloc, AllocError = std.mem
 Server = lsp.lsp_serve
 FrameFault, frame_at, short_by, partial = lsp.lsp_frame
 
-// How far a drain got, and whether the framing still made sense.
 Drain* = {
     at*: usize,
     framed*: bool,
 }
 
-// One session, until the stream closes or `shutdown` is answered.
-//
-// THE READ COMES FIRST AND THE ANSWERS SECOND, every time round — what
-// makes a frame split across two reads work: bytes are appended, and
-// the drain finds one more complete message than last time.
-//
-// EACH READ ASKS FOR EXACTLY WHAT THE ENVELOPE SAYS IS MISSING —
-// `short_by`; see `lsp_frame.zen` for why it cannot be a fixed chunk.
 serve_stdio* = (env: Env, a: Alloc) Res<i32, AllocError> {
     server      ::= a.Server(env);
     input_arena ::= env.mem.alloc();
@@ -62,9 +34,8 @@ serve_stdio* = (env: Env, a: Alloc) Res<i32, AllocError> {
                 at     = d.at;
                 framed = d.framed;
                 after_drain(server, batch).try();
-                // Persistent server fields copy anything they retain.
                 (at == held.len).then(() {
-                    clear(held);
+                    held.clear();
                     at = 0;
                 });
             },
@@ -73,27 +44,6 @@ serve_stdio* = (env: Env, a: Alloc) Res<i32, AllocError> {
     Ok(exit_code(server.stopped(), framed));
 }
 
-// Keep the allocation and move only the logical end. `take` from the end
-// shifts nothing, so clearing is linear in the frame size.
-clear = (held :: Vec<u8>) () {
-    loop(held.len > 0, (h) { held.take(held.len - 1); });
-}
-
-// THE SETTLE POINT OVER A PIPE: everything that had arrived has been
-// answered, so a build owed to a `didChange` happens here — a cheap
-// no-op when nothing is owed, and a key comparison when the state a
-// query already built is still current (`lsp_built.zen`'s single
-// flight).
-//
-// AND IT IS EVERY MESSAGE, NOT EVERY BATCH — the coalescing
-// `lsp_diag.zen`'s header is blunt about not getting at the transport
-// (`serve` over a buffer can). What makes that affordable is the slot,
-// not the transport: the second and later messages against one document
-// state build nothing.
-//
-// NOT CALLED `settled`: `Server` has a method of that name and this
-// takes one as its first parameter, so the two would collide — this
-// folder's rule about a free function shadowing a method.
 after_drain = (server :: Server, t: Alloc) Res<(), AllocError> {
     out ::= t.String().try();
     server.settled(t, out).try();
@@ -101,11 +51,6 @@ after_drain = (server :: Server, t: Alloc) Res<(), AllocError> {
     Ok(());
 }
 
-// `n` more bytes from stdin onto the end of `held`; `false` is end of
-// input. THE ROOM IS MADE FIRST: `Stdin.read` has no `Alloc`, so it can
-// only fill capacity that already exists. A read that FAILS ends the
-// session exactly as a read of zero does — looping on a broken pipe
-// would spin instead of exiting.
 arrived = (env: Env, held :: Vec<u8>, n: usize) Res<bool, AllocError> {
     want = at_least_one(n);
     held.reserve(want).try();
@@ -115,17 +60,10 @@ arrived = (env: Env, held :: Vec<u8>, n: usize) Res<bool, AllocError> {
     })
 }
 
-// Never zero — a read of nothing would spin a loop. One byte always
-// makes progress, which is what a header block being scanned asks for
-// anyway.
 at_least_one = (n: usize) usize {
     (n == 0).match({ true => 1, false => n })
 }
 
-// Every complete frame in `held` from `at`, answered to stdout. Stops at
-// the first fault. A PARTIAL one is not a fault here — the next read
-// fixes it — and a real one ends the session, since only the header of
-// this message says where the next one starts.
 drain = (server :: Server, t: Alloc, held: str, at: usize)
         Res<Drain, AllocError> {
     from   ::= at;
@@ -140,20 +78,13 @@ drain = (server :: Server, t: Alloc, held: str, at: usize)
     Ok(Drain(at: from, framed: framed));
 }
 
-// One message in, its reply out. The body borrows the current input
-// arena; persistent server fields copy what they retain.
 answered = (server :: Server, t: Alloc, body: str) Res<(), AllocError> {
     out ::= t.String().try();
     server.one(t, body, out).try();
-    // A NOTIFICATION PRODUCES NO BYTES and this prints none: the
-    // protocol forbids replying to one.
     print(out.view());
     Ok(());
 }
 
-// A real framing fault, said once, to the same stream the replies went
-// to. `println` here (vs `print` above) is correct: this is a line of
-// text, not a frame.
 fault_line = (f: FrameFault, framed: bool) () {
     framed.match({
         true  => (),
@@ -161,11 +92,6 @@ fault_line = (f: FrameFault, framed: bool) () {
     });
 }
 
-// `exit 0` when `shutdown` was answered, 1 otherwise: this server stops
-// reading the moment it answers `shutdown`, so it never sees the `exit`
-// that follows. A stream closing under a running server is the SAME
-// answer as a client going away without asking, and so is a broken
-// frame.
 exit_code = (stopped: bool, framed: bool) i32 {
     (stopped && framed).match({ true => 0, false => 1 })
 }

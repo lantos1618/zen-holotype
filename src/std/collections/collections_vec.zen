@@ -1,27 +1,15 @@
-// src/std/collections/collections_vec.zen
-// Vec<T>: the growable buffer everything else is built on. everything
-// here is sealed (=) — collections are not extension points, and
-// sealed methods compile to direct, inlinable calls
+// Growable allocator-backed buffer. Its sealed operations are not extension
+// points and compile to direct calls.
 
 Alloc, AllocError, Ptr, null_ptr = std.mem
 Range = std.core.range
 
 Vec*<T> = {
-    // an empty Vec owns no pages: null data + zero capacity ARE the
-    // empty state, and realloc treats a null p as a fresh allocation,
-    // so the first grow runs the same call every later one does
     data :: Ptr<T> = null_ptr<T>(),
-    len* :: usize = 0,      // * is readable outside; mutation still only via methods
+    len* :: usize = 0,
     capacity :: usize = 0,
-
-    // `:` set once at construction: an Alloc is a handle (two words
-    // into the arena), so grow can realloc THROUGH it while the field
-    // itself stays immutable — `::` is shallow, hence this.
     alloc: Alloc,
 
-    // grow lands in THIS frame, never inside a closure: the match is a
-    // value, `.try()` on it belongs to add, so a failed grow returns
-    // Err from add and cannot fall through to the write below
     add* = (self :: @Self, value: T) Res<(), AllocError> {
         (self.len == self.capacity).match({
             true  => self.grow(),
@@ -39,17 +27,9 @@ Vec*<T> = {
         });
     }
 
-    // THE DOOR ONTO THE RAW FLOOR, and the one export of the storage
-    // other collections never make: `Ptr.read`/`write` are unchecked —
-    // bounds are the caller's to hold, nothing traps (mem_ptr.zen) —
-    // so this is raw-floor access spelled in plain sight at every call
-    // site. Its two in-std callers both need it: String.view builds a
-    // `str` over another module's storage, and Stdin.read's spare-
-    // capacity fill hands the C floor the buffer itself.
+    // Raw storage access; callers own bounds and lifetime checks.
     ptr* = (self: @Self) Ptr<T> { self.data }
 
-    // dual of get, what a Map overwrites a row through. past len is
-    // None exactly as get is.
     set* = (self :: @Self, i: usize, value: T) Res<()> {
         (i < self.len).match({
             true  => { self.data.write(i, value); Ok(()) },
@@ -57,15 +37,8 @@ Vec*<T> = {
         });
     }
 
-    // moves an element OUT, leaving the vec one shorter — without this
-    // a Vec<T> of Drop values can be filled and never emptied
-    //
-    // the return CONSUMES `value`: a plain `Ok(value)` would copy the
-    // bytes into the payload and leave `value` registered for drop in
-    // this frame, so a Drop T dies here before the caller ever sees it
-    // — twice, once the caller's copy drops too. sema cannot catch it
-    // (T is unknown here, and the rule fails open on generics), so the
-    // move has to be spelled.
+    // Move an element out and close its slot. Consuming the return value keeps
+    // Drop elements owned by the caller rather than this frame.
     take* = (self :: @Self, i: usize) Res<T> {
         value = self.get(i).try();
         Range(i + 1, self.len).loop((h, j) {
@@ -75,13 +48,17 @@ Vec*<T> = {
         Ok(consume value);
     }
 
-    // room for `n` MORE elements, before anything writes them. Exists
-    // because a CAPABILITY'S FLOOR fills a run this module did not
-    // allocate: `Stdin.read` (std.env) hands the C floor the buffer's
-    // spare capacity and reads into it, so the room must exist BEFORE
-    // the call. Every other filler goes through `add` and needs none
-    // of this. Asks for DOUBLE requested so a chunked stream reader
-    // reallocs a logarithmic, not linear, number of times.
+    // Remove every element while retaining the allocated capacity.
+    clear* = (self :: @Self) () {
+        loop(self.len > 0, (h) {
+            self.take(self.len - 1).match({
+                Ok(value) => { dropped = consume value; },
+                None      => (),
+            });
+        });
+    }
+
+    // Reserve room for n additional elements without changing len.
     reserve* = (self :: @Self, n: usize) Res<(), AllocError> {
         want = self.len + n;
         (want <= self.capacity).match({
@@ -90,12 +67,8 @@ Vec*<T> = {
         })
     }
 
-    // reserve AND count the room in len, leaving the bytes unwritten:
-    // String.add fills the run with one copy_from where `add` in
-    // a loop pays the capacity branch per byte. The gap is real
-    // elements as far as len is concerned — nobody hands it out before
-    // the caller writes it, and this module's unchecked floor is the
-    // only writer either way.
+    // Reserve and count n unwritten slots. The caller must initialize them
+    // before exposing the Vec.
     grow_by* = (self :: @Self, n: usize) Res<(), AllocError> {
         self.reserve(n).try();
         self.len = self.len + n;
@@ -116,13 +89,7 @@ Vec*<T> = {
     }
 }
 
-// a Vec IS a Range of its elements — `get` already answers exactly
-// what `at` asks, None-past-end included, which is what stops a walk
-// rather than reading past the buffer.
-//
-// start/end are SUPPLIED, not stored (DESIGN.md: satisfy requirements,
-// never impl storage), so a Vec growing mid-loop reports its new end,
-// not a stale one.
+// Iteration observes the current length, including growth during a loop.
 Vec.impl(Range<T>, {
     start: 0,
     end: self.len,
@@ -130,10 +97,7 @@ Vec.impl(Range<T>, {
     at ::= (self: @Self, index: usize) Res<T> { self.get(index) }
 })
 
-// `alloc.Vec<i32>()`: ufcs constructor, lives beside Vec (not on
-// Alloc) since only this module sees data/capacity. a bare value, not a
-// Res: an empty Vec owns no pages so construction can't fail — the
-// first add allocates, and THAT is what returns Res
+// Construction allocates no storage; the first growth can fail.
 Vec* = <T>(a: Alloc) Vec<T> {
     Vec(alloc: a)
 }

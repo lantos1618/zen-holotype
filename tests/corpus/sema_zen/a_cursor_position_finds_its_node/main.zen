@@ -1,22 +1,6 @@
-// A CURSOR POSITION FINDS ITS NODE — PLAN.md stage 4's one missing
-// precondition, and the only primitive an LSP needs that nothing else
-// does. Every other consumer walks down from a root; an editor arrives
-// holding a position and nothing else.
-//
-// The round trip this asserts is HOVER, in full and with no server:
-//
-//     position -> node_at -> ExprId -> type_of -> a type name
-//
-// It walks a REAL parsed file rather than a hand-built arena, because
-// the claim is about spans the parser produced. `type_of_is_memoized`
-// builds its tree through the arena API for the opposite reason: it is
-// a test of sema, and a parser bug there would read as a sema bug.
-// Here a parser bug IS the bug, so the parser is in the loop.
-//
-// The positions below are chosen to pin the rule rather than to
-// pass: the smallest node wins, a span is half-open so `end` is past
-// the node, and a position in no node at all is `None` and not a
-// failure — an editor hovering over a comment gets nothing, correctly.
+// Exercise the hover path without an LSP server:
+// position -> smallest containing node -> memoized semantic type -> name.
+// Parsed spans are half-open; a position outside every node returns `None`.
 
 scan, Source = std.lex
 Parser = std.parse
@@ -40,10 +24,8 @@ hover = (c :: Checker, a: Alloc, line: usize, col: usize)
     })
 }
 
-// THE MEMO IS THE ANSWER. `check_all` has already typed every node in
-// the file, so a hover is a memo READ and not a second check — which is
-// the whole reason DESIGN.md decision 3 says sema is memoized queries
-// and not passes, and the reason PLAN.md can call an LSP thin.
+// `check_all` has already typed every node, so hover reads the memo rather
+// than checking the expression again.
 show = (c :: Checker, a: Alloc, line: usize, col: usize, e: ExprId)
        Res<(), AllocError> {
     out ::= a.String().try();

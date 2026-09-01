@@ -1,32 +1,7 @@
-// The loop family, which has no Zen body anywhere.
-//
-// `src/std/core/loop/loop_iter.zen` declares seven signatures and no
-// definitions, and says why: "a loop is the one thing that cannot be
-// written in a language whose only control flow is `.match`, `.loop` and
-// recursion". So the backend IS the body, and this asserts that it is.
-//
-// THE ASSERTIONS ARE THE THREE BUGS THIS LOWERING ACTUALLY HAD, each
-// found by running the emitted program rather than by counting faults:
-//
-//   - `Res<q>` REACHING A BINDING. `loop<R: Range<T>, T>` returns
-//     `Res<T>` and nothing settles `T` — it is reachable only through
-//     the closure, and a closure infers FROM a signature. Sema hands
-//     back the erased `q`, and a binding declared at it makes every
-//     loop in the program share one C type. `cc` caught it; nothing in
-//     Zen did.
-//   - A SECOND DECLARATION WHERE A STORE WAS MEANT. Zen writes a
-//     declaration and an assignment the same way, so `i = i + 1` inside
-//     a `loop(() { i < 3 }, ..)` emitted a FRESH `i` per pass and the
-//     condition kept reading the original. The C compiled and the
-//     program never terminated.
-//   - `index` AND `value` CONFUSED. Over `Range(10, 13)` they are 0,1,2
-//     and 10,11,12; a lowering that hands the counter to both is
-//     invisible on a range that starts at zero, which is every range in
-//     a test that was not written to catch this.
-//
-// The C is inspected rather than run because the harness runs THIS
-// program, not the one it emits — so each assertion is written as a
-// property that a wrong lowering could not satisfy.
+// Inspect C emitted for the bodyless loop intrinsics. The fixture covers an
+// inferred `Res<T>`, mutation from a while body, distinct range index/value,
+// value-carrying break, and next. The harness runs this inspector rather than
+// the program it emits, so assertions are properties of the generated C.
 
 Alloc, AllocError = std.mem
 str, String = std.text

@@ -1,45 +1,6 @@
-// src/sema/sema_diag.zen
-// What sema says when a program means nothing.
-//
-// The shape is `lex_diag.zen`'s, for the reasons stated there and one
-// more that is sema's own.
-//
-// A DIAGNOSTIC IS A VALUE, NOT A RAISE. It is collected and returned, so
-// one bad declaration never stops a run. The only way a query returns
-// `Err` is `AllocError` — which is why every signature in this module
-// says `Res<T, AllocError>` and never invents a `SemaError` beside it.
-//
-// A FAULT CARRIES WHAT THE SENTENCE NEEDS, AND NOTHING ELSE. The lexer
-// can afford a fault with no payload because its span names the bytes
-// and the renderer holds the source. Sema cannot: "expected i32, found
-// str" is not derivable from a position. But the payload is TYPE IDS and
-// interned strings, never a formatted message — so a `Diag` stays
-// comparable and costs no allocation to raise. `render` is where the
-// sentence is built, and it is the only place that allocates.
-//
-// FOUR PAYLOAD SHAPES, NOT TWENTY-FOUR. A fault names something
-// (`NameFault`), contrasts two types (`TypeFault`), points at two
-// declarations that cannot both stand (`PairFault`), or names something
-// and the module that would not let it out (`ExportFault`). A fifth
-// shape would be a sign that a check is doing two things.
-//
-// `ExportFault` earned its place by being got wrong first. `NotExported`
-// was raised through a `NameFault` whose single string had already been
-// joined into "hex_digit is not exported by module text" at the raise
-// site — so the sentence lived in `sema_def.zen`, this file's `message`
-// said "not exported" a second time, and the two halves could not be
-// reworded without touching both. A payload one field short moves the
-// wording out of the renderer.
-//
-// ONE MISTAKE, ONE DIAGNOSTIC. `Ty.Unknown` is the mechanism: a query
-// that has already reported returns poison, and poison never produces a
-// second sentence.
-//
-// OVER 500 LINES, AND THE JUSTIFICATION STYLE.md ASKS FOR: the subject
-// is "the sentence sema says", and its two halves — the law, and what
-// this program did to break it — are `message` and `write_detail`, read
-// together at every raise site and reworded together. Splitting them is
-// the exact failure `ExportFault` records above.
+// Semantic diagnostics are collected values; query failure remains reserved
+// for AllocError. Fault payloads keep structured names, spans, and type IDs so
+// this module owns all user-facing wording. Unknown types suppress cascades.
 
 Span = std.ast.ast_span
 str, String = std.text
@@ -49,19 +10,10 @@ TyId, Types = sema.sema_ty
 // Something the program named, or failed to.
 NameFault* = { name*: str }
 
-// A name and the module that would not let it out. Two fields and not a
-// pre-joined string, because a fault carries WHAT WENT WRONG and this
-// file decides how it reads — a caller that composes the sentence itself
-// has taken that decision away, and the wording then lives in whichever
-// module happened to raise it.
+// A name and the module that does not export it.
 ExportFault* = { name*: str, module*: str }
 
-// A place, and the capture that keeps it alive. The consume's own
-// position names the crime; the capture is where the binding stopped
-// being movable, and that is a second place the sentence has to name —
-// a reader staring at the consume cannot find the closure without it.
-// Not a `PairFault`: one side here is a use site, which `PairFault`'s
-// two declaration positions are defined never to be.
+// A place and the capture site that keeps it alive.
 CaptureFault* = {
     place*: str,
     at*: Span,
@@ -75,22 +27,14 @@ TypeFault* = {
     found*: TyId,
 }
 
-// Two declarations, both named, because a diagnostic that reports an
-// ambiguity and shows one side of it is a diagnostic that sends the
-// reader hunting. `first` and `second` are declaration positions, never
-// the use site — an overload set is wrong where it is written.
+// Two conflicting declaration positions.
 PairFault* = {
     name*: str,
     first*: Span,
     second*: Span,
 }
 
-// Every way a well-formed parse can still mean nothing.
-//
-// Each variant is a distinct mistake with a distinct fix, and each one
-// is a line of DESIGN.md rather than a category. There is no
-// `TypeError`, because "type error" names the phase and not the rule
-// the author broke.
+// Every semantic fault has a distinct corrective message below.
 SemaFault* =
     // resolution
       UndefinedName(NameFault)         // no binding of this name is in scope
@@ -159,29 +103,11 @@ SemaFault* =
     | InstantiationDepth(NameFault)    // the instantiation set is infinite
 
     // comptime
-    //
-    // THE PAYLOAD IS EMPTY AND STILL A `NameFault`: there is no second
-    // name to contrast and nothing in the program to quote — the form
-    // itself is what is refused — but a payload-less variant is
-    // checked structurally by `tests/gates/faults_reachable.zen`.
     | MetaNotImplemented(NameFault)    // `.name` folds (M3); every other form is still the wall
     | CountNotComptime(NameFault)      // an array's count folds, or it is refused
     | ComptimeBudget(NameFault)        // the evaluator's fuel ran out — the build fails, it never hangs
 
     // ownership
-    //
-    // EVERY ONE OF THESE IS A `NameFault`, and that is the point of the
-    // four-shapes rule holding here too: an ownership mistake names a
-    // PLACE — `f`, `p.left`, `add` — and there is no second type to
-    // contrast it against and no second declaration to point at. A
-    // payload of its own would have been a fifth shape carrying exactly
-    // what the first already carries.
-    //
-    // THE SENTENCE LEADS WITH THE RULE AND THE DETAIL NAMES THE PLACE,
-    // which is the ordinary `message` + `write_detail` split and not a
-    // new one: "use after move" is the law, "f was consumed" is this
-    // program's instance of it. Reading the two together is the whole
-    // diagnostic, and neither half repeats the other.
     | ConsumedUse(NameFault)           // a place that was moved out of
     | NeedsMutableReceiver(NameFault)  // a `::` method reached through `:`
     | ImmutableWrite(NameFault)        // a write through a `:` link of the path
@@ -261,8 +187,8 @@ message* = (fault: SemaFault) str {
         ProvenIndexOutOfBounds(_) => "index out of bounds: a trap the compiler can prove will fire is a compile error",
         InfiniteSize(_)           => "infinite size: the field cycle never reaches an indirection, so the layout does not terminate (`Ptr<T>` is the finite form)",
         InstantiationDepth(_)     => "instantiation depth exceeded: the type argument keeps widening, so the instantiation set is infinite",
-        MetaNotImplemented(_)     => "`@meta` is not implemented yet: it hands back the compiler's own ast nodes at comptime, and the evaluator behind it arrives at PLAN.md stage 5 — docs/design_meta.md",
-        CountNotComptime(_)       => "an array's count is part of its type, so it is known at compile time: a literal, or a name declared as one. Folding anything further needs the comptime evaluator, which arrives at PLAN.md stage 5 — docs/design_meta.md",
+        MetaNotImplemented(_)     => "`@meta` is not implemented yet for this operation",
+        CountNotComptime(_)       => "an array count must be a compile-time constant: use a literal or a constant name",
         ComptimeBudget(_)         => "comptime evaluation ran out of steps: the evaluator is budgeted so the build fails rather than hangs — docs/design_meta.md",
         ConsumedUse(_)            => "use after move:",
         NeedsMutableReceiver(_)   => "the receiver is immutable:",
@@ -392,15 +318,7 @@ write_name = (out :: String, f: NameFault) Res<(), AllocError> {
     quote(out, f.name)
 }
 
-// THE FIELD NAME NEXT TO THE PHRASE THAT NEEDS IT. This read "impl is
-// missing a field: <the law> `height`", so the reader had to carry the
-// law between the two halves of one noun phrase — and the article was
-// the only thing keeping them apart. The law still leads; it just
-// follows the name it is about.
-// The construction's own note. NOT `write_missing`'s: that one ends "an
-// impl supplies a value for every field the bound declares", which is
-// the right sentence for the other half of this rule and the wrong one
-// here — a constructor supplies fields, not an impl.
+// Explain why a missing constructor field is required.
 write_ctor_missing = (out :: String, f: NameFault) Res<(), AllocError> {
     quote(out, f.name).try();
     out.add(
@@ -408,19 +326,7 @@ write_ctor_missing = (out :: String, f: NameFault) Res<(), AllocError> {
     )
 }
 
-// The name the type does not declare, beside the type that was asked —
-// `write_member`'s sentence is exactly this one: "no `nosuch` on `A`".
-// A construction argument is a member lookup with nowhere else to be
-// reported, so it borrows that shape rather than minting its own.
-//
-// THE CONSTANT AND ITS TYPE, which is what the position cannot give:
-// told only that `y` may not be written here, an author reads the
-// declaration three lines up and sees an `i32` they supplied one of.
-// Naming it a constant of `A` is what turns the line back into one
-// mistake, and `::` is the spelling that makes the field supplyable.
-// The fault carries the constant's own type because that is what the
-// declaration wrote, and `write_member`'s "no `y` on `A`" is the wrong
-// sentence here — `y` exists; it is just not storage.
+// A constant exists on the type but cannot be supplied as storage.
 write_ctor_constant = (out :: String, types: Types, f: TypeFault)
                       Res<(), AllocError> {
     found ::= types.name_of(f.found).try();
@@ -444,12 +350,7 @@ write_missing = (out :: String, f: NameFault) Res<(), AllocError> {
     Ok(());
 }
 
-// WHAT THE NAME ALREADY MEANS, because that is the half the position
-// cannot give: an author who wrote `LIMIT =>` believes they wrote a
-// comparison, and being told the arm binds leaves them looking at a
-// line that reads exactly like the comparison they meant. Naming the
-// constant is what turns it back into one mistake, and `==` is the
-// spelling that does compare.
+// Name the constant and the comparison spelling the author can use.
 write_const_pattern = (out :: String, f: NameFault) Res<(), AllocError> {
     out.fmt(
         " — `{}` names a constant in scope: compare it with `==`, or rename the binder",
@@ -458,12 +359,7 @@ write_const_pattern = (out :: String, f: NameFault) Res<(), AllocError> {
     Ok(());
 }
 
-// WHICH MODULE THE IMPL HAS TO MOVE TO, which is the half a position
-// cannot give: told only that an impl is homeless, an author still has
-// to find out where `u8` is declared. The name is the target and the
-// module is its declaring one — an `ExportFault` and not a new shape,
-// since "a name, and the module it is about" is exactly what that
-// payload carries.
+// Name the module that owns the impl target.
 write_orphan = (out :: String, f: ExportFault) Res<(), AllocError> {
     out.fmt(
         ": {} is declared in module {}, so the impl belongs there",
@@ -473,17 +369,7 @@ write_orphan = (out :: String, f: ExportFault) Res<(), AllocError> {
     Ok(());
 }
 
-// THE NAME AND THE TYPE THAT WAS ASKED, because the type is the half the
-// reader cannot see: `size` is declared, plainly, three lines up — on
-// `Bag`. Told only that there is no `size`, an author goes and looks at
-// the declaration that does exist. `write_types` was here before and
-// printed "expected <unknown>, found Box": there is no expectation in a
-// member lookup, and a poison id rendered as one said so twice.
-//
-// EXPORTED because a construction argument naming nothing reaches this
-// same sentence — `CtorNamesNoMember` carries exactly this fault's shape,
-// and rendering it here keeps "how a fault reads" in the one file that
-// owns diagnostics.
+// Include both the requested member and receiver type.
 write_member* = (out :: String, types: Types, f: TypeFault)
                 Res<(), AllocError> {
     found ::= types.name_of(f.found).try();
@@ -498,11 +384,7 @@ write_ctor_surplus = (out :: String, types: Types, f: TypeFault)
     Ok(())
 }
 
-// THE METHOD AND ITS SIGNATURE, because the name is not the problem: the
-// reader wrote a member access that resolves, and what is missing is the
-// `()` that reads it. The found half carries the function type, so the
-// sentence can show what `s.len` actually named — `(String) usize` — and
-// the fix writes itself.
+// A method used as a value needs an explicit call.
 write_method_value = (out :: String, types: Types, f: TypeFault)
                      Res<(), AllocError> {
     sig ::= types.name_of(f.found).try();
@@ -515,17 +397,7 @@ write_method_value = (out :: String, types: Types, f: TypeFault)
     Ok(());
 }
 
-// THE SPELLING THE READER HAS TO WRITE INSTEAD, which is the half a
-// position cannot give them: told only that `Error.IoError` is not a
-// value, an author has no way to guess whether the fix is a variant they
-// forgot to declare or an argument they forgot to pass.
-//
-// A `TypeFault` whose two ids are the SET and the member's own type,
-// rather than an expectation and what was found. There is no expectation
-// in this mistake — it is not that the wrong type turned up, it is that
-// no value was written at all — and the two types the sentence needs are
-// exactly two, so the shape fits and a fifth payload would carry the
-// same pair under a new name.
+// Show the payload type required by a carried union member.
 write_needs_value = (out :: String, types: Types, f: TypeFault)
                     Res<(), AllocError> {
     found   ::= types.name_of(f.found).try();
@@ -541,9 +413,7 @@ write_needs_value = (out :: String, types: Types, f: TypeFault)
     Ok(());
 }
 
-// Which type impls no `Eq`. There is no second type to contrast it
-// against — the operands agree, that is not what is wrong — so this
-// names one and not two.
+// Name the type missing an `Eq` implementation.
 write_needs_eq = (out :: String, types: Types, f: TypeFault)
                  Res<(), AllocError> {
     found ::= types.name_of(f.found).try();
@@ -551,9 +421,7 @@ write_needs_eq = (out :: String, types: Types, f: TypeFault)
     Ok(());
 }
 
-// THE TYPE IS THE EVIDENCE, not a contrast: nothing expected a value, so
-// there is no "expected" half. The law follows the name of what was
-// computed, as it does in `write_missing`.
+// Name the type of a discarded value.
 write_discarded = (out :: String, types: Types, f: TypeFault)
                   Res<(), AllocError> {
     found ::= types.name_of(f.found).try();
@@ -564,25 +432,13 @@ write_discarded = (out :: String, types: Types, f: TypeFault)
     Ok(());
 }
 
-// An ownership sentence: the place, then what happened to it.
-//
-// UNQUOTED, unlike every other name this file prints, because the place
-// is the SUBJECT of a sentence and not evidence appended to one. "`f`
-// was consumed" reads as a fragment with a quoted token in it; "f was
-// consumed" reads as the claim it is, and it is the claim the ownership
-// tests assert. The tail travels with the raise site rather than living
-// in `message` because `message` has already said the law — repeating it
-// here would print the rule twice and the place never.
+// Ownership diagnostics read as a sentence with the place as its subject.
 write_place = (out :: String, f: NameFault, tail: str) Res<(), AllocError> {
     out.fmt(" {}{}", f.name, tail).try();
     Ok(());
 }
 
-// The place is unquoted like every ownership sentence; the capture is
-// the half a position cannot give — told only that f was consumed, an
-// author cannot find which closure holds it. Both positions travel in
-// one diagnostic, so the sentence carries its own evidence and the
-// reader walks from the move to the capture that forbids it.
+// Include the capture position that keeps the consumed place alive.
 write_capture = (out :: String, f: CaptureFault) Res<(), AllocError> {
     out.fmt(" {} was consumed by a closure that captured it", f.place).try();
     out.add(" — the capture keeps it alive here: ").try();
@@ -590,28 +446,19 @@ write_capture = (out :: String, f: CaptureFault) Res<(), AllocError> {
     Ok(());
 }
 
-// The name and the module that would not let it out, as a sentence
-// rather than a quoted fragment. Both halves are needed to act on it —
-// a reader told only `hex_digit` still has to find which of the file's
-// imports was the one that refused.
+// Name both the blocked name and the module that did not export it.
 write_export = (out :: String, f: ExportFault) Res<(), AllocError> {
     out.fmt(": {} is not exported by module {}", f.name, f.module).try();
     Ok(());
 }
 
-// "NOT WRITABLE" AND NOT "NOT EXPORTED", because the field IS exported
-// and a reader who is told otherwise goes and stars something already
-// starred. `*` grants reading; the sentence has to say which half was
-// refused.
+// Export grants reading, not cross-module writes.
 write_unwritable = (out :: String, f: ExportFault) Res<(), AllocError> {
     out.fmt(": {} is not writable outside module {}", f.name, f.module).try();
     Ok(());
 }
 
-// WHICH MODULE, because that is the half a reader cannot see. `zz = vec`
-// and `Alias = Shape` are the same three tokens, so being told `zz` is not
-// a value leaves the author looking at a line that reads like a type
-// alias. Naming `vec` is what turns it back into one mistake.
+// Explain that the name denotes a module and requires member access.
 write_module = (out :: String, f: ExportFault) Res<(), AllocError> {
     out.fmt(
         ": `{}` names module `{}`, so write `{}.<name>`",
@@ -622,15 +469,8 @@ write_module = (out :: String, f: ExportFault) Res<(), AllocError> {
     Ok(());
 }
 
-// Both sides, always. `expected` first, because that is the order the
-// reader is thinking in: they wrote something, and the context wanted
-// something else.
-// NEITHER SIDE IS AN EXPECTATION, which is why this is not
-// `write_types`. At a slot with a written type the position is what the
-// arm owes and "expected" names it; at `x = b.match(..)` there is no
-// such word, and printing "expected int" would put the first arm's type
-// in the position's voice. So the sentence contrasts one arm with the
-// rest, and every noun in it is something the author wrote.
+// Match-arm disagreement has no expected type; contrast this arm with those
+// above it instead.
 write_arms = (out :: String, types: Types, f: TypeFault)
              Res<(), AllocError> {
     found ::= types.name_of(f.found).try();
@@ -652,17 +492,7 @@ write_types = (out :: String, types: Types, f: TypeFault)
     Ok(());
 }
 
-// `literal 2147483648 does not fit i32`. The number is the literal as
-// WRITTEN — a slice of the source, so nothing is formatted into the
-// fault — and it is absent exactly when the value was not written as
-// one: `-1` is unary minus applied to `1`, and quoting `1` in a
-// sentence about a value of `-1` would be false. The type still names
-// itself, so the sentence is complete either way.
-//
-// `text` is bound before the closure and not read through `f` inside
-// it: the bootstrapper loses a captured struct's type across a lambda
-// boundary, and `quote` above captures a bare `str` for the same
-// reason.
+// Include source text only when the rejected value is a direct literal.
 write_literal = (out :: String, types: Types, f: TypeFault)
                 Res<(), AllocError> {
     text = f.name;
@@ -673,18 +503,7 @@ write_literal = (out :: String, types: Types, f: TypeFault)
     Ok(());
 }
 
-// BOTH DECLARATIONS, EACH WITH ITS FILE. `write_pos` alone gives
-// `9:1 and 11:1`, which reads fine to a person on one screen and is
-// useless to everything else: an editor cannot jump to it, and
-// `TESTING.md` requires every position a `.expected` names to appear as
-// `path:line:col`, so a bare pair silently failed the one test that
-// exercises this fault. A `Span` has carried its file all along — the
-// renderer was simply not asking for it.
-//
-// The two spans may be in DIFFERENT files, which is the case that makes
-// the full form necessary rather than merely tidy: two modules may each
-// declare the same signature, and naming one of them by line alone
-// points at the wrong file's line.
+// Include full paths because the declarations may be in different files.
 write_pair = (out :: String, f: PairFault) Res<(), AllocError> {
     quote(out, f.name).try();
     out.add(": ").try();

@@ -1,10 +1,7 @@
 // src/gen/gen_c/gen_c_handle.zen
 // `h.break(v)` and `h.next()` — leaving a loop, and leaving a pass.
-// Its own file rather than the tail of `gen_c_loop.zen`: DESIGN.md
-// frames `.try()` as "a jump out through a frame boundary, exactly what
-// `h.break(v)` does" — the loop file answers what a loop IS, this one
-// what a jump out of one is, the question `gen_c_flow.zen` answers for
-// `.try()`.
+// Loop construction lives in gen_c_loop; this module owns exits from the
+// loop frame and their cleanup.
 // Both are `goto`s, neither is C's `break`/`continue`: the body is
 // inlined into whatever the lowering of a `.match` produced (an `if`
 // chain today), and a C `break` there would leave that construct rather
@@ -137,17 +134,9 @@ write_break = (
         ),
         false => Ok(()),
     }).try();
-    // THE VALUE BROKEN WITH IS NOT FREE TO CHOOSE ITS TYPE. `loop_handle.zen`
-    // states the rule — break's `T` "is the enclosing loop's own T, fixed by
-    // the loop this handle names, never by the call" — and the frame's
-    // settled type is that answer: the walked element, or a fold's
-    // accumulator (`settle_res`, `gen_c_loop.zen`). Sema never sees either
-    // side of the question: `h` is bound at `unknown` (`bind_handle`) and
-    // sema does not walk lambda bodies at all, so this is the one place the
-    // two types meet. Without the check, a disagreement is a compound
-    // literal in the wrong slot for cc to catch — and two integers of
-    // different widths convert silently, compiling clean and answering
-    // garbage.
+    // A break value must fit the loop frame's settled payload: the walked
+    // element or fold accumulator. The handle has no ordinary value type, so
+    // this is where the argument and frame payload meet.
     ((c.args.len > 0) && (fr.has_result)).match({
         false => Ok(()),
         true  => be.break_fits(id, c, fr, ctx),
@@ -210,13 +199,8 @@ break_value_fits = (
     })
 }
 
-// AND A LITERAL FITS ITS FAMILY, NOT ITS TYPE. That leniency is what
-// keeps `Range(0, 5).loop(.. h.break(42) ..)` legal over a `usize`
-// walk, and it is also what let `h.break(300)` over a `[u8]` walk
-// truncate to 44 with exit 0 and no diagnostic — the break was the one
-// typed position in this language with no range check on it, while
-// `q: u8 = 300` has been refused all along. `cc` says `-Woverflow`
-// here and `zen` said nothing (#766).
+// A literal fits its numeric family but must also fit the payload width. This
+// keeps ordinary inferred literals legal without allowing silent truncation.
 break_literal_fits = (be :: CBackend, value: ExprId, payload: TyId)
                      Res<(), AllocError> {
     be.check.literal_overflows(value, payload).match({
@@ -314,12 +298,8 @@ write_ok_payload = (
     mem ::= be.alloc.String().try();
     sym_member(mem, "Ok").try();
     line.fmt(", .zg_data.{} = ", mem.view()).try();
-    // THE EMITTER KEEPS THE NODE'S OWN TYPE. `expr` spells `-7` from its
-    // own reading of the node; spelling it AT THE PAYLOAD instead re-reads
-    // the literal through the slot and shifts the bits it was meant to
-    // carry (#784). The compound literal already casts to the frame's
-    // `Res<T>` (`assign_ok`), so the C conversion happens at the
-    // initialiser — where the sign survives.
+    // Lower the node at its own type. The enclosing Res<T> initializer then
+    // converts to the frame payload without changing signed-literal reading.
     expr(be, value, ctx, payload, line).try();
     Ok(());
 }

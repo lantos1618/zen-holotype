@@ -1,22 +1,4 @@
-// src/lsp/lsp_symbol.zen
-// `textDocument/documentSymbol` — a module's declarations, flat.
-//
-// THE ONE ANSWER HERE THAT NEEDS NO CHECKER: a declaration's kind, span
-// and name-span are all AST facts, so this file parses the open buffer
-// and walks its decls — `module_count`/`module_at` territory, per
-// `design_lsp.md` §2's table ("no new query"). Like colour's lexical
-// half it answers on an unsaved buffer with no `rootUri`, and on a file
-// that does not fully parse — the parser reports and hands back what it
-// had, so every declaration before the fault is listed.
-//
-// FLAT `SymbolInformation`, not the hierarchical `DocumentSymbol`: the
-// two carry the same facts and the flat form is the one every client
-// renders. TOP-LEVEL ONLY — a member's or variant's outline entry is a
-// real feature, and it is deliberately not this one.
-//
-// KINDS are the protocol's `SymbolKind` numbers. An alias has no kind of
-// its own; Class (5) is the closest a client can render, and the mapping
-// lives here exactly once.
+// Writes flat document symbols from declarations in the open buffer.
 
 str, String = std.text
 Vec = std.collections
@@ -26,12 +8,7 @@ Parser = std.parse
 Ast, Module, Decl, Span, Ident = std.ast
 write_range = lsp.lsp_pos
 written, obj, arr, Nest = std.json
-write_decimal = lsp.lsp_frame
 
-// One outline entry: the name, its kind, the declaration's whole span
-// (`range`) and the name's own (`selectionRange`) — `Decl.span` and
-// `Ident.span` are exactly those two, which is why this file holds no
-// arithmetic.
 Sym* = {
     name*: str,
     kind*: usize,
@@ -39,16 +16,12 @@ Sym* = {
     name_span*: Span,
 }
 
-// SymbolKind, spelled the protocol's way.
-CLASS*: usize = 5        // an alias, the nearest thing to a type name
+CLASS*: usize = 5        // LSP has no type-alias symbol kind.
 ENUM*: usize = 10
 FUNCTION*: usize = 12
 CONSTANT*: usize = 14
 STRUCT*: usize = 23
 
-// Every top-level declaration of the buffer, in source order. The parse
-// is the same four lines hover opens with, minus the `Checker` — the
-// tree is never added to an arena because nothing here asks sema.
 symbols_at* = (a: Alloc, text: str, out :: Vec<Sym>) Res<(), AllocError> {
     tree ::= a.Ast();
     lexed = scan(a, Source(file: "doc", text: text)).try();
@@ -62,11 +35,6 @@ module_syms = (m: Module, out :: Vec<Sym>) Res<(), AllocError> {
     Ok(());
 }
 
-// An Import binds names it does not declare and an Impl declares no name
-// of its own — neither is an outline entry. Neither is a declaration
-// whose name the parser invented: mid-typing buffers (`= `) carry an
-// empty Ident, and the protocol's `name` must not be falsy — one empty
-// row makes the client reject the whole list.
 decl_sym = (d: Decl, out :: Vec<Sym>) Res<(), AllocError> {
     d.kind.match({
         Function(f) => add_sym(out, f.name, FUNCTION, d.span),
@@ -91,9 +59,6 @@ add_sym = (out :: Vec<Sym>, id: Ident, kind: usize, span: Span)
     Ok(())
 }
 
-// The flat list as the protocol spells it. `text` IS THE BUFFER THE
-// SPANS WERE MEASURED AGAINST — the same file, always, since a lone
-// parse answers about nothing else.
 write_symbols* = (uri: str, text: str, syms: Vec<Sym>, out :: String)
                  Res<(), AllocError> {
     list ::= arr(out).try();
@@ -101,15 +66,13 @@ write_symbols* = (uri: str, text: str, syms: Vec<Sym>, out :: String)
     list.close(out)
 }
 
-// THE LIST IS PASSED, NOT A COUNT: the separator between two entries
-// belongs to the array that holds them, and `Nest` is what holds it.
 write_sym = (s: Sym, uri: str, text: str, list :: Nest, out :: String)
             Res<(), AllocError> {
     list.next(out).try();
     sym ::= obj(out).try();
     sym.text("name", s.name, out).try();
     sym.key("kind", out).try();
-    write_decimal(s.kind, out).try();
+    out.write_usize(s.kind).try();
     sym.key("location", out).try();
     at ::= obj(out).try();
     at.text("uri", uri, out).try();

@@ -1,27 +1,6 @@
-// DESIGN.md decides between two readings of `A | B` by what the names
-// MEAN: a union of existing types when EVERY variant names a type in
-// scope, a nominal enum otherwise. THE QUESTION IS ABOUT THE
-// DECLARATION.
-//
-// Asked one variant at a time it has a different answer, and the wrong
-// answer is silent. `Kind` below is nominal, because `Ident` and `Arrow`
-// are not types — but `Payload` is, so a per-variant decision gives that
-// one variant a `Payload` to carry. The program still compiles, still
-// runs, still prints the same thing; the enum is just wider, holding a
-// union member nothing ever reads.
-//
-// That is exactly what shipped. `lex.TokenKind` has sixty variants and
-// one of them is `Eq`, which the prelude also exports as the equality
-// bound — so every token the compiler lexed carried a three-word trait
-// record, and `TokenKind` was 32 bytes where 16 would do. `ast.ExprKind`
-// had the same thing with `@scope`'s `Scope`. Both were in the seed.
-//
-// SO THIS TEST ASSERTS ON THE EMITTED C AND NOT ON STDOUT. Nothing about
-// what the program PRINTS changes when the decision goes wrong, which is
-// why 395 green corpus tests said nothing about it for as long as it was
-// there. The bootstrap had it right the whole time and the self-hosted
-// port dropped the per-declaration check — a disagreement between two
-// implementations that no output could show.
+// `A | B` is a union only when every variant in the declaration names a
+// type; otherwise the entire declaration is a nominal enum. The distinction
+// affects generated layout rather than runtime output, so this test inspects C.
 
 Alloc, AllocError = std.mem
 str, String = std.text
@@ -64,20 +43,10 @@ main = (env: Env) Res<i32, AllocError> {
 
     println("nothing was refused: {}", faults.is_empty());
 
-    // THE ASSERTION. A nominal enum's variant does not carry the type it
-    // happens to be named after, so `Payload` appears in the C as its own
-    // struct and NOT as a member of Kind's union.
+    // A nominal enum variant carries no type merely because the names match.
     println("Kind carries no Payload: {}", c.view().count("zu_m7Payload") == 0);
 
-    // and the other reading is untouched: every variant of Either names a
-    // type, so both carry one.
-    //
-    // PRESENT, not exactly once. The member name appears where the union
-    // is DECLARED and again wherever a value of it is BUILT, and `main`
-    // above builds one — so `== 1` was counting the declaration only
-    // because `Either.Left(..)` used to drop its argument on the floor.
-    // The contrast that catches the bug this test is about is between
-    // none and some, and that is what is asserted.
+    // Every Either variant names a type, so both payload fields are present.
     println("Either carries Left: {}", c.view().count("zu_m4Left") > 0);
     println("Either carries Right: {}", c.view().count("zu_m5Right") > 0);
 

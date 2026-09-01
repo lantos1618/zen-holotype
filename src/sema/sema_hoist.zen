@@ -1,11 +1,8 @@
 // src/sema/sema_hoist.zen
 // What lifts into a `Res`, and what does not.
 //
-// DESIGN.md: "hoisting: a bare T lifts into Res<T> wherever a Res is
-// expected — `0;` closes a `Res<i32, E>` function like `Ok(0);` does.
-// hoisting only fires when exactly ONE variant carries the type."
-//
-// TWO RULES, BOTH REFUSALS. The lift itself needs no code: the backend
+// A bare T lifts into Res<T> when exactly one variant carries it. The lift
+// itself needs no code: the backend
 // builds an `Ok` for a value that fits the success payload. Sema only
 // owes the two cases where a reader would be guessing:
 //   - `Res<i32, i32>` has TWO variants carrying `i32`, so a bare 32 is
@@ -13,18 +10,17 @@
 //   - only SUCCESS lifts. A bare error value at a `Res` return is not
 //     an `Err` — a failure that lifted silently would be unwritten.
 //
-// NEVER COUNT AN UNSETTLED SLOT: `assignable` is lenient about a type
+// Never count an unsettled slot: `assignable` is lenient about a type
 // nobody has computed (`Var`, `Infer`, poison), so counting those would
 // make `<T, E>() Res<T, E>` ambiguous at every tail. Standing rule:
 // never invent a diagnostic out of missing information.
 //
-// THE TWO CALL SITES: a function's tail (`sema_decl.zen`, after the
+// The two call sites are a function's tail (`sema_decl.zen`, after the
 // body is typed) and a constructor's field (`sema_apply.zen`, after
 // the construction's type is known). A binding with a written type
 // goes through `coerce` instead, which reports the ordinary mismatch.
 //
-// AND ONE RULE THAT IS NOT ABOUT HOISTING AT ALL, at the bottom of the
-// file: `check_arms`, which puts a match's ARMS where the match itself
+// `check_arms` also puts a match's arms where the match itself
 // stands. It lives here because every answer it has for a `Res` slot
 // is one of the answers above — an arm is a tail, and a tail that
 // lifts must go on lifting.
@@ -54,19 +50,14 @@ hoist_check* = (c :: Checker, file: str, span: Span, got: TyId, want: TyId)
     })
 }
 
-// A VALUE THAT DOES NOT FIT AND HAS NOWHERE TO LIFT IS NOT THIS FILE'S
-// TO REPORT, and the arm below is `Ok(())` for that reason and not by
-// oversight. `hoist_at` has one caller — `field_fits` — and the mismatch
-// it used to swallow is now raised by `check_ctor_shape` in
-// `sema_bound.zen`, which is where the answer needs `satisfies_bound`:
+// A value that neither fits nor lifts is reported by the positional checker.
+// Constructor shape validation belongs in sema_bound because it needs
+// `satisfies_bound`:
 // `Buf(alloc: alloc)` hands an `Arena` to an `alloc: Alloc` field, and a
 // bound is a promise kept by an impl, not a type `assignable` compares.
 //
-// IT LIVES THERE AND NOT HERE BECAUSE OF THE MODULE GRAPH. Importing
-// `sema_bound` into this file closes a cycle — sema_hoist -> sema_bound
-// -> sema_call -> sema_hoist — and the cost is not a diagnostic: the
-// backend stopped emitting whole instantiations, and 96 corpus programs
-// compiled to C that named functions nothing declared.
+// Importing sema_bound here would close a sema_hoist -> sema_bound ->
+// sema_call -> sema_hoist cycle.
 hoist_into = (c :: Checker, file: str, span: Span, got: TyId, want: TyId)
              Res<(), AllocError> {
     c.types.at(want).match({
@@ -243,11 +234,7 @@ res_return = (
     })
 }
 
-// AND A VALUE WITH NOWHERE TO LIFT IS THE TAIL'S OWN MISMATCH.
-// `hoist_into_res` is silent for it by design — at a constructor field
-// `check_ctor_shape` reports it — but at a `Res` return NOBODY did, so
-// `() Res<(), E> { inner().try() }` and `() Res<i32, E> { "x" }` were
-// accepted and `cc` was the type checker (#764). The refusal goes
+// A value with nowhere to lift is the tail's own mismatch. The refusal goes
 // through `wrong_return` so the two exemptions still hold: a `()`
 // return discards anything, and a `;`-terminated tail that yields
 // nothing still closes the function.
@@ -266,13 +253,12 @@ lift_or_refuse = (
     })
 }
 
-// A NODE THAT COVERS NO BYTES WAS NOT WRITTEN. The parser stands one
+// A node that covers no bytes was not written. The parser stands one
 // where a construct it could not read would have gone —
 // `parser.empty_span`, "it stands where the missing construct would
 // have stood and covers no bytes, so nothing downstream mistakes it
-// for source the author wrote" — and typing that poison is typing the
-// first diagnostic's wreckage. TESTING.md: one syntax error must not
-// cascade into fifty.
+// for source the author wrote". Typing that poison would cascade the
+// original syntax diagnostic.
 was_written = (node: Expr) bool {
     (node.span.start.line != node.span.end.line)
         || (node.span.start.col != node.span.end.col)
@@ -291,13 +277,6 @@ lands_somewhere = (c: Checker, got: TyId, r: TyRes) bool {
 // value is unit (`sema_call.print_or_call`), so `f = () i32 {
 // println("x") }` returns nothing where an `i32` was promised, and
 // `Err("not an error at all")` no longer closes a `Res<i32, Error>`.
-//
-// BUG FOUND THE HARD WAY: `str` was once both a prim in the type store
-// and a struct `std.text` declares, so `str_at`'s own `str(...)` wasn't
-// `assignable` to its declared `str` and the general rule reddened
-// every program that stands on std with "expected str, found str".
-// Fixed in `sema_ty.named`, which now answers with the primitive for a
-// declaration of a primitive's name — one `str`, rule costs nothing.
 //
 // TWO EXEMPTIONS (one rule, either side: a value nobody asked for need
 // not fit):
@@ -344,10 +323,7 @@ tail_expr* = (c: Checker, blk: Block) Res<ExprId> {
     })
 }
 
-// Empty block asked first, and must be: `len - 1` on a `usize` zero
-// underflows, which this compiler traps on — `f = () () { }` used to
-// crash the compiler with `trap: integer overflow` here instead of
-// compiling to nothing.
+// Ask about an empty block before subtracting from its unsigned length.
 last_stmt_expr = (c: Checker, blk: Block) Res<ExprId> {
     (blk.stmts.len > 0).match({
         false => None,
@@ -355,10 +331,8 @@ last_stmt_expr = (c: Checker, blk: Block) Res<ExprId> {
     })
 }
 
-// A NESTED BLOCK ENDS ON ITS OWN TAIL, and `stmt_type` has always typed
-// a `Block` statement with `block_type` — so `{ { 11 } }` is an `i32`
-// to the checker and was nothing at all to every reader that asked
-// here. Descending gives one answer to both (#764).
+// A nested block ends on its own tail, so descend through a final block
+// statement to the expression that supplies its value.
 last_stmt_of = (c: Checker, stmts: Vec<Stmt>) Res<ExprId> {
     stmts.get(stmts.len - 1).match({
         None  => None,
@@ -589,13 +563,10 @@ ctor_no_member = (c :: Checker, a: Arg, name: str, ty: TyId)
     )
 }
 
-// WHAT THE MEMBER IS DECIDES WHAT THE ARGUMENT MEANS. A field is
+// What the member is decides what the argument means. A field is
 // storage the construction supplies; a struct-body constant (R4:
 // `y: i32 = 20`) is one value per type, read as `A.y`, so a
-// construction naming one used to be type-checked against its type and
-// then dropped by gen_c — sema believed an i32 was being supplied while
-// nothing was stored. Refused here, at the same face as the two refusals
-// beside it, so no half of the compiler believes the value landed.
+// construction cannot supply that constant as if it were storage.
 //
 // `field_fits` keeps every question it asked of a field's value — lift,
 // literal range, arms — and asks them only where they have an answer:
@@ -641,18 +612,8 @@ ctor_names_constant = (
     )
 }
 
-// A field is a typed slot: all of its questions get asked — what lifts
-// into it, whether the given value fits the declared type, and whether
-// every ARM of a match written there fits it. `Holder(n: 3000000000)` on
-// `n: i32` used to pass the first while nobody asked the second;
-// `Holder(n: b.match({ true => 1, false => false }))` passed the first
-// two while nobody asked the third, and a field is where a wrong value
-// stops being one expression's mistake and gets STORED.
-//
-// AND WHETHER THE VALUE IS A LOOP HANDLE (#807): `Box(g: h)` declared
-// real storage for the field and read `zu_l1h` into it, undeclared —
-// cc alone objecting, exactly the argument face one call over. The
-// bind seat's question, asked of the field's value.
+// A field is a typed slot: check lifting, assignability, match arms, literal
+// range, and whether the value is a non-storable loop handle.
 refuse_handle_value = sema.sema_handle
 field_fits = (c :: Checker, a: Arg, want: TyId, ctx: Ctx)
              Res<(), AllocError> {

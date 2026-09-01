@@ -1,44 +1,18 @@
-// src/lsp/lsp_frame.zen
-// The envelope: `Content-Length: <n>\r\n\r\n<body>`, and nothing else.
-//
-// JSON-RPC over a byte stream needs exactly one thing the JSON reader
-// cannot give it — where a message ENDS. Deliberately the smallest file
-// in `src/lsp/`: a framing layer that knows what a message means can
-// disagree with the one that parses it.
-//
-// THE BODY IS BYTES AND IS NOT SCANNED. `n` counts bytes, not
-// characters; the body may contain `\r`, `\n` and any UTF-8 sequence, so
-// splitting on newlines would corrupt any message containing one —
-// `design_lsp.md:157` specifies a byte-counted `read` and explicitly no
-// `read_line` for this reason.
-//
-// HEADER NAMES ARE COMPARED CASE-INSENSITIVELY, per protocol; every
-// other header (e.g. optional `Content-Type`) is skipped, not rejected.
+// Reads and writes byte-counted `Content-Length` envelopes. Header names are
+// case-insensitive; `Envelope.next` identifies the next frame in the buffer.
 
 str, String, parse_usize = std.text
 Range = std.core
 AllocError = std.mem
-to_lower, digit = std.core.byte
+to_lower = std.core.byte
 
-// One message, and where the next one starts. `next` rather than a
-// consumed cursor, so the caller can walk a buffer of frames without this
-// file holding any state.
 Envelope* = {
     body*: str,
     next*: usize,
 }
 
-// Why a frame could not be read, and at which byte. `Short` is not an
-// error at a live transport — it means the bytes have not all arrived;
-// over a buffer it is end-of-input, so `frames_in` treats it as the stop
-// condition rather than a failure.
-FrameFault* = NoBlank(usize)     // headers that never ended
-            | NoLength(usize)    // a header block with no Content-Length
-            | BadLength(usize)   // a Content-Length that is not a number
-            | Short(usize)       // fewer bytes than the length promises
+FrameFault* = NoBlank(usize) | NoLength(usize) | BadLength(usize) | Short(usize)
 
-// Where the fault sits. Every variant carries it, so there is nothing
-// to decide.
 byte* = (f: FrameFault) usize {
     f.match({
         NoBlank(i)   => i,
@@ -48,9 +22,6 @@ byte* = (f: FrameFault) usize {
     })
 }
 
-// The fault, said for a person. `lsp_serve.zen`'s `frame_fault` reports
-// it to a caller's stream and this folder's `fault_line` to a console;
-// both say this sentence.
 why* = (f: FrameFault) str {
     f.match({
         NoBlank(_)   => "the headers never ended",
@@ -60,9 +31,6 @@ why* = (f: FrameFault) str {
     })
 }
 
-// Whether the framing still made sense at `f`. Over a live transport
-// `NoBlank` and `Short` are bytes still in flight, not faults; over a
-// buffer `serve` ends the session at any of the four.
 partial* = (f: FrameFault) bool {
     f.match({
         NoBlank(_)   => true,
@@ -72,7 +40,6 @@ partial* = (f: FrameFault) bool {
     })
 }
 
-// The frame beginning at `at`.
 frame_at* = (bytes: str, at: usize) Res<Envelope, FrameFault> {
     blank = blank_at(bytes, at).try();
     len   = length_in(bytes, at, blank).try();
@@ -86,17 +53,6 @@ frame_at* = (bytes: str, at: usize) Res<Envelope, FrameFault> {
     })
 }
 
-// How many more bytes the message beginning at `at` needs, ZERO when
-// that cannot be known yet.
-//
-// THIS IS WHAT MAKES A LIVE TRANSPORT POSSIBLE. `Stdin.read` reads
-// EXACTLY what it is asked for and blocks until it has it
-// (`src/std/env/env.zen`), so asking for more than the message holds
-// would wait on bytes the client will not send until answered, while the
-// client waits on that answer. Asking for exactly what is missing cannot
-// deadlock. Zero means "ask for one byte", which always makes progress
-// while headers are still arriving (no `Content-Length` to compute from
-// yet) — not simply `frame_at`'s `Short` read backward.
 short_by* = (bytes: str, at: usize) usize {
     blank_at(bytes, at).match({
         Err(_)    => 0,
@@ -124,9 +80,6 @@ blank_at = (bytes: str, at: usize) Res<usize, FrameFault> {
     })
 }
 
-// The `Content-Length` value in the header block spanning `at..blank`.
-// Scanned line by line because a header VALUE may itself contain a
-// colon.
 length_in = (bytes: str, at: usize, blank: usize) Res<usize, FrameFault> {
     from  ::= at;
     found ::= false;
@@ -152,7 +105,6 @@ length_in = (bytes: str, at: usize, blank: usize) Res<usize, FrameFault> {
     })
 }
 
-// The `\r` ending the header line at `from`, or the end of the block.
 line_end = (bytes: str, from: usize, blank: usize) usize {
     Range(from, blank).find((i) { bytes.index(i) == '\r' }).match({
         Ok(i) => i,
@@ -160,9 +112,6 @@ line_end = (bytes: str, from: usize, blank: usize) usize {
     })
 }
 
-// Whether the line at `from` names Content-Length. Case-insensitive on
-// the NAME; the colon must be there too — `Content-Lengthy: 3` is a
-// different header.
 is_length = (bytes: str, from: usize, stop: usize) bool {
     fits = from + NAME.len <= stop;
     same ::= fits;
@@ -172,8 +121,6 @@ is_length = (bytes: str, from: usize, stop: usize) bool {
     same;
 }
 
-// A header value with its surrounding spaces removed. Only spaces and
-// tabs — a header line's other whitespace is its terminator.
 trimmed = (bytes: str, from: usize, stop: usize) str {
     lo ::= from;
     hi ::= stop;
@@ -184,28 +131,11 @@ trimmed = (bytes: str, from: usize, stop: usize) str {
 
 blankish = (b: u8) bool { b == ' ' || b == '\t' }
 
-// A message, framed, appended to `out`. EXACT BYTES, NO TRAILING
-// NEWLINE — `Console.println` (`src/std/env/env.zen:45`) appends one
-// `\n` and is unusable for this.
 write_frame* = (body: str, out :: String) Res<(), AllocError> {
     out.add("Content-Length: ").try();
-    write_decimal(body.len, out).try();
+    out.write_usize(body.len).try();
     out.add("\r\n\r\n").try();
     out.add(body)
-}
-
-// A usize, in decimal, with no allocation. The digit comes from a TABLE
-// rather than arithmetic: this language has no narrowing conversion
-// (`src/std/core/num.zen:124`), so indexing a ten-byte string by a value
-// already known to be under ten is that conversion, spelled as a lookup.
-write_decimal* = (n: usize, out :: String) Res<(), AllocError> {
-    (n < 10).match({
-        true  => out.add(digit(n)),
-        false => {
-            write_decimal(n / 10, out).try();
-            out.add(digit(n % 10))
-        },
-    })
 }
 
 NAME*: str = "content-length:"
