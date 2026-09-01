@@ -194,7 +194,7 @@ norm_destructure = (
     ty   : TyId,
     ctx  : Ctx
 ) Res<usize, AllocError> {
-    text = last_segment(d.name);
+    text = d.name.last_segment();
     c.member_of(ty, text).match({
         Ok(t) => c.norm_set_ctor(ps, node, d, text, t, ctx),
         None  => c.plain_ctor(ps, node, d, ty, text, ctx),
@@ -240,7 +240,7 @@ norm_name = (
     ty   : TyId,
     ctx  : Ctx
 ) Res<usize, AllocError> {
-    text = last_segment(pn.name);
+    text = pn.name.last_segment();
     c.is_case(ty, text).try().match({
         true  => ps.add(ctor_pat(text, node.span)),
         false => c.norm_set_name(ps, node, pn, ty, text, ctx),
@@ -293,7 +293,7 @@ norm_member_dot = (
     leaf : str,
     ctx  : Ctx
 ) Res<usize, AllocError> {
-    member = segment_at(pn.name, 0);
+    member = pn.name.segment_at(0);
     c.member_of(ty, member).match({
         None    => c.norm_binder(ps, node, leaf, ty, ctx),
         Ok(mty) => c.is_case(mty, leaf).try().match({
@@ -359,23 +359,6 @@ is_case* = (c :: Checker, ty: TyId, name: str) Res<bool, AllocError> {
     cases ::= c.alloc.Vec<Case>();
     c.cases_of(ty, cases).try();
     Ok(find_case(cases, name).match({ Ok(_) => true, None => false }));
-}
-
-// `Shape.Unit` and `Unit` name one case: the last segment is the name,
-// the rest is qualification a deeper path has no meaning beyond.
-last_segment* = (q: QualifiedName) str {
-    n = q.segments.len;
-    (n == 0).match({
-        true  => "",
-        false => q.segments.get(n - 1).match({ Ok(s) => s.text, None => "" }),
-    })
-}
-
-// The FIRST segment of a qualified pattern name: `ParseError.NotANumber`
-// names the member `ParseError`. A miss is not input — `norm_member_dot`
-// only runs when there are exactly two segments — so it reads as "".
-segment_at* = (q: QualifiedName, i: usize) str {
-    q.segments.get(i).match({ Ok(s) => s.text, None => "" })
 }
 
 // ---------------------------------------------------------------------
@@ -1031,23 +1014,9 @@ member_leaf = (c :: Checker, ps :: Pats, mty: TyId, text: str, span: Span)
 // member carries. `sym_union_member` spells the same thing in C.
 member_name = (c :: Checker, mty: TyId) str {
     c.types.at(mty).match({
-        Named(n) => last_segment_str(n.name),
+        Named(n) => n.name.after_last('.'),
         _        => "",
     })
-}
-
-last_segment_str = (qname: str) str {
-    qname.slice(qname.len - last_len(qname), qname.len)
-}
-
-last_len = (qname: str) usize {
-    dot      ::= 0;
-    i: usize ::= 0;
-    loop(() { i < qname.len && dot == 0 }, (h) {
-        (qname.index(i) == '.').then(() { dot = i + 1; });
-        i = i + 1;
-    });
-    qname.len - dot
 }
 
 lit_pat = (text: str, span: Span) Pat {

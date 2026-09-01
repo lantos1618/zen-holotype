@@ -939,16 +939,6 @@ dotted* = (a: Alloc, q: QualifiedName) Res<str, AllocError> {
     Ok(out.view());
 }
 
-// The last segment of a dotted name — `core` of `std.core`, and `main`
-// of a name with no dot at all, which is why the cut starts at 0.
-last_segment* = (name: str) str {
-    cut ::= 0;
-    Range(0, name.len).loop((h, i) {
-        (name.index(i) == '.').then(() { cut = i + 1; });
-    });
-    name.slice(cut, name.len)
-}
-
 decl_at* = (tree: Ast, id: DeclId) Res<Decl> {
     tree.module_at(id.module.to_usize()).match({
         None  => None,
@@ -1032,20 +1022,16 @@ named_variant = (e: Enum, name: str) bool {
 // `text.text` by the path rule and to `text` by the folder rule, and a
 // person wrote the folder form — so a repeated last segment collapses.
 module_display* = (name: str) str {
-    head = name.slice(0, cut_before(name));
-    last_segment(head).eq(last_segment(name)).match({
-        true  => head,
-        false => name,
-    })
-}
-
-// Where the last segment starts, minus its dot.
-cut_before = (name: str) usize {
-    cut ::= name.len;
-    Range(0, name.len).loop((h, i) {
-        (name.index(i) == '.').then(() { cut = i; });
+    name.rfind('.').match({
+        None      => name,
+        Ok(split) => {
+            head = name.slice(0, split);
+            head.after_last('.').eq(name.after_last('.')).match({
+                true  => head,
+                false => name,
+            })
+        },
     });
-    cut
 }
 
 visited = (seen: Vec<usize>, mi: usize) bool {

@@ -15,7 +15,6 @@ TyId, TyNamed, TyRes, is_failure = sema.sema_ty
 decl_at = sema.sema_def
 Ctx = sema.sema_check
 Inst = sema.sema_inst
-last_segment = sema.sema_match
 member_of = sema.sema_union
 sym_local, sym_member, sym_variant = gen.gen_name
 sym_union_member = gen.gen_name
@@ -71,7 +70,7 @@ PatternSite = {
         d    : Destructure,
         out  :: String
     ) Res<(), AllocError> {
-        member = last_segment(d.name);
+        member = d.name.last_segment();
         member_of(be.check, self.ty, member).match({
             None  => self.plain_ctor_cond(be, d, out),
             Ok(t) => self.member_ctor_cond(be, d, t, out),
@@ -80,13 +79,13 @@ PatternSite = {
 
     plain_ctor_cond = (self: @Self, be :: CBackend, d: Destructure,
                        out :: String) Res<(), AllocError> {
-        self.tag_name(be, last_segment(d.name), out).try();
+        self.tag_name(be, d.name.last_segment(), out).try();
         self.payload_cond(be, d, out)
     }
 
     member_ctor_cond = (self: @Self, be :: CBackend, d: Destructure,
                         mty: TyId, out :: String) Res<(), AllocError> {
-        member = last_segment(d.name);
+        member = d.name.last_segment();
         self.tag_name(be, member, out).try();
         place ::= be.alloc.String().try();
         be.set_member_place(mty, self.place, place).try();
@@ -97,7 +96,7 @@ PatternSite = {
                  out :: String) Res<(), AllocError> {
         pat     = be.tree.pattern_at(pid);
         narrows = pat.kind.match({
-            Name(p) => be.is_variant(self.ty, last_segment(p.name)),
+            Name(p) => be.is_variant(self.ty, p.name.last_segment()),
             _       => false,
         });
         narrows.match({
@@ -113,7 +112,7 @@ PatternSite = {
 
     payload_cond = (self: @Self, be :: CBackend, d: Destructure,
                     out :: String) Res<(), AllocError> {
-        be.payload_type(self.ty, last_segment(d.name)).match({
+        be.payload_type(self.ty, d.name.last_segment()).match({
             None  => be.bare_payload(d),
             Ok(t) => self.nested_cond(be, d, t, out),
         })
@@ -130,7 +129,7 @@ PatternSite = {
     write_nested_cond = (self: @Self, be :: CBackend, d: Destructure,
                          ty: TyId, out :: String) Res<(), AllocError> {
         place ::= be.alloc.String().try();
-        be.payload_place(last_segment(d.name), self.place, place).try();
+        be.payload_place(d.name.last_segment(), self.place, place).try();
         out.add(" && ").try();
         self.at(ty, place.view()).cond(be, d.binder, out)
     }
@@ -156,9 +155,9 @@ PatternSite = {
 
     name_cond = (self: @Self, be :: CBackend, q: QualifiedName,
                  out :: String) Res<(), AllocError> {
-        be.is_variant(self.ty, last_segment(q)).match({
+        be.is_variant(self.ty, q.last_segment()).match({
             true  => self.tag_cond(be, q, out),
-            false => self.set_name_cond(be, last_segment(q), out),
+            false => self.set_name_cond(be, q.last_segment(), out),
         })
     }
 
@@ -193,7 +192,7 @@ PatternSite = {
 
     tag_cond = (self: @Self, be :: CBackend, q: QualifiedName,
                 out :: String) Res<(), AllocError> {
-        self.tag_name(be, last_segment(q), out)
+        self.tag_name(be, q.last_segment(), out)
     }
 
     tag_name = (self: @Self, be :: CBackend, name: str, out :: String)
@@ -216,7 +215,7 @@ PatternSite = {
 
     bind_name = (self: @Self, be :: CBackend, q: QualifiedName)
                 Res<(), AllocError> {
-        name = last_segment(q);
+        name = q.last_segment();
         be.is_variant(self.ty, name).match({
             true  => Ok(()),
             false => be.bind_local(name, self.ty, self.place),
@@ -225,7 +224,7 @@ PatternSite = {
 
     bind_payload = (self: @Self, be :: CBackend, d: Destructure)
                    Res<(), AllocError> {
-        member = last_segment(d.name);
+        member = d.name.last_segment();
         member_of(be.check, self.ty, member).match({
             None    => self.enum_bind_payload(be, d),
             Ok(mty) => self.set_bind_payload(be, d, mty),
@@ -234,7 +233,7 @@ PatternSite = {
 
     enum_bind_payload = (self: @Self, be :: CBackend, d: Destructure)
                         Res<(), AllocError> {
-        be.payload_type(self.ty, last_segment(d.name)).match({
+        be.payload_type(self.ty, d.name.last_segment()).match({
             // A written unit payload still introduces a Zen binding even
             // though it has no C field. Publishing the storage-free slot is
             // what lets a generic `Ok(value)` body instantiate at `T = ()`.
@@ -246,7 +245,7 @@ PatternSite = {
     bind_unit_payload = (self: @Self, be :: CBackend, pid: PatternId)
                         Res<(), AllocError> {
         be.tree.pattern_at(pid).kind.match({
-            Name(p) => self.bind_unit_name(be, last_segment(p.name)),
+            Name(p) => self.bind_unit_name(be, p.name.last_segment()),
             _       => Ok(()),
         })
     }
@@ -269,7 +268,7 @@ PatternSite = {
     bind_inner = (self: @Self, be :: CBackend, d: Destructure, ty: TyId)
                  Res<(), AllocError> {
         place ::= be.alloc.String().try();
-        be.payload_place(last_segment(d.name), self.place, place).try();
+        be.payload_place(d.name.last_segment(), self.place, place).try();
         self.at(ty, place.view()).bind(be, d.binder)
     }
 }
@@ -365,7 +364,7 @@ write_unreachable = (be :: CBackend, node: Expr, m: Match)
 // Only a narrowing Name reaches here, so its last segment is the case.
 leaf_of = (pat: Pattern) str {
     pat.kind.match({
-        Name(p) => last_segment(p.name),
+        Name(p) => p.name.last_segment(),
         _       => "",
     })
 }
@@ -388,7 +387,7 @@ bare_payload = (be :: CBackend, d: Destructure) Res<(), AllocError> {
 narrows = (be :: CBackend, pid: PatternId, st: TyId) bool {
     be.tree.pattern_at(pid).kind.match({
         Wild    => false,
-        Name(p) => be.is_variant(st, last_segment(p.name)),
+        Name(p) => be.is_variant(st, p.name.last_segment()),
         _       => true,
     })
 }
@@ -485,18 +484,7 @@ unsupported_cond = (be :: CBackend, pat: Pattern, out :: String)
 leaf_name_of = (be :: CBackend, mty: TyId) Res<str, AllocError> {
     qname ::= be.alloc.String().try();
     be.enum_path(mty, qname).try();
-    Ok(last_segment_str(qname))
-}
-
-// Use the last dot: a first-dot stop answered `core.io.IoError`.
-last_segment_str = (qname: String) str {
-    dot      ::= 0;
-    i: usize ::= 0;
-    loop(i < qname.len(), (h) {
-        (qname.view().index(i) == '.').then(() { dot = i + 1; });
-        i = i + 1;
-    });
-    qname.view().slice(dot, qname.len())
+    Ok(qname.view().after_last('.'))
 }
 
 // A C declaration for a pattern binding, plus the same binding in
