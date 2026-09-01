@@ -1,0 +1,280 @@
+// Lower compiler-provided represented-enum conversions. External integers are
+// translated at the call site; the enum's internal dense tag never becomes an
+// ABI promise.
+
+ExprId, Access, Call, Enum, Variant, EnumDiscriminant = std.ast
+AllocError = std.mem
+str, String = std.text
+TyId, TyNamed = sema.sema_ty
+Ctx = sema.sema_check
+DiscriminantCall, RepresentedEnum = sema.sema_discriminant
+represented_enum, has_catch_all = sema.sema_discriminant
+const_int = sema.sema_const
+type_of = sema.sema_type
+sym_variant, sym_member, RES_PATH = gen.gen_name
+CBackend = gen.gen_c.gen_c_state
+expr = gen.gen_c.gen_c_expr
+temp, init_temp = gen.gen_c.gen_c_flow
+write_qname = gen.gen_c.gen_c_layout
+ctype = gen.gen_c.gen_c_type
+
+lower_discriminant_call* = (
+    be   :: CBackend,
+    id   : ExprId,
+    call : Call,
+    ac   : Access,
+    kind : DiscriminantCall,
+    ctx  : Ctx,
+    out  :: String
+) Res<(), AllocError> {
+    kind.match({
+        Encode(ty) => be.lower_discriminant_encode(ac, ty, ctx, out),
+        Decode(ty) => be.lower_discriminant_decode(id, call, ty, ctx, out),
+    })
+}
+
+lower_discriminant_encode = (
+    be  :: CBackend,
+    ac  : Access,
+    ty  : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    shape = be.required_represented(ty).try();
+    code ::= be.alloc.String().try();
+    expr(be, ac.base, ctx, shape.ty, code).try();
+    held  = be.init_temp(shape.ty, "enum", code.view()).try();
+    dst   = be.temp(shape.repr, "discriminant").try();
+    qname = be.represented_qname(shape).try();
+    be.fmt("switch ({}.zg_tag) {{\n", held.view()).try();
+    be.indent();
+    shape.value.variants.loop((h, v) {
+        v.discriminant.match({
+            None             => Ok(()),
+            Ok(Exact(value)) => be.write_encode_case(
+                held.view(),
+                dst.view(),
+                qname.view(),
+                v,
+                value,
+                false
+            ),
+            Ok(CatchAll(_))  => be.write_encode_case(
+                held.view(),
+                dst.view(),
+                qname.view(),
+                v,
+                ac.base,
+                true
+            ),
+        }).try();
+    });
+    be.dedent();
+    be.writeln("}").try();
+    out.add(dst.view())
+}
+
+write_encode_case = (
+    be        :: CBackend,
+    held      : str,
+    dst       : str,
+    qname     : str,
+    v         : Variant,
+    value     : ExprId,
+    catch_all : bool
+) Res<(), AllocError> {
+    tag ::= be.alloc.String().try();
+    tag.sym_variant(qname, v.name.text).try();
+    be.fmt("case {}:\n", tag.view()).try();
+    be.indent();
+    catch_all.match({
+        true  => {
+            member ::= be.alloc.String().try();
+            member.sym_member(v.name.text).try();
+            be.fmt("{dst} = {held}.zg_data.{};\n", member.view())
+        },
+        false => be.check.const_int(value).match({
+            Ok(n) => {
+                line ::= be.alloc.String().try();
+                line.fmt("{dst} = {n};\n").try();
+                be.write(line.view())
+            },
+            None  => be.fmt("{dst} = 0;\n"),
+        }),
+    }).try();
+    be.writeln("break;").try();
+    be.dedent();
+    Ok(())
+}
+
+lower_discriminant_decode = (
+    be   :: CBackend,
+    id   : ExprId,
+    call : Call,
+    ty   : TyId,
+    ctx  : Ctx,
+    out  :: String
+) Res<(), AllocError> {
+    shape = be.required_represented(ty).try();
+    arg   = call.args.get(0).ok_or(AllocError.OutOfMemory).try();
+    code ::= be.alloc.String().try();
+    expr(be, arg.value, ctx, shape.repr, code).try();
+    raw   = be.init_temp(shape.repr, "wire", code.view()).try();
+    ret   = be.check.type_of(id, ctx).try();
+    dst   = be.temp(ret, "enum").try();
+    qname = be.represented_qname(shape).try();
+    open ::= true;
+    shape.value.variants.loop((h, v) {
+        v.discriminant.match({
+            Ok(Exact(value)) => be.write_decode_exact(
+                shape,
+                ret,
+                raw.view(),
+                dst.view(),
+                qname.view(),
+                v,
+                value,
+                open
+            ),
+            _                => Ok(()),
+        }).try();
+        v.discriminant.match({ Ok(Exact(_)) => { open = false; }, _ => () });
+    });
+    be.write_decode_fallback(shape, ret, raw.view(), dst.view(), qname.view())
+        .try();
+    out.add(dst.view())
+}
+
+write_decode_exact = (
+    be    :: CBackend,
+    shape : RepresentedEnum,
+    ret   : TyId,
+    raw   : str,
+    dst   : str,
+    qname : str,
+    v     : Variant,
+    value : ExprId,
+    first : bool
+) Res<(), AllocError> {
+    n = be.check.const_int(value).match({ Ok(x) => x, None => 0 });
+    line ::= be.alloc.String().try();
+    first.match({
+        true  => line.fmt("if ({raw} == {n}) {{\n"),
+        false => line.fmt("else if ({raw} == {n}) {{\n"),
+    }).try();
+    be.write(line.view()).try();
+    be.indent();
+    enum_value = be.known_enum_value(shape, qname, v).try();
+    has_catch_all(shape.value).match({
+        true  => be.set_line(dst, enum_value.view()),
+        false => be.set_closed_ok(ret, dst, enum_value.view()),
+    }).try();
+    be.dedent();
+    be.writeln("}")
+}
+
+write_decode_fallback = (
+    be    :: CBackend,
+    shape : RepresentedEnum,
+    ret   : TyId,
+    raw   : str,
+    dst   : str,
+    qname : str
+) Res<(), AllocError> {
+    be.writeln("else {").try();
+    be.indent();
+    be.catch_all_variant(shape.value).match({
+        None  => be.set_closed_none(ret, dst),
+        Ok(v) => {
+            value = be.unknown_enum_value(shape, qname, v, raw).try();
+            be.set_line(dst, value.view())
+        },
+    }).try();
+    be.dedent();
+    be.writeln("}")
+}
+
+required_represented = (be :: CBackend, ty: TyId)
+                       Res<RepresentedEnum, AllocError> {
+    be.check.represented_enum(ty).try().match({
+        Ok(shape) => Ok(shape),
+        None      => Err(AllocError.OutOfMemory),
+    })
+}
+
+represented_qname = (be :: CBackend, shape: RepresentedEnum)
+                    Res<String, AllocError> {
+    out ::= be.alloc.String().try();
+    be.check.types.at(shape.ty).match({
+        Named(n) => be.write_qname(out, n),
+        _        => Ok(()),
+    }).try();
+    Ok(out)
+}
+
+known_enum_value = (
+    be    :: CBackend,
+    shape : RepresentedEnum,
+    qname : str,
+    v     : Variant
+) Res<String, AllocError> {
+    out ::= be.alloc.String().try();
+    cty ::= be.alloc.String().try();
+    be.ctype(shape.ty, cty).try();
+    out.fmt("({}){{ .zg_tag = ", cty.view()).try();
+    out.sym_variant(qname, v.name.text).try();
+    out.add(" }").try();
+    Ok(out)
+}
+
+unknown_enum_value = (
+    be    :: CBackend,
+    shape : RepresentedEnum,
+    qname : str,
+    v     : Variant,
+    raw   : str
+) Res<String, AllocError> {
+    out ::= be.alloc.String().try();
+    cty ::= be.alloc.String().try();
+    be.ctype(shape.ty, cty).try();
+    out.fmt("({}){{ .zg_tag = ", cty.view()).try();
+    out.sym_variant(qname, v.name.text).try();
+    out.add(", .zg_data.").try();
+    out.sym_member(v.name.text).try();
+    out.fmt(" = {raw} }}").try();
+    Ok(out)
+}
+
+catch_all_variant = (be: CBackend, e: Enum) Res<Variant> {
+    e.variants.find((v) {
+        v.discriminant.match({ Ok(CatchAll(_)) => true, _ => false })
+    }).match({
+        None  => None,
+        Ok(v) => Ok(v),
+    })
+}
+
+set_closed_ok = (be :: CBackend, ret: TyId, dst: str, value: str)
+                Res<(), AllocError> {
+    cty    ::= be.alloc.String().try();
+    tag    ::= be.alloc.String().try();
+    member ::= be.alloc.String().try();
+    be.ctype(ret, cty).try();
+    tag.sym_variant(RES_PATH, "Ok").try();
+    member.sym_member("Ok").try();
+    be.fmt(
+        "{dst} = ({}){{ .zg_tag = {}, .zg_data.{} = {value} }};\n",
+        cty.view(),
+        tag.view(),
+        member.view()
+    )
+}
+
+set_closed_none = (be :: CBackend, ret: TyId, dst: str)
+                  Res<(), AllocError> {
+    cty ::= be.alloc.String().try();
+    tag ::= be.alloc.String().try();
+    be.ctype(ret, cty).try();
+    tag.sym_variant(RES_PATH, "None").try();
+    be.fmt("{dst} = ({}){{ .zg_tag = {} }};\n", cty.view(), tag.view())
+}

@@ -21,6 +21,8 @@ case_payload, Case, cases_of, find_case = sema.sema_case
 check_ctor_fields = sema.sema_hoist
 check_ctor_shape = sema.sema_bound
 Found, members_of = sema.sema_member
+SemaFault, NameFault = sema.sema_diag
+catch_all_named = sema.sema_discriminant
 
 construct* = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
             Res<TyId, AllocError> {
@@ -109,6 +111,7 @@ variant_call_type* = (
     name : str,
     ctx  : Ctx
 ) Res<TyId, AllocError> {
+    catch_all = c.catch_all_named(ty, name).try();
     inst ::= c.alloc.Inst();
     own = c.applied_at_own_vars(ty).try();
     c.types.at(own).match({
@@ -133,9 +136,20 @@ variant_call_type* = (
         true  => c.variant_literal(call, ty, name, inst),
         false => Ok(()),
     }).try();
-    (inst.len() == 0).match({
+    settled = (inst.len() == 0).match({
         true  => Ok(ty),
         false => c.subst(own, inst),
+    }).try();
+    catch_all.match({
+        false => Ok(settled),
+        true  => {
+            c.report(
+                call.args_span.file,
+                call.args_span,
+                SemaFault.CatchAllConstruction(NameFault(name: name))
+            ).try();
+            c.types.unknown()
+        },
     })
 }
 

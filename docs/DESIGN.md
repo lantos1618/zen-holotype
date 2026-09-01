@@ -172,6 +172,18 @@ The consequence is a layout rule, and it is the reason to state this explicitly 
 
 Nominal enums are unaffected. `Signal = Start | Stop` is not a union, its variants name no types, and there is no second spelling of it to agree with — so it is numbered by declaration order, which is the order its author wrote and the order its exhaustiveness diagnostics read best in.
 
+**A nominal enum may declare a separate integer representation for a wire or file format.** The type after the declaration name is the external domain; every known variant writes one unique compile-time integer. A final typed `_` variant preserves values the protocol has not assigned yet:
+
+```groovy
+FrameType*: u8 =
+      Data = 0x0
+    | Headers = 0x1
+    | Ping = 0x6
+    | Unknown(u8) = _
+```
+
+`kind.discriminant()` returns the external `u8`, and `FrameType.from_discriminant(byte)` reconstructs the enum. With a catch-all the latter is total; without one it returns `Res<FrameType>`. The catch-all cannot be constructed directly, because `Unknown(0)` would give the known `Data` byte two in-memory values. Represented enums are nominal, non-generic, and their known variants carry no payload. Their external numbers never replace the compiler's dense internal tags: sparse protocol values are serialization data, not pattern-matching layout.
+
 The leading bar on a one-variant enum is the whole point: without it `AllocError = OutOfMemory` and `Alias = Shape` are the same three tokens, and `TestError = Failed(str)` and `Circle1 = AddFoo(Circle)` are the same five. With it, a parser needs no lookahead, no position rule, and no guess — and an enum may be declared anywhere, not only at module level.
 
 **One declaration form:** there are no traits, only structs. A struct whose fields happen to be functions, used as a bound, is what other languages call a trait — nothing marks it special, because nothing needs to. `A.impl(B, {..})` supplies a value for every field `B` declares: an `f64` field takes an `f64`, a function-typed field takes a function. One rule, no second mechanism — which is why the method table above and the field rules are the same table.

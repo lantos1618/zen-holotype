@@ -13,6 +13,7 @@ module_display = sema.sema_def
 Diag, SemaFault, TypeFault = sema.sema_diag
 ExportFault = sema.sema_diag
 Inst, InstEdge = sema.sema_inst
+DiscriminantCall = sema.sema_discriminant
 
 // One scoped name. Mutability feeds receiver/ownership checks, param feeds LSP
 // classification, and span identifies the original binding in diagnostics.
@@ -84,6 +85,9 @@ Checker* = {
     // Declaration selected for each successfully resolved call.
     call_memo* :: Map<ExprId, DeclId>,
 
+    // Compiler-provided represented-enum conversions.
+    discriminant_calls* :: Map<ExprId, DiscriminantCall>,
+
     // Name expressions that resolve to formal parameters.
     param_memo* :: Map<ExprId, bool>,
 
@@ -130,6 +134,19 @@ Checker* = {
     resolve_call* = (self :: @Self, id: ExprId, d: DeclId)
                     Res<(), AllocError> {
         self.call_memo.set(id, d)
+    }
+
+    mark_discriminant_call* = (
+        self :: @Self,
+        id   : ExprId,
+        call : DiscriminantCall
+    ) Res<(), AllocError> {
+        self.discriminant_calls.set(id, call)
+    }
+
+    discriminant_call_of* = (self: @Self, id: ExprId)
+                            Res<DiscriminantCall> {
+        self.discriminant_calls.get(id)
     }
 
     // The text an `@meta(...).name` access folded to for this written
@@ -720,6 +737,7 @@ Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
         meta_recheck: 0,
         supply_memo: a.Map<ExprId, TyId>(),
         call_memo: a.Map<ExprId, DeclId>(),
+        discriminant_calls: a.Map<ExprId, DiscriminantCall>(),
         param_memo: a.Map<ExprId, bool>(),
         callee_access: a.Map<ExprId, bool>(),
         inst_memo: a.Map<ExprId, Inst>(),

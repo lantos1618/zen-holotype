@@ -1,0 +1,326 @@
+// External integer representations for nominal enums. Internal enum tags stay
+// dense and private; these helpers validate and convert at the language edge.
+
+Enum, Variant, EnumDiscriminant, Expr, ExprId, TypeId = std.ast
+Call, Access, Span, Decl = std.ast
+AllocError = std.mem
+Vec = std.collections
+str = std.text
+Range = std.core
+TyId, TyNamed, is_integer = sema.sema_ty
+DeclId = sema.sema_id
+decl_at = sema.sema_def
+Checker, Ctx = sema.sema_check
+Base = sema.sema_member
+SemaFault, NameFault, PairFault = sema.sema_diag
+type_from_ast = sema.sema_denote
+const_int, fits = sema.sema_const
+
+DiscriminantCall* = Encode(TyId) | Decode(TyId)
+DiscriminantAnswer* = DiscriminantAnswered(TyId) | NotDiscriminant
+
+RepresentedEnum* = {
+    ty*: TyId,
+    repr*: TyId,
+    decl*: DeclId,
+    value*: Enum,
+}
+
+check_enum_discriminants* = (c :: Checker, e: Enum, mi: usize)
+                            Res<(), AllocError> {
+    e.repr.match({
+        None        => c.check_plain_enum_discriminants(e),
+        Ok(repr_id) => c.check_represented_enum(e, mi, repr_id),
+    })
+}
+
+check_plain_enum_discriminants = (c :: Checker, e: Enum)
+                                 Res<(), AllocError> {
+    e.variants.loop((h, v) {
+        v.discriminant.match({
+            None  => Ok(()),
+            Ok(_) => c.invalid_discriminant(v),
+        }).try();
+    });
+    Ok(())
+}
+
+check_represented_enum = (
+    c       :: Checker,
+    e       : Enum,
+    mi      : usize,
+    repr_id : TypeId
+) Res<(), AllocError> {
+    ctx        = Ctx(mi, c.types.unknown().try());
+    repr       = c.type_from_ast(repr_id, ctx).try();
+    name       = c.prim_name(repr);
+    valid_repr = is_integer(name) && !name.eq("usize") && e.tparams.len == 0;
+    valid_repr.match({
+        true  => c.check_discriminant_rows(e, repr, name, ctx),
+        false => c.report(
+            e.name.span.file,
+            e.name.span,
+            SemaFault.InvalidEnumRepresentation(NameFault(name: e.name.text))
+        ),
+    })
+}
+
+check_discriminant_rows = (
+    c    :: Checker,
+    e    : Enum,
+    repr : TyId,
+    name : str,
+    ctx  : Ctx
+) Res<(), AllocError> {
+    values  ::= c.alloc.Vec<i64>();
+    spans   ::= c.alloc.Vec<Span>();
+    catches ::= 0;
+    e.variants.loop((h, i, v) {
+        v.discriminant.match({
+            None    => c.invalid_discriminant(v),
+            Ok(row) => row.match({
+                Exact(id)   => c.check_exact_discriminant(
+                    v,
+                    id,
+                    name,
+                    values,
+                    spans
+                ),
+                CatchAll(_) => {
+                    catches = catches + 1;
+                    c.check_catch_all(e, i, v, repr, ctx)
+                },
+            }),
+        }).try();
+    });
+    (catches <= 1).match({
+        true  => Ok(()),
+        false => c.report(
+            e.name.span.file,
+            e.name.span,
+            SemaFault.InvalidEnumDiscriminant(NameFault(name: e.name.text))
+        ),
+    })
+}
+
+check_exact_discriminant = (
+    c      :: Checker,
+    v      : Variant,
+    id     : ExprId,
+    repr   : str,
+    values :: Vec<i64>,
+    spans  :: Vec<Span>
+) Res<(), AllocError> {
+    v.payload.match({
+        Ok(_) => c.invalid_discriminant(v),
+        None  => c.const_int(id).match({
+            None      => c.invalid_discriminant(v),
+            Ok(value) => fits(value, repr).match({
+                Ok(true) => c.unique_discriminant(v, value, values, spans),
+                _        => c.invalid_discriminant(v),
+            }),
+        }),
+    })
+}
+
+unique_discriminant = (
+    c      :: Checker,
+    v      : Variant,
+    value  : i64,
+    values :: Vec<i64>,
+    spans  :: Vec<Span>
+) Res<(), AllocError> {
+    Range(0, values.len).find((i) {
+        values.get(i).match({ Ok(x) => x == value, None => false })
+    }).match({
+        None    => {
+            values.add(value).try();
+            spans.add(v.span)
+        },
+        Ok(hit) => c.report(
+            v.span.file,
+            v.span,
+            SemaFault.DuplicateEnumDiscriminant(PairFault(
+                name: v.name.text,
+                first: spans.get(hit).match({ Ok(s) => s, None => v.span }),
+                second: v.span
+            ))
+        ),
+    })
+}
+
+check_catch_all = (
+    c    :: Checker,
+    e    : Enum,
+    i    : usize,
+    v    : Variant,
+    repr : TyId,
+    ctx  : Ctx
+) Res<(), AllocError> {
+    last       = i + 1 == e.variants.len;
+    payload_ok = v.payload.match({
+        None    => false,
+        Ok(tid) => c.type_from_ast(tid, ctx).match({
+            Ok(ty) => ty.eq(repr),
+            Err(_) => false,
+        }),
+    });
+    (last && payload_ok).match({
+        true  => Ok(()),
+        false => c.invalid_discriminant(v),
+    })
+}
+
+invalid_discriminant = (c :: Checker, v: Variant) Res<(), AllocError> {
+    c.report(
+        v.span.file,
+        v.span,
+        SemaFault.InvalidEnumDiscriminant(NameFault(name: v.name.text))
+    )
+}
+
+represented_enum* = (c :: Checker, ty: TyId)
+                    Res<Res<RepresentedEnum>, AllocError> {
+    c.types.at(ty).match({
+        Named(n) => c.represented_named(ty, n),
+        _        => Ok(None),
+    })
+}
+
+represented_named = (c :: Checker, ty: TyId, n: TyNamed)
+                    Res<Res<RepresentedEnum>, AllocError> {
+    decl_at(c.tree, n.decl).match({
+        None    => Ok(None),
+        Ok(row) => row.kind.match({
+            Enum(e) => e.repr.match({
+                None    => Ok(None),
+                Ok(rid) => {
+                    ctx  = Ctx(
+                        n.decl.module.to_usize(),
+                        c.types.unknown().try()
+                    );
+                    repr = c.type_from_ast(rid, ctx).try();
+                    Ok(Ok(RepresentedEnum(
+                        ty: ty,
+                        repr: repr,
+                        decl: n.decl,
+                        value: e
+                    )))
+                },
+            }),
+            _       => Ok(None),
+        }),
+    })
+}
+
+has_catch_all* = (e: Enum) bool {
+    e.variants.find((v) {
+        v.discriminant.match({
+            Ok(CatchAll(_)) => true,
+            _               => false,
+        })
+    }).match({ Ok(_) => true, None => false })
+}
+
+catch_all_named* = (c :: Checker, ty: TyId, name: str)
+                   Res<bool, AllocError> {
+    c.represented_enum(ty).try().match({
+        None      => Ok(false),
+        Ok(shape) => Ok(shape.value.variants.find((v) {
+            v.name.text.eq(name) && v.discriminant.match({
+                Ok(CatchAll(_)) => true,
+                _               => false,
+            })
+        }).match({ Ok(_) => true, None => false })),
+    })
+}
+
+discriminant_member_call* = (
+    c    :: Checker,
+    id   : ExprId,
+    node : Expr,
+    call : Call,
+    ac   : Access,
+    base : Base,
+    ctx  : Ctx
+) Res<DiscriminantAnswer, AllocError> {
+    candidate = ac.name.text.eq("discriminant")
+        || ac.name.text.eq("from_discriminant");
+    candidate.match({
+        false => Ok(DiscriminantAnswer.NotDiscriminant),
+        true  => c.represented_enum(base.ty).try().match({
+            None      => Ok(DiscriminantAnswer.NotDiscriminant),
+            Ok(shape) => c.check_discriminant_call(
+                id,
+                node,
+                call,
+                ac,
+                base,
+                shape,
+                ctx
+            ),
+        }),
+    })
+}
+
+check_discriminant_call = (
+    c     :: Checker,
+    id    : ExprId,
+    node  : Expr,
+    call  : Call,
+    ac    : Access,
+    base  : Base,
+    shape : RepresentedEnum,
+    ctx   : Ctx
+) Res<DiscriminantAnswer, AllocError> {
+    encode = !base.is_type && ac.name.text.eq("discriminant")
+        && call.args.len == 0;
+    decode = base.is_type && ac.name.text.eq("from_discriminant")
+        && call.args.len == 1;
+    encode.match({
+        true  => {
+            c.mark_discriminant_call(
+                id,
+                DiscriminantCall.Encode(shape.ty)
+            ).try();
+            Ok(DiscriminantAnswer.DiscriminantAnswered(shape.repr))
+        },
+        false => decode.match({
+            true  => c.check_decode_call(id, call, shape, ctx),
+            false => c.report_invalid_discriminant_call(node, ac.name.text),
+        }),
+    })
+}
+
+check_decode_call = (
+    c     :: Checker,
+    id    : ExprId,
+    call  : Call,
+    shape : RepresentedEnum,
+    ctx   : Ctx
+) Res<DiscriminantAnswer, AllocError> {
+    arg  = call.args.get(0).ok_or(AllocError.OutOfMemory).try();
+    node = c.tree.expr_at(arg.value);
+    got  = c.type_of(arg.value, ctx).try();
+    c.coerce(node.span.file, node.span, got, shape.repr, "").try();
+    c.check_literal(arg.value, shape.repr).try();
+    c.mark_discriminant_call(id, DiscriminantCall.Decode(shape.ty)).try();
+    ret = has_catch_all(shape.value).match({
+        true  => Ok(shape.ty),
+        false => c.types.res_absence(shape.ty),
+    }).try();
+    Ok(DiscriminantAnswer.DiscriminantAnswered(ret))
+}
+
+report_invalid_discriminant_call = (
+    c    :: Checker,
+    node : Expr,
+    name : str
+) Res<DiscriminantAnswer, AllocError> {
+    c.report(
+        node.span.file,
+        node.span,
+        SemaFault.NoOverload(NameFault(name: name))
+    ).try();
+    Ok(DiscriminantAnswer.DiscriminantAnswered(c.types.unknown().try()))
+}
