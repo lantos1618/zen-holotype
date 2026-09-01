@@ -87,29 +87,42 @@ check_discriminant_rows = (
     name : str,
     ctx  : Ctx
 ) Res<(), AllocError> {
-    values  ::= c.alloc.Vec<i64>();
-    spans   ::= c.alloc.Vec<Span>();
-    catches ::= 0;
+    values ::= c.alloc.Vec<i64>();
+    spans  ::= c.alloc.Vec<Span>();
+    valid  ::= true;
     e.variants.loop((h, i, v) {
-        v.discriminant.match({
+        valid = v.discriminant.match({
             None   => is_discriminant_catch_all(v).match({
-                true  => {
-                    catches = catches + 1;
-                    c.check_catch_all(e, i, v, repr, ctx)
-                },
-                false => c.invalid_discriminant(v),
+                true  => c.check_catch_all(e, i, v, repr, ctx),
+                false => c.reject_discriminant(v),
             }),
             Ok(id) => c.check_exact_discriminant(v, id, name, values, spans),
         }).try();
+        (!valid).then(() { h.break() });
     });
-    (catches <= 1).match({
-        true  => Ok(()),
-        false => c.report(
-            e.name.span.file,
-            e.name.span,
-            SemaFault.InvalidEnumDiscriminant(NameFault(name: e.name.text))
-        ),
-    })
+    Ok(())
+}
+
+reject_discriminant = (c :: Checker, v: Variant) Res<bool, AllocError> {
+    c.invalid_discriminant(v).try();
+    Ok(false);
+}
+
+reject_duplicate = (
+    c     :: Checker,
+    v     : Variant,
+    first : Span
+) Res<bool, AllocError> {
+    c.report(
+        v.span.file,
+        v.span,
+        SemaFault.DuplicateEnumDiscriminant(PairFault(
+            name: v.name.text,
+            first: first,
+            second: v.span
+        ))
+    ).try();
+    Ok(false);
 }
 
 check_exact_discriminant = (
@@ -119,14 +132,14 @@ check_exact_discriminant = (
     repr   : str,
     values :: Vec<i64>,
     spans  :: Vec<Span>
-) Res<(), AllocError> {
+) Res<bool, AllocError> {
     v.payload.match({
-        Ok(_) => c.invalid_discriminant(v),
+        Ok(_) => c.reject_discriminant(v),
         None  => c.const_int(id).match({
-            None      => c.invalid_discriminant(v),
+            None      => c.reject_discriminant(v),
             Ok(value) => fits(value, repr).match({
                 Ok(true) => c.unique_discriminant(v, value, values, spans),
-                _        => c.invalid_discriminant(v),
+                _        => c.reject_discriminant(v),
             }),
         }),
     })
@@ -138,22 +151,18 @@ unique_discriminant = (
     value  : i64,
     values :: Vec<i64>,
     spans  :: Vec<Span>
-) Res<(), AllocError> {
+) Res<bool, AllocError> {
     Range(0, values.len).find((i) {
         values.get(i).match({ Ok(x) => x == value, None => false })
     }).match({
         None    => {
             values.add(value).try();
-            spans.add(v.span)
+            spans.add(v.span).try();
+            Ok(true)
         },
-        Ok(hit) => c.report(
-            v.span.file,
-            v.span,
-            SemaFault.DuplicateEnumDiscriminant(PairFault(
-                name: v.name.text,
-                first: spans.get(hit).match({ Ok(s) => s, None => v.span }),
-                second: v.span
-            ))
+        Ok(hit) => c.reject_duplicate(
+            v,
+            spans.get(hit).match({ Ok(s) => s, None => v.span })
         ),
     })
 }
@@ -165,7 +174,7 @@ check_catch_all = (
     v    : Variant,
     repr : TyId,
     ctx  : Ctx
-) Res<(), AllocError> {
+) Res<bool, AllocError> {
     last       = i + 1 == e.variants.len;
     payload_ok = v.payload.match({
         None    => false,
@@ -175,8 +184,8 @@ check_catch_all = (
         }),
     });
     (last && payload_ok).match({
-        true  => Ok(()),
-        false => c.invalid_discriminant(v),
+        true  => Ok(true),
+        false => c.reject_discriminant(v),
     })
 }
 
