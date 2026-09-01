@@ -51,6 +51,107 @@ CapabilityKind* = NotCapability
     | StdinRead
     | ScopeDefer
 
+// All source facts for one classified capability call. They are resolved
+// together in gen_c_member and remain fixed until lowering has emitted the
+// call's value. Backend state and the destination stay explicit mutable
+// borrows at that execution boundary.
+CapabilityCall* = {
+    kind: CapabilityKind,
+    id: ExprId,
+    call: Call,
+    access: Access,
+    receiver_ty: TyId,
+    module: usize,
+    function: Function,
+    ctx: Ctx,
+    want: TyId,
+
+    lower = (self: @Self, be :: CBackend, out :: String)
+            Res<(), AllocError> {
+        id  = self.id;
+        c   = self.call;
+        a   = self.access;
+        rty = self.receiver_ty;
+        ctx = self.ctx;
+        self.kind.match({
+            ScopeDefer    => be.lower_defer(id, c, a, ctx, out),
+            ActorSpawn    => be.lower_actor_spawn(id, c, a, rty, ctx, out),
+            ActorStop     => be.lower_actor_stop(a, rty, ctx, out),
+            ThreadsJoin   => be.lower_join(id, c, a, rty, self.want, ctx, out),
+            NotCapability => be.unsupported(
+                id,
+                "an unclassified capability",
+                out
+            ),
+            _             => {
+                ret = self.return_type(be).try();
+                be.request_type(ret).try();
+                self.lower_typed(be, ret, out)
+            },
+        })
+    }
+
+    lower_typed = (self: @Self, be :: CBackend, ret: TyId,
+                   out :: String) Res<(), AllocError> {
+        id  = self.id;
+        c   = self.call;
+        a   = self.access;
+        rty = self.receiver_ty;
+        ctx = self.ctx;
+        self.kind.match({
+            MemAlloc     => be.lower_alloc(id, a, rty, ret, ctx, out),
+            MemPage      => be.lower_page(id, c, ret, ctx, out),
+            MemRelease   => be.lower_release(c, ctx, out),
+            FsWrite      => be.lower_write(id, c, ret, ctx, out),
+            FsRead       => {
+                aty = self.parameter_type(be).try();
+                be.lower_read(id, c, ret, aty, ctx, out)
+            },
+            FsLock       => be.lower_lock(id, c, ret, ctx, out),
+            FsRemove     => be.lower_remove(id, c, ret, ctx, out),
+            FsProbe      => be.lower_probe(c, a.name.text, ctx, out),
+            LockUnlock   => be.lower_unlock(id, c, a, rty, ret, ctx, out),
+            EnvVar       => be.lower_env_var(c, ret, ctx, out),
+            ClockRead    => be.lower_clock_read(c, a.name.text, ret, ctx, out),
+            ThreadsSleep => be.lower_sleep(c, ret, ctx, out),
+            ThreadsSpawn => be.lower_spawn(id, c, ret, ctx, out),
+            ConsolePrint => lower_console_print(
+                be,
+                c,
+                a.name.text,
+                ret,
+                ctx,
+                out
+            ),
+            StdinRead    => {
+                aty = self.parameter_type(be).try();
+                be.lower_stdin_read(id, c, ret, aty, ctx, out)
+            },
+            _            => be.unsupported(
+                id,
+                "an unlowerable capability kind",
+                out
+            ),
+        })
+    }
+
+    parameter_type = (self: @Self, be :: CBackend)
+                     Res<TyId, AllocError> {
+        sctx = be.check.self_ctx(self.module, self.receiver_ty).try();
+        self.function.params.get(1).match({
+            None  => be.check.types.unknown(),
+            Ok(p) => be.check.param_type(p, sctx),
+        })
+    }
+
+    // Read the declared return with @Self bound in its declaring module.
+    return_type = (self: @Self, be :: CBackend) Res<TyId, AllocError> {
+        sctx     = be.check.self_ctx(self.module, self.receiver_ty).try();
+        declared = be.declared_ret(self.function, sctx).try();
+        sub(be, declared)
+    }
+}
+
 capability_kind* = (be :: CBackend, rty: TyId, name: str) CapabilityKind {
     owner                      = owner_of(be, rty);
     found: Res<CapabilityKind> = loop<CapabilityKind>((h) {
@@ -91,10 +192,7 @@ capability_kind* = (be :: CBackend, rty: TyId, name: str) CapabilityKind {
         be.is_defer(rty, name).then(() { h.break(ScopeDefer) });
         h.break(NotCapability);
     });
-    found.match({
-        Ok(kind) => kind,
-        None     => NotCapability,
-    })
+    found.value_or(NotCapability)
 }
 
 owner_of = (be :: CBackend, rty: TyId) str {
@@ -109,119 +207,12 @@ capability_owner = (be :: CBackend, n: TyNamed) str {
     ((n.name.eq("Mem") && module.eq("std.mem.mem_arena"))
         || (n.name.is_in(["Fs", "Lock", "Env", "Clock", "Threads", "Thread", "Console", "Stdin"]) && module.eq("std.env.env"))
         || (n.name.eq("Ref") && module.eq("std.actor.actor_core")))
-        .match({ true => n.name, false => "" })
+        .then(() { n.name }).value_or("")
 }
 
-// Scope.defer and the two actor operations need call-site information that the
-// common typed-capability path does not carry.
-lower_capability* = (
-    be   :: CBackend,
-    kind : CapabilityKind,
-    id   : ExprId,
-    c    : Call,
-    a    : Access,
-    rty  : TyId,
-    mi   : usize,
-    f    : Function,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError> {
-    kind.match({
-        ScopeDefer    => be.lower_defer(id, c, a, ctx, out),
-        // Spawn's checked call type contains the argument-inferred result.
-        ActorSpawn    => be.lower_actor_spawn(id, c, a, rty, ctx, out),
-        ActorStop     => be.lower_actor_stop(a, rty, ctx, out),
-        // Thread.join's T occurs only in its return, so `want` settles it.
-        ThreadsJoin   => be.lower_join(id, c, a, rty, want, ctx, out),
-        NotCapability => be.unsupported(id, "an unclassified capability", out),
-        _             => be.lower_typed_capability(
-            kind,
-            id,
-            c,
-            a,
-            rty,
-            mi,
-            f,
-            ctx,
-            out
-        ),
-    })
-}
-
-lower_typed_capability = (
-    be   :: CBackend,
-    kind : CapabilityKind,
-    id   : ExprId,
-    c    : Call,
-    a    : Access,
-    rty  : TyId,
-    mi   : usize,
-    f    : Function,
-    ctx  : Ctx,
-    out  :: String
-) Res<(), AllocError> {
-    ret = be.cap_ret(rty, mi, f).try();
-    be.request_type(ret).try();
-    // Fs.read receives the declared Alloc handle, not the Arena argument type.
-    aty = be.cap_param(rty, mi, f).try();
-    be.lower_capability_kind(kind, id, c, a, rty, ret, aty, ctx, out)
-}
-
-cap_param = (be :: CBackend, rty: TyId, mi: usize, f: Function)
-            Res<TyId, AllocError> {
-    sctx = be.check.self_ctx(mi, rty).try();
-    f.params.get(1).match({
-        None  => be.check.types.unknown(),
-        Ok(p) => be.check.param_type(p, sctx),
-    })
-}
-
-lower_capability_kind = (
-    be   :: CBackend,
-    kind : CapabilityKind,
-    id   : ExprId,
-    c    : Call,
-    a    : Access,
-    rty  : TyId,
-    ret  : TyId,
-    aty  : TyId,
-    ctx  : Ctx,
-    out  :: String
-) Res<(), AllocError> {
-    kind.match({
-        MemAlloc     => be.lower_alloc(id, a, rty, ret, ctx, out),
-        MemPage      => be.lower_page(id, c, ret, ctx, out),
-        MemRelease   => be.lower_release(c, ctx, out),
-        FsWrite      => be.lower_write(id, c, ret, ctx, out),
-        FsRead       => be.lower_read(id, c, ret, aty, ctx, out),
-        FsLock       => be.lower_lock(id, c, ret, ctx, out),
-        FsRemove     => be.lower_remove(id, c, ret, ctx, out),
-        FsProbe      => be.lower_probe(c, a.name.text, ctx, out),
-        LockUnlock   => be.lower_unlock(id, c, a, rty, ret, ctx, out),
-        EnvVar       => be.lower_env_var(c, ret, ctx, out),
-        ClockRead    => be.lower_clock_read(c, a.name.text, ret, ctx, out),
-        ThreadsSleep => be.lower_sleep(c, ret, ctx, out),
-        ThreadsSpawn => be.lower_spawn(id, c, ret, ctx, out),
-        ConsolePrint => lower_console_print(be, c, a.name.text, ret, ctx, out),
-        StdinRead    => be.lower_stdin_read(id, c, ret, aty, ctx, out),
-        _            => be.unsupported(
-            id,
-            "an unlowerable capability kind",
-            out
-        ),
-    })
-}
-
-// The declared return type, read in the module that declares the
-// member with `@Self` bound to the receiver — the same two steps
-// `gen_c_member.method_sig` takes for a parameter, and for the same
-// reason: `@Self` is a written type only that query answers.
-cap_ret = (be :: CBackend, rty: TyId, mi: usize, f: Function)
-          Res<TyId, AllocError> {
-    sctx     = be.check.self_ctx(mi, rty).try();
-    declared = be.declared_ret(f, sctx).try();
-    sub(be, declared)
+lower_capability* = (be :: CBackend, call: CapabilityCall, out :: String)
+                    Res<(), AllocError> {
+    call.lower(be, out)
 }
 
 // `env.mem.alloc()` — where an arena comes from
