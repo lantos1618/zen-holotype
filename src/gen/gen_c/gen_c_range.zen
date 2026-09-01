@@ -3,7 +3,7 @@
 // from at ends the walk. Bounds are recognized structurally, and synthesized
 // at calls inline the impl body with parameters bound to emitted C text.
 
-ExprId, Lambda = std.ast
+ExprId = std.ast
 Function = std.ast
 Impl, Member, Field, Struct = std.ast
 AllocError = std.mem
@@ -18,25 +18,18 @@ impl_bound_type = sema.sema_supply
 sym_local, sym_member, sym_variant = gen.gen_name
 RES_PATH = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
-unsupported = gen.gen_c.gen_c_report
 declarator, declared_ret, struct_decl, res_value, is_res = gen.gen_c.gen_c_type
 intern_res_open, recv_inst, sub_with = gen.gen_c.gen_c_mono
 enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 Dest, block, deliver = gen.gen_c.gen_c_stmt
-write_label, open_result, close_pass = gen.gen_c.gen_c_loop
-Shape = gen.gen_c.gen_c_shape
-run_body, declare_usize, settle_res, walk_temp = gen.gen_c.gen_c_loop
-no_fold = gen.gen_c.gen_c_fold
 array_of = gen.gen_c.gen_c_array
 impl_field = gen.gen_c.gen_c_impl
 
 // A range that stores its bounds.
 
-// Whether the range's own declaration STORES `start` and `end` rather
-// than supplying them through an impl. `Range(0, n)` does; a `Vec` does
-// not, and reading `v.zg_mstart` off one would name a member that is
-// not there. C would catch it, which is exactly the outcome a backend
-// may not produce — so it is a refusal with a position instead.
+// Whether this declaration physically stores both bounds. This structural
+// question also recognizes the Range declaration in small compiler fixtures
+// that intentionally build no prelude world.
 supplies_bounds* = (be :: CBackend, rty: TyId) bool {
     be.has_field(rty, "start") && be.has_field(rty, "end")
 }
@@ -58,9 +51,6 @@ decl_has_field = (be :: CBackend, decl: DeclId, name: str) bool {
 struct_has_field = (s: Struct, name: str) bool {
     got ::= false;
     s.members.loop((h, m) {
-        // STORAGE, not a name: a const or method called `start` is not
-        // a field to read `zg_mstart` off, so this stays Field-only on
-        // purpose — `m.named` would widen it.
         m.kind.match({
             Field(fl) => fl.name.text.eq(name).then(() { got = true; }),
             _         => (),
@@ -69,12 +59,25 @@ struct_has_field = (s: Struct, name: str) bool {
     got
 }
 
+// A real impl outranks coincidentally stored names because it may supply an
+// `at` hook. The concrete Range declaration has no impl and takes the direct
+// stored-bound path.
+uses_stored_bounds* = (be :: CBackend, rty: TyId)
+                      Res<bool, AllocError> {
+    be.supplies_bounds(rty).match({
+        false => Ok(false),
+        true  => be.range_impl(rty).try().match({
+            None  => Ok(true),
+            Ok(_) => Ok(false),
+        }),
+    })
+}
+
 // A range whose impl supplies computed bounds and an optional at function.
 
 RangeImpl* = {
-    decl*: DeclId,      // the RECEIVER's declaration, whose parameters
-                        // the impl borrows
-    mi*: usize,         // the module the type and its impls live in
+    decl*: DeclId,
+    mi*: usize,
     start*: ExprId,
     end*: ExprId,
     at*: Res<Function>,
@@ -122,10 +125,9 @@ keep_range_impl = (
     i   : ImplId,
     out :: Vec<RangeImpl>
 ) Res<(), AllocError> {
-    (n.decl.module == i.decl.module).match({
-        false => Ok(()),
-        true  => be.range_impl_at(n, i, out),
-    })
+    (n.decl.module == i.decl.module)
+        .then(() { be.range_impl_at(n, i, out).try(); });
+    Ok(())
 }
 
 range_impl_at = (
@@ -148,10 +150,9 @@ keep_if_range = (
 ) Res<(), AllocError> {
     mi    = n.decl.module.to_usize();
     bound = be.check.impl_bound_type(im, mi).try();
-    be.supplies_bounds(bound).match({
-        false => Ok(()),
-        true  => be.add_range_impl(n, im, mi, out),
-    })
+    be.supplies_bounds(bound)
+        .then(() { be.add_range_impl(n, im, mi, out).try(); });
+    Ok(())
 }
 
 // An impl that names the bound and supplies neither `start` nor `end`
@@ -205,10 +206,8 @@ impl_fn = (be :: CBackend, im: Impl, name: str)
 
 keep_bodied_fn = (m: Member, name: str, out :: Vec<Function>)
                  Res<(), AllocError> {
-    m.named(name).match({
-        false => Ok(()),
-        true  => add_bodied_fn(m, out),
-    })
+    m.named(name).then(() { add_bodied_fn(m, out).try(); });
+    Ok(())
 }
 
 add_bodied_fn = (m: Member, out :: Vec<Function>) Res<(), AllocError> {
@@ -246,7 +245,7 @@ array_pass = (be :: CBackend, a: TyArray) Res<Res<TyId>, AllocError> {
 
 stored_or_supplied_pass = (be :: CBackend, rty: TyId)
                           Res<Res<TyId>, AllocError> {
-    be.supplies_bounds(rty).match({
+    be.uses_stored_bounds(rty).try().match({
         true  => be.index_pass(),
         false => be.impl_pass(rty),
     })
@@ -307,131 +306,6 @@ range_element_type* = (be :: CBackend, rty: TyId)
     }));
 }
 
-// A range whose `start` and `end` an impl supplies — a `Vec`.
-lower_supplied* = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    one  : ExprId,
-    rty  : TyId,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError> {
-    be.range_impl(rty).try().match({
-        None   => be.unsupported(
-            id,
-            "a loop over a range whose bounds an impl supplies",
-            out
-        ),
-        Ok(ri) => be.lower_impl_range(
-            id,
-            sh,
-            one,
-            rty,
-            ri,
-            lam,
-            ctx,
-            want,
-            out
-        ),
-    })
-}
-
-lower_impl_range = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    one  : ExprId,
-    rty  : TyId,
-    ri   : RangeImpl,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError> {
-    be.range_pass_type(rty).try().match({
-        None     => be.unsupported(
-            id,
-            "a loop over a range whose element nothing settles",
-            out
-        ),
-        Ok(pass) => lower_impl_walk(
-            be,
-            id,
-            sh,
-            one,
-            rty,
-            ri,
-            pass,
-            lam,
-            ctx,
-            want,
-            out
-        ),
-    })
-}
-
-// Impl bounds may spill, so evaluate them into usize locals with self bound to
-// the range temporary. A non-Ok at result exits through the loop break label.
-lower_impl_walk = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    one  : ExprId,
-    rty  : TyId,
-    ri   : RangeImpl,
-    pass : TyId,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-)
-                  Res<(), AllocError> {
-    elem    = be.res_value(pass).match({ Ok(t) => t, None => pass });
-    settled = be.settle_res(want, elem).try();
-
-    rng = be.walk_temp(one, rty, ctx).try();
-
-    st = be.open_result(settled, out).try();
-    counter ::= be.fresh_name("i").try();
-    base    ::= be.fresh_name("b").try();
-    limit   ::= be.fresh_name("n").try();
-    be.declare_usize(counter.view()).try();
-    be.declare_usize(base.view()).try();
-    be.declare_usize(limit.view()).try();
-    be.supplied_bound(ri, rty, ri.start, counter.view(), rng.view()).try();
-    be.supplied_bound(ri, rty, ri.end, limit.view(), rng.view()).try();
-    be.fmt("{} = {};\n", base.view(), counter.view()).try();
-
-    be.fmt("while ({} < {}) {\n", counter.view(), limit.view()).try();
-    be.indent();
-    value ::= be.alloc.String().try();
-    be.take_pass(
-        ri,
-        rty,
-        pass,
-        counter.view(),
-        st.brk,
-        rng.view(),
-        value
-    ).try();
-    be.run_body(
-        sh,
-        lam,
-        counter.view(),
-        base.view(),
-        value.view(),
-        elem,
-        be.no_fold().try(),
-        ctx
-    ).try();
-    be.close_pass(st, counter.view(), be.no_fold().try()).try();
-    Ok(());
-}
-
-// Lower an impl-supplied range in pass order.
 // The impl's `self`, bound to the range temporary. An ordinary local
 // holding a copy: the walk reads the range and never writes it, so
 // there is nothing to write through and no address to take.

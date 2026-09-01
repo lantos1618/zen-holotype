@@ -24,10 +24,11 @@ intern_res_open = gen.gen_c.gen_c_mono
 has_var = sema.sema_inst
 expr, ty_of = gen.gen_c.gen_c_expr
 Dest, block = gen.gen_c.gen_c_stmt
-supplies_bounds = gen.gen_c.gen_c_range
+uses_stored_bounds = gen.gen_c.gen_c_range
 bind_text = gen.gen_c.gen_c_range
 is_res = gen.gen_c.gen_c_type
-lower_supplied = gen.gen_c.gen_c_range
+RangeImpl, range_impl, range_pass_type = gen.gen_c.gen_c_range
+supplied_bound, take_pass = gen.gen_c.gen_c_range
 array_of, lower_array_walk = gen.gen_c.gen_c_array
 
 // Lowering.
@@ -158,7 +159,6 @@ lower_led = (
     })
 }
 
-// Impl-supplied ranges do not yet support fold accumulators.
 lower_impl_walk = (
     be   :: CBackend,
     id   : ExprId,
@@ -177,7 +177,31 @@ lower_impl_walk = (
             "a fold over a range whose bounds an impl supplies",
             out
         ),
-        false => be.lower_supplied(id, sh, one, rty, lam, ctx, want, out),
+        false => be.range_impl(rty).try().match({
+            None   => be.unsupported(
+                id,
+                "a loop over a range whose bounds an impl supplies",
+                out
+            ),
+            Ok(ri) => be.range_pass_type(rty).try().match({
+                None     => be.unsupported(
+                    id,
+                    "a loop over a range whose element nothing settles",
+                    out
+                ),
+                Ok(pass) => be.lower_supplied_walk(
+                    sh,
+                    one,
+                    rty,
+                    ri,
+                    pass,
+                    lam,
+                    ctx,
+                    want,
+                    out
+                ),
+            }),
+        }),
     })
 }
 
@@ -282,6 +306,15 @@ write_cond_body = (be :: CBackend, lam: Lambda, brk: usize, ctx: Ctx)
 // would make the two indistinguishable exactly when the range does not
 // start at zero.
 
+// These names are allocated, initialized and consumed as one range walk.
+// The range value is deliberately separate: it is evaluated before the loop
+// result is opened, while control and fold state have their own owners.
+RangeWalk = {
+    counter: str,
+    base: str,
+    limit: str,
+}
+
 lower_range = (
     be   :: CBackend,
     id   : ExprId,
@@ -334,7 +367,7 @@ lower_range_impl = (
     fold : Fold,
     out  :: String
 ) Res<(), AllocError> {
-    be.supplies_bounds(rty).match({
+    be.uses_stored_bounds(rty).try().match({
         false => lower_impl_walk(
             be,
             id,
@@ -400,29 +433,79 @@ lower_bounded = (
 
     st       = be.open_result(want, out).try();
     usize_ty = be.check.types.prim("usize").try();
+    walk     = be.range_walk().try();
+    be.assign_member(walk.counter, rng.view(), "start").try();
+    be.assign_member(walk.limit, rng.view(), "end").try();
+    be.start_range_walk(walk).try();
+
+    be.fmt("while ({} < {}) {\n", walk.counter, walk.limit).try();
+    be.indent();
+    be.run_range_body(walk, sh, lam, walk.counter, usize_ty, fold, ctx).try();
+    be.close_pass(st, walk.counter, fold).try();
+    Ok(());
+}
+
+range_walk = (be :: CBackend) Res<RangeWalk, AllocError> {
     counter ::= be.fresh_name("i").try();
     base    ::= be.fresh_name("b").try();
     be.declare_usize(counter.view()).try();
     be.declare_usize(base.view()).try();
     limit ::= be.fresh_name("n").try();
     be.declare_usize(limit.view()).try();
-    be.assign_member(counter.view(), rng.view(), "start").try();
-    be.assign_member(limit.view(), rng.view(), "end").try();
-    be.fmt("{} = {};\n", base.view(), counter.view()).try();
+    Ok(RangeWalk(
+        counter: counter.view(),
+        base: base.view(),
+        limit: limit.view()
+    ));
+}
 
-    be.fmt("while ({} < {}) {\n", counter.view(), limit.view()).try();
+start_range_walk = (be :: CBackend, walk: RangeWalk) Res<(), AllocError> {
+    be.fmt("{} = {};\n", walk.base, walk.counter)
+}
+
+run_range_body = (
+    be    :: CBackend,
+    walk  : RangeWalk,
+    sh    : Shape,
+    lam   : Lambda,
+    value : str,
+    ety   : TyId,
+    fold  : Fold,
+    ctx   : Ctx
+) Res<(), AllocError> {
+    be.run_body(sh, lam, walk.counter, walk.base, value, ety, fold, ctx)
+}
+
+// Impl bounds are lowered in their declaring module and may spill into the
+// walk's locals. `at` remains the final bounds check.
+lower_supplied_walk = (
+    be   :: CBackend,
+    sh   : Shape,
+    one  : ExprId,
+    rty  : TyId,
+    ri   : RangeImpl,
+    pass : TyId,
+    lam  : Lambda,
+    ctx  : Ctx,
+    want : TyId,
+    out  :: String
+) Res<(), AllocError> {
+    elem    = be.res_value(pass).match({ Ok(t) => t, None => pass });
+    settled = be.settle_res(want, elem).try();
+    rng     = be.walk_temp(one, rty, ctx).try();
+    st      = be.open_result(settled, out).try();
+    walk    = be.range_walk().try();
+    be.supplied_bound(ri, rty, ri.start, walk.counter, rng.view()).try();
+    be.supplied_bound(ri, rty, ri.end, walk.limit, rng.view()).try();
+    be.start_range_walk(walk).try();
+
+    be.fmt("while ({} < {}) {\n", walk.counter, walk.limit).try();
     be.indent();
-    be.run_body(
-        sh,
-        lam,
-        counter.view(),
-        base.view(),
-        counter.view(),
-        usize_ty,
-        fold,
-        ctx
-    ).try();
-    be.close_pass(st, counter.view(), fold).try();
+    value ::= be.alloc.String().try();
+    be.take_pass(ri, rty, pass, walk.counter, st.brk, rng.view(), value).try();
+    fold = be.no_fold().try();
+    be.run_range_body(walk, sh, lam, value.view(), elem, fold, ctx).try();
+    be.close_pass(st, walk.counter, fold).try();
     Ok(());
 }
 
