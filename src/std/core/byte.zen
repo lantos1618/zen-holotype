@@ -1,5 +1,5 @@
 // ASCII byte predicates and conversions. UTF-8 codepoint operations live in
-// std.text.text_utf8. UFCS exposes these as methods such as `b.is_digit()`.
+// std.text.text_utf8.
 DIGIT_ZERO* : u8 = '0'
 DIGIT_NINE* : u8 = '9'
 LOWER_A*    : u8 = 'a'
@@ -9,13 +9,10 @@ UPPER_A*    : u8 = 'A'
 UPPER_F*    : u8 = 'F'
 UPPER_Z*    : u8 = 'Z'
 
-// Difference between corresponding ASCII lower- and uppercase letters.
 CASE_GAP*   : u8 = 32
 
-// Largest single-byte ASCII value.
 ASCII_MAX*  : u8 = 127
 
-// how many digits a base-16 digit stands for
 HEX_BASE*   : u8 = 16
 
 is_ascii* = (b: u8) bool { b <= ASCII_MAX }
@@ -30,12 +27,9 @@ is_alpha* = (b: u8) bool { b.is_lower() || b.is_upper() }
 
 is_alnum* = (b: u8) bool { b.is_alpha() || b.is_digit() }
 
-// what a lexer skips. `\v`/`\f` included: treating them as ordinary
-// bytes yields an "unexpected character" diagnostic nobody can act on
+// Includes vertical-tab and form-feed.
 is_space* = (b: u8) bool { b.is_in([' ', '\t', '\n', '\r', '\v', '\f']) }
 
-// first byte and later bytes differ by exactly one thing — two names,
-// not one with a flag
 is_ident_start* = (b: u8) bool { b.is_alpha() || b == '_' }
 
 is_ident_cont*  = (b: u8) bool { b.is_alnum() || b == '_' }
@@ -44,8 +38,7 @@ is_hex_digit* = (b: u8) bool {
     b.is_digit() || (b >= LOWER_A && b <= LOWER_F) || (b >= UPPER_A && b <= UPPER_F)
 }
 
-// Res, not a trap: "is this a digit, and which one" can legitimately
-// miss (str.get shape). A caller already certain pays nothing via `.try()`.
+// None for a non-decimal byte.
 digit_value* = (b: u8) Res<u8> {
     b.is_digit().match({
         true  => Ok(b - DIGIT_ZERO),
@@ -53,10 +46,7 @@ digit_value* = (b: u8) Res<u8> {
     });
 }
 
-// Spell one already-bounded decimal digit. The overloads keep callers in
-// their own integer domain: formatting a u64/usize should not require each
-// caller to invent a narrowing shim. Values above nine trap by exhausting
-// the unsigned subtraction, just as hex_digit traps above fifteen.
+// Encode a decimal digit as ASCII; values outside 0..9 trap.
 digit* = (n: u8) u8 {
     9 - n;
     DIGIT_ZERO + n
@@ -86,11 +76,7 @@ digit* = (n: usize) u8 {
     })
 }
 
-// Early return over a pyramid: the one-shot loop is a breakable block,
-// each `.then` a guard naming one spelling of a hex digit, the bare
-// last break the miss. The typed binding is load-bearing for the
-// reason `lsp_reply.request_of` states — a match on the loop call
-// itself leaves T unresolved.
+// Decode one ASCII hexadecimal digit.
 hex_value* = (b: u8) Res<u8> {
     found: Res<u8> = loop<u8>((h) {
         b.is_digit().then(() { h.break(b - DIGIT_ZERO) });
@@ -104,8 +90,7 @@ hex_value* = (b: u8) Res<u8> {
     });
 }
 
-// ASCII-only case folding: a byte outside A-Z/a-z comes back
-// unchanged — there is no case to fold
+// ASCII bytes outside A-Z are unchanged.
 to_lower* = (b: u8) u8 {
     b.is_upper().match({
         true  => b + CASE_GAP,
@@ -120,13 +105,8 @@ to_upper* = (b: u8) u8 {
     });
 }
 
-// the low nibble as its hex digit. Caller splits the byte first —
-// `(b / HEX_BASE).hex_digit()` then `(b % HEX_BASE)`. TRAPS above 15:
-// an out-of-range nibble is a bug in the caller's shift, not a miss.
+// Encode a nibble as lowercase ASCII; values above 15 trap.
 hex_digit* = (nibble: u8) u8 {
-    // str.index's idiom: underflows for nibble >= HEX_BASE — unsigned
-    // underflow IS the trap. Can't write `/ 0` literally: the compiler
-    // rejects a trap it can prove will always fire.
     HEX_BASE - nibble - 1;
     (nibble < 10).match({
         true  => DIGIT_ZERO + nibble,
@@ -134,9 +114,6 @@ hex_digit* = (nibble: u8) u8 {
     });
 }
 
-// The same spelling for hash nibbles, which naturally live in u64. Keeping
-// this beside the byte overload prevents every hash writer from carrying its
-// own sixteen-arm conversion table.
 hex_digit* = (nibble: u64) u8 {
     nibble.match({
         0 => '0', 1 => '1', 2 => '2', 3 => '3',
