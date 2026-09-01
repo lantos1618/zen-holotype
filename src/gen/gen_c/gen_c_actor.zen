@@ -33,6 +33,39 @@ BehaviorHit* = {
     mi*: usize,
 }
 
+// Source and inferred facts for one resolved Env.spawn call. They become
+// available as one set when Ref<A> has been recognised and remain fixed until
+// the result expression is delivered.
+ActorSpawn = {
+    id: ExprId,
+    call: Call,
+    access: Access,
+    receiver_ty: TyId,
+    result_ty: TyId,
+    ref_ty: TyId,
+    actor_ty: TyId,
+    ctx: Ctx,
+}
+
+// Runtime layout types are discovered together before actor records or
+// lifecycle callbacks can be emitted. This snapshot is the input to both.
+ActorSpawnLayout = {
+    spawn: ActorSpawn,
+    context_ty: TyId,
+    arena_ty: TyId,
+    state_ty: TyId,
+    alloc_ty: TyId,
+}
+
+// Generated names born at one actor site and consumed together while its
+// value is emitted. Their backing strings live in the backend allocator.
+ActorLifecycle = {
+    layout: ActorSpawnLayout,
+    record: str,
+    started: str,
+    stopped: str,
+}
+
 // Recognition uses declaration ownership as well as spelling. A user-defined
 // Ref or Actor is an ordinary type.
 ref_of_actor* = (be :: CBackend, ty: TyId) Res<Res<TyId>, AllocError> {
@@ -724,184 +757,120 @@ lower_actor_spawn* = (
     ret = be.check.type_of(id, ctx).try();
     be.payload_type(ret, "Ok").match({
         None       => be.unsupported(id, "Env.spawn without a Ref result", out),
-        Ok(ref_ty) => be.spawn_ref(id, c, a, rty, ret, ref_ty, ctx, out),
-    })
-}
-
-spawn_ref = (
-    be     :: CBackend,
-    id     : ExprId,
-    c      : Call,
-    a      : Access,
-    rty    : TyId,
-    ret    : TyId,
-    ref_ty : TyId,
-    ctx    : Ctx,
-    out    :: String
-) Res<(), AllocError> {
-    be.ref_of_actor(ref_ty).try().match({
-        None         => be.unsupported(
-            id,
-            "Env.spawn returning a non-actor Ref",
-            out
-        ),
-        Ok(actor_ty) => be.spawn_types(
-            id,
-            c,
-            a,
-            rty,
-            ret,
-            ref_ty,
-            actor_ty,
-            ctx,
-            out
-        ),
-    })
-}
-
-spawn_types = (
-    be       :: CBackend,
-    id       : ExprId,
-    c        : Call,
-    a        : Access,
-    rty      : TyId,
-    ret      : TyId,
-    ref_ty   : TyId,
-    actor_ty : TyId,
-    ctx      : Ctx,
-    out      :: String
-) Res<(), AllocError> {
-    be.actor_named_type("Context").try().match({
-        None           => be.unsupported(id, "std.actor.Context", out),
-        Ok(context_ty) => be.named_type_at(
-            "Arena",
-            "std.mem.mem_arena.Arena"
-        ).try().match({
-            None         => be.unsupported(id, "std.mem.Arena", out),
-            Ok(arena_ty) => be.spawn_known(
+        Ok(ref_ty) => be.ref_of_actor(ref_ty).try().match({
+            None         => be.unsupported(
                 id,
-                c,
-                a,
-                rty,
-                ret,
-                ref_ty,
-                actor_ty,
-                context_ty,
-                arena_ty,
-                ctx,
+                "Env.spawn returning a non-actor Ref",
+                out
+            ),
+            Ok(actor_ty) => be.resolve_actor_spawn(
+                ActorSpawn(
+                    id: id,
+                    call: c,
+                    access: a,
+                    receiver_ty: rty,
+                    result_ty: ret,
+                    ref_ty: ref_ty,
+                    actor_ty: actor_ty,
+                    ctx: ctx,
+                ),
                 out
             ),
         }),
     })
 }
 
-spawn_known = (
-    be         :: CBackend,
-    id         : ExprId,
-    c          : Call,
-    a          : Access,
-    rty        : TyId,
-    ret        : TyId,
-    ref_ty     : TyId,
-    actor_ty   : TyId,
-    context_ty : TyId,
-    arena_ty   : TyId,
-    ctx        : Ctx,
-    out        :: String
-) Res<(), AllocError> {
-    be.field_of(arena_ty, "state").try().match({
-        None          => be.unsupported(id, "Arena without state", out),
-        Ok(state_ptr) => pointee(be, state_ptr).match({
-            None         => be.unsupported(
-                id,
-                "Arena state that is not a pointer",
-                out
-            ),
-            Ok(state_ty) => be.field_of(context_ty, "alloc").try().match({
-                None         => be.unsupported(
-                    id,
-                    "Context without Alloc",
+resolve_actor_spawn = (be :: CBackend, spawn: ActorSpawn, out :: String)
+                      Res<(), AllocError> {
+    be.actor_named_type("Context").try().match({
+        None           => be.unsupported(spawn.id, "std.actor.Context", out),
+        Ok(context_ty) => be.named_type_at(
+            "Arena",
+            "std.mem.mem_arena.Arena"
+        ).try().match({
+            None         => be.unsupported(spawn.id, "std.mem.Arena", out),
+            Ok(arena_ty) => be.field_of(arena_ty, "state").try().match({
+                None          => be.unsupported(
+                    spawn.id,
+                    "Arena without state",
                     out
                 ),
-                Ok(alloc_ty) => be.write_actor_spawn(
-                    c,
-                    a,
-                    rty,
-                    ret,
-                    ref_ty,
-                    actor_ty,
-                    context_ty,
-                    arena_ty,
-                    state_ty,
-                    alloc_ty,
-                    ctx,
-                    out
-                ),
+                Ok(state_ptr) => pointee(be, state_ptr).match({
+                    None         => be.unsupported(
+                        spawn.id,
+                        "Arena state that is not a pointer",
+                        out
+                    ),
+                    Ok(state_ty) => be.field_of(context_ty, "alloc")
+                        .try().match({
+                        None         => be.unsupported(
+                            spawn.id,
+                            "Context without Alloc",
+                            out
+                        ),
+                        Ok(alloc_ty) => {
+                            value = be.write_actor_spawn(ActorSpawnLayout(
+                                spawn: spawn,
+                                context_ty: context_ty,
+                                arena_ty: arena_ty,
+                                state_ty: state_ty,
+                                alloc_ty: alloc_ty,
+                            )).try();
+                            out.add(value.view())
+                        },
+                    }),
+                }),
             }),
         }),
     })
 }
 
-write_actor_spawn = (
-    be         :: CBackend,
-    c          : Call,
-    a          : Access,
-    rty        : TyId,
-    ret        : TyId,
-    ref_ty     : TyId,
-    actor_ty   : TyId,
-    context_ty : TyId,
-    arena_ty   : TyId,
-    state_ty   : TyId,
-    alloc_ty   : TyId,
-    ctx        : Ctx,
-    out        :: String
-) Res<(), AllocError> {
+write_actor_spawn = (be :: CBackend, layout: ActorSpawnLayout)
+                    Res<String, AllocError> {
     be.need_actor();
-    [ret, ref_ty, actor_ty, context_ty, arena_ty, state_ty, alloc_ty].loop((h, ty) { be.request_type(ty).try() });
+    [
+        layout.spawn.result_ty,
+        layout.spawn.ref_ty,
+        layout.spawn.actor_ty,
+        layout.context_ty,
+        layout.arena_ty,
+        layout.state_ty,
+        layout.alloc_ty,
+    ].loop((h, ty) { be.request_type(ty).try() });
     n = be.next_actor_site();
     rec ::= be.alloc.String().try();
     sym_gen(rec, "actor", n).try();
-    be.write_actor_record(rec.view(), actor_ty, context_ty, arena_ty).try();
-    started = be.write_started_callback(n, rec.view(), actor_ty).try();
+    be.write_actor_record(layout, rec.view()).try();
+    started = be.write_started_callback(
+        n,
+        rec.view(),
+        layout.spawn.actor_ty
+    ).try();
     stopped = be.write_stopped_callback(
         n,
         rec.view(),
-        actor_ty,
-        arena_ty
+        layout.spawn.actor_ty,
+        layout.arena_ty
     ).try();
-    be.write_spawn_value(
-        c,
-        a,
-        rty,
-        ret,
-        ref_ty,
-        actor_ty,
-        context_ty,
-        arena_ty,
-        state_ty,
-        alloc_ty,
-        rec.view(),
-        started.view(),
-        stopped.view(),
-        ctx,
-        out
-    )
+    be.write_spawn_value(ActorLifecycle(
+        layout: layout,
+        record: rec.view(),
+        started: started.view(),
+        stopped: stopped.view(),
+    ))
 }
 
 write_actor_record = (
-    be      :: CBackend,
-    name    : str,
-    actor   : TyId,
-    context : TyId,
-    arena   : TyId
+    be     :: CBackend,
+    layout : ActorSpawnLayout,
+    name   : str
 ) Res<(), AllocError> {
     a ::= be.alloc.String().try();
-    be.ctype(actor, a).try();
+    be.ctype(layout.spawn.actor_ty, a).try();
     c ::= be.alloc.String().try();
-    be.ctype(context, c).try();
+    be.ctype(layout.context_ty, c).try();
     ar ::= be.alloc.String().try();
-    be.ctype(arena, ar).try();
+    be.ctype(layout.arena_ty, ar).try();
     text ::= be.alloc.String().try();
     text.fmt(
         "typedef struct {name} {{ zg_actor zg_base; {} zg_state; {} zg_ctx; {} zg_arena; }} {name};",
@@ -1011,39 +980,37 @@ drop_symbol = (be :: CBackend, ty: TyId) Res<Res<String>, AllocError> {
     })
 }
 
-write_spawn_value = (
-    be         :: CBackend,
-    c          : Call,
-    a          : Access,
-    rty        : TyId,
-    ret        : TyId,
-    ref_ty     : TyId,
-    actor_ty   : TyId,
-    context_ty : TyId,
-    arena_ty   : TyId,
-    state_ty   : TyId,
-    alloc_ty   : TyId,
-    rec        : str,
-    started    : str,
-    stopped    : str,
-    ctx        : Ctx,
-    out        :: String
-) Res<(), AllocError> {
+write_spawn_value = (be :: CBackend, lifecycle: ActorLifecycle)
+                    Res<String, AllocError> {
+    layout = lifecycle.layout;
+    spawn  = layout.spawn;
     env_code ::= be.alloc.String().try();
-    expr(be, a.base, ctx, rty, env_code).try();
-    env = be.temp(rty, "env").try();
+    expr(be, spawn.access.base, spawn.ctx, spawn.receiver_ty, env_code).try();
+    env = be.temp(spawn.receiver_ty, "env").try();
     be.set_line(env.view(), env_code.view()).try();
     actor_code ::= be.alloc.String().try();
-    c.args.get(0).match({
+    spawn.call.args.get(0).match({
         None      => actor_code.add("0"),
-        Ok(value) => expr(be, value.value, ctx, actor_ty, actor_code),
+        Ok(value) => expr(
+            be,
+            value.value,
+            spawn.ctx,
+            spawn.actor_ty,
+            actor_code
+        ),
     }).try();
     state_c ::= be.alloc.String().try();
-    be.ctype(state_ty, state_c).try();
+    be.ctype(layout.state_ty, state_c).try();
     cell        ::= be.fresh_name("actor").try();
     arena_state ::= be.fresh_name("actor_state").try();
     status      ::= be.fresh_name("actor_status").try();
-    be.fmt("{rec} *{} = ({rec} *)malloc(sizeof({rec}));\n", cell.view()).try();
+    be.fmt(
+        "{} *{} = ({} *)malloc(sizeof({}));\n",
+        lifecycle.record,
+        cell.view(),
+        lifecycle.record,
+        lifecycle.record
+    ).try();
     be.fmt(
         "{} *{} = ({} *)malloc(sizeof({}));\n",
         state_c.view(),
@@ -1051,26 +1018,20 @@ write_spawn_value = (
         state_c.view(),
         state_c.view()
     ).try();
-    dst = be.temp(ret, "t").try();
+    dst = be.temp(spawn.result_ty, "t").try();
     be.fmt("if (!{} || !{}) {{\n", cell.view(), arena_state.view()).try();
     be.indent();
     be.fmt("free({});\nfree({});\n", cell.view(), arena_state.view()).try();
-    be.write_assign_err(ret, "OutOfMemory", dst.view()).try();
+    be.write_assign_err(spawn.result_ty, "OutOfMemory", dst.view()).try();
     be.dedent();
     be.writeln("} else {").try();
     be.indent();
     be.init_actor_fields(
+        lifecycle,
         cell.view(),
         arena_state.view(),
         env.view(),
-        actor_code.view(),
-        actor_ty,
-        context_ty,
-        arena_ty,
-        state_ty,
-        alloc_ty,
-        started,
-        stopped
+        actor_code.view()
     ).try();
     be.fmt(
         "int {} = zg_actor_start(&{}->zg_base);\n",
@@ -1081,29 +1042,28 @@ write_spawn_value = (
     be.indent();
     // No worker owns the value when startup fails. Run ordinary Drop for
     // the actor and let Arena.drop release both its pages and state cell.
-    be.write_failed_spawn_drop(cell.view(), actor_ty, arena_ty).try();
+    be.write_failed_spawn_drop(layout, cell.view()).try();
     be.fmt("free({});\n", cell.view()).try();
-    be.write_assign_err(ret, "Unavailable", dst.view()).try();
+    be.write_assign_err(spawn.result_ty, "Unavailable", dst.view()).try();
     be.dedent();
     be.writeln("} else {").try();
     be.indent();
     ref_value ::= be.alloc.String().try();
-    be.write_ref_value(ref_ty, cell.view(), ref_value).try();
-    be.write_assign_ok(ret, ref_value.view(), dst.view()).try();
+    be.write_ref_value(spawn.ref_ty, cell.view(), ref_value).try();
+    be.write_assign_ok(spawn.result_ty, ref_value.view(), dst.view()).try();
     be.dedent();
     be.writeln("}").try();
     be.dedent();
     be.writeln("}").try();
-    out.add(dst.view())
+    Ok(dst)
 }
 
 write_failed_spawn_drop = (
-    be    :: CBackend,
-    cell  : str,
-    actor : TyId,
-    arena : TyId
+    be     :: CBackend,
+    layout : ActorSpawnLayout,
+    cell   : str
 ) Res<(), AllocError> {
-    be.drop_symbol(actor).try().match({
+    be.drop_symbol(layout.spawn.actor_ty).try().match({
         None       => Ok(()),
         Ok(symbol) => be.fmt(
             "(void)({}(&{}->zg_state));\n",
@@ -1111,7 +1071,7 @@ write_failed_spawn_drop = (
             cell
         ),
     }).try();
-    be.drop_symbol(arena).try().match({
+    be.drop_symbol(layout.arena_ty).try().match({
         None       => Ok(()),
         Ok(symbol) => be.fmt(
             "(void)({}(&{}->zg_arena));\n",
@@ -1123,18 +1083,13 @@ write_failed_spawn_drop = (
 
 init_actor_fields = (
     be          :: CBackend,
+    lifecycle   : ActorLifecycle,
     cell        : str,
     arena_state : str,
     env         : str,
-    actor       : str,
-    actor_ty    : TyId,
-    context_ty  : TyId,
-    arena_ty    : TyId,
-    state_ty    : TyId,
-    alloc_ty    : TyId,
-    started     : str,
-    stopped     : str
+    actor       : str
 ) Res<(), AllocError> {
+    layout = lifecycle.layout;
     mem ::= be.alloc.String().try();
     mem.sym_member("mem").try();
     head ::= be.alloc.String().try();
@@ -1147,7 +1102,7 @@ init_actor_fields = (
     be.fmt("{arena_state}->{} = NULL;\n", head.view()).try();
     be.fmt("{arena_state}->{} = 0;\n", next.view()).try();
     arena_c ::= be.alloc.String().try();
-    be.ctype(arena_ty, arena_c).try();
+    be.ctype(layout.arena_ty, arena_c).try();
     arena_field ::= be.alloc.String().try();
     arena_field.sym_member("state").try();
     be.fmt(
@@ -1158,9 +1113,14 @@ init_actor_fields = (
     alloc_value ::= be.alloc.String().try();
     addr        ::= be.alloc.String().try();
     addr.fmt("&{cell}->zg_arena").try();
-    be.fat_value(addr.view(), arena_ty, alloc_ty, alloc_value).try();
+    be.fat_value(
+        addr.view(),
+        layout.arena_ty,
+        layout.alloc_ty,
+        alloc_value
+    ).try();
     context_c ::= be.alloc.String().try();
-    be.ctype(context_ty, context_c).try();
+    be.ctype(layout.context_ty, context_c).try();
     context_env ::= be.alloc.String().try();
     context_env.sym_member("env").try();
     context_alloc ::= be.alloc.String().try();
@@ -1175,8 +1135,8 @@ init_actor_fields = (
     be.fmt("{cell}->zg_state = {actor};\n").try();
     be.fmt("{cell}->zg_base.state = &{cell}->zg_state;\n").try();
     be.fmt("{cell}->zg_base.context = &{cell}->zg_ctx;\n").try();
-    be.fmt("{cell}->zg_base.started = {started};\n").try();
-    be.fmt("{cell}->zg_base.stopped = {stopped};\n").try();
+    be.fmt("{cell}->zg_base.started = {};\n", lifecycle.started).try();
+    be.fmt("{cell}->zg_base.stopped = {};\n", lifecycle.stopped).try();
     Ok(())
 }
 
