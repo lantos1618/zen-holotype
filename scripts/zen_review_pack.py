@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,7 +33,39 @@ def sample_key(label: str, relative: str) -> str:
     return hashlib.sha256(f"{label}:{relative}".encode()).hexdigest()
 
 
-def choose(snapshot: dict, label: str, max_lines: int, ranked_files: int) -> list:
+def previous_revision(label: str) -> str | None:
+    snapshots = sorted(SNAPSHOTS.glob("round-*.json"))
+    current = SNAPSHOTS / f"{label}.json"
+    earlier = [path for path in snapshots if path < current]
+    if not earlier:
+        return None
+    return json.loads(earlier[-1].read_text())["revision"]
+
+
+def changed_sources(before: str | None, after: str) -> set[str]:
+    if before is None:
+        return set()
+    result = subprocess.run(
+        ["git", "diff", "--name-only", f"{before}..{after}", "--", "src"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return {
+        path
+        for path in result.stdout.splitlines()
+        if path.endswith(".zen") and source_path(path).is_file()
+    }
+
+
+def choose(
+    snapshot: dict,
+    label: str,
+    max_lines: int,
+    ranked_files: int,
+    changed: set[str],
+) -> list:
     selected: list[tuple[str, str, int]] = []
     used: set[str] = set()
     total = 0
@@ -63,6 +96,16 @@ def choose(snapshot: dict, label: str, max_lines: int, ranked_files: int) -> lis
             used.add(relative)
             total += lines
             break
+
+    ranked = {path: i for i, path in enumerate(snapshot["ranking"])}
+    companions = sorted(changed - used, key=lambda path: (ranked.get(path, 1 << 30), path))
+    for relative in companions:
+        lines = line_count(source_path(relative))
+        if total + lines > max_lines:
+            continue
+        selected.append((relative, "changed-companion", lines))
+        used.add(relative)
+        total += lines
     return selected
 
 
@@ -72,8 +115,9 @@ def render(label: str, revision: str, selected: list[tuple[str, str, int]]) -> s
         "",
         f"Revision: `{revision}`.",
         "",
-        "This bounded pack contains the highest mechanical review priorities",
-        "plus one deterministic spot-check from each top-level source area.",
+        "This bounded pack contains the highest mechanical review priorities,",
+        "one deterministic spot-check from each top-level source area, and",
+        "changed companion files that fit the remaining line budget.",
         "Inspect bodies and comments rather than inferring implementation from",
         "signatures. Selection is evidence for review, not authorization to edit.",
         "",
@@ -109,11 +153,13 @@ def main() -> int:
     if not snapshot_path.is_file():
         raise SystemExit(f"missing {snapshot_path}")
     snapshot = json.loads(snapshot_path.read_text())
+    before = previous_revision(options.label)
     selected = choose(
         snapshot,
         options.label,
         options.max_lines,
         options.ranked_files,
+        changed_sources(before, snapshot["revision"]),
     )
     document = render(options.label, snapshot["revision"], selected)
     output = PACKS / f"{options.label}-context.md"
