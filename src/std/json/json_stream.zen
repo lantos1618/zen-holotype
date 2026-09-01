@@ -6,7 +6,7 @@ str, String = std.text
 Vec = std.collections
 Alloc = std.mem
 Range = std.core
-JsonFault, decode_text_token, number_token,
+JsonFault, TextByte, text_byte, simple, decode_text_token, number_token, shifted,
     MAX_NESTING = std.json.json_read
 
 JsonEvent* = ObjectStart
@@ -30,11 +30,9 @@ Phase = ObjectKeyOrEnd
     | ArrayValue
     | ArrayCommaOrEnd
 
-Frame = { phase: Phase }
-
 Decoder* = {
     a: Alloc,
-    frames :: Vec<Frame>,
+    frames :: Vec<Phase>,
     token :: String,
     mode :: Mode,
     key :: bool,
@@ -129,7 +127,7 @@ Decoder* = {
     ) Res<bool, JsonFault> {
         self.phase().match({
             ObjectKeyOrEnd   => (b == '}').match({
-                true  => self.close_object(events),
+                true  => self.close(JsonEvent.ObjectEnd, events),
                 false => self.start_key(b),
             }),
             ObjectKey        => self.start_key(b),
@@ -141,19 +139,19 @@ Decoder* = {
             ObjectCommaOrEnd => (b == ',').match({
                 true  => { self.set_phase(Phase.ObjectKey); Ok(true) },
                 false => (b == '}').match({
-                    true  => self.close_object(events),
+                    true  => self.close(JsonEvent.ObjectEnd, events),
                     false => Err(JsonFault.Unexpected(self.at)),
                 }),
             }),
             ArrayValueOrEnd  => (b == ']').match({
-                true  => self.close_array(events),
+                true  => self.close(JsonEvent.ArrayEnd, events),
                 false => self.start_value(b, events),
             }),
             ArrayValue       => self.start_value(b, events),
             ArrayCommaOrEnd  => (b == ',').match({
                 true  => { self.set_phase(Phase.ArrayValue); Ok(true) },
                 false => (b == ']').match({
-                    true  => self.close_array(events),
+                    true  => self.close(JsonEvent.ArrayEnd, events),
                     false => Err(JsonFault.Unexpected(self.at)),
                 }),
             }),
@@ -187,7 +185,7 @@ Decoder* = {
         self   :: @Self,
         events :: Vec<JsonEvent>
     ) Res<bool, JsonFault> {
-        self.open(Frame(phase: Phase.ObjectKeyOrEnd)).try();
+        self.open(Phase.ObjectKeyOrEnd).try();
         events.add(JsonEvent.ObjectStart).try(JsonFault.NoMemory);
         Ok(true)
     }
@@ -196,37 +194,29 @@ Decoder* = {
         self   :: @Self,
         events :: Vec<JsonEvent>
     ) Res<bool, JsonFault> {
-        self.open(Frame(phase: Phase.ArrayValueOrEnd)).try();
+        self.open(Phase.ArrayValueOrEnd).try();
         events.add(JsonEvent.ArrayStart).try(JsonFault.NoMemory);
         Ok(true)
     }
 
-    open = (self :: @Self, frame: Frame) Res<(), JsonFault> {
+    open = (self :: @Self, phase: Phase) Res<(), JsonFault> {
         (self.frames.len >= MAX_NESTING).match({
             true  => Err(JsonFault.TooDeep(self.at)),
             false => {
                 self.value_done();
-                self.frames.add(frame).try(JsonFault.NoMemory);
+                self.frames.add(phase).try(JsonFault.NoMemory);
                 Ok(())
             },
         })
     }
 
-    close_object = (
+    close = (
         self   :: @Self,
+        event  : JsonEvent,
         events :: Vec<JsonEvent>
     ) Res<bool, JsonFault> {
         self.frames.take(self.frames.len - 1);
-        events.add(JsonEvent.ObjectEnd).try(JsonFault.NoMemory);
-        Ok(true)
-    }
-
-    close_array = (
-        self   :: @Self,
-        events :: Vec<JsonEvent>
-    ) Res<bool, JsonFault> {
-        self.frames.take(self.frames.len - 1);
-        events.add(JsonEvent.ArrayEnd).try(JsonFault.NoMemory);
+        events.add(event).try(JsonFault.NoMemory);
         Ok(true)
     }
 
@@ -269,21 +259,20 @@ Decoder* = {
                 self.slash = false;
                 (b == 'u').match({
                     true  => { self.hex_left = 4; Ok(true) },
-                    false => simple_escape(b).match({
-                        true  => Ok(true),
-                        false => Err(JsonFault.BadEscape(self.at)),
+                    false => simple(b).match({
+                        Ok(_) => Ok(true),
+                        None  => Err(JsonFault.BadEscape(self.at)),
                     }),
                 })
             },
-            false => (b == '"').match({
-                true  => self.finish_quoted(events),
-                false => (b == '\\').match({
-                    true  => { self.slash = true; Ok(true) },
-                    false => (b < ' ').match({
-                        true  => Err(JsonFault.Unexpected(self.at)),
-                        false => Ok(true),
-                    }),
-                }),
+            false => text_byte(b, self.at).match({
+                Err(fault)     => Err(fault),
+                Ok(TextEnd)    => self.finish_quoted(events),
+                Ok(TextEscape) => {
+                    self.slash = true;
+                    Ok(true)
+                },
+                Ok(TextPlain)  => Ok(true),
             }),
         })
     }
@@ -292,11 +281,7 @@ Decoder* = {
         self   :: @Self,
         events :: Vec<JsonEvent>
     ) Res<bool, JsonFault> {
-        value     = decoded_text(
-            self.a,
-            self.token.view(),
-            self.token_at
-        ).try();
+        value     = self.decoded_text().try();
         self.mode = Mode.Ready;
         self.key.match({
             true  => {
@@ -338,12 +323,38 @@ Decoder* = {
         self   :: @Self,
         events :: Vec<JsonEvent>
     ) Res<(), JsonFault> {
-        raw   = self.token.view();
-        event = atom_event(self.a, raw, self.token_at).try();
+        event = self.atom_event().try();
         events.add(event).try(JsonFault.NoMemory);
         self.mode = Mode.Ready;
         self.value_done();
         Ok(())
+    }
+
+    decoded_text = (self: @Self) Res<String, JsonFault> {
+        decode_text_token(self.a, self.token.view()).match({
+            Err(fault) => Err(fault.shifted(self.token_at)),
+            Ok(value)  => Ok(value),
+        })
+    }
+
+    atom_event = (self: @Self) Res<JsonEvent, JsonFault> {
+        raw                     = self.token.view();
+        literal: Res<JsonEvent> = loop((h) {
+            raw.eq("true").then(() { h.break(JsonEvent.Bool(true)) });
+            raw.eq("false").then(() { h.break(JsonEvent.Bool(false)) });
+            raw.eq("null").then(() { h.break(JsonEvent.Null) });
+            h.break();
+        });
+        literal.match({
+            Ok(event) => Ok(event),
+            None      => keyword_start(raw).match({
+                true  => Err(JsonFault.Unexpected(self.token_at)),
+                false => number_token(self.a, raw).match({
+                    Err(fault) => Err(fault.shifted(self.token_at)),
+                    Ok(value)  => Ok(JsonEvent.Number(value)),
+                }),
+            }),
+        })
     }
 
     value_done = (self :: @Self) () {
@@ -361,11 +372,11 @@ Decoder* = {
 
     phase = (self: @Self) Phase {
         self.frames.get(self.frames.len - 1)
-            .value_or(Frame(phase: Phase.ArrayValue)).phase
+            .value_or(Phase.ArrayValue)
     }
 
     set_phase = (self :: @Self, phase: Phase) () {
-        self.frames.set(self.frames.len - 1, Frame(phase: phase));
+        self.frames.set(self.frames.len - 1, phase);
         ();
     }
 
@@ -399,7 +410,7 @@ Decoder* = {
 Decoder* = (a: Alloc) Res<Decoder, JsonFault> {
     Ok(Decoder(
         a: a,
-        frames: a.Vec<Frame>(),
+        frames: a.Vec<Phase>(),
         token: a.String().try(JsonFault.NoMemory),
         mode: Mode.Ready,
         key: false,
@@ -422,57 +433,9 @@ atom_end = (b: u8) bool {
     json_space(b) || b.is_in([',', ']', '}', ':', '{', '[', '"'])
 }
 
-simple_escape = (b: u8) bool {
-    b.is_in(['"', '\\', '/', 'b', 'f', 'n', 'r', 't'])
-}
-
-atom_event = (a: Alloc, raw: str, base: usize) Res<JsonEvent, JsonFault> {
-    raw.eq("true").match({
-        true  => Ok(JsonEvent.Bool(true)),
-        false => raw.eq("false").match({
-            true  => Ok(JsonEvent.Bool(false)),
-            false => raw.eq("null").match({
-                true  => Ok(JsonEvent.Null),
-                false => keyword_start(raw).match({
-                    true  => Err(JsonFault.Unexpected(base)),
-                    false => Ok(JsonEvent.Number(
-                        checked_number(a, raw, base).try()
-                    )),
-                }),
-            }),
-        }),
-    })
-}
-
 keyword_start = (raw: str) bool {
     raw.get(0).match({
         Ok(b) => b.is_in(['t', 'f', 'n']),
         None  => false,
-    })
-}
-
-decoded_text = (a: Alloc, raw: str, base: usize) Res<String, JsonFault> {
-    decode_text_token(a, raw).match({
-        Err(f)    => Err(shift(f, base)),
-        Ok(value) => Ok(value),
-    })
-}
-
-checked_number = (a: Alloc, raw: str, base: usize) Res<String, JsonFault> {
-    number_token(a, raw).match({
-        Err(f)    => Err(shift(f, base)),
-        Ok(value) => Ok(value),
-    })
-}
-
-shift = (f: JsonFault, base: usize) JsonFault {
-    f.match({
-        Unexpected(at) => JsonFault.Unexpected(base + at),
-        Truncated(at)  => JsonFault.Truncated(base + at),
-        BadEscape(at)  => JsonFault.BadEscape(base + at),
-        BadNumber(at)  => JsonFault.BadNumber(base + at),
-        TooDeep(at)    => JsonFault.TooDeep(base + at),
-        Trailing(at)   => JsonFault.Trailing(base + at),
-        NoMemory       => JsonFault.NoMemory,
     })
 }

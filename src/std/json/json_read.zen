@@ -7,7 +7,7 @@
 
 str, String, push_utf8 = std.text
 Vec = std.collections
-Alloc, AllocError = std.mem
+Alloc = std.mem
 Range = std.core
 Jsons, Json, JsonId, Pair = std.json.json_write
 
@@ -21,13 +21,11 @@ JsonFault* = Unexpected(usize)   // a byte that cannot begin what is expected he
            | Trailing(usize)     // a complete value, and then more bytes
            | NoMemory            // the arena could not grow
 
-// A depth ceiling, a security property not a nicety: this reader
-// recurses, and `[[[[[...` with no ceiling is a stack overflow reachable
-// from the wire. 64 is deeper than any LSP message.
+// Bounds recursive DOM reads and the incremental decoder's frame stack.
 MAX_NESTING*: usize = 64
 
-// The cursor. Holds the Alloc because DECODING A STRING ALLOCATES — an
-// escape means the decoded bytes cannot be borrowed from the input.
+// The cursor borrows plain strings from the input. Escaped strings are decoded
+// with the supplied allocator.
 Reader* = {
     text: str,
     a: Alloc,
@@ -82,14 +80,12 @@ Reader* = {
         })
     }
 
-    // JSON's number grammar, in full:
+    // JSON number grammar:
     //
     //     -? ( 0 | [1-9][0-9]* ) ( . [0-9]+ )? ( [eE] [+-]? [0-9]+ )?
     //
-    // Validated and NOT evaluated — the lexeme is what is stored (see
-    // `json_write.zen`'s header) — so this finds where the number ends and
-    // refuses non-numbers: `01`, `.5`, `1.`, `1e` each rejected at the
-    // byte that makes them wrong.
+    // The original lexeme is stored after validation rather than converted to
+    // a machine number.
     number = (self :: @Self, tree :: Jsons) Res<JsonId, JsonFault> {
         tree.add(Json.Num(self.number_text().try()))
             .replace_err(JsonFault.NoMemory)
@@ -108,10 +104,10 @@ Reader* = {
     integer_part = (self :: @Self) Res<(), JsonFault> {
         b = self.peek().try();
         (b == '0').match({
-            true  => { self.at = self.at + 1; fine() },
+            true  => { self.at = self.at + 1; Ok(()) },
             false => (b >= '1' && b <= '9').match({
                 false => Err(JsonFault.BadNumber(self.at)),
-                true  => { self.digits(); fine() },
+                true  => { self.digits(); Ok(()) },
             }),
         })
     }
@@ -120,14 +116,14 @@ Reader* = {
     // JSON number.
     fraction_part = (self :: @Self) Res<(), JsonFault> {
         self.byte_if('.').match({
-            false => fine(),
+            false => Ok(()),
             true  => self.at_least_one_digit(),
         })
     }
 
     exponent_part = (self :: @Self) Res<(), JsonFault> {
         (self.byte_if('e') || self.byte_if('E')).match({
-            false => fine(),
+            false => Ok(()),
             true  => {
                 self.byte_if('+') || self.byte_if('-');
                 self.at_least_one_digit()
@@ -140,7 +136,7 @@ Reader* = {
         self.digits();
         (self.at == from).match({
             true  => Err(JsonFault.BadNumber(from)),
-            false => fine(),
+            false => Ok(()),
         })
     }
 
@@ -161,10 +157,6 @@ Reader* = {
         self.at = self.at + 1;
         kids ::= self.a.Vec<JsonId>();
         self.spaces();
-        // PEEKED AND NOT CONSUMED: consuming the closer here would leave
-        // `close` nothing to consume, so `[]` would report the END OF
-        // THE DOCUMENT — nowhere near the mistake, and this was every
-        // message (every LSP message ends `"params":{}}`).
         more ::= !self.here(']');
         more.loop((h) {
             kids.add(self.value(tree).try()).try(JsonFault.NoMemory);
@@ -211,7 +203,7 @@ Reader* = {
     // the reader to the wrong place.
     close = (self :: @Self, b: u8) Res<(), JsonFault> {
         self.byte_if(b).match({
-            true  => fine(),
+            true  => Ok(()),
             false => (self.at >= self.text.len).match({
                 true  => Err(JsonFault.Truncated(self.text.len)),
                 false => Err(JsonFault.Unexpected(self.at)),
@@ -224,10 +216,7 @@ Reader* = {
         tree.add(Json.Text(s)).replace_err(JsonFault.NoMemory);
     }
 
-    // The decoded bytes of the string at the cursor. NO ESCAPE MEANS NO
-    // ALLOCATION: the common case is borrowed as a slice; only a string
-    // with a backslash is rebuilt — matters since every key goes
-    // through here.
+    // Borrows an unescaped string and allocates only when decoding escapes.
     text_at = (self :: @Self) Res<str, JsonFault> {
         self.byte_if('"').match({
             false => Err(JsonFault.Unexpected(self.at)),
@@ -240,10 +229,11 @@ Reader* = {
         plain ::= true;
         done  ::= false;
         loop(!done, (h) {
-            b = self.peek().try();
-            (b == '"').then(() { done = true; });
-            (b == '\\').then(() { plain = false; done = true; });
-            (!done).then(() { self.at = self.at + 1; });
+            text_byte(self.peek().try(), self.at).try().match({
+                TextEnd    => { done = true; },
+                TextEscape => { plain = false; done = true; },
+                TextPlain  => { self.at = self.at + 1; },
+            });
         });
         plain.match({
             true  => { self.at = self.at + 1; Ok(self.text.slice(
@@ -262,22 +252,17 @@ Reader* = {
         done ::= false;
         loop(!done, (h) {
             b       = self.peek().try();
+            kind    = text_byte(b, self.at).try();
             self.at = self.at + 1;
-            (b == '"').match({
-                true  => { done = true; },
-                false => { self.copy_one(b, out).try(); },
+            kind.match({
+                TextEnd    => { done = true; },
+                TextEscape => { self.escape(out).try(); },
+                TextPlain  => {
+                    out.add(b).try(JsonFault.NoMemory);
+                },
             });
         });
         Ok(out.view());
-    }
-
-    // One byte of a string already found to contain an escape. The
-    // cursor is PAST `b`, so `escape` starts on the byte after it.
-    copy_one = (self :: @Self, b: u8, out :: String) Res<(), JsonFault> {
-        (b == '\\').match({
-            true  => self.escape(out),
-            false => out.add(b).replace_err(JsonFault.NoMemory),
-        })
     }
 
     // The eight escapes JSON has. `self.at` is on the byte after the
@@ -385,18 +370,14 @@ Reader* = {
         self.depth = self.depth + 1;
         (self.depth > MAX_NESTING).match({
             true  => Err(JsonFault.TooDeep(self.at)),
-            false => fine(),
+            false => Ok(()),
         })
     }
 
     up = (self :: @Self) () { self.depth = self.depth - 1; }
 }
 
-// THE ENTRY POINT: one complete value, and nothing after it. `Trailing`
-// is checked rather than ignored: a body of `{}{}` means the sender and
-// this server disagree about `Content-Length`, and every later frame
-// would be misaligned — caught here as one named error instead of a
-// silent desync.
+// Read one complete value. Non-whitespace after it is a trailing-data fault.
 read* = (a: Alloc, tree :: Jsons, text: str) Res<JsonId, JsonFault> {
     r ::= Reader(text: text, a: a, at: 0, depth: 0);
     root = r.value(tree).try();
@@ -407,9 +388,8 @@ read* = (a: Alloc, tree :: Jsons, text: str) Res<JsonId, JsonFault> {
     })
 }
 
-// Primitive token doors shared with the incremental decoder. They use the
-// same escape and number grammar as `read`, but do not allocate a temporary
-// Jsons arena for every streamed token.
+// Owning token results used by the incremental decoder. Validation remains on
+// Reader, so DOM and streaming entry points accept the same grammar.
 decode_text_token* = (a: Alloc, raw: str) Res<String, JsonFault> {
     r ::= Reader(text: raw, a: a, at: 0, depth: 0);
     value = r.text_at().try();
@@ -436,13 +416,8 @@ number_token* = (a: Alloc, raw: str) Res<String, JsonFault> {
     })
 }
 
-// The escapes that stand for one byte, as ONE match on the byte rather
-// than a pyramid of `==`. `/` is in the set — JSON allows it, though
-// nothing here ever writes it that way. `\b` and `\f` have no character
-// literal in this language (the lexer takes `\n \t \r \0 \\ \' \"` and no
-// more), so their RESULTS are named by codepoint; `\u` is not here at all
-// because it is four more bytes and its own reader.
-simple = (b: u8) Res<u8> {
+// JSON's single-byte escapes. Unicode escapes are decoded separately.
+simple* = (b: u8) Res<u8> {
     b.match({
         '"'  => Ok('"'),
         '\\' => Ok('\\'),
@@ -456,25 +431,42 @@ simple = (b: u8) Res<u8> {
     })
 }
 
-// `Ok(())` with its error side NAMED: a bare `Ok(())` in one match arm
-// whose sibling is `Res<(), JsonFault>` infers the one-parameter `Res`
-// instead, and the two do not join.
-fine* = () Res<(), JsonFault> { Ok(()) }
+// Structural bytes inside a quoted token. Both readers use this classifier so
+// an unescaped control byte cannot be accepted by only one of them.
+TextByte* = TextEnd | TextEscape | TextPlain
+
+text_byte* = (b: u8, at: usize) Res<TextByte, JsonFault> {
+    b.match({
+        '"'  => Ok(TextByte.TextEnd),
+        '\\' => Ok(TextByte.TextEscape),
+        _    => (b < ' ').match({
+            true  => Err(JsonFault.Unexpected(at)),
+            false => Ok(TextByte.TextPlain),
+        }),
+    })
+}
+
+shifted* = (self: JsonFault, base: usize) JsonFault {
+    self.match({
+        Unexpected(at) => JsonFault.Unexpected(base + at),
+        Truncated(at)  => JsonFault.Truncated(base + at),
+        BadEscape(at)  => JsonFault.BadEscape(base + at),
+        BadNumber(at)  => JsonFault.BadNumber(base + at),
+        TooDeep(at)    => JsonFault.TooDeep(base + at),
+        Trailing(at)   => JsonFault.Trailing(base + at),
+        NoMemory       => JsonFault.NoMemory,
+    })
+}
 
 BACKSPACE*: u8 = 8
 FORM_FEED*: u8 = 12
 ZERO_U32*: u32 = 0
 HEX_BASE_U32*: u32 = 16
 
-// UTF-16's surrogate halves: a pair encodes a codepoint at or above
-// 65536, the high half carrying the top ten bits and the low half the
-// bottom ten (`design_lsp.md`).
+// UTF-16 surrogate bounds used while decoding `\u` pairs.
 SURROGATE_HI_MIN*: u32 = 55296     // D800
 SURROGATE_HI_MAX*: u32 = 56319     // DBFF
 SURROGATE_LO_MIN*: u32 = 56320     // DC00
 SURROGATE_LO_MAX*: u32 = 57343     // DFFF
 SURROGATE_SPAN*: u32 = 1024
 ASTRAL_BASE*: u32 = 65536
-
-// UTF-8 boundary policy and encoding are owned by `std.text`; `push_utf8`
-// keeps this reader consistent with the decoder.

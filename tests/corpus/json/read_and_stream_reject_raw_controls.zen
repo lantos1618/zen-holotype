@@ -1,0 +1,42 @@
+JsonEvent, JsonFault, Jsons, read = std.json
+
+fault_at = (fault: JsonFault) usize {
+    fault.match({
+        Unexpected(at) => at,
+        Truncated(at)  => at,
+        BadEscape(at)  => at,
+        BadNumber(at)  => at,
+        TooDeep(at)    => at,
+        Trailing(at)   => at,
+        NoMemory       => 0,
+    })
+}
+
+read_one = (a: Alloc, text: str) () {
+    tree ::= a.Jsons();
+    read(a, tree, text).match({
+        Ok(_)      => println("read accepted"),
+        Err(fault) => println("read refused {}", fault_at(fault)),
+    });
+}
+
+stream_one = (a: Alloc, text: str) Res<(), JsonFault> {
+    decoder ::= a.Decoder().try();
+    events  ::= a.Vec<JsonEvent>();
+    decoder.feed(text, events).match({
+        Ok(_)      => println("stream accepted"),
+        Err(fault) => println("stream refused {}", fault_at(fault)),
+    });
+    Ok(())
+}
+
+main = (env: Env) Res<i32, JsonFault> {
+    a ::= env.mem.alloc();
+    raw = "\"line\nbreak\"";
+    read_one(a, raw);
+    stream_one(a, raw).try();
+    after_escape = "\"ok\\nline\nbreak\"";
+    read_one(a, after_escape);
+    stream_one(a, after_escape).try();
+    Ok(0)
+}
