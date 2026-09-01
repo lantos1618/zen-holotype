@@ -127,138 +127,17 @@ lower_walk* = (
     out  :: String
 )
              Res<(), AllocError> {
-    lead = be.first_lead(args);
-    lead.match({
-        None    => be.lower_forever(id, sh, None, lam, ctx, want, fold, out),
-        Ok(one) => be.lower_led(id, sh, one, lam, ctx, want, fold, out),
-    })
-}
-
-first_lead = (be :: CBackend, args: Vec<ExprId>) Res<ExprId> {
-    (args.len > 1).match({
-        false => None,
-        true  => args.get(0),
-    })
-}
-
-lower_led = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    one  : ExprId,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    fold : Fold,
-    out  :: String
-)
-            Res<(), AllocError> {
-    be.is_cond(one, ctx).try().match({
-        true  => be.lower_forever(id, sh, Ok(one), lam, ctx, want, fold, out),
-        false => be.lower_range(id, sh, one, lam, ctx, want, fold, out),
-    })
-}
-
-lower_impl_walk = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    one  : ExprId,
-    rty  : TyId,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    fold : Fold,
-    out  :: String
-) Res<(), AllocError> {
-    fold.has.match({
-        true  => be.unsupported(
-            id,
-            "a fold over a range whose bounds an impl supplies",
-            out
-        ),
-        false => be.range_impl(rty).try().match({
-            None   => be.unsupported(
-                id,
-                "a loop over a range whose bounds an impl supplies",
-                out
-            ),
-            Ok(ri) => be.range_pass_type(rty).try().match({
-                None     => be.unsupported(
-                    id,
-                    "a loop over a range whose element nothing settles",
-                    out
-                ),
-                Ok(pass) => be.lower_supplied_walk(
-                    sh,
-                    one,
-                    rty,
-                    ri,
-                    pass,
-                    lam,
-                    ctx,
-                    want,
-                    out
-                ),
-            }),
-        }),
-    })
-}
-
-// A condition is either the original zero-argument closure or the bool
-// overload. The latter is emitted at the top of every pass, so a mutable
-// name is observed after the body changes it rather than copied at entry.
-is_cond = (be :: CBackend, one: ExprId, ctx: Ctx)
-          Res<bool, AllocError> {
-    be.lambda_at(one).match({
-        Ok(lam) => Ok(lam.params.len == 0),
-        None    => {
-            want = be.check.types.prim("bool").try();
-            got  = be.ty_of(one, ctx, want).try();
-            Ok(got.index == want.index)
-        },
-    })
+    LoopSite(
+        id: id,
+        shape: sh,
+        lam: lam,
+        ctx: ctx,
+        want: want,
+        fold: fold,
+    ).walk(be, args, out)
 }
 
 // while true, and while cond
-
-lower_forever = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    cond : Res<ExprId>,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    fold : Fold,
-    out  :: String
-) Res<(), AllocError> {
-    st = be.open_result(want, out).try();
-    counter ::= be.alloc.String().try();
-    sh.wants_index.match({
-        true  => be.open_counter(counter),
-        false => Ok(()),
-    }).try();
-    be.writeln("for (;;) {").try();
-    be.indent();
-    cond.match({
-        None    => Ok(()),
-        Ok(one) => be.write_cond_guard(one, st.brk, ctx),
-    }).try();
-    usize_ty = be.check.types.prim("usize").try();
-    be.run_body(
-        sh,
-        lam,
-        counter.view(),
-        "",
-        counter.view(),
-        usize_ty,
-        fold,
-        ctx
-    ).try();
-    be.close_pass(st, counter.view(), fold).try();
-    Ok(());
-}
 
 // `while cond` is tested BEFORE each pass, so a false initial condition
 // runs the body zero times. A closure is inlined and a bool expression is
@@ -313,97 +192,227 @@ RangeWalk = {
     counter: str,
     base: str,
     limit: str,
+    elem: TyId,
+
+    start = (self: @Self, be :: CBackend) Res<(), AllocError> {
+        be.fmt("{} = {};\n", self.base, self.counter)
+    }
+
+    body = (self: @Self, be :: CBackend, site: LoopSite, value: str)
+           Res<(), AllocError> {
+        site.run_body(be, self.counter, self.base, value, self.elem)
+    }
 }
 
-lower_range = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    one  : ExprId,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    fold : Fold,
-    out  :: String
-) Res<(), AllocError> {
-    unknown = be.check.types.unknown().try();
-    rty     = be.ty_of(one, ctx, unknown).try();
-    // Fixed arrays satisfy Range intrinsically and have no declaration or impl.
-    be.array_of(rty).match({
-        Ok(a) => be.lower_array_walk(
-            sh,
-            one,
-            rty,
-            a,
-            lam,
-            ctx,
-            want,
-            fold,
-            out
-        ),
-        None  => be.lower_range_impl(
-            id,
-            sh,
-            one,
-            rty,
-            lam,
-            ctx,
-            want,
-            fold,
-            out
-        ),
-    })
-}
+// Source facts fixed after loop-shape and fold settlement. A target expression
+// and its range type are later phase facts and remain method parameters.
+LoopSite = {
+    id: ExprId,
+    shape: Shape,
+    lam: Lambda,
+    ctx: Ctx,
+    want: TyId,
+    fold: Fold,
 
-lower_range_impl = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    one  : ExprId,
-    rty  : TyId,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    fold : Fold,
-    out  :: String
-) Res<(), AllocError> {
-    be.uses_stored_bounds(rty).try().match({
-        false => lower_impl_walk(
+    walk = (self: @Self, be :: CBackend, args: Vec<ExprId>, out :: String)
+           Res<(), AllocError> {
+        (args.len > 1).match({
+            false => self.forever(be, None, out),
+            true  => args.get(0).match({
+                None      => self.forever(be, None, out),
+                Ok(first) => self.led(be, first, out),
+            }),
+        })
+    }
+
+    led = (self: @Self, be :: CBackend, first: ExprId, out :: String)
+          Res<(), AllocError> {
+        self.is_condition(be, first).try().match({
+            true  => self.forever(be, Ok(first), out),
+            false => self.range(be, first, out),
+        })
+    }
+
+    // A zero-parameter closure or bool expression is tested every pass.
+    is_condition = (self: @Self, be :: CBackend, first: ExprId)
+                   Res<bool, AllocError> {
+        be.lambda_at(first).match({
+            Ok(lam) => Ok(lam.params.len == 0),
+            None    => {
+                bool_ty = be.check.types.prim("bool").try();
+                got     = be.ty_of(first, self.ctx, bool_ty).try();
+                Ok(got.index == bool_ty.index)
+            },
+        })
+    }
+
+    forever = (self: @Self, be :: CBackend, cond: Res<ExprId>, out :: String)
+              Res<(), AllocError> {
+        frame = be.open_result(self.want, out).try();
+        counter ::= be.alloc.String().try();
+        self.shape.wants_index.then(() { be.open_counter(counter).try() });
+        be.writeln("for (;;) {").try();
+        be.indent();
+        cond.match({
+            None          => Ok(()),
+            Ok(condition) => be.write_cond_guard(
+                condition,
+                frame.brk,
+                self.ctx
+            ),
+        }).try();
+        usize_ty = be.check.types.prim("usize").try();
+        self.run_body(be, counter.view(), "", counter.view(), usize_ty).try();
+        be.close_pass(frame, counter.view(), self.fold).try();
+        Ok(())
+    }
+
+    range = (self: @Self, be :: CBackend, first: ExprId, out :: String)
+            Res<(), AllocError> {
+        unknown = be.check.types.unknown().try();
+        rty     = be.ty_of(first, self.ctx, unknown).try();
+        // Arrays satisfy Range intrinsically and have no declaration or impl.
+        be.array_of(rty).match({
+            Ok(array) => be.lower_array_walk(
+                self.shape,
+                first,
+                rty,
+                array,
+                self.lam,
+                self.ctx,
+                self.want,
+                self.fold,
+                out
+            ),
+            None      => self.range_impl(be, first, rty, out),
+        })
+    }
+
+    range_impl = (self: @Self, be :: CBackend, first: ExprId, rty: TyId,
+                  out :: String) Res<(), AllocError> {
+        be.uses_stored_bounds(rty).try().match({
+            false => self.impl_walk(be, first, rty, out),
+            true  => self.settled(be, first, rty, out),
+        })
+    }
+
+    // Impl-supplied bounds cannot support folds and must settle an element.
+    impl_walk = (self: @Self, be :: CBackend, first: ExprId, rty: TyId,
+                 out :: String) Res<(), AllocError> {
+        loop((h) {
+            self.fold.has.then(() {
+                be.unsupported(
+                    self.id,
+                    "a fold over a range whose bounds an impl supplies",
+                    out
+                ).try();
+                h.break();
+            });
+            be.range_impl(rty).try().match({
+                None     => {
+                    be.unsupported(
+                        self.id,
+                        "a loop over a range whose bounds an impl supplies",
+                        out
+                    ).try();
+                    h.break();
+                },
+                Ok(impl) => be.range_pass_type(rty).try().match({
+                    None     => {
+                        be.unsupported(
+                            self.id,
+                            "a loop over a range whose element nothing settles",
+                            out
+                        ).try();
+                        h.break();
+                    },
+                    Ok(pass) => {
+                        self.supplied(be, first, rty, impl, pass, out).try();
+                        h.break();
+                    },
+                }),
+            });
+        });
+        Ok(())
+    }
+
+    // Settle an open loop result from the range element or its break values.
+    settled = (self: @Self, be :: CBackend, first: ExprId, rty: TyId,
+               out :: String) Res<(), AllocError> {
+        elem = be.loop_element(self.id, self.ctx).try().match({
+            None  => be.broken_element(self.id, self.ctx).try(),
+            Ok(t) => t,
+        });
+        want = be.settle_res(self.want, elem).try();
+        self.bounded(be, first, rty, want, out)
+    }
+
+    bounded = (self: @Self, be :: CBackend, first: ExprId, rty: TyId,
+               want: TyId, out :: String) Res<(), AllocError> {
+        range = be.walk_temp(first, rty, self.ctx).try();
+        frame = be.open_result(want, out).try();
+        elem  = be.check.types.prim("usize").try();
+        walk  = be.range_walk(elem).try();
+        be.assign_member(walk.counter, range.view(), "start").try();
+        be.assign_member(walk.limit, range.view(), "end").try();
+        walk.start(be).try();
+        be.fmt("while ({} < {}) {\n", walk.counter, walk.limit).try();
+        be.indent();
+        walk.body(be, self, walk.counter).try();
+        be.close_pass(frame, walk.counter, self.fold).try();
+        Ok(())
+    }
+
+    // Impl bounds are lowered in their declaring module; `at` performs the
+    // final bounds check and supplies the value for this pass.
+    supplied = (self: @Self, be :: CBackend, first: ExprId, rty: TyId,
+                impl: RangeImpl, pass: TyId, out :: String)
+               Res<(), AllocError> {
+        elem  = be.res_value(pass).match({ Ok(t) => t, None => pass });
+        want  = be.settle_res(self.want, elem).try();
+        range = be.walk_temp(first, rty, self.ctx).try();
+        frame = be.open_result(want, out).try();
+        walk  = be.range_walk(elem).try();
+        be.supplied_bound(
+            impl,
+            rty,
+            impl.start,
+            walk.counter,
+            range.view()
+        ).try();
+        be.supplied_bound(impl, rty, impl.end, walk.limit, range.view()).try();
+        walk.start(be).try();
+        be.fmt("while ({} < {}) {\n", walk.counter, walk.limit).try();
+        be.indent();
+        value ::= be.alloc.String().try();
+        be.take_pass(
+            impl,
+            rty,
+            pass,
+            walk.counter,
+            frame.brk,
+            range.view(),
+            value
+        ).try();
+        walk.body(be, self, value.view()).try();
+        be.close_pass(frame, walk.counter, self.fold).try();
+        Ok(())
+    }
+
+    run_body = (self: @Self, be :: CBackend, counter: str, base: str,
+                value: str, elem: TyId) Res<(), AllocError> {
+        run_body(
             be,
-            id,
-            sh,
-            one,
-            rty,
-            lam,
-            ctx,
-            want,
-            fold,
-            out
-        ),
-        true  => be.lower_settled(id, sh, one, rty, lam, ctx, want, fold, out),
-    })
-}
-
-// Settle the loop payload from its range element or break values when sema's
-// generic Res payload remains open. A range without at yields usize.
-lower_settled = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    one  : ExprId,
-    rty  : TyId,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    fold : Fold,
-    out  :: String
-) Res<(), AllocError> {
-    elem    = be.loop_element(id, ctx).try().match({
-        None  => be.broken_element(id, ctx).try(),
-        Ok(t) => t,
-    });
-    settled = be.settle_res(want, elem).try();
-    be.lower_bounded(id, sh, one, rty, lam, ctx, settled, fold, out)
+            self.shape,
+            self.lam,
+            counter,
+            base,
+            value,
+            elem,
+            self.fold,
+            self.ctx
+        )
+    }
 }
 
 // The loop's `Res<T>` at a `T` the backend worked out, or the written
@@ -417,35 +426,7 @@ settle_res* = (be :: CBackend, want: TyId, elem: TyId)
     })
 }
 
-lower_bounded = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    one  : ExprId,
-    rty  : TyId,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    fold : Fold,
-    out  :: String
-) Res<(), AllocError> {
-    rng = be.walk_temp(one, rty, ctx).try();
-
-    st       = be.open_result(want, out).try();
-    usize_ty = be.check.types.prim("usize").try();
-    walk     = be.range_walk().try();
-    be.assign_member(walk.counter, rng.view(), "start").try();
-    be.assign_member(walk.limit, rng.view(), "end").try();
-    be.start_range_walk(walk).try();
-
-    be.fmt("while ({} < {}) {\n", walk.counter, walk.limit).try();
-    be.indent();
-    be.run_range_body(walk, sh, lam, walk.counter, usize_ty, fold, ctx).try();
-    be.close_pass(st, walk.counter, fold).try();
-    Ok(());
-}
-
-range_walk = (be :: CBackend) Res<RangeWalk, AllocError> {
+range_walk = (be :: CBackend, elem: TyId) Res<RangeWalk, AllocError> {
     counter ::= be.fresh_name("i").try();
     base    ::= be.fresh_name("b").try();
     be.declare_usize(counter.view()).try();
@@ -455,58 +436,9 @@ range_walk = (be :: CBackend) Res<RangeWalk, AllocError> {
     Ok(RangeWalk(
         counter: counter.view(),
         base: base.view(),
-        limit: limit.view()
-    ));
-}
-
-start_range_walk = (be :: CBackend, walk: RangeWalk) Res<(), AllocError> {
-    be.fmt("{} = {};\n", walk.base, walk.counter)
-}
-
-run_range_body = (
-    be    :: CBackend,
-    walk  : RangeWalk,
-    sh    : Shape,
-    lam   : Lambda,
-    value : str,
-    ety   : TyId,
-    fold  : Fold,
-    ctx   : Ctx
-) Res<(), AllocError> {
-    be.run_body(sh, lam, walk.counter, walk.base, value, ety, fold, ctx)
-}
-
-// Impl bounds are lowered in their declaring module and may spill into the
-// walk's locals. `at` remains the final bounds check.
-lower_supplied_walk = (
-    be   :: CBackend,
-    sh   : Shape,
-    one  : ExprId,
-    rty  : TyId,
-    ri   : RangeImpl,
-    pass : TyId,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError> {
-    elem    = be.res_value(pass).match({ Ok(t) => t, None => pass });
-    settled = be.settle_res(want, elem).try();
-    rng     = be.walk_temp(one, rty, ctx).try();
-    st      = be.open_result(settled, out).try();
-    walk    = be.range_walk().try();
-    be.supplied_bound(ri, rty, ri.start, walk.counter, rng.view()).try();
-    be.supplied_bound(ri, rty, ri.end, walk.limit, rng.view()).try();
-    be.start_range_walk(walk).try();
-
-    be.fmt("while ({} < {}) {\n", walk.counter, walk.limit).try();
-    be.indent();
-    value ::= be.alloc.String().try();
-    be.take_pass(ri, rty, pass, walk.counter, st.brk, rng.view(), value).try();
-    fold = be.no_fold().try();
-    be.run_range_body(walk, sh, lam, value.view(), elem, fold, ctx).try();
-    be.close_pass(st, walk.counter, fold).try();
-    Ok(());
+        limit: limit.view(),
+        elem: elem,
+    ))
 }
 
 // THE COLLECTION IS EVALUATED ONCE, into a temporary of its own, and
