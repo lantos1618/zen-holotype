@@ -18,8 +18,9 @@ write_tokens = lsp.lsp_colour
 Diagnostics, Shared = lsp.lsp_diag
 write_actions = lsp.lsp_action
 relative_to = zen.zen_path
-method_of, params_of, param, string_at, number_at = lsp.lsp_reply
-result, failed, parse_error, write_hover, write_target = lsp.lsp_reply
+method_of, param, string_at = lsp.lsp_reply
+DecodedRequest, RequestTurn = lsp.lsp_reply
+write_hover, write_target = lsp.lsp_reply
 write_capabilities = lsp.lsp_reply
 RpcFault, own_str = lsp.lsp_reply
 request_of = lsp.lsp_reply
@@ -52,81 +53,78 @@ Server* = {
     one* = (self :: @Self, t: Alloc, body: str, out :: String)
            Res<(), AllocError> {
         tree ::= t.Jsons();
-        msg  ::= t.String().try();
+        turn ::= t.RequestTurn().try();
         read(t, tree, body).match({
-            Err(f)  => parse_error(f, msg),
-            Ok(req) => self.route(t, tree, req, msg),
+            Err(f)  => turn.parse_error(f),
+            Ok(req) => self.route(tree, req, turn),
         }).try();
-        msg.is_empty().match({
+        turn.is_empty().match({
             true  => written(),
-            false => write_frame(msg.view(), out),
+            false => write_frame(turn.view(), out),
         })
     }
 
-    route = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, msg :: String)
+    route = (self :: @Self, tree: Jsons, req: JsonId, turn :: RequestTurn)
             Res<(), AllocError> {
         method = method_of(tree, req);
         tree.field(req, "id").match({
             None    => self.notified(tree, req, method),
-            Ok(rid) => self.requested(t, tree, req, method, rid, msg),
+            Ok(rid) => self.requested(DecodedRequest(tree, req, rid), turn),
         })
     }
 
-    requested = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
-                 method: str, rid: JsonId, msg :: String)
+    requested = (self :: @Self, request: DecodedRequest, turn :: RequestTurn)
                 Res<(), AllocError> {
+        method = request.method();
         (self.ready || method.eq("initialize")).match({
-            false => failed(
-                tree,
-                rid,
+            false => turn.failed(
+                request,
                 RpcFault.NotInitialized,
-                "the server has not been initialized",
-                msg
+                "the server has not been initialized"
             ),
-            true  => self.answered(t, tree, req, method, rid, msg),
+            true  => self.answered(request, turn),
         })
     }
 
-    answered = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
-                method: str, rid: JsonId, msg :: String)
+    answered = (self :: @Self, request: DecodedRequest, turn :: RequestTurn)
                Res<(), AllocError> {
+        method = request.method();
         request_of(method).match({
-            Initialize => self.initialized(t, tree, req, rid, msg),
+            Initialize => self.initialized(request, turn),
             Shutdown   => {
                 self.stopping = true;
-                result(tree, rid, "null", msg)
+                turn.result(request, "null")
             },
-            Hover      => self.hovered(t, tree, req, rid, msg),
-            Definition => self.defined(t, tree, req, rid, msg),
-            Outline    => self.outlined(t, tree, req, rid, msg),
-            Completion => self.completed(t, tree, req, rid, msg),
-            Colour     => self.coloured(t, tree, req, rid, msg),
-            Format     => self.formatted(t, tree, req, rid, msg),
-            Action     => self.acted(t, tree, req, rid, msg),
-            Unknown    => self.unknown(t, tree, rid, method, msg),
+            Hover      => self.hovered(request, turn),
+            Definition => self.defined(request, turn),
+            Outline    => self.outlined(request, turn),
+            Completion => self.completed(request, turn),
+            Colour     => self.coloured(request, turn),
+            Format     => self.formatted(request, turn),
+            Action     => self.acted(request, turn),
+            Unknown    => self.unknown(request, turn),
         })
     }
 
-    initialized = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
-                   rid: JsonId, msg :: String) Res<(), AllocError> {
+    initialized = (self :: @Self, request: DecodedRequest,
+                   turn :: RequestTurn) Res<(), AllocError> {
         self.members.invalidate();
         self.ready     = true;
         self.workspace = own_str(
             self.a,
-            path_of(string_at(tree, params_of(tree, req), "rootUri"))
+            path_of(request.string_at(request.params(), "rootUri"))
         ).try();
-        caps ::= t.String().try();
+        caps ::= turn.alloc().String().try();
         write_capabilities(caps).try();
-        result(tree, rid, caps.view(), msg)
+        turn.result(request, caps.view())
     }
 
-    unknown = (self :: @Self, t: Alloc, tree: Jsons, rid: JsonId, method: str,
-               msg :: String) Res<(), AllocError> {
-        why ::= t.String().try();
-        why.add("no handler for ").try();
-        why.add(method).try();
-        why.add(" - see docs/design_lsp.md for the stage it arrives at").try();
-        failed(tree, rid, RpcFault.MethodNotFound, why.view(), msg)
+    unknown = (self :: @Self, request: DecodedRequest,
+               turn :: RequestTurn) Res<(), AllocError> {
+        why ::= turn.alloc().String().try();
+        why.add("method not found: ").try();
+        why.add(request.method()).try();
+        turn.failed(request, RpcFault.MethodNotFound, why.view())
     }
 
     notified = (self :: @Self, tree: Jsons, req: JsonId, method: str)
@@ -300,25 +298,25 @@ Server* = {
         })
     }
 
-    unopened = (self :: @Self, tree: Jsons, rid: JsonId, msg :: String)
+    unopened = (self :: @Self, request: DecodedRequest,
+                turn :: RequestTurn)
                Res<(), AllocError> {
-        failed(
-            tree,
-            rid,
+        turn.failed(
+            request,
             RpcFault.InvalidParams,
-            "no open document for that uri",
-            msg
+            "no open document for that uri"
         )
     }
 
-    hovered = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
-               msg :: String) Res<(), AllocError> {
-        uri       = string_at(tree, param(tree, req, "textDocument"), "uri");
-        where     = param(tree, req, "position");
-        line      = number_at(tree, where, "line");
-        character = number_at(tree, where, "character");
+    hovered = (self :: @Self, request: DecodedRequest, turn :: RequestTurn)
+              Res<(), AllocError> {
+        t         = turn.alloc();
+        uri       = request.string_at(request.param("textDocument"), "uri");
+        where     = request.param("position");
+        line      = request.number_at(where, "line");
+        character = request.number_at(where, "character");
         self.docs.get(uri).match({
-            None     => self.unopened(tree, rid, msg),
+            None     => self.unopened(request, turn),
             Ok(text) => {
                 body ::= t.String().try();
                 self.workspace.is_empty().match({
@@ -339,21 +337,22 @@ Server* = {
                         body
                     ),
                 }).try();
-                result(tree, rid, body.view(), msg)
+                turn.result(request, body.view())
             },
         })
     }
 
-    coloured = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
-                rid: JsonId, msg :: String) Res<(), AllocError> {
-        uri = string_at(tree, param(tree, req, "textDocument"), "uri");
+    coloured = (self :: @Self, request: DecodedRequest,
+                turn :: RequestTurn) Res<(), AllocError> {
+        t   = turn.alloc();
+        uri = request.string_at(request.param("textDocument"), "uri");
         self.docs.get(uri).match({
-            None     => self.unopened(tree, rid, msg),
+            None     => self.unopened(request, turn),
             Ok(text) => {
                 body ::= t.String().try();
                 names = self.notes.classes_for(t, uri).try();
                 write_tokens(t, uri, text, names, body).try();
-                result(tree, rid, body.view(), msg)
+                turn.result(request, body.view())
             },
         })
     }
@@ -414,14 +413,15 @@ Server* = {
         })
     }
 
-    defined = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
-               msg :: String) Res<(), AllocError> {
-        uri       = string_at(tree, param(tree, req, "textDocument"), "uri");
-        where     = param(tree, req, "position");
-        line      = number_at(tree, where, "line");
-        character = number_at(tree, where, "character");
+    defined = (self :: @Self, request: DecodedRequest, turn :: RequestTurn)
+              Res<(), AllocError> {
+        t         = turn.alloc();
+        uri       = request.string_at(request.param("textDocument"), "uri");
+        where     = request.param("position");
+        line      = request.number_at(where, "line");
+        character = request.number_at(where, "character");
         self.docs.get(uri).match({
-            None     => self.unopened(tree, rid, msg),
+            None     => self.unopened(request, turn),
             Ok(text) => {
                 body ::= t.String().try();
                 self.workspace.is_empty().match({
@@ -442,7 +442,7 @@ Server* = {
                         body
                     ),
                 }).try();
-                result(tree, rid, body.view(), msg)
+                turn.result(request, body.view())
             },
         })
     }
@@ -489,42 +489,45 @@ Server* = {
         })
     }
 
-    outlined = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
-                msg :: String) Res<(), AllocError> {
-        uri = string_at(tree, param(tree, req, "textDocument"), "uri");
+    outlined = (self :: @Self, request: DecodedRequest,
+                turn :: RequestTurn) Res<(), AllocError> {
+        t   = turn.alloc();
+        uri = request.string_at(request.param("textDocument"), "uri");
         self.docs.get(uri).match({
-            None     => self.unopened(tree, rid, msg),
+            None     => self.unopened(request, turn),
             Ok(text) => {
                 syms ::= t.Vec<Sym>();
                 symbols_at(t, text, syms).try();
                 body ::= t.String().try();
                 write_symbols(t, uri, text, syms, body).try();
-                result(tree, rid, body.view(), msg)
+                turn.result(request, body.view())
             },
         })
     }
 
-    formatted = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
-                 rid: JsonId, msg :: String) Res<(), AllocError> {
-        uri = string_at(tree, param(tree, req, "textDocument"), "uri");
+    formatted = (self :: @Self, request: DecodedRequest,
+                 turn :: RequestTurn) Res<(), AllocError> {
+        t   = turn.alloc();
+        uri = request.string_at(request.param("textDocument"), "uri");
         self.docs.get(uri).match({
-            None     => self.unopened(tree, rid, msg),
+            None     => self.unopened(request, turn),
             Ok(text) => {
                 body ::= t.String().try();
                 write_edits(t, text, body).try();
-                result(tree, rid, body.view(), msg)
+                turn.result(request, body.view())
             },
         })
     }
 
-    acted = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
-             msg :: String) Res<(), AllocError> {
-        uri   = string_at(tree, param(tree, req, "textDocument"), "uri");
-        range = param(tree, req, "range");
-        first = param(tree, range, "start");
-        last  = param(tree, range, "end");
+    acted = (self :: @Self, request: DecodedRequest, turn :: RequestTurn)
+            Res<(), AllocError> {
+        t     = turn.alloc();
+        uri   = request.string_at(request.param("textDocument"), "uri");
+        range = request.param("range");
+        first = request.field_at(range, "start");
+        last  = request.field_at(range, "end");
         self.docs.get(uri).match({
-            None     => self.unopened(tree, rid, msg),
+            None     => self.unopened(request, turn),
             Ok(text) => {
                 body ::= t.String().try();
                 self.workspace.is_empty().match({
@@ -533,14 +536,14 @@ Server* = {
                         t,
                         uri,
                         text,
-                        number_at(tree, first, "line"),
-                        number_at(tree, first, "character"),
-                        number_at(tree, last, "line"),
-                        number_at(tree, last, "character"),
+                        request.number_at(first, "line"),
+                        request.number_at(first, "character"),
+                        request.number_at(last, "line"),
+                        request.number_at(last, "character"),
                         body
                     ),
                 }).try();
-                result(tree, rid, body.view(), msg)
+                turn.result(request, body.view())
             },
         })
     }
@@ -567,14 +570,15 @@ Server* = {
         })
     }
 
-    completed = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
-                 rid: JsonId, msg :: String) Res<(), AllocError> {
-        uri       = string_at(tree, param(tree, req, "textDocument"), "uri");
-        where     = param(tree, req, "position");
-        line      = number_at(tree, where, "line");
-        character = number_at(tree, where, "character");
+    completed = (self :: @Self, request: DecodedRequest,
+                 turn :: RequestTurn) Res<(), AllocError> {
+        t         = turn.alloc();
+        uri       = request.string_at(request.param("textDocument"), "uri");
+        where     = request.param("position");
+        line      = request.number_at(where, "line");
+        character = request.number_at(where, "character");
         self.docs.get(uri).match({
-            None     => self.unopened(tree, rid, msg),
+            None     => self.unopened(request, turn),
             Ok(text) => {
                 body ::= t.String().try();
                 self.workspace.is_empty().match({
@@ -594,7 +598,7 @@ Server* = {
                         (!cached).then(() {
                             complete_at(qa, text, line, character, items).try();
                         });
-                        sort_items(items).try();
+                        sort_items(items);
                         write_items(qa, items, body)
                     },
                     false => self.write_completion(
@@ -606,7 +610,7 @@ Server* = {
                         body
                     ),
                 }).try();
-                result(tree, rid, body.view(), msg)
+                turn.result(request, body.view())
             },
         })
     }
@@ -658,7 +662,7 @@ Server* = {
         done.match({
             false => written(),
             true  => {
-                sort_items(items).try();
+                sort_items(items);
                 write_items(t, items, body)
             },
         }).try();
@@ -679,7 +683,7 @@ Server* = {
             character,
             items
         ).try();
-        sort_items(items).try();
+        sort_items(items);
         write_items(t, items, body)
     }
 }

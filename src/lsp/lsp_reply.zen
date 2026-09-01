@@ -13,6 +13,71 @@ method_of* = (tree: Jsons, req: JsonId) str {
     string_at(tree, req, "method")
 }
 
+// One JSON-RPC request after its id has been found. The tree owns every
+// decoded string this request can expose, and the ids mean nothing without
+// that tree, so keep all three together through the complete dispatch route.
+DecodedRequest* = {
+    tree: Jsons,
+    request: JsonId,
+    id: JsonId,
+
+    method* = (self: @Self) str { method_of(self.tree, self.request) }
+
+    params* = (self: @Self) JsonId { params_of(self.tree, self.request) }
+
+    param* = (self: @Self, name: str) JsonId {
+        param(self.tree, self.request, name)
+    }
+
+    field_at* = (self: @Self, value: JsonId, name: str) JsonId {
+        self.tree.field(value, name).match({ None => value, Ok(v) => v })
+    }
+
+    string_at* = (self: @Self, value: JsonId, name: str) str {
+        string_at(self.tree, value, name)
+    }
+
+    number_at* = (self: @Self, value: JsonId, name: str) usize {
+        number_at(self.tree, value, name)
+    }
+}
+
+DecodedRequest* = (tree: Jsons, request: JsonId, id: JsonId) DecodedRequest {
+    DecodedRequest(tree: tree, request: request, id: id)
+}
+
+// Per-message scratch state. Its allocator and response are born together in
+// Server.one and live until that response is framed; handlers should not
+// forward either independently through the request route.
+RequestTurn* = {
+    temporary: Alloc,
+    response :: String,
+
+    alloc* = (self: @Self) Alloc { self.temporary }
+
+    is_empty* = (self: @Self) bool { self.response.is_empty() }
+
+    view* = (self: @Self) str { self.response.view() }
+
+    result* = (self :: @Self, request: DecodedRequest, body: str)
+              Res<(), AllocError> {
+        result(request.tree, request.id, body, self.response)
+    }
+
+    failed* = (self :: @Self, request: DecodedRequest, code: RpcFault,
+               why: str) Res<(), AllocError> {
+        failed(request.tree, request.id, code, why, self.response)
+    }
+
+    parse_error* = (self :: @Self, fault: JsonFault) Res<(), AllocError> {
+        parse_error(fault, self.response)
+    }
+}
+
+RequestTurn* = (temporary: Alloc) Res<RequestTurn, AllocError> {
+    Ok(RequestTurn(temporary: temporary, response: temporary.String().try()))
+}
+
 params_of* = (tree: Jsons, req: JsonId) JsonId {
     tree.field(req, "params").match({ None => req, Ok(ps) => ps })
 }
@@ -36,15 +101,15 @@ number_at* = (tree: Jsons, obj: JsonId, name: str) usize {
     })
 }
 
-result* = (tree: Jsons, rid: JsonId, body: str, msg :: String)
-          Res<(), AllocError> {
+result = (tree: Jsons, rid: JsonId, body: str, msg :: String)
+         Res<(), AllocError> {
     reply ::= head(tree, rid, msg).try();
     reply.key("result", msg).try();
     msg.add(body).try();
     reply.close(msg)
 }
 
-failed* = (
+failed = (
     tree : Jsons,
     rid  : JsonId,
     code : RpcFault,
@@ -71,7 +136,7 @@ head = (tree: Jsons, rid: JsonId, msg :: String) Res<Nest, AllocError> {
     Ok(reply)
 }
 
-parse_error* = (f: JsonFault, msg :: String) Res<(), AllocError> {
+parse_error = (f: JsonFault, msg :: String) Res<(), AllocError> {
     reply ::= obj(msg).try();
     reply.text("jsonrpc", "2.0", msg).try();
     reply.key("id", msg).try();
