@@ -17,14 +17,14 @@ The corresponding decisions are in
 | Item | Count |
 | --- | ---: |
 | Zen files | 227 |
-| Top-level declarations | 7202 |
-| Types | 358 |
+| Top-level declarations | 7198 |
+| Types | 363 |
 | Enums | 94 |
 | Aliases | 0 |
 | Implementations | 76 |
-| Functions | 4029 |
+| Functions | 4021 |
 | Constants | 175 |
-| Imports and re-exports | 2470 |
+| Imports and re-exports | 2469 |
 
 ## Files
 
@@ -692,7 +692,7 @@ C_STANDARD*, comment* = gen.gen_c.gen_c_runtime
 
 ### `src/gen/gen_c/gen_c_actor.zen`
 
-68 declarations (types: 1, functions: 44, imports and re-exports: 23).
+69 declarations (types: 4, functions: 42, imports and re-exports: 23).
 
 #### Types
 
@@ -701,6 +701,32 @@ BehaviorHit* = {
     site*: Site,
     f*: Function,
     mi*: usize,
+}
+
+ActorSpawn = {
+    id: ExprId,
+    call: Call,
+    access: Access,
+    receiver_ty: TyId,
+    result_ty: TyId,
+    ref_ty: TyId,
+    actor_ty: TyId,
+    ctx: Ctx,
+}
+
+ActorSpawnLayout = {
+    spawn: ActorSpawn,
+    context_ty: TyId,
+    arena_ty: TyId,
+    state_ty: TyId,
+    alloc_ty: TyId,
+}
+
+ActorLifecycle = {
+    layout: ActorSpawnLayout,
+    record: str,
+    started: str,
+    stopped: str,
 }
 ```
 
@@ -845,68 +871,16 @@ lower_actor_spawn* = (
     out :: String
 ) Res<(), AllocError>
 
-spawn_ref = (
-    be     :: CBackend,
-    id     : ExprId,
-    c      : Call,
-    a      : Access,
-    rty    : TyId,
-    ret    : TyId,
-    ref_ty : TyId,
-    ctx    : Ctx,
-    out    :: String
-) Res<(), AllocError>
+resolve_actor_spawn = (be :: CBackend, spawn: ActorSpawn, out :: String)
+                      Res<(), AllocError>
 
-spawn_types = (
-    be       :: CBackend,
-    id       : ExprId,
-    c        : Call,
-    a        : Access,
-    rty      : TyId,
-    ret      : TyId,
-    ref_ty   : TyId,
-    actor_ty : TyId,
-    ctx      : Ctx,
-    out      :: String
-) Res<(), AllocError>
-
-spawn_known = (
-    be         :: CBackend,
-    id         : ExprId,
-    c          : Call,
-    a          : Access,
-    rty        : TyId,
-    ret        : TyId,
-    ref_ty     : TyId,
-    actor_ty   : TyId,
-    context_ty : TyId,
-    arena_ty   : TyId,
-    ctx        : Ctx,
-    out        :: String
-) Res<(), AllocError>
-
-write_actor_spawn = (
-    be         :: CBackend,
-    c          : Call,
-    a          : Access,
-    rty        : TyId,
-    ret        : TyId,
-    ref_ty     : TyId,
-    actor_ty   : TyId,
-    context_ty : TyId,
-    arena_ty   : TyId,
-    state_ty   : TyId,
-    alloc_ty   : TyId,
-    ctx        : Ctx,
-    out        :: String
-) Res<(), AllocError>
+write_actor_spawn = (be :: CBackend, layout: ActorSpawnLayout)
+                    Res<String, AllocError>
 
 write_actor_record = (
-    be      :: CBackend,
-    name    : str,
-    actor   : TyId,
-    context : TyId,
-    arena   : TyId
+    be     :: CBackend,
+    layout : ActorSpawnLayout,
+    name   : str
 ) Res<(), AllocError>
 
 write_started_callback = (be :: CBackend, n: usize, rec: str, actor: TyId)
@@ -936,45 +910,22 @@ write_stopped_callback = (
 
 drop_symbol = (be :: CBackend, ty: TyId) Res<Res<String>, AllocError>
 
-write_spawn_value = (
-    be         :: CBackend,
-    c          : Call,
-    a          : Access,
-    rty        : TyId,
-    ret        : TyId,
-    ref_ty     : TyId,
-    actor_ty   : TyId,
-    context_ty : TyId,
-    arena_ty   : TyId,
-    state_ty   : TyId,
-    alloc_ty   : TyId,
-    rec        : str,
-    started    : str,
-    stopped    : str,
-    ctx        : Ctx,
-    out        :: String
-) Res<(), AllocError>
+write_spawn_value = (be :: CBackend, lifecycle: ActorLifecycle)
+                    Res<String, AllocError>
 
 write_failed_spawn_drop = (
-    be    :: CBackend,
-    cell  : str,
-    actor : TyId,
-    arena : TyId
+    be     :: CBackend,
+    layout : ActorSpawnLayout,
+    cell   : str
 ) Res<(), AllocError>
 
 init_actor_fields = (
     be          :: CBackend,
+    lifecycle   : ActorLifecycle,
     cell        : str,
     arena_state : str,
     env         : str,
-    actor       : str,
-    actor_ty    : TyId,
-    context_ty  : TyId,
-    arena_ty    : TyId,
-    state_ty    : TyId,
-    alloc_ty    : TyId,
-    started     : str,
-    stopped     : str
+    actor       : str
 ) Res<(), AllocError>
 
 write_ref_value = (
@@ -4713,7 +4664,7 @@ FORMAT_DOOR, SINK_FLOOR = gen.gen_c.gen_c_sink
 
 ### `src/gen/gen_c/gen_c_flow.zen`
 
-81 declarations (types: 1, functions: 54, imports and re-exports: 26).
+79 declarations (types: 1, functions: 53, imports and re-exports: 25).
 
 #### Types
 
@@ -4850,8 +4801,6 @@ unsupported_cond = (be :: CBackend, pat: Pattern, out :: String)
 
 leaf_name_of = (be :: CBackend, mty: TyId) Res<str, AllocError>
 
-last_segment_str = (qname: String) str
-
 bind_local = (be :: CBackend, name: str, ty: TyId, init: str)
              Res<(), AllocError>
 
@@ -4976,8 +4925,6 @@ decl_at = sema.sema_def
 Ctx = sema.sema_check
 
 Inst = sema.sema_inst
-
-last_segment = sema.sema_match
 
 member_of = sema.sema_union
 
@@ -13294,7 +13241,7 @@ before_start = (cl: Classed, line: usize, col: usize) bool
 
 is_start = (cl: Classed, line: usize, col: usize) bool
 
-sort_classes* = (names :: Vec<Classed>) Res<(), AllocError>
+sort_classes* = (names :: Vec<Classed>) ()
 
 write_tokens* = (
     a     : Alloc,
@@ -13503,7 +13450,7 @@ member_names = (ms: Vec<Member>, cands :: Vec<Item>) Res<(), AllocError>
 
 global_kind = (k: DefKind) usize
 
-sort_items* = (items :: Vec<Item>) Res<(), AllocError>
+sort_items* = (items :: Vec<Item>) ()
 
 write_items* = (a: Alloc, items: Vec<Item>, out :: String)
                Res<(), AllocError>
@@ -14528,11 +14475,36 @@ root_for, relative_to, std_root_for = zen.zen_path
 
 ### `src/lsp/lsp_reply.zen`
 
-30 declarations (types: 3, enums: 2, functions: 17, constants: 1, imports and re-exports: 7).
+34 declarations (types: 5, enums: 2, functions: 19, constants: 1, imports and re-exports: 7).
 
 #### Types
 
 ```zen
+DecodedRequest* = {
+    tree: Jsons,
+    request: JsonId,
+    id: JsonId,
+    method* = (self: @Self) str
+    params* = (self: @Self) JsonId
+    param* = (self: @Self, name: str) JsonId
+    field_at* = (self: @Self, value: JsonId, name: str) JsonId
+    string_at* = (self: @Self, value: JsonId, name: str) str
+    number_at* = (self: @Self, value: JsonId, name: str) usize
+}
+
+RequestTurn* = {
+    temporary: Alloc,
+    response :: String,
+    alloc* = (self: @Self) Alloc
+    is_empty* = (self: @Self) bool
+    view* = (self: @Self) str
+    result* = (self :: @Self, request: DecodedRequest, body: str)
+              Res<(), AllocError>
+    failed* = (self :: @Self, request: DecodedRequest, code: RpcFault,
+               why: str) Res<(), AllocError>
+    parse_error* = (self :: @Self, fault: JsonFault) Res<(), AllocError>
+}
+
 FaultText = { why: str, at: Res<usize> }
 
 MarkupContent = {
@@ -14568,6 +14540,10 @@ RpcFault* = ParseError | MethodNotFound | InvalidParams | NotInitialized
 ```zen
 method_of* = (tree: Jsons, req: JsonId) str
 
+DecodedRequest* = (tree: Jsons, request: JsonId, id: JsonId) DecodedRequest
+
+RequestTurn* = (temporary: Alloc) Res<RequestTurn, AllocError>
+
 params_of* = (tree: Jsons, req: JsonId) JsonId
 
 param* = (tree: Jsons, req: JsonId, name: str) JsonId
@@ -14576,10 +14552,10 @@ string_at* = (tree: Jsons, obj: JsonId, name: str) str
 
 number_at* = (tree: Jsons, obj: JsonId, name: str) usize
 
-result* = (tree: Jsons, rid: JsonId, body: str, msg :: String)
-          Res<(), AllocError>
+result = (tree: Jsons, rid: JsonId, body: str, msg :: String)
+         Res<(), AllocError>
 
-failed* = (
+failed = (
     tree : Jsons,
     rid  : JsonId,
     code : RpcFault,
@@ -14589,7 +14565,7 @@ failed* = (
 
 head = (tree: Jsons, rid: JsonId, msg :: String) Res<Nest, AllocError>
 
-parse_error* = (f: JsonFault, msg :: String) Res<(), AllocError>
+parse_error = (f: JsonFault, msg :: String) Res<(), AllocError>
 
 write_fault = (f: JsonFault, msg :: String) Res<(), AllocError>
 
@@ -14635,7 +14611,7 @@ write_legend = lsp.lsp_colour
 
 ### `src/lsp/lsp_serve.zen`
 
-29 declarations (types: 1, implementations: 1, functions: 4, imports and re-exports: 23).
+30 declarations (types: 1, implementations: 1, functions: 4, imports and re-exports: 24).
 
 #### Types
 
@@ -14655,18 +14631,16 @@ Server* = {
     completion_builds* = (self: @Self) usize
     one* = (self :: @Self, t: Alloc, body: str, out :: String)
            Res<(), AllocError>
-    route = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, msg :: String)
+    route = (self :: @Self, tree: Jsons, req: JsonId, turn :: RequestTurn)
             Res<(), AllocError>
-    requested = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
-                 method: str, rid: JsonId, msg :: String)
+    requested = (self :: @Self, request: DecodedRequest, turn :: RequestTurn)
                 Res<(), AllocError>
-    answered = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
-                method: str, rid: JsonId, msg :: String)
+    answered = (self :: @Self, request: DecodedRequest, turn :: RequestTurn)
                Res<(), AllocError>
-    initialized = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
-                   rid: JsonId, msg :: String) Res<(), AllocError>
-    unknown = (self :: @Self, t: Alloc, tree: Jsons, rid: JsonId, method: str,
-               msg :: String) Res<(), AllocError>
+    initialized = (self :: @Self, request: DecodedRequest,
+                   turn :: RequestTurn) Res<(), AllocError>
+    unknown = (self :: @Self, request: DecodedRequest,
+               turn :: RequestTurn) Res<(), AllocError>
     notified = (self :: @Self, tree: Jsons, req: JsonId, method: str)
                Res<(), AllocError>
     watched = (self :: @Self, tree: Jsons, req: JsonId)
@@ -14683,34 +14657,35 @@ Server* = {
     replace_docs = (self :: @Self, uri: str, text: Res<str>)
                    Res<(), AllocError>
     settled* = (self :: @Self, t: Alloc, out :: String) Res<(), AllocError>
-    unopened = (self :: @Self, tree: Jsons, rid: JsonId, msg :: String)
+    unopened = (self :: @Self, request: DecodedRequest,
+                turn :: RequestTurn)
                Res<(), AllocError>
-    hovered = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
-               msg :: String) Res<(), AllocError>
-    coloured = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
-                rid: JsonId, msg :: String) Res<(), AllocError>
+    hovered = (self :: @Self, request: DecodedRequest, turn :: RequestTurn)
+              Res<(), AllocError>
+    coloured = (self :: @Self, request: DecodedRequest,
+                turn :: RequestTurn) Res<(), AllocError>
     build_for = (self :: @Self, path: str, t: Alloc) Res<Shared, AllocError>
     shared_hover = (self :: @Self, t: Alloc, uri: str, text: str,
                     line: usize, character: usize, body :: String)
                    Res<(), AllocError>
     write_hovered = (self :: @Self, a: Alloc, h: Hover, body :: String)
                     Res<(), AllocError>
-    defined = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
-               msg :: String) Res<(), AllocError>
+    defined = (self :: @Self, request: DecodedRequest, turn :: RequestTurn)
+              Res<(), AllocError>
     write_definition = (self :: @Self, t: Alloc, uri: str, text: str,
                         line: usize, character: usize, body :: String)
                        Res<(), AllocError>
-    outlined = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
-                msg :: String) Res<(), AllocError>
-    formatted = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
-                 rid: JsonId, msg :: String) Res<(), AllocError>
-    acted = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
-             msg :: String) Res<(), AllocError>
+    outlined = (self :: @Self, request: DecodedRequest,
+                turn :: RequestTurn) Res<(), AllocError>
+    formatted = (self :: @Self, request: DecodedRequest,
+                 turn :: RequestTurn) Res<(), AllocError>
+    acted = (self :: @Self, request: DecodedRequest, turn :: RequestTurn)
+            Res<(), AllocError>
     shared_actions = (self :: @Self, t: Alloc, uri: str, text: str,
                       sl: usize, sc: usize, el: usize, ec: usize,
                       body :: String) Res<(), AllocError>
-    completed = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
-                 rid: JsonId, msg :: String) Res<(), AllocError>
+    completed = (self :: @Self, request: DecodedRequest,
+                 turn :: RequestTurn) Res<(), AllocError>
     write_completion = (self :: @Self, t: Alloc, uri: str, text: str,
                         line: usize, character: usize, body :: String)
                        Res<(), AllocError>
@@ -14780,9 +14755,11 @@ write_actions = lsp.lsp_action
 
 relative_to = zen.zen_path
 
-method_of, params_of, param, string_at, number_at = lsp.lsp_reply
+method_of, param, string_at = lsp.lsp_reply
 
-result, failed, parse_error, write_hover, write_target = lsp.lsp_reply
+DecodedRequest, RequestTurn = lsp.lsp_reply
+
+write_hover, write_target = lsp.lsp_reply
 
 write_capabilities = lsp.lsp_reply
 
@@ -14986,7 +14963,7 @@ DefKind*, Def*, ImportBinding*           = sema.sema_def
 
 ModuleTable*, World*, dotted*, decl_at*  = sema.sema_def
 
-PRELUDE*, last_segment*                  = sema.sema_def
+PRELUDE*                                 = sema.sema_def
 
 Checker*, Ctx*, Binding*                 = sema.sema_check
 
@@ -17073,7 +17050,7 @@ check_own = sema.sema_own
 
 ### `src/sema/sema_def.zen`
 
-39 declarations (types: 5, enums: 1, functions: 24, constants: 2, imports and re-exports: 7).
+37 declarations (types: 5, enums: 1, functions: 22, constants: 2, imports and re-exports: 7).
 
 #### Types
 
@@ -17275,8 +17252,6 @@ add_imports = (t :: ModuleTable, a: Alloc, im: Import) Res<(), AllocError>
 
 dotted* = (a: Alloc, q: QualifiedName) Res<str, AllocError>
 
-last_segment* = (name: str) str
-
 decl_at* = (tree: Ast, id: DeclId) Res<Decl>
 
 copy_defs = (src: Vec<Def>, out :: Vec<Def>) Res<(), AllocError>
@@ -17304,8 +17279,6 @@ enum_has_variant = (tree: Ast, d: Def, name: str) bool
 named_variant = (e: Enum, name: str) bool
 
 module_display* = (name: str) str
-
-cut_before = (name: str) usize
 
 visited = (seen: Vec<usize>, mi: usize) bool
 ```
@@ -18676,7 +18649,7 @@ type_from_ast = sema.sema_denote
 
 ### `src/sema/sema_match.zen`
 
-101 declarations (types: 3, enums: 1, functions: 80, imports and re-exports: 17).
+97 declarations (types: 3, enums: 1, functions: 76, imports and re-exports: 17).
 
 #### Types
 
@@ -18824,10 +18797,6 @@ not_a_case = (c :: Checker, ty: TyId, text: str) Res<bool, AllocError>
 names_const = (c :: Checker, text: str, ctx: Ctx) Res<bool, AllocError>
 
 is_case* = (c :: Checker, ty: TyId, name: str) Res<bool, AllocError>
-
-last_segment* = (q: QualifiedName) str
-
-segment_at* = (q: QualifiedName, i: usize) str
 
 check_coverage = (
     c    :: Checker,
@@ -19110,10 +19079,6 @@ member_leaf = (c :: Checker, ps :: Pats, mty: TyId, text: str, span: Span)
               Res<usize, AllocError>
 
 member_name = (c :: Checker, mty: TyId) str
-
-last_segment_str = (qname: str) str
-
-last_len = (qname: str) usize
 
 lit_pat = (text: str, span: Span) Pat
 
@@ -22690,6 +22655,8 @@ Ident* = {
 QualifiedName* = {
     segments*: Vec<Ident>,
     span*: Span,
+    segment_at* = (self: @Self, i: usize) str
+    last_segment* = (self: @Self) str
 }
 ```
 
@@ -23134,7 +23101,7 @@ LoopHandle = std.core.loop.loop_handle
 
 ### `src/std/collections/collections_sort.zen`
 
-9 declarations (types: 1, functions: 5, imports and re-exports: 3).
+8 declarations (types: 1, functions: 5, imports and re-exports: 2).
 
 #### Types
 
@@ -23147,15 +23114,15 @@ Ordered* = {
 #### Functions
 
 ```zen
-sort*<T: Ordered> = (xs :: Vec<T>) Res<(), AllocError>
+sort*<T: Ordered> = (xs :: Vec<T>) ()
 
-sink<T> = (xs :: Vec<T>, at: usize) Res<(), AllocError>
+sink<T> = (xs :: Vec<T>, at: usize) ()
 
 out_of_order<T> = (xs: Vec<T>, j: usize) bool
 
-swap_at<T> = (xs :: Vec<T>, j: usize) Res<(), AllocError>
+swap_at<T> = (xs :: Vec<T>, j: usize) ()
 
-swap_pair<T> = (xs :: Vec<T>, j: usize, lft: T, rgt: T) Res<(), AllocError>
+swap_pair<T> = (xs :: Vec<T>, j: usize, lft: T, rgt: T) ()
 ```
 
 #### Imports and re-exports
@@ -23164,8 +23131,6 @@ swap_pair<T> = (xs :: Vec<T>, j: usize, lft: T, rgt: T) Res<(), AllocError>
 Vec        = std.collections.collections_vec
 
 Range      = std.core.range
-
-AllocError = std.mem
 ```
 
 ### `src/std/collections/collections_vararg.zen`
@@ -26196,8 +26161,7 @@ TcpStream* = {
     socket :: Socket,
     connect* = (a: Alloc, host: str, port: u16) Res<TcpStream, TcpError>
     write* = (self: @Self, bytes: str) Res<(), TcpError>
-    read* = (self: @Self, a: Alloc, buf :: Vec<u8>, n: usize)
-            Res<usize, TcpError>
+    read* = (self: @Self, buf :: Vec<u8>, n: usize) Res<usize, TcpError>
     close* = (self :: @Self) ()
 }
 ```
@@ -27781,6 +27745,7 @@ str* = {
     find* = (self: @Self, needle: u8) Res<usize>
     find* = (self: @Self, needle: str) Res<usize>
     rfind* = (self: @Self, needle: u8) Res<usize>
+    after_last* = (self: @Self, delimiter: u8) str
 }
 
 Split* = {
@@ -28246,7 +28211,7 @@ Parser, module = std.parse.parse
 
 Checker, check_all = sema.sema
 
-PRELUDE, last_segment = sema.sema
+PRELUDE = sema.sema
 
 check_module_graph = sema.sema
 
@@ -28810,7 +28775,7 @@ FmtJob = zen.zen_cli
 
 ### `src/zen/zen_path.zen`
 
-29 declarations (types: 1, functions: 20, constants: 2, imports and re-exports: 6).
+28 declarations (types: 1, functions: 19, constants: 2, imports and re-exports: 6).
 
 #### Types
 
@@ -28846,8 +28811,6 @@ under = (root: str, path: str) bool
 dot_for = (b: u8) u8
 
 slash_for* = (b: u8) u8
-
-last_of* = (q: QualifiedName) str
 
 unit_at* = (a: Alloc, root: str, path: str) Res<Unit, AllocError>
 

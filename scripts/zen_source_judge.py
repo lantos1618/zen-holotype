@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Run the independent Gemini 3.7 Flash source-health review for one round."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import subprocess
+
+
+ROOT = Path(__file__).resolve().parents[1]
+HEALTH = ROOT / "docs" / "SOURCE_HEALTH.md"
+INVENTORY = ROOT / "docs" / "ZEN_SIGNATURES.md"
+STYLE = ROOT / "docs" / "STYLE.md"
+AUDIT = ROOT / "docs" / "SOURCE_OWNERSHIP_AUDIT.md"
+PROMPT = ROOT / "docs" / "SOURCE_HEALTH_JUDGE.md"
+SNAPSHOTS = ROOT / "docs" / "source_health"
+MODEL = "gemini-3.7-flash"
+
+
+def previous_review(label: str) -> Path | None:
+    reviews = sorted(SNAPSHOTS.glob(f"*-{MODEL}.md"))
+    current = SNAPSHOTS / f"{label}-{MODEL}.md"
+    earlier = [path for path in reviews if path != current]
+    return earlier[-1] if earlier else None
+
+
+def main() -> int:
+    args = argparse.ArgumentParser(description=__doc__)
+    args.add_argument("--label", required=True)
+    args.add_argument("--gemini", default="gemini")
+    options = args.parse_args()
+
+    contexts = [INVENTORY, HEALTH, STYLE, AUDIT]
+    previous = previous_review(options.label)
+    if previous is not None:
+        contexts.append(previous)
+    missing = [path for path in [PROMPT, *contexts] if not path.is_file()]
+    if missing:
+        raise SystemExit("missing review input: " + ", ".join(map(str, missing)))
+
+    command = [
+        options.gemini,
+        "-m",
+        MODEL,
+        "-r",
+        "judge",
+        "-t",
+        "0.2",
+        "--max",
+        "8000",
+        "-f",
+        str(PROMPT),
+    ]
+    for context in contexts:
+        command.extend(["-c", str(context)])
+    result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+    if result.returncode != 0:
+        raise SystemExit(result.stderr.strip() or f"Gemini exited {result.returncode}")
+    review = result.stdout.strip()
+    if not review:
+        raise SystemExit("Gemini returned an empty review")
+
+    SNAPSHOTS.mkdir(parents=True, exist_ok=True)
+    output = SNAPSHOTS / f"{options.label}-{MODEL}.md"
+    output.write_text(
+        f"# Gemini 3.7 Flash review — {options.label}\n\n"
+        f"Model: `{MODEL}`\n\n{review}\n"
+    )
+    print(output)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
