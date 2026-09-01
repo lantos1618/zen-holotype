@@ -218,6 +218,7 @@ write_actor_floor = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     out.say("    zg_actor_msg *tail;").try();
     out.say("    size_t count;").try();
     out.say("    int open;").try();
+    out.say("    int joined;").try();
     out.say("    void *state;").try();
     out.say("    void *context;").try();
     out.say("    void (*started)(zg_actor *);").try();
@@ -366,6 +367,11 @@ write_actor_stop_floor = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     out.say("    pthread_cond_signal(&a->wake);").try();
     out.say("    pthread_mutex_unlock(&a->lock);").try();
     out.say("}").try();
+    out.say("static void zg_actor_join(zg_actor *a) {").try();
+    out.say("    if (!a || a->joined) return;").try();
+    out.say("    pthread_join(a->thread, NULL);").try();
+    out.say("    a->joined = 1;").try();
+    out.say("}").try();
     out.say("static void zg_actor_shutdown(void) {").try();
     out.say("    pthread_mutex_lock(&zg_actor_registry_lock);").try();
     out.say("    zg_actor_shutting_down = 1;").try();
@@ -379,7 +385,7 @@ write_actor_stop_floor = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     out.say("    pthread_mutex_unlock(&zg_actor_registry_lock);").try();
     out.say("    while (list) {").try();
     out.say("        zg_actor *next = list->next;").try();
-    out.say("        pthread_join(list->thread, NULL);").try();
+    out.say("        if (!list->joined) pthread_join(list->thread, NULL);").try();
     out.say("        pthread_cond_destroy(&list->wake);").try();
     out.say("        pthread_mutex_destroy(&list->lock);").try();
     out.say("        free(list);").try();
@@ -446,6 +452,26 @@ lower_actor_stop* = (
     id.sym_member("id").try();
     be.fmt(
         "zg_actor_stop((zg_actor *)(uintptr_t)({}.{}));\n",
+        recv.view(),
+        id.view()
+    ).try();
+    out.add("0")
+}
+
+lower_actor_join* = (
+    be  :: CBackend,
+    a   : Access,
+    rty : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    be.need_actor();
+    recv ::= be.alloc.String().try();
+    expr(be, a.base, ctx, rty, recv).try();
+    id ::= be.alloc.String().try();
+    id.sym_member("id").try();
+    be.fmt(
+        "zg_actor_join((zg_actor *)(uintptr_t)({}.{}));\n",
         recv.view(),
         id.view()
     ).try();
@@ -1137,6 +1163,7 @@ init_actor_fields = (
     be.fmt("{cell}->zg_base.context = &{cell}->zg_ctx;\n").try();
     be.fmt("{cell}->zg_base.started = {};\n", lifecycle.started).try();
     be.fmt("{cell}->zg_base.stopped = {};\n", lifecycle.stopped).try();
+    be.fmt("{cell}->zg_base.joined = 0;\n").try();
     Ok(())
 }
 

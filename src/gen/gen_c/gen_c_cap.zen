@@ -20,12 +20,12 @@ close_else, close_brace, open_null_test = gen.gen_c.gen_c_flow
 lower_probe, lower_write, lower_read, lower_remove, lower_lock, lower_unlock = gen.gen_c.gen_c_fs
 lower_stdin_read = gen.gen_c.gen_c_stdin
 lower_env_var = gen.gen_c.gen_c_env
-lower_console_print, is_console_print = gen.gen_c.gen_c_print
+lower_console_print, lower_console_flush, is_console_print = gen.gen_c.gen_c_print
 is_defer, lower_defer = gen.gen_c.gen_c_scope
 write_position = gen.gen_c.gen_c_op
 lower_clock_read = gen.gen_c.gen_c_clock
 lower_sleep, lower_spawn, lower_join = gen.gen_c.gen_c_threads
-lower_actor_spawn, lower_actor_stop = gen.gen_c.gen_c_actor
+lower_actor_spawn, lower_actor_stop, lower_actor_join = gen.gen_c.gen_c_actor
 
 // Classification is closed and travels with MethodKind into lowering,
 // so receiver ownership and an overloaded name such as `read` are
@@ -43,11 +43,13 @@ CapabilityKind* = NotCapability
     | EnvVar
     | ActorSpawn
     | ActorStop
+    | ActorJoin
     | ClockRead
     | ThreadsSleep
     | ThreadsSpawn
     | ThreadsJoin
     | ConsolePrint
+    | ConsoleFlush
     | StdinRead
     | ScopeDefer
 
@@ -77,6 +79,7 @@ CapabilityCall* = {
             ScopeDefer    => be.lower_defer(id, c, a, ctx, out),
             ActorSpawn    => be.lower_actor_spawn(id, c, a, rty, ctx, out),
             ActorStop     => be.lower_actor_stop(a, rty, ctx, out),
+            ActorJoin     => be.lower_actor_join(a, rty, ctx, out),
             ThreadsJoin   => be.lower_join(id, c, a, rty, self.want, ctx, out),
             NotCapability => be.unsupported(
                 id,
@@ -123,6 +126,7 @@ CapabilityCall* = {
                 ctx,
                 out
             ),
+            ConsoleFlush => lower_console_flush(be, ret, out),
             StdinRead    => {
                 aty = self.parameter_type(be).try();
                 be.lower_stdin_read(id, c, ret, aty, ctx, out)
@@ -173,6 +177,9 @@ capability_kind* = (be :: CBackend, rty: TyId, name: str) CapabilityKind {
         (owner.eq("Ref") && name.eq("stop")).then(() {
             h.break(ActorStop)
         });
+        (owner.eq("Ref") && name.eq("join")).then(() {
+            h.break(ActorJoin)
+        });
         (owner.eq("Clock") && name.is_in(["since_start", "unix"])).then(() {
             h.break(ClockRead)
         });
@@ -187,6 +194,9 @@ capability_kind* = (be :: CBackend, rty: TyId, name: str) CapabilityKind {
         });
         (owner.eq("Console") && is_console_print(name)).then(() {
             h.break(ConsolePrint)
+        });
+        (owner.eq("Console") && name.eq("flush")).then(() {
+            h.break(ConsoleFlush)
         });
         (owner.eq("Stdin") && name.eq("read")).then(() { h.break(StdinRead) });
         be.is_defer(rty, name).then(() { h.break(ScopeDefer) });
