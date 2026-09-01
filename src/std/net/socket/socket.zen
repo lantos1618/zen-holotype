@@ -242,11 +242,16 @@ Socket* = {
     read* = (self: @Self, buf :: Vec<u8>, n: usize)
             Res<usize, SocketFault> {
         self.open.ensure(SocketFault.PeerClosed).try();
-        buf.reserve(n).try(SocketFault.ReadFault);
-        got = self.handle().recv(buf.ptr(), n).try();
-        (got == 0).match({
-            true  => Err(SocketFault.PeerClosed),
-            false => Ok(got),
+        (n == 0).match({
+            true  => Ok(0),
+            false => {
+                buf.reserve(n).try(SocketFault.ReadFault);
+                got = self.handle().recv(buf.ptr(), n).try();
+                (got == 0).match({
+                    true  => Err(SocketFault.PeerClosed),
+                    false => Ok(got),
+                })
+            },
         })
     }
 
