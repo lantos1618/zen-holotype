@@ -9,10 +9,7 @@ TokenKind, is_trivia = std.parse.parse_token
 Parser = std.parse.parser
 starts_type_kind = std.parse.parse_type
 
-// What a declaration's value turned out to be. Not an AST node — it is
-// the answer to one question asked in one place, and naming it is what
-// keeps the seven readings of `Name = <thing>` a table rather than a
-// nest.
+// The grammatical shape selected for a declaration value.
 ValueShape* = StructValue
     | EnumValue
     | FnValue
@@ -20,21 +17,13 @@ ValueShape* = StructValue
     | AliasValue
     | ExprValue
 
-// -------------------------------------------------------------------
-// the bounded scans
-//
-// Each answers one question about a delimited run without consuming a
-// token and without backtracking. They are the whole of this parser's
-// lookahead.
-// -------------------------------------------------------------------
-
 // The first index at or after `from` holding a non-trivia token.
 live_at* = (p :: Parser, from: usize) usize {
     out ::= p.tokens_len();
     Range(from, p.tokens_len()).loop((h, k) {
-        p.token_kind_at(k).is_trivia().match({
-            true  => (),
-            false => { out = k; h.break(); },
+        (!p.token_kind_at(k).is_trivia()).then(() {
+            out = k;
+            h.break();
         });
     });
     out;
@@ -125,10 +114,7 @@ group_items_at = (p :: Parser, from: usize, to: usize) usize {
         (kind == TokenKind.Comma && depth == 0).then(
             () { commas = commas + 1; }
         );
-        kind.is_trivia().match({
-            true  => (),
-            false => { empty = false; },
-        });
+        (!kind.is_trivia()).then(() { empty = false; });
         depth = kind.delim_step(depth);
     });
     empty.match({
@@ -161,16 +147,14 @@ angle_step = (kind: TokenKind, depth: usize) usize {
     });
 }
 
-// What proves a `<` was a comparison after all. A type argument list
-// never contains a statement terminator or a body.
+// Tokens that cannot occur inside a type argument list.
 angle_stop = (kind: TokenKind) bool {
-    kind.match({
-        Semicolon  => true,
-        BraceOpen  => true,
-        BraceClose => true,
-        Eof        => true,
-        _          => false,
-    });
+    kind.is_in([
+        TokenKind.Semicolon,
+        TokenKind.BraceOpen,
+        TokenKind.BraceClose,
+        TokenKind.Eof,
+    ])
 }
 
 down = (d: usize) usize {
@@ -180,13 +164,8 @@ down = (d: usize) usize {
     });
 }
 
-// -------------------------------------------------------------------
-// the shape of a value
-//
-// Bounded lookahead, never backtracking: at most a name, one balanced
-// group, and the token after it. That is the whole of what R1a needs,
-// and it is why a declaration can be classified before it is parsed.
-// -------------------------------------------------------------------
+// Value classification uses bounded lookahead: at most a name, one balanced
+// group, and the following token.
 
 value_shape* = (p :: Parser, module_level: bool) ValueShape {
     p.peek().kind.match({
@@ -232,14 +211,11 @@ ident_shape = (p :: Parser, module_level: bool) ValueShape {
     });
 }
 
-// `Circle(Circle) |` or `Circle |` — a name, one optional balanced
-// payload, and a bar. The bar closes the fork the moment it appears,
-// which is R1's whole claim.
+// `Circle(Circle) |` and `Circle |` both begin enum declarations.
 variant_ahead = (p :: Parser) bool {
     j ::= p.live_at(p.at + 1);
-    (p.token_kind_at(j) == TokenKind.ParenOpen).match({
-        true  => { j = p.live_at(p.group_end_at(j)); },
-        false => (),
+    (p.token_kind_at(j) == TokenKind.ParenOpen).then(() {
+        j = p.live_at(p.group_end_at(j));
     });
     p.token_kind_at(j) == TokenKind.Bar;
 }
@@ -253,9 +229,8 @@ path_or_alias = (p :: Parser) ValueShape {
         j       = p.live_at(p.live_at(j + 1) + 1);
         running = p.token_kind_at(j) == TokenKind.Dot;
     });
-    (p.token_kind_at(j) == TokenKind.Lt).match({
-        true  => { j = p.live_at(p.angles_end_at(j)); },
-        false => (),
+    (p.token_kind_at(j) == TokenKind.Lt).then(() {
+        j = p.live_at(p.angles_end_at(j));
     });
     p.closes_value(j).match({
         false => ValueShape.ExprValue,
@@ -270,10 +245,7 @@ path_or_alias = (p :: Parser) ValueShape {
 // declaration has no terminator, so this is the only thing standing
 // between `Alias = Shape` and `Alias = Shape.member`.
 closes_value = (p :: Parser, j: usize) bool {
-    p.token_kind_at(j).continues_expr().match({
-        true  => false,
-        false => true,
-    });
+    !p.token_kind_at(j).continues_expr()
 }
 
 continues_expr = (kind: TokenKind) bool {
@@ -306,30 +278,15 @@ continues_expr = (kind: TokenKind) bool {
 // statements, so everything is a declaration and nothing has to
 // decide.
 decl_head_ahead* = (p :: Parser, module_level: bool) bool {
-    p.at_kind(TokenKind.Ident).match({
-        false => false,
-        true  => p.head_shape_ahead(),
-    });
+    p.at_kind(TokenKind.Ident) && p.head_shape_ahead()
 }
 
-// A `*` here is the export marker ONLY if the rest of a head follows
-// it. It is also multiplication, and treating it as the marker on
-// SIGHT made `twice = (n: i32) i32 { n * 2 }` a declaration named `n`
-// — the commonest shape in the language, rejected, while `n + 2` and
-// `(n * 2)` were fine. The star settles nothing on its own: what
-// settles it is the `=` a declaration has and a product does not, so
-// the star is stepped over and the same question asked past it.
-//
-// This is `binder_after_head` below, one binder narrower — a `:` in a
-// body is a typed BINDING, not a declaration — and the two are written
-// alike because they are one shape: a name, an optional `*`, optional
-// type parameters, a binder.
+// `*` is an export marker only when a declaration binder follows it;
+// otherwise it remains multiplication. `:` denotes a binding inside a body,
+// so this check accepts only assignment binders.
 head_shape_ahead = (p :: Parser) bool {
     j ::= p.live_at(p.at + 1);
-    (p.token_kind_at(j) == TokenKind.Star).match({
-        true  => { j = p.live_at(j + 1); },
-        false => (),
-    });
+    (p.token_kind_at(j) == TokenKind.Star).then(() { j = p.live_at(j + 1); });
     after = p.token_kind_at(j);
     (after == TokenKind.Lt).match({
         true  => p.generic_head_ahead(j),
@@ -339,17 +296,14 @@ head_shape_ahead = (p :: Parser) bool {
 
 generic_head_ahead = (p :: Parser, j: usize) bool {
     k = p.angles_end_at(j);
-    (k > j) && p.assigns(p.live_kind(k))
+    (k > j) && p.live_kind(k).assigns()
 }
 
 assign_head_ahead = (p :: Parser, after: TokenKind, j: usize) bool {
-    p.assigns(after).match({
-        false => false,
-        true  => p.declares_value(p.live_at(j + 1)),
-    });
+    after.assigns() && p.declares_value(p.live_at(j + 1))
 }
 
-assigns = (p: Parser, kind: TokenKind) bool {
+assigns = (kind: TokenKind) bool {
     kind.is_in([TokenKind.Eq, TokenKind.ColonColonEq])
 }
 
@@ -374,37 +328,20 @@ declares_fn = (p :: Parser, j: usize, kind: TokenKind) bool {
 }
 
 declares_enum = (p :: Parser, j: usize, kind: TokenKind) bool {
-    (kind == TokenKind.Ident).match({
-        false => false,
-        true  => p.bar_after(j),
-    });
+    kind == TokenKind.Ident && p.bar_after(j)
 }
 
 bar_after = (p :: Parser, j: usize) bool {
     k ::= p.live_at(j + 1);
-    (p.token_kind_at(k) == TokenKind.ParenOpen).match({
-        true  => { k = p.live_at(p.group_end_at(k)); },
-        false => (),
+    (p.token_kind_at(k) == TokenKind.ParenOpen).then(() {
+        k = p.live_at(p.group_end_at(k));
     });
     p.token_kind_at(k) == TokenKind.Bar;
 }
 
-// -------------------------------------------------------------------
-// a return type, or the next declaration
-//
-// The fifth question, and the one nobody wrote down: a signature's
-// return type is followed by NOTHING — a declaration has no terminator
-// — so the token after it is the next member's name, and a name can
-// begin a type.
-//
-// It only bites where the return type is written `()`: a `Named` type
-// stops at its own last token and never reaches for the one after.
-// `next* = (self: @Self) ()` above `stop* = (self: @Self) ()` read the
-// `()` as a nullary function type's parameter list and `stop` as its
-// return type, wanting a member name at the `*`. That shape is all of
-// loop_handle.zen, mem_ptr.zen and mem_alloc.zen — the parser couldn't
-// read the standard library it's compiled against.
-// -------------------------------------------------------------------
+// A declaration has no terminator, so after a `()` return type the next
+// member name can also look like the start of a type. A following declaration
+// binder distinguishes that member head from a return type.
 
 // Whether a return type really begins at the cursor. Everything a type
 // may begin with, minus the one thing that only LOOKS like one.
@@ -418,21 +355,14 @@ ret_ahead* = (p :: Parser) bool {
 // `:`, `::`, `=` or `::=` after a name, which is what makes one token
 // of scanning enough to tell a return type from the next line.
 member_head_ahead* = (p :: Parser) bool {
-    p.at_kind(TokenKind.Ident).match({
-        false => false,
-        true  => p.binder_after_head(),
-    });
+    p.at_kind(TokenKind.Ident) && p.binder_after_head()
 }
 
 binder_after_head = (p :: Parser) bool {
     j ::= p.live_at(p.at + 1);
-    (p.token_kind_at(j) == TokenKind.Star).match({
-        true  => { j = p.live_at(j + 1); },
-        false => (),
-    });
-    (p.token_kind_at(j) == TokenKind.Lt).match({
-        true  => { j = p.live_at(p.angles_end_at(j)); },
-        false => (),
+    (p.token_kind_at(j) == TokenKind.Star).then(() { j = p.live_at(j + 1); });
+    (p.token_kind_at(j) == TokenKind.Lt).then(() {
+        j = p.live_at(p.angles_end_at(j));
     });
     p.token_kind_at(j).binds();
 }
