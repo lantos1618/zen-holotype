@@ -129,8 +129,52 @@ const_node = (c: Checker, node: Expr, left: usize) Res<i64> {
 
 const_literal* = (l: Literal) Res<i64> {
     l.kind.match({
-        Int => l.text.parse_i64(),
+        Int => l.integer.match({
+            Ok(value) => magnitude_i64(value),
+            None      => l.text.parse_i64(),
+        }),
         _   => None,
+    })
+}
+
+// Convert a lexer-validated magnitude without a narrowing cast. Recursion is
+// bounded by the 20 decimal digits of u64.
+magnitude_i64 = (value: u64) Res<i64> {
+    (value > 9223372036854775807).match({
+        true  => None,
+        false => Ok(magnitude_i64_open(value)),
+    })
+}
+
+magnitude_i64_open = (value: u64) i64 {
+    (value < 10).match({
+        true  => last_magnitude_digit(value),
+        false => magnitude_i64_open(value / 10) * 10
+            + last_magnitude_digit(value % 10),
+    })
+}
+
+last_magnitude_digit = (value: u64) i64 {
+    value.match({
+        0 => 0, 1 => 1, 2 => 2, 3 => 3, 4 => 4,
+        5 => 5, 6 => 6, 7 => 7, 8 => 8, _ => 9,
+    })
+}
+
+// Whether a positive integer literal fits a fixed-width integer type. This
+// complements `fits(i64, ..)` for the upper half of u64's domain.
+fits_magnitude* = (value: u64, name: str) Res<bool> {
+    name.match({
+        "i8"    => Ok(value <= 127),
+        "u8"    => Ok(value <= 255),
+        "i16"   => Ok(value <= 32767),
+        "u16"   => Ok(value <= 65535),
+        "i32"   => Ok(value <= 2147483647),
+        "u32"   => Ok(value <= 4294967295),
+        "i64"   => Ok(value <= 9223372036854775807),
+        "u64"   => Ok(true),
+        "usize" => Ok(true),
+        _       => None,
     })
 }
 

@@ -813,7 +813,7 @@ lower_paren = (
 lower_literal = (l: Literal, out :: String) Res<(), AllocError> {
     l.kind.match({
         Str   => lower_str_literal(l, out),
-        Int   => lower_int_literal(l.text, out),
+        Int   => lower_int_literal(l, out),
         Float => out.add(l.text),
         Char  => out.add(l.text),
         Bool  => out.add(l.text),
@@ -824,9 +824,9 @@ lower_literal = (l: Literal, out :: String) Res<(), AllocError> {
 // C99 requires an unsigned suffix for decimal constants larger than `i64.MAX`.
 // The digits decide the suffix because their representable range is independent
 // Of the expression's settled type.
-lower_int_literal = (text: str, out :: String) Res<(), AllocError> {
-    out.add(text).try();
-    over_i64(text).match({
+lower_int_literal = (literal: Literal, out :: String) Res<(), AllocError> {
+    out.add(literal.text).try();
+    over_i64(literal).match({
         true  => out.add("ULL"),
         false => Ok(()),
     })
@@ -834,13 +834,13 @@ lower_int_literal = (text: str, out :: String) Res<(), AllocError> {
 
 I64_MAX_DIGITS: str = "9223372036854775807"
 
-// `lex_literal.number` reads decimal only — no separators, no leading
-// zero, no suffix — so more digits is a larger number and equal digits
-// order the same way bytes do.
-over_i64 = (text: str) bool {
-    (text.len == I64_MAX_DIGITS.len).match({
-        true  => I64_MAX_DIGITS.before(text),
-        false => text.len > I64_MAX_DIGITS.len,
+over_i64 = (literal: Literal) bool {
+    literal.integer.match({
+        Ok(value) => value > 9223372036854775807,
+        None      => (literal.text.len == I64_MAX_DIGITS.len).match({
+            true  => I64_MAX_DIGITS.before(literal.text),
+            false => literal.text.len > I64_MAX_DIGITS.len,
+        }),
     })
 }
 

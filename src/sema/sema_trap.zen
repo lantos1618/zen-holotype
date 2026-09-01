@@ -5,7 +5,7 @@ str = std.text
 TyId, TyArray, is_integer = sema.sema_ty
 SemaFault, NameFault, TypeFault = sema.sema_diag
 Checker = sema.sema_check
-const_int, const_literal, fits, fold = sema.sema_const
+const_int, const_literal, fits, fits_magnitude, fold = sema.sema_const
 len_of, min_of = sema.sema_const
 check_binary* = (c :: Checker, b: Binary, ty: TyId) Res<(), AllocError> {
     b.op.match({
@@ -213,12 +213,15 @@ unfoldable_within = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
 
 literal_kind_within = (c :: Checker, id: ExprId, l: Literal, want: TyId)
                       Res<(), AllocError> {
-    name   = c.prim_name(want);
-    widest = name.eq("u64") || name.eq("usize");
+    name = c.prim_name(want);
     l.kind.match({
-        Int => widest.match({
-            true  => Ok(()),
-            false => c.out_of_range(id, want),
+        Int => l.integer.match({
+            None      => c.out_of_range(id, want),
+            Ok(value) => fits_magnitude(value, name).match({
+                Ok(true)  => Ok(()),
+                Ok(false) => c.out_of_range(id, want),
+                None      => c.out_of_range(id, want),
+            }),
         }),
         _   => Ok(()),
     })
