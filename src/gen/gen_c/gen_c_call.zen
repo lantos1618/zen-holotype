@@ -343,19 +343,192 @@ CallSite = {
         self.emit(be, f, sig, sym.view(), out)
     }
 
+    // A UFCS receiver occupies signature slot zero. It is held whenever a
+    // later argument still has a call to run.
+    write_receiver = (self: @Self, be :: CBackend, f: Function,
+                      sig: Vec<TyId>, out :: String)
+                     Res<usize, AllocError> {
+        self.recv.match({
+            None     => Ok(0),
+            Ok(base) => {
+                hold = be.holds(self.c, 0, 1);
+                be.write_arg_at(base, 0, hold, f, sig, self.ctx, out).try();
+                Ok(1)
+            },
+        })
+    }
+
     emit = (self: @Self, be :: CBackend, f: Function, sig: Vec<TyId>,
             sym: str, out :: String) Res<(), AllocError> {
         out.fmt("{sym}(").try();
-        first = be.write_receiver(
-            self.recv,
-            self.c,
-            f,
-            sig,
-            self.ctx,
-            out
-        ).try();
-        be.write_call_args(self.c, first, f, sig, self.ctx, out).try();
+        first = self.write_receiver(be, f, sig, out).try();
+        CallArgs(c: self.c, f: f, sig: sig, first: first, ctx: self.ctx).write(be, out).try();
         out.add(")").try();
+        Ok(())
+    }
+}
+
+// The immutable facts shared by one direct argument emission. They become a
+// phase only after the receiver has decided `first`; backend and destination
+// remain borrowed by each write.
+CallArgs = {
+    c: Call,
+    f: Function,
+    sig: Vec<TyId>,
+    first: usize,
+    ctx: Ctx,
+
+    write = (self: @Self, be :: CBackend, out :: String)
+            Res<(), AllocError> {
+        pack_slot(be.types(), self.sig).match({
+            None     => self.write_written(be, out),
+            Ok(slot) => self.write_to_pack(be, slot, out),
+        })
+    }
+
+    write_written = (self: @Self, be :: CBackend, out :: String)
+                    Res<(), AllocError> {
+        written ::= self.first > 0;
+        unknown = be.check.types.unknown().try();
+        self.c.args.loop((h, i, a) {
+            pos = i + self.first;
+            ty  = self.sig.get(pos).match({ Ok(t) => t, None => unknown });
+            be.has_storage(ty).match({
+                false => be.deliver(a.value, self.ctx, ty, Dest.Discard),
+                true  => {
+                    written.then(() { out.add(", ").try() });
+                    hold = be.holds(self.c, pos, self.first);
+                    be.write_arg_at(
+                        a.value,
+                        pos,
+                        hold,
+                        self.f,
+                        self.sig,
+                        self.ctx,
+                        out
+                    ).try();
+                    written = true;
+                    Ok(())
+                },
+            }).try();
+        });
+        Ok(())
+    }
+
+    // Fixed arguments precede one packed C argument. Erased fixed values are
+    // still evaluated, but do not consume a comma or a C parameter slot.
+    write_to_pack = (self: @Self, be :: CBackend, slot: usize,
+                     out :: String) Res<(), AllocError> {
+        written ::= self.first > 0;
+        unknown = be.check.types.unknown().try();
+        self.c.args.loop((h, i, a) {
+            pos = i + self.first;
+            (pos < slot).then(() {
+                ty = self.sig.get(pos).match({ Ok(t) => t, None => unknown });
+                be.has_storage(ty).match({
+                    false => be.deliver(a.value, self.ctx, ty, Dest.Discard),
+                    true  => {
+                        written.then(() { out.add(", ").try() });
+                        hold = be.holds(self.c, pos, self.first);
+                        be.write_arg_at(
+                            a.value,
+                            pos,
+                            hold,
+                            self.f,
+                            self.sig,
+                            self.ctx,
+                            out
+                        ).try();
+                        written = true;
+                        Ok(())
+                    },
+                }).try();
+            });
+        });
+        written.then(() { out.add(", ").try() });
+        pack = self.sig.get(slot).match({
+            Ok(t) => t,
+            None  => TyId(index: 0),
+        });
+        self.write_pack(be, slot, pack, out)
+    }
+
+    write_pack = (self: @Self, be :: CBackend, slot: usize, pack: TyId,
+                  out :: String) Res<(), AllocError> {
+        self.is_forwarded(be, slot, pack).try().match({
+            true  => self.write_forwarded(be, slot, pack, out),
+            false => self.write_spread(be, slot, pack, out),
+        })
+    }
+
+    is_forwarded = (self: @Self, be :: CBackend, slot: usize, pack: TyId)
+                   Res<bool, AllocError> {
+        ((self.c.args.len + self.first) == (slot + 1)).match({
+            false => Ok(false),
+            true  => self.pack_typed_arg(be, slot, pack),
+        })
+    }
+
+    pack_typed_arg = (self: @Self, be :: CBackend, slot: usize, pack: TyId)
+                     Res<bool, AllocError> {
+        arg_value(self.c, slot - self.first).match({
+            None  => Ok(false),
+            Ok(v) => self.same_as_pack(be, v, pack),
+        })
+    }
+
+    same_as_pack = (self: @Self, be :: CBackend, v: ExprId, pack: TyId)
+                   Res<bool, AllocError> {
+        got = be.ty_of(v, self.ctx, pack).try();
+        Ok(got.eq(pack));
+    }
+
+    write_forwarded = (self: @Self, be :: CBackend, slot: usize,
+                       pack: TyId, out :: String) Res<(), AllocError> {
+        arg_value(self.c, slot - self.first).match({
+            None  => Ok(()),
+            Ok(v) => be.expr(v, self.ctx, pack, out),
+        })
+    }
+
+    write_spread = (self: @Self, be :: CBackend, slot: usize, pack: TyId,
+                    out :: String) Res<(), AllocError> {
+        out.add("(").try();
+        be.ctype(pack, out).try();
+        out.add(")").try();
+        ((self.c.args.len + self.first) == slot).match({
+            true  => out.add("{ 0 }"),
+            false => self.write_run(be, slot, pack, out),
+        })
+    }
+
+    write_run = (self: @Self, be :: CBackend, slot: usize, pack: TyId,
+                 out :: String) Res<(), AllocError> {
+        elem = pack_elem(be.types(), pack).match({ Ok(t) => t, None => pack });
+        out.add("{ .").try();
+        sym_member(out, "data").try();
+        out.add(" = (").try();
+        be.ctype(elem, out).try();
+        out.add("[]){ ").try();
+        self.write_pack_elems(be, slot, elem, out).try();
+        out.add(" }, .").try();
+        sym_member(out, "len").try();
+        out.add(" = ").try();
+        out.write_usize(self.c.args.len + self.first - slot).try();
+        out.add("u }").try();
+        Ok(())
+    }
+
+    write_pack_elems = (self: @Self, be :: CBackend, slot: usize,
+                        elem: TyId, out :: String) Res<(), AllocError> {
+        self.c.args.loop((h, i, a) {
+            pos = i + self.first;
+            (pos >= slot).then(() {
+                (pos > slot).then(() { out.add(", ").try() });
+                hold = be.holds(self.c, pos, self.first);
+                be.value_held(a.value, self.ctx, elem, hold, out).try();
+            });
+        });
         Ok(())
     }
 }
@@ -1030,229 +1203,5 @@ write_call_args* = (
     ctx   : Ctx,
     out   :: String
 ) Res<(), AllocError> {
-    pack_slot(be.types(), sig).match({
-        None     => be.write_written_args(c, first, f, sig, ctx, out),
-        Ok(slot) => be.write_to_pack(c, first, slot, f, sig, ctx, out),
-    })
-}
-
-write_written_args = (
-    be    :: CBackend,
-    c     : Call,
-    first : usize,
-    f     : Function,
-    sig   : Vec<TyId>,
-    ctx   : Ctx,
-    out   :: String
-) Res<(), AllocError> {
-    written ::= first > 0;
-    unknown = be.check.types.unknown().try();
-    c.args.loop((h, i, a) {
-        pos = i + first;
-        ty  = sig.get(pos).match({ Ok(t) => t, None => unknown });
-        be.has_storage(ty).match({
-            false => be.deliver(a.value, ctx, ty, Dest.Discard),
-            true  => {
-                written.then(() { out.add(", ").try() });
-                hold = be.holds(c, pos, first);
-                be.write_arg_at(a.value, pos, hold, f, sig, ctx, out).try();
-                written = true;
-                Ok(())
-            },
-        }).try();
-    });
-    Ok(());
-}
-
-// A `vararg<T>` parameter receives one packed C argument. `slot` and
-// `i + first` are signature indexes, including any UFCS receiver.
-write_to_pack = (
-    be    :: CBackend,
-    c     : Call,
-    first : usize,
-    slot  : usize,
-    f     : Function,
-    sig   : Vec<TyId>,
-    ctx   : Ctx,
-    out   :: String
-) Res<(), AllocError> {
-    c.args.loop((h, i, a) {
-        ((i + first) < slot).then(() {
-            (i + first > 0).then(() { out.add(", ").try() });
-            hold = be.holds(c, i + first, first);
-            be.write_arg_at(a.value, i + first, hold, f, sig, ctx, out).try();
-        });
-    });
-    (slot > 0).then(() { out.add(", ").try() });
-    pack = sig.get(slot).match({ Ok(t) => t, None => TyId(index: 0) });
-    be.write_pack(c, first, slot, pack, ctx, out);
-}
-
-// A pack borrows an automatic array compound literal for the duration of the
-// call; sema prevents it from escaping.
-write_pack = (
-    be    :: CBackend,
-    c     : Call,
-    first : usize,
-    slot  : usize,
-    pack  : TyId,
-    ctx   : Ctx,
-    out   :: String
-) Res<(), AllocError> {
-    be.is_forwarded_pack(c, first, slot, pack, ctx).try().match({
-        true  => be.write_forwarded(c, first, slot, pack, ctx, out),
-        false => be.write_spread(c, first, slot, pack, ctx, out),
-    })
-}
-
-// Forward an existing pack as a struct copy rather than nesting packs.
-is_forwarded_pack = (
-    be    :: CBackend,
-    c     : Call,
-    first : usize,
-    slot  : usize,
-    pack  : TyId,
-    ctx   : Ctx
-) Res<bool, AllocError> {
-    ((c.args.len + first) == (slot + 1)).match({
-        false => Ok(false),
-        true  => be.pack_typed_arg(c, first, slot, pack, ctx),
-    })
-}
-
-pack_typed_arg = (
-    be    :: CBackend,
-    c     : Call,
-    first : usize,
-    slot  : usize,
-    pack  : TyId,
-    ctx   : Ctx
-) Res<bool, AllocError> {
-    arg_value(c, slot - first).match({
-        None  => Ok(false),
-        Ok(v) => be.same_as_pack(v, pack, ctx),
-    })
-}
-
-same_as_pack = (be :: CBackend, v: ExprId, pack: TyId, ctx: Ctx)
-               Res<bool, AllocError> {
-    got = be.ty_of(v, ctx, pack).try();
-    Ok(got.eq(pack));
-}
-
-write_forwarded = (
-    be    :: CBackend,
-    c     : Call,
-    first : usize,
-    slot  : usize,
-    pack  : TyId,
-    ctx   : Ctx,
-    out   :: String
-) Res<(), AllocError> {
-    arg_value(c, slot - first).match({
-        None  => Ok(()),
-        Ok(v) => be.expr(v, ctx, pack, out),
-    })
-}
-
-// `(<pack>){ .data = (<elem>[]){ a, b, c }, .len = 3u }`, and `{ 0 }` for
-// an empty pack — a zero-length array initialiser is a GNU extension, and
-// `{ 0 }` says the same thing in C99: a null run of length zero.
-write_spread = (
-    be    :: CBackend,
-    c     : Call,
-    first : usize,
-    slot  : usize,
-    pack  : TyId,
-    ctx   : Ctx,
-    out   :: String
-) Res<(), AllocError> {
-    out.add("(").try();
-    be.ctype(pack, out).try();
-    out.add(")").try();
-    ((c.args.len + first) == slot).match({
-        true  => out.add("{ 0 }"),
-        false => be.write_run(c, first, slot, pack, ctx, out),
-    })
-}
-
-write_run = (
-    be    :: CBackend,
-    c     : Call,
-    first : usize,
-    slot  : usize,
-    pack  : TyId,
-    ctx   : Ctx,
-    out   :: String
-) Res<(), AllocError> {
-    elem = pack_elem(be.types(), pack).match({ Ok(t) => t, None => pack });
-    out.add("{ .").try();
-    sym_member(out, "data").try();
-    out.add(" = (").try();
-    be.ctype(elem, out).try();
-    out.add("[]){ ").try();
-    be.write_pack_elems(c, first, slot, elem, ctx, out).try();
-    out.add(" }, .").try();
-    sym_member(out, "len").try();
-    out.add(" = ").try();
-    out.write_usize(c.args.len + first - slot).try();
-    out.add("u }").try();
-    Ok(());
-}
-
-// Each swallowed argument at the pack's ELEMENT type, so a literal takes
-// its width from `T` exactly as it would in a fixed array literal.
-write_pack_elems = (
-    be    :: CBackend,
-    c     : Call,
-    first : usize,
-    slot  : usize,
-    elem  : TyId,
-    ctx   : Ctx,
-    out   :: String
-) Res<(), AllocError> {
-    c.args.loop((h, i, a) {
-        ((i + first) >= slot).then(() {
-            ((i + first) > slot).then(() { out.add(", ").try() });
-            hold = be.holds(c, i + first, first);
-            be.value_held(a.value, ctx, elem, hold, out).try();
-        });
-    });
-    Ok(());
-}
-
-// The receiver a ufcs call arrived through, as argument zero. The answer
-// is how many arguments were written, which is what shifts the rest of
-// them one place along their own signature.
-write_receiver = (
-    be   :: CBackend,
-    recv : Res<ExprId>,
-    c    : Call,
-    f    : Function,
-    sig  : Vec<TyId>,
-    ctx  : Ctx,
-    out  :: String
-)
-                 Res<usize, AllocError> {
-    recv.match({
-        None     => Ok(0),
-        Ok(base) => be.write_recv_expr(base, c, f, sig, ctx, out),
-    })
-}
-
-// A receiver stands before every argument, so it is held whenever any of
-// them still has a call to run.
-write_recv_expr = (
-    be   :: CBackend,
-    base : ExprId,
-    c    : Call,
-    f    : Function,
-    sig  : Vec<TyId>,
-    ctx  : Ctx,
-    out  :: String
-)
-                  Res<usize, AllocError> {
-    hold = be.holds(c, 0, 1);
-    be.write_arg_at(base, 0, hold, f, sig, ctx, out).try();
-    Ok(1);
+    CallArgs(c: c, f: f, sig: sig, first: first, ctx: ctx).write(be, out)
 }
