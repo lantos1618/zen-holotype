@@ -1,0 +1,90 @@
+str = std.text
+
+// A local written in a generic method must be substituted at the method's
+// current instantiation. Otherwise both methods below declare one open
+// Res<Spec<T>> while their signatures return two concrete specializations.
+BuildFlag = Emit | Out
+FmtFlag = FormatCheck | FormatOther
+
+Spec<T> = {
+    name: str,
+    id: T,
+}
+
+Options<T> = {
+    first: Res<Spec<T>>,
+
+    find = (self: @Self, name: str) Res<Spec<T>> {
+        found: Res<Spec<T>> = self.first.match({
+            Ok(spec) => spec.name.eq(name).match({
+                true  => Ok(spec),
+                false => None,
+            }),
+            None     => None,
+        });
+        found
+    }
+
+    args = (self: @Self, word: str) Args<T> {
+        Args(options: Options(first: self.first), word: word)
+    }
+}
+
+Item<T> = {
+    named: Res<T>,
+    word: str,
+}
+
+Args<T> = {
+    options: Options<T>,
+    word: str,
+
+    next = (self: @Self) Res<Item<T>> {
+        self.options.find(self.word).match({
+            Ok(spec) => Ok(Item(named: Ok(spec.id), word: self.word)),
+            None     => None,
+        })
+    }
+}
+
+option = <T>(name: str, id: T) Options<T> {
+    Options<T>(first: Ok(Spec(name: name, id: id)))
+}
+
+item = <T>(id: T, word: str) Item<T> {
+    Item<T>(named: Ok(id), word: word)
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    opts: Options<BuildFlag> = option<BuildFlag>("repeat", BuildFlag.Emit);
+    one: Item<BuildFlag>     = item<BuildFlag>(BuildFlag.Out, "three");
+    fmt: Options<FmtFlag>    = option<FmtFlag>("check", FmtFlag.FormatCheck);
+    opts.args("repeat").next().match({
+        Ok(found) => found.named.match({
+            Ok(id) => id.match({
+                Emit => println("{} emit", found.word),
+                Out  => println("{} out", found.word),
+            }),
+            None   => println("missing build id"),
+        }),
+        None      => println("missing option"),
+    });
+    one.named.match({
+        Ok(id) => id.match({
+            Emit => println("emit {}", one.word),
+            Out  => println("out {}", one.word),
+        }),
+        None   => println("missing item"),
+    });
+    fmt.args("check").next().match({
+        Ok(found) => found.named.match({
+            Ok(id) => id.match({
+                FormatCheck => println("{}", found.word),
+                FormatOther => println("other"),
+            }),
+            None   => println("missing fmt id"),
+        }),
+        None      => println("missing fmt"),
+    });
+    Ok(0)
+}

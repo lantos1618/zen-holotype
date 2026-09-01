@@ -66,6 +66,39 @@ digit_value* = (b: u8) Res<u8> {
     });
 }
 
+// Spell one already-bounded decimal digit. The overloads keep callers in
+// their own integer domain: formatting a u64/usize should not require each
+// caller to invent a narrowing shim. Values above nine trap by exhausting
+// the unsigned subtraction, just as hex_digit traps above fifteen.
+digit* = (n: u8) u8 {
+    9 - n;
+    DIGIT_ZERO + n
+}
+
+digit* = (n: u64) u8 {
+    n.match({
+        0 => '0', 1 => '1', 2 => '2', 3 => '3', 4 => '4',
+        5 => '5', 6 => '6', 7 => '7', 8 => '8', 9 => '9',
+        _ => { n - 10; '0' },
+    })
+}
+
+digit* = (n: i64) u8 {
+    n.match({
+        0 => '0', 1 => '1', 2 => '2', 3 => '3', 4 => '4',
+        5 => '5', 6 => '6', 7 => '7', 8 => '8', 9 => '9',
+        _ => { (n < 0).match({ true => n - 1, false => 9 - n }); '0' },
+    })
+}
+
+digit* = (n: usize) u8 {
+    n.match({
+        0 => '0', 1 => '1', 2 => '2', 3 => '3', 4 => '4',
+        5 => '5', 6 => '6', 7 => '7', 8 => '8', 9 => '9',
+        _ => { 9 - n; '0' },
+    })
+}
+
 // Early return over a pyramid: the one-shot loop is a breakable block,
 // each `.then` a guard naming one spelling of a hex digit, the bare
 // last break the miss. The typed binding is load-bearing for the
@@ -112,6 +145,19 @@ hex_digit* = (nibble: u8) u8 {
         true  => DIGIT_ZERO + nibble,
         false => LOWER_A + nibble - 10,
     });
+}
+
+// The same spelling for hash nibbles, which naturally live in u64. Keeping
+// this beside the byte overload prevents every hash writer from carrying its
+// own sixteen-arm conversion table.
+hex_digit* = (nibble: u64) u8 {
+    nibble.match({
+        0 => '0', 1 => '1', 2 => '2', 3 => '3',
+        4 => '4', 5 => '5', 6 => '6', 7 => '7',
+        8 => '8', 9 => '9', 10 => 'a', 11 => 'b',
+        12 => 'c', 13 => 'd', 14 => 'e', 15 => 'f',
+        _ => { 15 - nibble; '0' },
+    })
 }
 
 hex_usize* = (b: u8) Res<usize> {

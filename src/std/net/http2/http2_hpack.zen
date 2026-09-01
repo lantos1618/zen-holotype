@@ -5,23 +5,24 @@ Alloc = std.mem
 str, String, str_at = std.text
 Res = std.core
 Vec = std.collections
-H2Error = std.net.http2.http2_types
+H2Error, H2Head = std.net.http2.http2_types
+
+STATIC_NAMES: [str, 62] = [
+    "", ":authority", ":method", ":method", ":path", ":path",
+    ":scheme", ":scheme", ":status", ":status", ":status", ":status",
+    ":status", ":status", ":status", "accept-charset", "accept-encoding", "accept-language",
+    "accept-ranges", "accept", "access-control-allow-origin", "age", "allow", "authorization",
+    "cache-control", "content-disposition", "content-encoding", "content-language", "content-length", "content-location",
+    "content-range", "content-type", "cookie", "date", "etag", "expect",
+    "expires", "from", "host", "if-match", "if-modified-since", "if-none-match",
+    "if-range", "if-unmodified-since", "last-modified", "link", "location", "max-forwards",
+    "proxy-authenticate", "proxy-authorization", "range", "referer", "refresh", "retry-after",
+    "server", "set-cookie", "strict-transport-security", "transfer-encoding", "user-agent", "vary",
+    "via", "www-authenticate",
+]
 
 static_name = (idx: usize) str {
-    NAMES: [str, 62] = [
-        "", ":authority", ":method", ":method", ":path", ":path",
-        ":scheme", ":scheme", ":status", ":status", ":status", ":status",
-        ":status", ":status", ":status", "accept-charset", "accept-encoding", "accept-language",
-        "accept-ranges", "accept", "access-control-allow-origin", "age", "allow", "authorization",
-        "cache-control", "content-disposition", "content-encoding", "content-language", "content-length", "content-location",
-        "content-range", "content-type", "cookie", "date", "etag", "expect",
-        "expires", "from", "host", "if-match", "if-modified-since", "if-none-match",
-        "if-range", "if-unmodified-since", "last-modified", "link", "location", "max-forwards",
-        "proxy-authenticate", "proxy-authorization", "range", "referer", "refresh", "retry-after",
-        "server", "set-cookie", "strict-transport-security", "transfer-encoding", "user-agent", "vary",
-        "via", "www-authenticate",
-    ];
-    NAMES[idx];
+    STATIC_NAMES[idx];
 }
 
 static_value = (idx: usize) str {
@@ -96,20 +97,20 @@ block_add_int* = (
 ) Res<(), H2Error> {
     max = prefix.pow2() - 1;
     (val < max).match({
-        true  => blk.add_byte(flags + val.to_u8()
+        true  => blk.add(flags + val.to_u8()
             .ok_or(H2Error.ProtocolFailed).try()).try(H2Error.SendFailed),
         false => {
-            blk.add_byte(flags + max.to_u8()
+            blk.add(flags + max.to_u8()
                 .ok_or(H2Error.ProtocolFailed).try()).try(H2Error.SendFailed);
             rest ::= val - max;
             loop((h) {
                 (rest < 128).then(() { h.break(); });
                 byte = (rest % 128 + 128).to_u8()
                     .ok_or(H2Error.ProtocolFailed).try();
-                blk.add_byte(byte).try(H2Error.SendFailed);
+                blk.add(byte).try(H2Error.SendFailed);
                 rest = rest / 128;
             });
-            blk.add_byte(rest.to_u8()
+            blk.add(rest.to_u8()
                 .ok_or(H2Error.ProtocolFailed).try()).try(H2Error.SendFailed);
         },
     });
@@ -119,7 +120,7 @@ block_add_int* = (
 // append a raw (never Huffman) string literal
 block_add_str* = (blk :: String, s: str) Res<(), H2Error> {
     blk.block_add_int(0, 7, s.len).try();
-    blk.add_bytes(s).replace_err(H2Error.SendFailed);
+    blk.add(s).replace_err(H2Error.SendFailed);
 }
 
 // ------------------------------------------------------------------
@@ -127,17 +128,10 @@ block_add_str* = (blk :: String, s: str) Res<(), H2Error> {
 // canonical: symbols sorted by (bit-length, code) sit in HUF_SYMTAB,
 // and per length L the codes are consecutive from HUF_FIRST_CODE[L],
 // so decoding is a bit walk with one range check per bit. The tables
-// are function locals because module-level array constants are not
-// lowered by gen_c yet.
+// are immutable module data and are inlined at their indexed uses.
 // ------------------------------------------------------------------
 
-huf_decode* = (
-    buf  : Vec<u8>,
-    a    : Alloc,
-    from : usize,
-    len  : usize
-) Res<String, H2Error> {
-    SYMTAB: [u8, 257]     = [
+HUF_SYMTAB: [u8, 257] = [
         48, 49, 50, 97, 99, 101, 105, 111, 115, 116, 32, 37, 45, 46, 47, 51,
         52, 53, 54, 55, 56, 57, 61, 65, 95, 98, 100, 102, 103, 104, 108, 109,
         110, 112, 114, 117, 58, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76,
@@ -155,16 +149,22 @@ huf_decode* = (
         2, 3, 4, 5, 6, 7, 8, 11, 12, 14, 15, 16, 17, 18, 19, 20,
         21, 23, 24, 25, 26, 27, 28, 29, 30, 31, 127, 220, 249, 10, 13, 22,
         0,
-    ];
-    FIRST_CODE: [u32, 31] = [
+    ]
+HUF_FIRST_CODE: [u32, 31] = [
         0, 0, 0, 0, 0, 0, 20, 92, 248, 0, 1016, 2042, 4090, 8184, 16380, 32764, 0, 0, 0, 524272, 1048550, 2097116, 4194258, 8388568, 16777194, 33554412, 67108832, 134217694, 268435426, 0, 1073741820,
-    ];
-    COUNT: [u32, 31]      = [
+    ]
+HUF_COUNT: [u32, 31] = [
         0, 0, 0, 0, 0, 10, 26, 32, 6, 0, 5, 3, 2, 6, 2, 3, 0, 0, 0, 3, 8, 13, 26, 29, 12, 4, 15, 19, 29, 0, 4,
-    ];
-    FIRST_IDX: [u32, 31]  = [
+    ]
+HUF_FIRST_IDX: [u32, 31] = [
         0, 0, 0, 0, 0, 0, 10, 36, 68, 0, 74, 79, 82, 84, 90, 92, 0, 0, 0, 95, 98, 106, 119, 145, 174, 186, 190, 205, 224, 0, 253,
-    ];
+    ]
+huf_decode* = (
+    buf  : Vec<u8>,
+    a    : Alloc,
+    from : usize,
+    len  : usize
+) Res<String, H2Error> {
     out          ::= a.String().try(H2Error.DecodeFailed);
     code: u32    ::= 0;
     nbits: usize ::= 0;
@@ -180,15 +180,15 @@ huf_decode* = (
             k     = k / 2;
             code  = code * 2 + bit;
             nbits = nbits + 1;
-            ready = nbits <= 30 && COUNT[nbits] > 0
-                && code >= FIRST_CODE[nbits]
-                && code - FIRST_CODE[nbits] < COUNT[nbits];
+            ready = nbits <= 30 && HUF_COUNT[nbits] > 0
+                && code >= HUF_FIRST_CODE[nbits]
+                && code - HUF_FIRST_CODE[nbits] < HUF_COUNT[nbits];
             ready.then(() {
-                idx = (FIRST_IDX[nbits]
-                    + (code - FIRST_CODE[nbits])).to_usize();
+                idx = (HUF_FIRST_IDX[nbits]
+                    + (code - HUF_FIRST_CODE[nbits])).to_usize();
                 (idx == 256).match({
                     true  => { bad = true; },
-                    false => out.add_byte(SYMTAB[idx])
+                    false => out.add(HUF_SYMTAB[idx])
                         .try(H2Error.DecodeFailed),
                 });
                 code  = 0;
@@ -210,10 +210,9 @@ huf_decode* = (
 }
 
 // ------------------------------------------------------------------
-// HPACK header-block decode. We need only :status out of a response,
-// but every field must still be walked to find the next one. Dynamic
-// table inserts are tolerated and dropped: our advertised table size
-// is 0, so no valid peer can reference them later.
+// HPACK header-block decode. Dynamic table inserts are tolerated and
+// dropped: our advertised table size is 0, so a peer cannot refer to
+// them later.
 // ------------------------------------------------------------------
 
 H2Str = { value: String, pos: usize }
@@ -230,7 +229,7 @@ read_string = (buf: Vec<u8>, a: Alloc, pos: usize) Res<H2Str, H2Error> {
         true  => buf.huf_decode(a, r.pos, r.val).try(),
         false => {
             raw ::= a.String().try(H2Error.DecodeFailed);
-            raw.add_bytes(str_at(buf.ptr().offset(r.pos), r.val))
+            raw.add(str_at(buf.ptr().offset(r.pos), r.val))
                 .try(H2Error.DecodeFailed);
             raw;
         },
@@ -238,19 +237,30 @@ read_string = (buf: Vec<u8>, a: Alloc, pos: usize) Res<H2Str, H2Error> {
     Ok(H2Str(value: s, pos: r.pos + r.val));
 }
 
-// decode a response header block and answer its :status
-hpack_status* = (
+H2Field = { name: String, value: String, pos: usize }
+
+DecodedHeaders = {
+    status :: Res<i32>,
+    pseudo :: bool,
+    bad_pseudo :: bool,
+}
+
+decode_headers = (
     buf  : Vec<u8>,
     a    : Alloc,
     from : usize,
     len  : usize
-) Res<i32, H2Error> {
+) Res<DecodedHeaders, H2Error> {
     (from + len > buf.len).match({
         true  => Err(H2Error.DecodeFailed),
         false => Ok(()),
     }).try();
-    pos: usize  ::= from;
-    status: i32 ::= 0;
+    pos: usize ::= from;
+    decoded    ::= DecodedHeaders(
+        status: None,
+        pseudo: false,
+        bad_pseudo: false,
+    );
 
     loop((h) {
         (pos >= from + len).then(() { h.break(); });
@@ -264,10 +274,9 @@ hpack_status* = (
                     true  => Err(H2Error.DecodeFailed),
                     false => Ok(()),
                 }).try();
-                r.val.static_name().eq(":status").then(() {
-                    status = r.val.static_value().parse_i32()
-                        .ok_or(H2Error.DecodeFailed).try();
-                });
+                name  = r.val.static_name();
+                value = r.val.static_value();
+                decoded.add_decoded(name, value).try();
                 pos = r.pos;
             },
             false => (b >= 64).match({
@@ -275,10 +284,7 @@ hpack_status* = (
                     // literal with incremental indexing
                     r = buf.read_int(pos, 6).try();
                     p = buf.read_name_value(a, r.pos, r.val).try();
-                    p.name.view().eq(":status").then(() {
-                        status = p.value.view().parse_i32()
-                            .ok_or(H2Error.DecodeFailed).try();
-                    });
+                    decoded.add_decoded(p.name.view(), p.value.view()).try();
                     pos = p.pos;
                 },
                 false => (b >= 32).match({
@@ -295,10 +301,10 @@ hpack_status* = (
                         // literal without indexing / never indexed
                         r = buf.read_int(pos, 4).try();
                         p = buf.read_name_value(a, r.pos, r.val).try();
-                        p.name.view().eq(":status").then(() {
-                            status = p.value.view().parse_i32()
-                                .ok_or(H2Error.DecodeFailed).try();
-                        });
+                        decoded.add_decoded(
+                            p.name.view(),
+                            p.value.view()
+                        ).try();
                         pos = p.pos;
                     },
                 }),
@@ -306,13 +312,69 @@ hpack_status* = (
         });
     });
 
-    (status == 0).match({
-        true  => Err(H2Error.DecodeFailed),
-        false => Ok(status),
+    Ok(decoded);
+}
+
+add_decoded = (self :: DecodedHeaders, name: str, value: str)
+              Res<(), H2Error> {
+    name.starts_with(":").then(() { self.pseudo = true; });
+    (name.starts_with(":") && !name.eq(":status"))
+        .then(() { self.bad_pseudo = true; });
+    name.eq(":status").then(() {
+        self.status.match({
+            Ok(_) => Err(H2Error.DecodeFailed).try(),
+            None  => {
+                self.status = Ok(value.parse_i32()
+                    .ok_or(H2Error.DecodeFailed).try());
+            },
+        });
+    });
+    Ok(())
+}
+
+// Decode initial response metadata. Exactly one :status field is required.
+hpack_response_headers* = (
+    buf  : Vec<u8>,
+    a    : Alloc,
+    from : usize,
+    len  : usize
+) Res<H2Head, H2Error> {
+    decoded = buf.decode_headers(a, from, len).try();
+    (!decoded.bad_pseudo).ensure(H2Error.ProtocolFailed).try();
+    status = decoded.status.ok_or(H2Error.DecodeFailed).try();
+    (status >= 100 && status <= 999)
+        .ensure(H2Error.ProtocolFailed).try();
+    (status >= 100 && status < 200).match({
+        true  => Ok(H2Head.Informational(status)),
+        false => Ok(H2Head.Response(status)),
     });
 }
 
-H2Field = { name: String, value: String, pos: usize }
+// Trailers may contain ordinary fields only; pseudo-headers are invalid here.
+hpack_trailer_headers* = (
+    buf  : Vec<u8>,
+    a    : Alloc,
+    from : usize,
+    len  : usize
+) Res<H2Head, H2Error> {
+    decoded = buf.decode_headers(a, from, len).try();
+    (!decoded.pseudo).ensure(H2Error.ProtocolFailed).try();
+    Ok(H2Head.Trailers);
+}
+
+// Decode an initial header block and return only its status.
+hpack_status* = (
+    buf  : Vec<u8>,
+    a    : Alloc,
+    from : usize,
+    len  : usize
+) Res<i32, H2Error> {
+    buf.hpack_response_headers(a, from, len).try().match({
+        Informational(status) => Ok(status),
+        Response(status)      => Ok(status),
+        Trailers              => Err(H2Error.DecodeFailed),
+    })
+}
 
 read_name_value = (
     buf      : Vec<u8>,
@@ -328,7 +390,7 @@ read_name_value = (
                 true  => Err(H2Error.DecodeFailed),
                 false => Ok(()),
             }).try();
-            name.add_bytes(name_idx.static_name()).try(H2Error.DecodeFailed);
+            name.add(name_idx.static_name()).try(H2Error.DecodeFailed);
         },
         false => {
             ns   = buf.read_string(a, p).try();
@@ -368,7 +430,8 @@ block_add_header* = (blk :: String, name: str, value: str) Res<(), H2Error> {
 block_add_lower = (blk :: String, s: str) Res<(), H2Error> {
     blk.block_add_int(0, 7, s.len).try();
     Range(0, s.len).loop((h, i) {
-        blk.add_byte(s[i].to_lower()).try(H2Error.SendFailed);
+        byte: u8 = s[i].to_lower();
+        blk.add(byte).try(H2Error.SendFailed);
     });
     Ok(());
 }

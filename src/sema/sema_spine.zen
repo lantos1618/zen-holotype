@@ -1,28 +1,10 @@
 // src/sema/sema_spine.zen
-// An operator chain is a SPINE, not a tree.
+// Iterative typing for left-associated binary chains.
 //
-// `a + b + c + ..` parses as `((a + b) + c) ..`, and `parse_expr.zen`
-// builds it with a loop (`binary_from` folds each operator onto the
-// left in place) — so a `+` chain's length is bounded by nothing: one
-// line of `tests/corpus/lex/long_single_line.zen` is ten thousand of
-// them.
-//
-// `type_of` on the root recurses once per term (compute_expr,
-// expr_kind, binary_type, type_of); at four frames a term, an
-// eight-megabyte stack runs out past a thousand — a segfault, and "a
-// crash is not a diagnostic" (docs/TESTING.md). The bootstrapper's
-// `gen_c.py:ex_Binary` walks the spine with a loop for the same reason.
-//
-// So the spine is walked with a cursor and typed BOTTOM-UP: every left
-// operand is in `expr_memo` before the level above asks for it, so the
-// recursion left is one level deep however long the line — the same
-// order `binary_type` already types its left operand in.
-//
-// Only the LEFT spine, only through `Binary`. Every other nesting —
-// parens, unary, call args — is recursive descent in the parser too, so
-// `MAX_DEPTH` already bounds it; the binary spine is the one construct
-// that escapes that bound, since it's the one the parser builds
-// iteratively.
+// The parser builds these chains iteratively, so their length is not bounded
+// by recursive-descent depth. Walking the left spine bottom-up memoizes each
+// operand before its parent and keeps expression typing at constant stack
+// depth. Other expression nesting remains recursively bounded.
 
 Expr, ExprId, Binary = std.ast
 AllocError = std.mem
@@ -33,14 +15,7 @@ Checker, Ctx = sema.sema_check
 // the reason that file's header gives
 type_of = sema.sema_type
 
-// Whether there is a spine below this operand at all. Asked at the call
-// site,
-// not as a micro-optimisation: the walk below holds a `Vec` and a
-// cursor, a frame far fatter than the recursion it replaces, and almost
-// every operand has no spine under it. Left unguarded it would sit
-// under every `+`/`==` in the tree and lower the depth at which OTHER
-// constructs run the stack out — measured: nested `.match` lost a third
-// of its headroom to exactly that.
+// Guard the heavier iterative walk; most operands have no left binary spine.
 spine_ahead* = (c: Checker, id: ExprId) bool {
     c.below(id).match({ None => false, Ok(_) => true })
 }
@@ -60,8 +35,7 @@ seed_left_spine* = (c :: Checker, id: ExprId, ctx: Ctx)
             Ok(next) => { spine.add(down).try(); down = next; true },
         });
     });
-    // `take` from the end is a pop, and the spine was collected top
-    // down, so this hands the levels back innermost first.
+    // The spine was collected top-down, so popping visits it deepest first.
     loop(spine.len > 0, (h) {
         spine.take(spine.len - 1).match({
             None   => c.types.unknown(),

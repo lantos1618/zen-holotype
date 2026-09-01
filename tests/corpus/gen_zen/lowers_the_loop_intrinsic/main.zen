@@ -56,22 +56,8 @@ emit = (a: Alloc, text: str, faults :: String) Res<String, AllocError> {
     be.emit_program(0, out).try();
     be.render_diags(faults).try();
     kept ::= a.String().try();
-    kept.add_bytes(out.view()).try();
+    kept.add(out.view()).try();
     Ok(kept);
-}
-
-occurrences = (hay: str, needle: str) usize {
-    n ::= 0;
-    Range(0, hay.len).loop((h, i) {
-        starts_at(hay, needle, i).then(() { n = n + 1; });
-    });
-    n
-}
-
-starts_at = (hay: str, needle: str, i: usize) bool {
-    (i + needle.len <= hay.len)
-        && (Range(0, needle.len).find((k) { hay[i + k] != needle[k] })
-                .match({ Ok(_) => false, None => true }))
 }
 
 main = (env: Env) Res<i32, AllocError> {
@@ -86,40 +72,34 @@ main = (env: Env) Res<i32, AllocError> {
     // call to a symbol nothing defines instead.
     println(
         "loop heads: {}",
-        occurrences(c.view(), "while (") + occurrences(c.view(), "for (;;) {")
+        c.view().count("while (") + c.view().count("for (;;) {")
     );
     // four label definitions, plus the two jumps to one: `h.break(v)`
     // and the `while_` guard, which leaves through the same door.
-    println("break label mentions: {}", occurrences(c.view(), "zg_brk"));
+    println("break label mentions: {}", c.view().count("zg_brk"));
 
     // `h.break(v)` and `h.next()` are gotos and not C's break and
     // continue: an inlined body sits inside the `if` chain a `.match`
     // produced, where a C `break` leaves the chain and not the loop.
-    println(
-        "continue label used: {}",
-        occurrences(c.view(), "goto zg_cnt") == 1
-    );
-    println("no C break statement: {}", occurrences(c.view(), " break;") == 0);
+    println("continue label used: {}", c.view().count("goto zg_cnt") == 1);
+    println("no C break statement: {}", c.view().count(" break;") == 0);
 
     // the erased loop type never reaches a declaration
-    println(
-        "no erased Res reached the C: {}",
-        occurrences(c.view(), "3ResI1_q") == 0
-    );
+    println("no erased Res reached the C: {}", c.view().count("3ResI1_q") == 0);
 
     // `i` is declared ONCE. A store lowered as a declaration would give
     // the second one a shadow number, and the condition would read the
     // first one forever.
     println(
         "the stored local is declared once: {}",
-        occurrences(c.view(), "zu_l1i_2") == 0
+        c.view().count("zu_l1i_2") == 0
     );
 
     // `value` is the element and not the pass count: over Range(10, 13)
     // the walk starts at 10, which only a `start`-seeded counter does.
     println(
         "the walk is seeded from start: {}",
-        occurrences(c.view(), "zu_m5start") > 0
+        c.view().count("zu_m5start") > 0
     );
     Ok(0);
 }

@@ -1,23 +1,7 @@
-// std.mem.mem_arena
-// The arena, and the page authority it draws from.
-//
-// An arena owns pages, hands out bumps of them, and releases every one
-// at once on drop — the default allocator (`alloc ::= env.mem.alloc()`
-// in main, one per test, one per actor). The trade: nothing is ever
-// reused, so allocation is a compare-and-add, and everything is
-// reclaimed in one shot at the end.
-//
-// THE SPLIT THIS FILE DRAWS: Arena owns the memory and is what Drop
-// applies to. The Alloc handle onto it owns nothing — two words, copies
-// freely, not Drop. `alloc.Vec<i32>()` copies those two words in;
-// dropping the arena releases everything they ever handed out.
-//
-// WHY Arena IS ONE POINTER: every Alloc method takes `self: @Self`, so
-// allocation can't write the receiver's own bytes, yet a bump
-// allocator obviously changes state on every allocation. Both are true
-// because what changes lives BEHIND the pointer — Arena is a fixed
-// handle onto an ArenaState, so a bitwise copy sees every bump
-// (DESIGN.md's test for `:`).
+// Arena allocation backed by page authority. An Arena owns its page chain and
+// releases it as a unit on drop; copied Alloc handles own nothing and mutate
+// the shared ArenaState behind the handle. Individual frees are intentionally
+// no-ops, and abandoned reallocations remain live until arena drop.
 
 Alloc, AllocError = std.mem.mem_alloc
 Ptr = std.mem.mem_ptr
@@ -27,25 +11,23 @@ Ptr = std.mem.mem_ptr
 // test doesn't reserve the machine
 PAGE_BYTES: usize = 65536
 
-// bookkeeping ahead of every run raw hands out: its length in bytes,
-// one usize wide. realloc needs the OLD length and DESIGN.md's
-// signature (`realloc(p, count)`) doesn't carry one, so the allocation
-// carries it instead — the one place std pays a word per allocation.
+// Each run stores its byte length immediately before the returned pointer so
+// realloc can recover the old size.
 HEADER_BYTES: usize = usize.BITS / 8
 
-// the strictest alignment any Zen value needs. An arena aligns every
+// The strictest alignment any Zen value needs. An arena aligns every
 // run to this instead of tracking T's own alignment, so realloc never
 // asks Ptr a second layout question
 ALIGN_MAX: usize = 16
 
-// round an offset up to the next multiple of `align`. Alignments are
+// Round an offset up to the next multiple of align. Alignments are
 // powers of two, never zero, so `%` can't trap
 align_up = (offset: usize, align: usize) usize {
     raised = offset + align - 1;
     raised - (raised % align)
 }
 
-// one region from the page authority. Header lives in its own first
+// One region from the page authority. Header lives in its own first
 // bytes (no second allocation); `prev` is the chain drop walks back
 Page* = {
     prev: Ptr<Page>,
@@ -53,9 +35,8 @@ Page* = {
     size: usize,      // bytes available from base
 }
 
-// everything about an arena that CHANGES, behind one pointer. Not
-// exported: what an arena is made of isn't part of what it is (same
-// reason Entry has no star in std.collections).
+// Mutable allocation state behind an Arena handle. Its representation is
+// private so callers cannot detach pages or alter the bump cursor.
 ArenaState = {
     mem: Mem,           // page authority; an arena never has ambient access
     head :: Ptr<Page>,  // the page currently being handed out of
@@ -137,19 +118,10 @@ Arena.impl(Alloc, {
         });
     }
 
-    // an arena never shrinks or reuses: hands out a fresh run, copies
-    // the old one in, old run stays until the whole arena drops. A
-    // null p is a fresh allocation with nothing to copy — an empty Vec
-    // grows through this same call, and that is the COMMON case, not a
-    // corner: every Vec and every String reaches here with `src` null
-    // the first time it grows. `keep` is already 0 then, so the copy
-    // would move no bytes — but it still lowers to `memcpy(dst, NULL,
-    // 0)`, which C99 7.1.4 leaves undefined however many bytes it
-    // moves, and which UBSan reported in 191 of the 698 corpus
-    // programs. Guarded HERE and not inside `Ptr.copy_from`, because
-    // this is the only caller in the tree and it is the one that
-    // already knows the source is null — a guard in the lowering would
-    // put a branch in front of every copy the backend ever emits.
+    // Grow the latest run in place when possible. Otherwise allocate and copy;
+    // a null source is a fresh allocation and must not be passed to memcpy,
+    // even when the requested copy length is zero. This guard belongs here
+    // because realloc owns both the null-source and old-length invariants.
     realloc = <T>(self: @Self, p: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
         src  = p.to<u8>();
         want = p.bytes(count);
@@ -171,20 +143,17 @@ Arena.impl(Alloc, {
         })
     }
 
-    // an arena frees nothing per allocation — every page goes back at
-    // once on drop; this is the design, not a stub
+    // Individual frees are deferred until Arena.drop releases every page.
     free = <T>(self: @Self, p: Ptr<T>) () {}
 })
 
-// The one `::` receiver in std.mem: Drop destroys the receiver's own
-// bytes, run exactly once — why `consume` exists, and why an Arena
-// can't be copied while the Alloc handle onto it can.
+// Drop consumes the Arena owner and releases its page chain exactly once.
 Arena.impl(Drop, {
     drop = (self :: @Self) () {
         s = self.state.read(0);
         page ::= s.head;
         loop(!page.is_null(), (h) {
-            // read the link BEFORE releasing: the header lives in the
+            // Read the link before releasing: the header lives in the
             // region about to go away
             prev = page.read(0).prev;
             s.mem.release(page);
@@ -194,12 +163,8 @@ Arena.impl(Drop, {
     }
 })
 
-// The page authority: the only thing that can obtain memory from the
-// OS, received on Env — law 2, no ambient authority even for pages.
-//
-// Like Alloc it's a handle, so its methods are `:` too: asking for a
-// page changes the OS's idea of this process, not the two words naming
-// the authority.
+// Page authority received through Env. Its methods mutate operating-system
+// state behind the handle rather than the handle's own bytes.
 Mem* = {
     // a fresh arena, rooted here. Owns no pages yet (first raw()
     // chains one) so nothing here can fail — `alloc ::= env.mem.alloc()`

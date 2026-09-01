@@ -123,7 +123,7 @@ and refuses everything else:**
   every byte was plain text, so the `(` in
 
   ```zen
-  out.add_bytes("(zg_fs_kind(").try();
+  out.add("(zg_fs_kind(").try();
   ```
 
   matched as a real open bracket — three of them on that line. Semantic

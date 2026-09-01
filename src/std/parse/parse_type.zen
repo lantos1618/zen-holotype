@@ -1,19 +1,7 @@
 // src/std/parse/parse_type.zen
-// Written types.
-//
-// "`Type` is a WRITTEN type. What sema computes is sema's" — so
-// nothing here resolves a name, checks an arity or decides whether
-// `Vec<T>` exists. It records what the author typed and where.
-//
-// THERE IS NO QUALIFIED TYPE. `std.core.Res` does not parse, because
-// imports bind locally and a type is always reachable by a bare name.
-// Adding one is a design change, not a missing case.
-//
-// A UNION IS FLAT — one `Union` of three members, never a `Union` of a
-// `Union` (`Union` in ast_node.zen says what that buys). The bar is
-// only ever read here in TYPE position: at a declaration's right-hand
-// side the same bar separates enum variants, and parse_decl.zen decides
-// which before this file is ever entered.
+// Syntax for written types. Name resolution and arity checks belong to sema.
+// Imports bind bare type names, so written types are unqualified. Union nodes
+// are flattened while parsing in type position.
 
 AllocError = std.mem
 Span, Ident, no_trivia = std.ast.ast_span
@@ -193,15 +181,8 @@ fn_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     p.fn_type_rest(m, tps, ps, span);
 }
 
-// DESIGN.md, Overloading: "Function types must name their parameters."
-// `(i32, i32) i32` is a legal parameter LIST — a closure infers its
-// types, so a bare name with none is allowed there — and never a legal
-// function type, so the two readings part here and nowhere earlier.
-//
-// Unsaid, it surfaces on the wrong line entirely: `apply = (f: (i32,
-// i32) i32, ..)` typed `f` as a function of two parameters named `i32`
-// and the only complaint was `add` undefined, three lines down at the
-// call.
+// Function types require named parameters. Lambda parameter lists may infer
+// types, so validation waits until the list is known to describe a type.
 named_params = (p :: Parser, ps: Vec<Param>) Res<(), AllocError> {
     ps.loop((h, param) {
         param.type.match({

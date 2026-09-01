@@ -38,14 +38,20 @@ sink_display = gen.gen_c.gen_c_display
 
 // recognising the door
 
-// The bodyless `add(out :: Sink, fmt: str, args: ...)`; `::` distinguishes
+// These names are part of one lowering contract, not incidental spellings:
+// `fmt` is the bodyless format door and `write` is a Sink's raw byte floor.
+// Keep them here so format-door discovery and floor selection cannot drift.
+FORMAT_DOOR*: str = "fmt"
+SINK_FLOOR*: str = "write"
+
+// The bodyless `fmt(out :: Sink, fmt: str, args: ...)`; `::` distinguishes
 // the writable sink from ordinary three-parameter functions.
 is_sink_door* = (be: CBackend, d: Def, f: Function) bool {
-    d.name.eq("add") && be.sink_door_shape(f)
+    d.name.eq(FORMAT_DOOR) && be.sink_door_shape(f)
 }
 
 // The door's shape with the name held out, because the MEMBER form has
-// no `Def` to read a name off — `s.add(..)` carries its name in the
+// no `Def` to read a name off — `s.fmt(..)` carries its name in the
 // access. Stated once so the two forms cannot drift into recognising
 // different declarations.
 sink_door_shape* = (be: CBackend, f: Function) bool {
@@ -83,44 +89,12 @@ variadic_type = (be: CBackend, t: TypeId) bool {
     be.tree.type_at(t).kind.match({ Variadic => true, _ => false })
 }
 
-// `String.add` reaches the same free door through UFCS. Lower the free
-// declaration so writer lookup stays in the door's module; the member's
-// `@Self` describes where bytes land, not the Sink used to dispatch them.
-
-lower_member_door* = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    recv : ExprId,
-    ctx  : Ctx,
-    out  :: String
-) Res<(), AllocError> {
-    be.door_decl().try().match({
-        None  => be.unsupported(id, "a format door with no declaration", out),
-        Ok(d) => be.lower_at_decl(id, c, d, recv, ctx, out),
-    })
-}
-
-lower_at_decl = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    d    : Def,
-    recv : ExprId,
-    ctx  : Ctx,
-    out  :: String
-) Res<(), AllocError> {
-    be.door_fn(d).match({
-        None  => be.unsupported(id, "a format door with no declaration", out),
-        Ok(g) => be.lower_sink_door(id, c, d, g, Ok(recv), ctx, out),
-    })
-}
-
-// A member call names no `text_fmt` path, so find the exported door by
-// its unique shape: writable receiver, format, variadic tail, no body.
+// Buffer formatting needs the free door's declaration so primitive writers
+// stay resolved in the format module. Find the exported door by its name and
+// shape; a member call reaches this declaration through ordinary UFCS.
 door_decl = (be :: CBackend) Res<Res<Def>, AllocError> {
     found ::= be.alloc.Vec<Def>();
-    be.check.world.exported_named("add", found).try();
+    be.check.world.exported_named(FORMAT_DOOR, found).try();
     kept ::= be.alloc.Vec<Def>();
     found.loop((h, x) { be.keep_door(x, kept).try() });
     Ok(kept.get(0));
@@ -635,7 +609,7 @@ DoorCall = {
             ),
         }).try();
         be.write_done(p.done).try();
-        out.add_bytes(p.tmp)
+        out.add(p.tmp)
     }
 }
 
@@ -871,7 +845,7 @@ call_symbol* = (be :: CBackend, d: Def, out :: String)
     sym ::= be.alloc.String().try();
     sym_fn(sym, be.check.types, be.check.world, d.qname, sig, inst).try();
     be.need_function(d, inst, sym.view()).try();
-    out.add_bytes(sym.view())
+    out.add(sym.view())
 }
 
 // `if (zg_tN.zg_tag != Ok) { goto done; }`

@@ -1,45 +1,9 @@
 // src/lsp/lsp_serve.zen
 // The server: lifecycle, a document overlay, and a dispatch table.
-//
-// It answers NINE requests — `lsp_reply.zen`'s `Request` union is that
-// list — and refuses everything else BY NAME with `-32601` and the method
-// spelled back, `src/zen/zen_cli.zen`'s own rule one level down: a
-// command that silently does nothing is worse than one that says it is
-// not written.
-//
-//   initialize                 capabilities, and the gate opens
-//   shutdown                   `null`, and no more work is accepted
-//   textDocument/hover                 lsp_hover.zen
-//   textDocument/definition            lsp_def.zen
-//   textDocument/documentSymbol        lsp_symbol.zen
-//   textDocument/completion            lsp_compl.zen
-//   textDocument/semanticTokens/full   lsp_colour.zen
-//   textDocument/formatting            lsp_fmt.zen
-//   textDocument/codeAction            lsp_action.zen
-//   didOpen / didChange        the overlay, Full sync only
-//   workspace/didChangeWatchedFiles
-//                              retire a build whose disk inputs changed
-//   didClose                   remove the buffer from the overlay
-//   initialized / exit / $/cancelRequest
-//                              notifications, no reply and nothing to do
-//   everything else            -32601, with the method named
-//
-// SYNC IS FULL AND CANNOT USEFULLY BE INCREMENTAL — `design_lsp.md` §5
-// holds the three structural reasons. `$/cancelRequest` is DROPPED and
-// not recorded: there is no yield point in `check_all`, and this server
-// is single-threaded (threads are outside `PLAN.md`'s seed subset).
-//
-// THIS FILE HOLDS NO TRANSPORT. `one` takes request bytes and appends
-// reply bytes; `serve` walks a buffer of frames the same way — so
-// `lsp_stdio.zen` puts a pipe under the same server the corpus drives
-// from a file, and the two answer identically by construction.
-//
-// OVER 500 LINES, per STYLE.md's justification: the subject is one
-// session (lifecycle, document store, the table that routes one
-// message, and the arena discipline of every answer) sharing the
-// `Server` that holds all four. `publishDiagnostics`' own subject is
-// `lsp_diag.zen`'s and the build itself `lsp_built.zen`'s, leaving here
-// the trigger and the routing.
+// Full-sync document notifications update an in-memory overlay. Requests use
+// that overlay and the shared build, unsupported methods return `-32601`, and
+// requests after shutdown are refused. Transport framing lives elsewhere;
+// `one` handles one JSON message and `serve` handles a buffer of frames.
 
 str, String = std.text
 Vec, Map = std.collections
@@ -54,19 +18,14 @@ Sym, symbols_at, write_symbols = lsp.lsp_symbol
 write_edits = lsp.lsp_fmt
 Item, MemberCache, complete_at, complete_shared = lsp.lsp_compl
 sort_items, write_items = lsp.lsp_compl
-// The colours, and the legend `initialize` advertises them under — one
-// file, for the reason `lsp_reply.zen` gives at its own import.
+// Semantic token output and the legend advertised during initialization.
 write_tokens = lsp.lsp_colour
-// The one message this server sends unprompted, the policy that decides
-// when, and the one build the settle and the queries share
-// (`lsp_built.zen` — reached through `Diagnostics`, whose slot it is).
+// Diagnostics policy and the build shared by settled queries.
 Diagnostics, Shared = lsp.lsp_diag
-// The one quickfix: an import line for an undefined name, read off the
-// SAME shared build the diagnostics came from.
+// Quick fixes are derived from the same build as diagnostics.
 write_actions = lsp.lsp_action
 relative_to = zen.zen_path
-// The wire's shapes: a request's fields read, a reply built. Their own
-// file (`lsp_reply.zen`) since the session met STYLE.md's hard cap.
+// Wire request and response helpers.
 method_of, params_of, param, string_at, number_at = lsp.lsp_reply
 result, failed, parse_error, write_hover, write_target = lsp.lsp_reply
 write_capabilities = lsp.lsp_reply
@@ -74,39 +33,27 @@ RpcFault, own_str = lsp.lsp_reply
 request_of = lsp.lsp_reply
 path_of = lsp.lsp_uri
 
-// The whole of the server's state.
-//
-// `docs` maps a URI to the open buffer's text in `docs_arena`: owned,
-// not borrowed from a request, but replaceable as one unit so full-sync
-// edits do not retain every old version for the session.
+// Session state. Open-buffer bytes are owned by `docs_arena`, which is
+// replaced as a unit after full-sync edits.
 Server* = {
     a: Alloc,
 
-    // THE AUTHORITY A QUERY NEEDS. Hover is a build now and reads the
-    // disk, so the server holds the same `Env` the driver does.
+    // Queries use the same environment capabilities as the compiler driver.
     env: Env,
 
     // Full-sync edits replace whole buffers. Their bytes live in this
     // replaceable arena so old versions do not accumulate for the session.
     docs_arena :: Arena,
 
-    // THE WORKSPACE, from `initialize`'s `rootUri`, as a path. Empty
-    // until `initialize` arrives or the client sends none — load-bearing
-    // emptiness: it sends hover back to the single-module answer instead
-    // of building a root nobody named. NOT THE COMPILATION ROOT
-    // (`zen_path.root_for` computes that from the document); this is
-    // only the floor it may not climb past.
+    // Workspace path from `rootUri`; empty means single-file behavior.
     workspace :: str = "",
 
     docs :: Map<str, str>,
 
-    // THE SAME DOCUMENTS, IN OPENING ORDER: a `Map` here cannot be
-    // walked, and a build's overlay must carry EVERY unsaved buffer, not
-    // only the one being edited.
+    // Open documents in stable order for building the complete overlay.
     open :: Vec<str>,
 
-    // What has been said about those documents, and what is owed — the
-    // policy lives in `lsp_diag.zen`; this file only marks and settles.
+    // Published-diagnostic state and pending work.
     notes :: Diagnostics,
 
     // The prefix-free candidate set for the last canonical dot completion.
@@ -116,23 +63,14 @@ Server* = {
     ready :: bool,        // `initialize` has been answered
     stopping :: bool,     // `shutdown` has been answered
 
-    // Whether `shutdown` has been answered. The FIELD stays unexported:
-    // nothing outside this file may decide when the server stops
-    // accepting work.
+    // Once set, no further work is accepted.
     stopped* = (self: @Self) bool { self.stopping }
 
     // Observable for the corpus performance invariant.
     completion_builds* = (self: @Self) usize { self.members.builds }
 
-    // One message: read it, route it, frame whatever it produced.
-    //
-    // `t` IS THE MESSAGE'S OWN ARENA, dropped by the caller when the
-    // reply has been written: the JSON tree, the reply being built and
-    // every answer's scratch live there, so a request leaves nothing
-    // behind. What must outlive the message — the documents, the open
-    // list, what `initialize` learned — borrows the request's BYTES
-    // (which the transport holds for the session) or allocates from
-    // `self.a`, never from `t`.
+    // Route one message. `t` owns request-local parsing and reply scratch;
+    // session state must allocate from `self.a` or the document arena.
     one* = (self :: @Self, t: Alloc, body: str, out :: String)
            Res<(), AllocError> {
         tree ::= t.Jsons();
@@ -141,8 +79,7 @@ Server* = {
             Err(f)  => parse_error(f, msg),
             Ok(req) => self.route(t, tree, req, msg),
         }).try();
-        // AN EMPTY MESSAGE IS A NOTIFICATION AND GETS NO FRAME — the
-        // protocol forbids replying to one.
+        // Notifications produce no reply frame.
         msg.is_empty().match({
             true  => written(),
             false => write_frame(msg.view(), out),
@@ -152,17 +89,14 @@ Server* = {
     route = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, msg :: String)
             Res<(), AllocError> {
         method = method_of(tree, req);
-        // THE PRESENCE OF `id` IS WHAT MAKES A MESSAGE A REQUEST, not
-        // the method name — a table of notification names would be a
-        // second, divergent copy of the spec.
+        // Presence of `id`, rather than the method name, identifies a request.
         tree.field(req, "id").match({
             None    => self.notified(tree, req, method),
             Ok(rid) => self.requested(t, tree, req, method, rid, msg),
         })
     }
 
-    // BEFORE `initialize`, EVERY REQUEST IS REFUSED with `-32002` — the
-    // one piece of lifecycle a server cannot skip.
+    // Requests before initialization receive `-32002`.
     requested = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
                  method: str, rid: JsonId, msg :: String)
                 Res<(), AllocError> {
@@ -178,9 +112,7 @@ Server* = {
         })
     }
 
-    // ONE FLAT MATCH: the string compares already happened, once, in
-    // `request_of` — a compare-per-method ladder nests one level per
-    // method, and the parser budgets stack per nesting level.
+    // `request_of` performs method-string classification once.
     answered = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
                 method: str, rid: JsonId, msg :: String)
                Res<(), AllocError> {
@@ -201,16 +133,7 @@ Server* = {
         })
     }
 
-    // `initialize` IS WHERE A SERVER LEARNS WHERE IT IS: `rootUri`
-    // arrives once and every later request names only a document.
-    //
-    // A CLIENT THAT SENDS NONE IS NOT AN ERROR. `rootUri` is nullable
-    // and a single-file editor session has no root — the field stays
-    // empty and hover falls back to checking the open document alone.
-    //
-    // `rootPath` IS NOT READ — the deprecated spelling of the same
-    // thing, and a second source for one fact can disagree with the
-    // first.
+    // `rootUri` is optional; without it queries use single-file behavior.
     initialized = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
                    rid: JsonId, msg :: String) Res<(), AllocError> {
         self.members.invalidate();
@@ -224,21 +147,17 @@ Server* = {
         result(tree, rid, caps.view(), msg)
     }
 
-    // REFUSED BY NAME: the method is echoed so a client's log says which
-    // request is unimplemented, not that some request failed.
+    // Echo the unsupported method in the error for actionable client logs.
     unknown = (self :: @Self, t: Alloc, tree: Jsons, rid: JsonId, method: str,
                msg :: String) Res<(), AllocError> {
         why ::= t.String().try();
-        why.add_bytes("no handler for ").try();
-        why.add_bytes(method).try();
-        why.add_bytes(
-            " - see docs/design_lsp.md for the stage it arrives at"
-        ).try();
+        why.add("no handler for ").try();
+        why.add(method).try();
+        why.add(" - see docs/design_lsp.md for the stage it arrives at").try();
         failed(tree, rid, RpcFault.MethodNotFound, why.view(), msg)
     }
 
-    // `initialized`, `exit` and `$/cancelRequest` mean "nothing to do
-    // here" and fall through the final arm.
+    // Lifecycle and cancellation notifications need no reply.
     notified = (self :: @Self, tree: Jsons, req: JsonId, method: str)
                Res<(), AllocError> {
         handled: Res<Res<(), AllocError>> = loop<Res<(), AllocError>>((h) {
@@ -259,11 +178,8 @@ Server* = {
         handled.match({ Ok(done) => done, None => written() })
     }
 
-    // OPEN DOCUMENTS COME FROM THE OVERLAY, not disk. VS Code emits a file
-    // watcher notification when one is saved as well as the didChange that
-    // supplied its bytes; invalidating for that second event rebuilt the
-    // same whole program twice. Only a CLOSED dependency can change an input
-    // the build read from disk.
+    // Watcher events invalidate only closed files; open files come from the
+    // overlay and already changed through `didChange`.
     watched = (self :: @Self, tree: Jsons, req: JsonId)
               Res<(), AllocError> {
         changes = param(tree, req, "changes");
@@ -301,9 +217,7 @@ Server* = {
         self.remember(string_at(tree, doc, "uri"), string_at(tree, doc, "text"))
     }
 
-    // FULL SYNC: `contentChanges[0].text` is the whole new buffer, since
-    // `initialize` advertised `textDocumentSync: 1`; a `range` field
-    // would mean incremental sync, never asked for, and is not read.
+    // Full sync replaces the buffer with `contentChanges[0].text`.
     changed = (self :: @Self, tree: Jsons, req: JsonId) Res<(), AllocError> {
         uri   = string_at(tree, param(tree, req, "textDocument"), "uri");
         edits = param(tree, req, "contentChanges");
@@ -314,9 +228,7 @@ Server* = {
         self.remember(uri, text)
     }
 
-    // Closing retires the overlay so subsequent builds read this file
-    // from disk. Map has no removal, so replace the small document store;
-    // the open-order Vec loses the same row.
+    // Closing removes the overlay so later builds read the file from disk.
     closed = (self :: @Self, tree: Jsons, req: JsonId)
              Res<(), AllocError> {
         doc = param(tree, req, "textDocument");
@@ -346,8 +258,7 @@ Server* = {
         self.notes.closed(stable, next)
     }
 
-    // A URI with no text is not stored — an empty document and an
-    // absent one are different states.
+    // Missing text is distinct from an empty document.
     remember = (self :: @Self, uri: str, text: str) Res<(), AllocError> {
         uri.is_empty().match({
             true  => written(),
@@ -410,14 +321,8 @@ Server* = {
         Ok(())
     }
 
-    // THE SETTLE POINT: every message the transport was holding has been
-    // answered, so `lsp_diag.zen`'s `settled` — which ensures rather
-    // than builds — is called here, by `serve` at buffer end and by
-    // `lsp_stdio.zen` after each drain. `t` is the batch's scratch.
-    //
-    // NOTHING IS SENT AFTER `shutdown`: no work is accepted once it has
-    // been answered, and an unprompted notification between `shutdown`
-    // and `exit` is work the client has just said it does not want.
+    // Settle diagnostics after a drained batch. Shutdown suppresses further
+    // work and unsolicited notifications.
     settled* = (self :: @Self, t: Alloc, out :: String) Res<(), AllocError> {
         self.stopping.match({
             true  => written(),
@@ -432,15 +337,7 @@ Server* = {
         })
     }
 
-    // THE ONE REFUSAL ALL SEVEN DOCUMENT QUERIES MAKE, written once: a uri
-    // no `didOpen` ever named. A CLIENT BUG, so `-32602` names it rather
-    // than answering `null`, `[]` or `{}` — each of those reads as
-    // "there is nothing here", which is a different and false statement
-    // about a document the server has never seen.
-    //
-    // `tests/corpus/lsp/every_query_refuses_a_uri_never_opened` asserts
-    // all seven on the wire, because three of them were covered by nothing
-    // and a shared refusal is exactly what turns silently into a `null`.
+    // Document queries require an open URI; an unknown URI receives `-32602`.
     unopened = (self :: @Self, tree: Jsons, rid: JsonId, msg :: String)
                Res<(), AllocError> {
         failed(
@@ -460,10 +357,8 @@ Server* = {
         character = number_at(tree, where, "character");
         self.docs.get(uri).match({
             None     => self.unopened(tree, rid, msg),
-            // THE WORKSPACE DECIDES, the way `lsp_hover.zen`'s header
-            // spells out: without one the lone module answers from the
-            // request's own arena, with one the SHARED build's checker
-            // does — so a hover after a settle builds nothing.
+            // Use the shared workspace build when available, otherwise check
+            // the open module alone.
             Ok(text) => {
                 body ::= t.String().try();
                 self.workspace.is_empty().match({
@@ -488,9 +383,8 @@ Server* = {
         })
     }
 
-    // COLOUR READS WHAT THE DIAGNOSTICS' BUILD SETTLED, and an empty
-    // `classes_for` IS the lexical answer, so the fallback costs no
-    // branch.
+    // Semantic classifications come from the settled build; an empty set
+    // requests lexical fallback.
     coloured = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
                 rid: JsonId, msg :: String) Res<(), AllocError> {
         uri = string_at(tree, param(tree, req, "textDocument"), "uri");
@@ -505,10 +399,7 @@ Server* = {
         })
     }
 
-    // THE SESSION, HANDED TO THE BUILD. `lsp_diag.zen`'s `shared` wants
-    // four fields off this server alongside the document's path, and all
-    // three workspace-backed queries below want the same five — so they
-    // are named once here rather than at each call.
+    // Snapshot the session inputs shared by workspace-backed queries.
     build_for = (self :: @Self, path: str, t: Alloc) Res<Shared, AllocError> {
         self.notes.shared(
             self.env,
@@ -520,10 +411,7 @@ Server* = {
         )
     }
 
-    // HOVER OFF THE SHARED BUILD, the way `write_definition` below does
-    // it — `lsp_diag.zen`'s `shared` is what ensures the slot, and its
-    // `None` arm is unreachable, falling back to a per-request build of
-    // its own rather than a guess.
+    // Ensure and query the shared build for hover information.
     shared_hover = (self :: @Self, t: Alloc, uri: str, text: str,
                     line: usize, character: usize, body :: String)
                    Res<(), AllocError> {
@@ -559,18 +447,16 @@ Server* = {
         })
     }
 
-    // A hover, or the protocol's `null` when the position answered
-    // nothing — the two lines every hover answer shares, once.
+    // Emit hover information or protocol `null` when no symbol is present.
     write_hovered = (self :: @Self, h: Hover, body :: String)
                     Res<(), AllocError> {
         h.found.match({
-            false => body.add_bytes("null"),
+            false => body.add("null"),
             true  => write_hover(h, body),
         })
     }
 
-    // DEFINITION and COMPLETION take the same two params as hover and
-    // let THE WORKSPACE DECIDE the same way `hovered` above spells out.
+    // Definition and completion follow the same workspace selection as hover.
     defined = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
                msg :: String) Res<(), AllocError> {
         uri       = string_at(tree, param(tree, req, "textDocument"), "uri");
@@ -609,8 +495,7 @@ Server* = {
         path = path_of(uri);
         sh   = self.build_for(path, t).try();
         sh.c.match({
-            // Unreachable, as in `shared_hover`; the per-request build
-            // answers instead.
+            // Fall back to the per-request path if no shared build is present.
             None  => {
                 qa ::= self.env.mem.alloc();
                 write_target(
@@ -645,10 +530,7 @@ Server* = {
         })
     }
 
-    // THE OUTLINE NEEDS NO BUILD AND NO WORKSPACE: a declaration's kind
-    // and spans are AST facts, so the buffer alone answers — the same
-    // economy colour's lexical half makes. Its scratch is the request's
-    // arena, like every other answer's.
+    // Document symbols use only the open buffer's syntax tree.
     outlined = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
                 msg :: String) Res<(), AllocError> {
         uri = string_at(tree, param(tree, req, "textDocument"), "uri");
@@ -664,9 +546,7 @@ Server* = {
         })
     }
 
-    // FORMATTING NEEDS NO BUILD AND NO WORKSPACE, the same economy the
-    // outline makes. Every refusal is `lsp_fmt.zen`'s and every one of
-    // them is `[]`, for the reason its header gives.
+    // Formatting uses the open buffer and returns no edits on refusal.
     formatted = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
                  rid: JsonId, msg :: String) Res<(), AllocError> {
         uri = string_at(tree, param(tree, req, "textDocument"), "uri");
@@ -680,11 +560,8 @@ Server* = {
         })
     }
 
-    // CODE ACTION IS A QUERY ON THE SETTLED BUILD, the way definition is:
-    // the names it offers imports for come from the checker's OWN diags,
-    // so no workspace or no build in the slot means `[]` — never a guess
-    // (`lsp_action.zen's` header), never a per-request rebuild (the settle
-    // at batch end holds the state a quickfix asks about).
+    // Code actions use diagnostics from the settled build; without one the
+    // correct response is an empty action list.
     acted = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId, rid: JsonId,
              msg :: String) Res<(), AllocError> {
         uri   = string_at(tree, param(tree, req, "textDocument"), "uri");
@@ -696,7 +573,7 @@ Server* = {
             Ok(text) => {
                 body ::= t.String().try();
                 self.workspace.is_empty().match({
-                    true  => body.add_bytes("[]"),
+                    true  => body.add("[]"),
                     false => self.shared_actions(
                         t,
                         uri,
@@ -719,7 +596,7 @@ Server* = {
         path = path_of(uri);
         sh   = self.build_for(path, t).try();
         sh.c.match({
-            None  => body.add_bytes("[]"),
+            None  => body.add("[]"),
             Ok(c) => write_actions(
                 c,
                 t,
@@ -735,8 +612,7 @@ Server* = {
         })
     }
 
-    // Plain completion reads the shared (or lone-module) checker. A dot
-    // needs DUMMY-patched text; `members` caches its prefix-free candidates.
+    // Dot completion uses patched text and caches prefix-free candidates.
     completed = (self :: @Self, t: Alloc, tree: Jsons, req: JsonId,
                  rid: JsonId, msg :: String) Res<(), AllocError> {
         uri       = string_at(tree, param(tree, req, "textDocument"), "uri");
@@ -787,8 +663,7 @@ Server* = {
         path = path_of(uri);
         sh   = self.build_for(path, t).try();
         done = sh.c.match({
-            // Unreachable, as in `write_definition`; the patched build
-            // below answers instead.
+            // The patched per-request build handles this fallback.
             None  => false,
             Ok(c) => self.shared_completion(
                 c,
@@ -885,16 +760,8 @@ server_with_docs = (a: Alloc, env: Env, docs_arena :: Arena) Server {
 }
 
 // Every frame in `input`, answered into `out`.
-//
-// A malformed frame STOPS the session: framing is the one layer where
-// recovery is impossible — the header of this message is the only thing
-// that says where the next starts, so skipping forward would
-// resynchronise onto a byte inside somebody's document.
-//
-// THE BUFFER FORM ANSWERS FROM THE SESSION ARENA THROUGHOUT — `s.a`
-// stands in for the per-message scratch `lsp_stdio.zen` hands `one`,
-// since a file-driven session ends with the process and nothing is
-// reclaimed before then anyway.
+// A malformed frame stops processing because the next frame boundary cannot
+// be recovered safely. Buffer-driven sessions use the session arena.
 serve* = (s :: Server, input: str, out :: String) Res<(), AllocError> {
     at    ::= 0;
     going ::= true;
@@ -904,19 +771,18 @@ serve* = (s :: Server, input: str, out :: String) Res<(), AllocError> {
             Ok(fr) => { at = fr.next; s.one(s.a, fr.body, out).try(); },
         });
     });
-    // THE END OF A BUFFER IS A SETTLE POINT — what makes a batch of
-    // changes cost one build.
+    // Settle once after the complete buffered batch.
     s.settled(s.a, out)
 }
 
 // A framing fault is reported to the caller's stream, not to a client
 // (which cannot be replied to if it cannot be framed).
 frame_fault = (f: FrameFault, out :: String) Res<(), AllocError> {
-    out.add_bytes("lsp: bad frame at byte ").try();
+    out.add("lsp: bad frame at byte ").try();
     write_decimal(f.byte(), out).try();
-    out.add_bytes(" (").try();
-    out.add_bytes(f.why()).try();
-    out.add_bytes(")\n")
+    out.add(" (").try();
+    out.add(f.why()).try();
+    out.add(")\n")
 }
 
 // The arena string-copy the document store and the workspace keep is

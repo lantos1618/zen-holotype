@@ -6,6 +6,8 @@ Alloc = std.mem
 Env = std.env
 Vec = std.collections
 str = std.text
+Range = std.core
+Options, options = std.cli
 
 // Temporary @meta boundary: std cannot import the compiler's std/ast
 // layer. The driver supplies this bodiless query; @meta will replace both
@@ -30,10 +32,65 @@ Arch* = X86_64 | Arm64
 // ABI belongs to target identity because it controls foreign layouts.
 Abi* = Gnu | Musl | Msvc | Darwin
 
+StableName* = {
+    stable_name* ::= (self: @Self) str
+}
+
+Os.impl(StableName, {
+    stable_name = (self: @Self) str {
+        self.match({ Macos => "macos", Linux => "linux", Windows => "windows" })
+    }
+})
+
+Arch.impl(StableName, {
+    stable_name = (self: @Self) str {
+        self.match({ X86_64 => "x86_64", Arm64 => "arm64" })
+    }
+})
+
+Abi.impl(StableName, {
+    stable_name = (self: @Self) str {
+        self.match({ Gnu => "gnu", Musl => "musl", Msvc => "msvc", Darwin => "darwin" })
+    }
+})
+
 Target* = {
     os*: Os,
     arch*: Arch,
     abi*: Abi,
+
+    // Clang's canonical target spelling. None means the three independently
+    // valid coordinates do not form a target this toolchain supports.
+    clang_triple* = (self: @Self) Res<str> {
+        self.os.match({
+            Linux   => self.arch.match({
+                X86_64 => self.abi.match({
+                    Gnu => Ok("x86_64-linux-gnu"), Musl => Ok("x86_64-linux-musl"), _ => None
+                }),
+                Arm64  => self.abi.match({
+                    Gnu => Ok("aarch64-linux-gnu"), Musl => Ok("aarch64-linux-musl"), _ => None
+                }),
+            }),
+            Macos   => self.abi.match({
+                Darwin => self.arch.match({
+                    X86_64 => Ok("x86_64-apple-darwin"),
+                    Arm64  => Ok("arm64-apple-darwin"),
+                }),
+                _      => None,
+            }),
+            Windows => self.arch.match({
+                X86_64 => self.abi.match({
+                    Msvc => Ok("x86_64-pc-windows-msvc"),
+                    Gnu  => Ok("x86_64-w64-windows-gnu"),
+                    _    => None,
+                }),
+                Arm64  => self.abi.match({
+                    Msvc => Ok("aarch64-pc-windows-msvc"),
+                    _    => None,
+                }),
+            }),
+        })
+    }
 }
 
 // Packages are fetched into a content-addressed cache and hash-verified.
@@ -100,6 +157,205 @@ Budget* = {
     bytes_op*: u64,
 }
 
+// A validated compiler build invocation. Emission is a sum rather than three
+// fields whose combinations every caller must interpret. `Check` is the
+// programmatic, no-output mode; the CLI rejects a command that never selected
+// one of the C modes.
+Emission* = Check | CStdout | CFile(str) | CDir(str)
+
+// Deterministic module-walk variations used to verify order independence.
+Permutation* = Natural | Reverse | Rotate | Interleave
+
+Permutation.impl(StableName, {
+    stable_name = (self: @Self) str {
+        self.match({
+            Natural    => "",
+            Reverse    => "reverse",
+            Rotate     => "rotate",
+            Interleave => "interleave",
+        })
+    }
+})
+
+index* = (self: Permutation, n: usize, i: usize) usize {
+    self.match({
+        Natural    => i,
+        Reverse    => n - 1 - i,
+        Rotate     => (i + 1) % n,
+        Interleave => interleaved(n, i),
+    })
+}
+
+interleaved = (n: usize, i: usize) usize {
+    half = n / 2;
+    (i < half).match({
+        true  => i * 2 + 1,
+        false => (i - half) * 2,
+    })
+}
+
+permutation* = (text: str) Permutation {
+    text.match({
+        "reverse"    => Permutation.Reverse,
+        "rotate"     => Permutation.Rotate,
+        "interleave" => Permutation.Interleave,
+        _            => Permutation.Natural,
+    })
+}
+
+BuildArgs* = {
+    root*: str,
+    emission* :: Emission = Emission.Check,
+    entry* :: str = "",
+    std_root* :: str = "",
+    symbol_map* :: str = "",
+    ffi* :: bool = false,
+    repeat* :: usize = 1,
+    permute* :: Permutation = Permutation.Natural,
+
+    emits* = (self: @Self) bool {
+        self.emission.match({ Check => false, _ => true })
+    }
+
+    writes_file* = (self: @Self) bool {
+        self.emission.match({ CFile(_) => true, _ => false })
+    }
+}
+
+// The one raw record populated by a build-option parser. It is shared with
+// std.build rather than mirrored inside a compiler CLI. Only `finish`
+// interprets the temporary `--emit-c`/`-o`/`--emit-c-dir` combination and
+// constructs the validated BuildArgs above.
+BuildFlags* = {
+    root* :: str = "",
+    out* :: str = "",
+    dir* :: str = "",
+    entry* :: str = "",
+    std_root* :: str = "",
+    symbol_map* :: str = "",
+    emit_c* :: bool = false,
+    ffi* :: bool = false,
+    repeat* :: usize = 1,
+    permute* :: str = "",
+
+    set_root* = (self :: @Self, value: str) () { self.root = value; }
+    set_out* = (self :: @Self, value: str) () { self.out = value; }
+    set_dir* = (self :: @Self, value: str) () {
+        self.emit_c = true;
+        self.dir    = value;
+    }
+    set_entry* = (self :: @Self, value: str) () { self.entry = value; }
+    set_std_root* = (self :: @Self, value: str) () { self.std_root = value; }
+    set_symbol_map* = (self :: @Self, value: str) () {
+        self.symbol_map = value;
+    }
+    set_repeat* = (self :: @Self, value: usize) () { self.repeat = value; }
+    set_permute* = (self :: @Self, value: str) () { self.permute = value; }
+    enable_emit_c* = (self :: @Self) () { self.emit_c = true; }
+    enable_ffi* = (self :: @Self) () { self.ffi = true; }
+
+    apply_switch* = (self :: @Self, flag: BuildFlag) () {
+        flag.match({
+            EmitC => self.enable_emit_c(),
+            Ffi   => self.enable_ffi(),
+            _     => (),
+        });
+    }
+
+    apply_setting* = (self :: @Self, flag: BuildFlag, value: str) () {
+        flag.match({
+            EmitDir   => self.set_dir(value),
+            Out       => self.set_out(value),
+            Entry     => self.set_entry(value),
+            StdRoot   => self.set_std_root(value),
+            SymbolMap => self.set_symbol_map(value),
+            Repeat    => self.set_repeat(repeat_count(value)),
+            Permute   => self.set_permute(value),
+            _         => (),
+        });
+    }
+
+    finish* = (self: @Self) Res<BuildArgs, BuildArgFault> {
+        self.root.is_empty().match({
+            true  => Err(BuildArgFault.MissingRoot),
+            false => self.emit_c.match({
+                false => Err(BuildArgFault.MissingEmit),
+                true  => Ok(BuildArgs(
+                    root: self.root,
+                    emission: self.emission(),
+                    entry: self.entry,
+                    std_root: self.std_root,
+                    symbol_map: self.symbol_map,
+                    ffi: self.ffi,
+                    repeat: self.repeat,
+                    permute: permutation(self.permute)
+                )),
+            }),
+        })
+    }
+
+    emission = (self: @Self) Emission {
+        self.dir.is_empty().match({
+            false => Emission.CDir(self.dir),
+            true  => self.out.is_empty().match({
+                true  => Emission.CStdout,
+                false => Emission.CFile(self.out),
+            }),
+        })
+    }
+}
+
+BuildArgFault* = MissingRoot | MissingEmit
+
+// The build option vocabulary lives with BuildArgs. Frontends provide argv
+// mechanics; this module owns the spelling and meaning of every build flag.
+BuildFlag* = EmitC
+    | EmitDir
+    | Out
+    | Entry
+    | StdRoot
+    | SymbolMap
+    | Repeat
+    | Permute
+    | Ffi
+
+FLAG_EMIT_C*: str = "--emit-c"
+FLAG_EMIT_DIR*: str = "--emit-c-dir"
+FLAG_OUT*: str = "-o"
+FLAG_ENTRY*: str = "--entry"
+FLAG_STD*: str = "--std"
+FLAG_SYMBOL_MAP*: str = "--symbol-map"
+FLAG_REPEAT*: str = "--repeat"
+FLAG_PERMUTE*: str = "--permute"
+FLAG_FFI*: str = "--ffi"
+ZEN_STD_ENV*: str = "ZEN_STD"
+
+build_options* = (a: Alloc) Res<Options<BuildFlag>, AllocError> {
+    declared ::= options<BuildFlag>(a);
+    declared.flag(FLAG_EMIT_C, BuildFlag.EmitC).try();
+    declared.setting(FLAG_EMIT_DIR, BuildFlag.EmitDir).try();
+    declared.setting(FLAG_OUT, BuildFlag.Out).try();
+    declared.setting(FLAG_ENTRY, BuildFlag.Entry).try();
+    declared.setting(FLAG_STD, BuildFlag.StdRoot).try();
+    declared.setting(FLAG_SYMBOL_MAP, BuildFlag.SymbolMap).try();
+    declared.setting(FLAG_REPEAT, BuildFlag.Repeat).try();
+    declared.setting(FLAG_PERMUTE, BuildFlag.Permute).try();
+    declared.flag(FLAG_FFI, BuildFlag.Ffi).try();
+    Ok(declared)
+}
+
+repeat_count = (text: str) usize {
+    n      ::= 0;
+    digits ::= !text.is_empty();
+    Range(0, text.len).loop((h, i) {
+        text.index(i).digit_value().match({
+            Ok(value) => { n = n * 10 + value.to_usize(); },
+            None      => { digits = false; },
+        });
+    });
+    (digits && n > 0).match({ true => n, false => 1 })
+}
+
 // The driver supplies these bodiless methods. `::` receivers mutate the
 // graph; `:` receivers only inspect parsed state or target identity.
 Builder* = {
@@ -107,6 +363,10 @@ Builder* = {
     arch*: Arch,
     env*: Env,
     alloc*: Alloc,   // build-time arena
+    // The same invocation record the CLI and compiler driver consume. The
+    // closed graph executor does not materialize Builder field reads yet, so
+    // it leaves this default in place until it receives an invocation too.
+    args*: BuildArgs = BuildArgs(root: ""),
 
     // Inspect parsed declarations without executing project code.
     module* = (self: @Self, path: Path) Module

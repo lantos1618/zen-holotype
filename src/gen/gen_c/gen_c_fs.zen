@@ -9,7 +9,6 @@ AllocError = std.mem
 str, String = std.text
 TyId = sema.sema_ty
 Ctx = sema.sema_check
-write_usize = sema.sema_diag
 sym_member, sym_variant, sym_gen, RES_PATH = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
@@ -98,14 +97,14 @@ FsSite = {
         be.fs_chain(self.ret, rc.view(), dst.view(), 1).try();
         be.close_else().try();
         value ::= be.alloc.String().try();
-        value.add_bytes("(").try();
+        value.add("(").try();
         be.ctype(lty, value).try();
-        value.add_bytes("){ .").try();
+        value.add("){ .").try();
         sym_member(value, "fd").try();
         value.fmt(" = {} }", fd.view()).try();
         be.write_assign_ok(self.ret, value.view(), dst.view()).try();
         be.close_brace().try();
-        out.add_bytes(dst.view())
+        out.add(dst.view())
     }
 
     read = (self: @Self, be :: CBackend, aty: TyId, out :: String)
@@ -172,7 +171,7 @@ FsSite = {
         );
         run.body(be).try();
         be.close_brace().try();
-        out.add_bytes(dst.view())
+        out.add(dst.view())
     }
 }
 
@@ -234,26 +233,26 @@ FsRead = {
     write_ok = (self: @Self, be :: CBackend, buf: str)
                Res<(), AllocError> {
         value ::= be.alloc.String().try();
-        value.add_bytes("(").try();
+        value.add("(").try();
         be.ctype(self.sty, value).try();
-        value.add_bytes("){ .").try();
+        value.add("){ .").try();
         sym_member(value, "data").try();
-        value.add_bytes(" = ").try();
+        value.add(" = ").try();
         self.write_vec(be, buf, value).try();
-        value.add_bytes(" }").try();
+        value.add(" }").try();
         be.write_assign_ok(self.ret, value.view(), self.dst)
     }
 
     write_vec = (self: @Self, be :: CBackend, buf: str, out :: String)
                 Res<(), AllocError> {
-        out.add_bytes("(").try();
+        out.add("(").try();
         be.ctype(self.vty, out).try();
-        out.add_bytes("){ ").try();
+        out.add("){ ").try();
         be.write_vec_field(self.vty, "data", buf, out, true).try();
         be.write_vec_field(self.vty, "len", self.got, out, false).try();
         be.write_vec_field(self.vty, "capacity", self.want, out, false).try();
         be.write_vec_field(self.vty, "alloc", self.al, out, false).try();
-        out.add_bytes(" }").try();
+        out.add(" }").try();
         Ok(())
     }
 }
@@ -303,7 +302,7 @@ lower_write* = (
     be.close_else().try();
     be.write_assign_ok_unit(ret, dst.view()).try();
     be.close_brace().try();
-    out.add_bytes(dst.view())
+    out.add(dst.view())
 }
 
 write_fs_call = (be :: CBackend, rc: str, fn: str, first: str, second: str)
@@ -329,12 +328,12 @@ lower_lock* = (
 write_lock_call = (be :: CBackend, rc: str, path: str, fd: str)
                   Res<(), AllocError> {
     line ::= be.alloc.String().try();
-    line.add_bytes(rc).try();
-    line.add_bytes(" = zg_fs_lock(").try();
-    line.add_bytes(path).try();
-    line.add_bytes(", &").try();
-    line.add_bytes(fd).try();
-    line.add_bytes(");\n").try();
+    line.add(rc).try();
+    line.add(" = zg_fs_lock(").try();
+    line.add(path).try();
+    line.add(", &").try();
+    line.add(fd).try();
+    line.add(");\n").try();
     be.write(line.view())
 }
 
@@ -360,13 +359,13 @@ lower_unlock* = (
     // Parenthesize the address before `->fd`; otherwise `&x->fd` parses as
     // `&(x->fd)`. A separate buffer avoids growing a String through its view.
     ptr ::= be.alloc.String().try();
-    ptr.add_bytes("(").try();
-    ptr.add_bytes(addr.view()).try();
-    ptr.add_bytes(")").try();
+    ptr.add("(").try();
+    ptr.add(addr.view()).try();
+    ptr.add(")").try();
     field ::= be.alloc.String().try();
     be.arrow_field(ptr.view(), "fd", field).try();
     be.unlock_line(field.view()).try();
-    out.add_bytes("0").try();
+    out.add("0").try();
     Ok(())
 }
 
@@ -383,8 +382,8 @@ unlock_line = (be :: CBackend, field: str) Res<(), AllocError> {
 // member mangler so the C name cannot drift from the type's own.
 arrow_field = (be :: CBackend, addr: str, name: str, out :: String)
               Res<(), AllocError> {
-    out.add_bytes(addr).try();
-    out.add_bytes("->").try();
+    out.add(addr).try();
+    out.add("->").try();
     out.sym_member(name)
 }
 
@@ -415,7 +414,7 @@ lower_remove* = (
     be.close_else().try();
     be.write_assign_ok(ret, yes.view(), dst.view()).try();
     be.close_brace().try();
-    out.add_bytes(dst.view())
+    out.add(dst.view())
 }
 
 write_remove_call = (be :: CBackend, rc: str, yes: str, path: str)
@@ -518,8 +517,8 @@ write_named_init = (
     out   :: String,
     first : bool
 ) Res<(), AllocError> {
-    first.match({ true => Ok(()), false => out.add_bytes(", ") }).try();
-    out.add_bytes(".").try();
+    first.match({ true => Ok(()), false => out.add(", ") }).try();
+    out.add(".").try();
     out.sym_member(name).try();
     out.fmt(" = {value}").try();
     Ok(());
@@ -555,7 +554,7 @@ fs_chain* = (be :: CBackend, ret: TyId, rc: str, dst: str, n: usize)
 open_ordinal_test = (be :: CBackend, rc: str, n: usize)
                     Res<(), AllocError> {
     ord ::= be.alloc.String().try();
-    write_usize(ord, n).try();
+    ord.write_usize(n).try();
     be.fmt("if ({rc} == {}) {\n", ord.view()).try();
     be.indent();
     Ok(());

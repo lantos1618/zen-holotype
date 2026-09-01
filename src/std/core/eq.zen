@@ -1,25 +1,20 @@
 // src/std/core/eq.zen
-// equality — one half of Map's bound: the hash finds the row fast,
+// Equality — one half of Map's bound: the hash finds the row fast,
 // eq confirms the key.
 //
-// nothing is imported or impl'd here: a trait sits BELOW the types
+// Nothing is imported or implemented here: a trait sits below the types
 // that satisfy it, so an impl lives with the type — str's impl beside
 // Eq would make std.core depend on std.text and invert the module graph
 
 Eq* = {
-    // required (`=` with no body): DESIGN.md's default is an @meta
-    // field-wise walk, and @meta is stage 5 — outside the seed subset.
-    // until it lands, a type that wants equality writes this one method
+    // Required until a default field-wise implementation is available.
     eq* = (self: @Self, other: @Self) bool
 
-    // sealed law: ne is always !eq, so the two can never diverge
+    // ne is derived so implementations cannot disagree with eq.
     ne* = (self: @Self, other: @Self) bool { !self.eq(other) }
 }
 
-// membership — equality asked of a list. A run of `||` spells the
-// same question once per answer and repeats the subject every time;
-// `name.is_in(["i8", "i16"])` states subject, question and answer set
-// once each.
+// Membership by equality over any Range.
 //
 // `R: Range<T>` and not an array type, for the reason the loop family
 // gives (std.core.range): a bound monomorphises where an
@@ -28,21 +23,12 @@ Eq* = {
 // argument, so its storage is the caller's frame — nothing here
 // outlives the call.
 //
-// A PRIMITIVE IS AN ORDINARY SUBJECT: every integer and `bool` impls Eq
-// beside its own declaration (std.core.num, std.core.bool), so
-// `b.is_in([' ', '\t'])` is the form a run of `||` was spelling out. The
-// impls have to live there and not here — an impl is only ever consulted
-// through the module that DECLARES its target, and one written beside
-// the trait would be dead text. Floats are the deliberate omission:
-// `NaN != NaN`, so membership would answer "no" about a value that is in
-// the list.
+// Every integer and bool implements Eq beside its declaration, so primitives
+// are ordinary subjects. Floats deliberately do not: NaN is not equal to
+// itself, which would make membership misleading.
 //
-// AN ACCUMULATOR AND NOT `xs.find((v) { v.eq(x) })`, which is the same
-// walk with a name on it and would ordinarily be the rule. The
-// bootstrapper drops the type parameters when a generic body reaches a
-// generic through a lambda and emits `Res<q>` with `q` unsubstituted,
-// so the find spelling compiles here and fails at `cc` in every one of
-// the 45 differential tests that stages this file.
+// The explicit accumulator keeps the generic walk direct and lets it stop on
+// the first match.
 is_in* = <T: Eq, R: Range<T>>(x: T, xs: R) bool {
     hit ::= false;
     xs.loop((h, v) { v.eq(x).then(() { hit = true; h.break(); }) });

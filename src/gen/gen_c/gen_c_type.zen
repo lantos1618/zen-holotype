@@ -30,13 +30,13 @@ AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
-TyId, TyNamed, TyRes, c_integer = sema.sema_ty
+TyId, TyNamed, TyRes, c_integer, is_failure = sema.sema_ty
 DeclId = sema.sema_id
 Def, decl_at = sema.sema_def
 Ctx = sema.sema_check
 type_from_ast = sema.sema_denote
 union_reading = sema.sema_union
-sym_type, is_failure, is_c_identifier = gen.gen_name
+sym_type, is_c_identifier = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 Inst = sema.sema_inst
 sub_with, enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
@@ -54,12 +54,12 @@ request_slots = gen.gen_c.gen_c_fat
 // diagnostic.
 ctype* = (be :: CBackend, id: TyId, out :: String) Res<(), AllocError> {
     be.types().at(id).match({
-        Prim(p)  => out.add_bytes(c_prim(p.name)),
+        Prim(p)  => out.add(c_prim(p.name)),
         Named(n) => be.maybe_ptr(id, n, out),
         Res(_)   => be.named_ctype(id, out),
         Union(_) => be.named_ctype(id, out),
         Array(_) => be.named_ctype(id, out),
-        _        => out.add_bytes("int"),
+        _        => out.add("int"),
     }).try();
     Ok(());
 }
@@ -90,7 +90,7 @@ maybe_ptr = (be :: CBackend, id: TyId, n: TyNamed, out :: String)
 maybe_scope = (be :: CBackend, id: TyId, n: TyNamed, out :: String)
               Res<(), AllocError> {
     is_scope_named(n).match({
-        true  => out.add_bytes("zg_scope *"),
+        true  => out.add("zg_scope *"),
         false => be.maybe_named_ctype(id, n, out),
     })
 }
@@ -101,7 +101,7 @@ maybe_scope = (be :: CBackend, id: TyId, n: TyNamed, out :: String)
 maybe_named_ctype = (be :: CBackend, id: TyId, n: TyNamed, out :: String)
                     Res<(), AllocError> {
     be.foreign_binding(n).match({
-        Ok(_) => out.add_bytes("int"),
+        Ok(_) => out.add("int"),
         None  => be.named_ctype(id, out),
     })
 }
@@ -123,7 +123,7 @@ ptr_ctype = (be :: CBackend, n: TyNamed, out :: String)
             Res<(), AllocError> {
     n.args.get(0).match({
         Ok(t) => be.elem_ctype(t, out),
-        None  => out.add_bytes("void *"),
+        None  => out.add("void *"),
     })
 }
 
@@ -140,17 +140,17 @@ elem_ctype = (be :: CBackend, t: TyId, out :: String) Res<(), AllocError> {
 write_opaque_ptr = (be :: CBackend, raw: COpaque, out :: String)
                    Res<(), AllocError> {
     is_c_identifier(raw.spelling).match({
-        true  => out.add_bytes(raw.spelling),
-        false => out.add_bytes("int"),
+        true  => out.add(raw.spelling),
+        false => out.add("int"),
     }).try();
-    out.add_bytes(" *")
+    out.add(" *")
 }
 
 write_elem_ctype = (be :: CBackend, t: TyId, out :: String)
                    Res<(), AllocError> {
     be.request_type(t).try();
     be.ctype(t, out).try();
-    out.add_bytes(" *")
+    out.add(" *")
 }
 
 named_ctype = (be :: CBackend, id: TyId, out :: String) Res<(), AllocError> {

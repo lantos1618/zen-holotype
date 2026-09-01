@@ -40,11 +40,13 @@ Actual = sema.sema_call
 recv_sig_fits, ty_at, tail_swallows = sema.sema_cand
 Case, cases_of, find_case = sema.sema_case
 is_case = sema.sema_match
-module_of, sym_fn, sym_member, sym_variant = gen.gen_name
+sym_fn, sym_member, sym_variant, qualify = gen.gen_name
 CBackend, MethodRef = gen.gen_c.gen_c_state
 unsupported, unresolved = gen.gen_c.gen_c_report
-sub_with, any_open, recv_inst, inst_open = gen.gen_c.gen_c_mono
-enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
+sub, sub_with, any_open, recv_inst, inst_open = gen.gen_c.gen_c_mono
+intern_var, unify, arg_type = gen.gen_c.gen_c_mono
+owner_of = sema.sema_inst
+enter_tparams, enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 ctype, is_unit = gen.gen_c.gen_c_type
 expr, ty_of, want_of = gen.gen_c.gen_c_expr
 has_call, holds = gen.gen_c.gen_c_expr
@@ -54,19 +56,20 @@ write_arg_at = gen.gen_c.gen_c_call
 handle_depth, lower_handle_call = gen.gen_c.gen_c_handle
 inlines, inline_method = gen.gen_c.gen_c_inline
 is_ptr_member, lower_ptr_member = gen.gen_c.gen_c_ptr
-lower_create = gen.gen_c.gen_c_alloc
+lower_create, alloc_raw = gen.gen_c.gen_c_alloc
 CapabilityKind, capability_kind, lower_capability = gen.gen_c.gen_c_cap
 is_fat = gen.gen_c.gen_c_fat
 lower_fat_call = gen.gen_c.gen_c_bound
 lower_assoc_call = gen.gen_c.gen_c_assoc
 lower_meta_walk, lower_meta_proj = gen.gen_c.gen_c_meta
-sink_door_shape, lower_member_door = gen.gen_c.gen_c_sink
+sink_door_shape = gen.gen_c.gen_c_sink
 is_floor_door, lower_floor_door = gen.gen_c.gen_c_floor
 by_arity, bodied_fn, impl_member, kept_or_arity = gen.gen_c.gen_c_impl
 has_body = gen.gen_c.gen_c_impl
 impl_member_at = gen.gen_c.gen_c_impl
 alias_of = gen.gen_c.gen_c_impl
 generic_enum = gen.gen_c.gen_c_impl
+ref_of_actor, lower_actor_send = gen.gen_c.gen_c_actor
 
 // the entry point
 
@@ -251,7 +254,7 @@ write_case_value = (
         true  => Ok(()),
         false => be.write_payload_arg(c, cs, ctx, out),
     }).try();
-    out.add_bytes(" }").try();
+    out.add(" }").try();
     Ok(());
 }
 
@@ -261,11 +264,11 @@ no_payload = (be :: CBackend, c: Call, cs: Case) bool {
 
 write_payload_arg = (be :: CBackend, c: Call, cs: Case, ctx: Ctx, out :: String)
                     Res<(), AllocError> {
-    out.add_bytes(", .zg_data.").try();
+    out.add(", .zg_data.").try();
     out.sym_member(cs.name).try();
-    out.add_bytes(" = ").try();
+    out.add(" = ").try();
     c.args.get(0).match({
-        None  => out.add_bytes("0"),
+        None  => out.add("0"),
         Ok(a) => expr(be, a.value, ctx, cs.payload, out),
     })
 }
@@ -284,7 +287,25 @@ lower_receiver_call = (
 )
                       Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
-    rty     = be.ty_of(d.a.base, ctx, unknown).try();
+    raw     = be.ty_of(d.a.base, ctx, unknown).try();
+    rty     = sub(be, raw).try();
+    be.ref_of_actor(rty).try().match({
+        Ok(actor) => d.a.name.text.eq("stop").match({
+            true  => be.lower_receiver_site(d, rty, ctx, want, out),
+            false => be.lower_actor_send(d.id, d.c, d.a, rty, actor, ctx, out),
+        }),
+        None      => be.lower_receiver_site(d, rty, ctx, want, out),
+    })
+}
+
+lower_receiver_site = (
+    be   :: CBackend,
+    d    : Dot,
+    rty  : TyId,
+    ctx  : Ctx,
+    want : TyId,
+    out  :: String
+) Res<(), AllocError> {
     site_of(be, rty).try().match({
         None  => be.lower_ufcs(d, rty, ctx, want, out),
         Ok(s) => be.with_site(d, s, ctx, want, out),
@@ -451,8 +472,8 @@ keep_if_fits = (
     actuals : Vec<Actual>,
     kept    :: Vec<Member>
 ) Res<(), AllocError> {
-    inst = be.recv_inst(s.ty).try();
-    sig ::= be.alloc.Vec<TyId>();
+    inst ::= be.recv_inst(s.ty).try();
+    sig  ::= be.alloc.Vec<TyId>();
     be.method_sig(s.ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
     be.check.recv_sig_fits(sig, actuals).try().match({
         true  => kept.add(m),
@@ -522,7 +543,7 @@ named_site = (
     n   : TyNamed
 ) Res<Res<Site>, AllocError> {
     qname ::= be.alloc.String().try();
-    join(qname, module_of(be.check.world, n.decl), n.name).try();
+    qualify(qname, be.check.world.module_name(n.decl), n.name).try();
     Ok(Ok(Site(
         ty: rty,
         decl: n.decl,
@@ -545,17 +566,10 @@ prim_site = (be :: CBackend, rty: TyId, name: str) Res<Res<Site>, AllocError> {
     })
 }
 
-join* = (out :: String, module: str, name: str) Res<(), AllocError> {
-    (module.len > 0).then(() { out.add_bytes(module).try() });
-    (module.len > 0).then(() { out.add_bytes(".").try() });
-    out.add_bytes(name).try();
-    Ok(());
-}
-
 // The qualified name of a type, for a variant symbol.
 type_qname = (be :: CBackend, ty: TyId, out :: String) Res<(), AllocError> {
     be.check.types.at(ty).match({
-        Named(n) => join(out, module_of(be.check.world, n.decl), n.name),
+        Named(n) => qualify(out, be.check.world.module_name(n.decl), n.name),
         _        => Ok(()),
     })
 }
@@ -592,7 +606,7 @@ keep_named = (st: Struct, name: str, out :: Vec<Member>) Res<(), AllocError> {
 MethodKind = Inlined
     | PtrMember(TyId)
     | Cap(CapabilityKind)
-    | SinkDoor
+    | AllocCreate
     | FloorDoor
     | FatSlot
     | Ordinary
@@ -607,15 +621,11 @@ MethodKind = Inlined
 //   Capability  a member whose floor is the target language's;
 //               `gen_c_cap.zen` claims it before anything below can
 //               refuse it as bodyless.
-//   SinkDoor    ASKED BEFORE THE TWO BELOW, because both get it wrong.
-//               `s.add("{}", x)` is bodyless BY DESIGN — so
-//               `method_fault` would reject the one spelling DESIGN.md
-//               writes, and on a receiver already typed `Sink` the fat
-//               branch would hunt an `add` slot `text_fmt.zen`
-//               deliberately never cut.
 //   FloorDoor   the same door on the receiver's OWN byte writer,
 //               `be.fmt("{};\n", name)`, answering what that writer
-//               answers. `gen_c_floor.zen` holds the contract.
+//               answers. A free `fmt(out :: Sink, ..)` reaches the sink
+//               lowering through ordinary UFCS; only a receiver's declared
+//               `fmt` arrives here. `gen_c_floor.zen` holds the contract.
 //   FatSlot     A MEMBER WITH NO BODY ON A VALUE WHOSE STATIC TYPE IS
 //               THE BOUND is the one call not resolvable statically:
 //               which function runs is decided by the impl behind the
@@ -637,7 +647,10 @@ method_kind = (be :: CBackend, d: Dot, s: Site, f: Function, ctx: Ctx)
             NotCapability => (),
             _             => h.break(MethodKind.Cap(kind)),
         });
-        be.is_member_door(d.a, f).then(() { h.break(MethodKind.SinkDoor) });
+        be.alloc_raw(s.ty, name).try().match({
+            None  => (),
+            Ok(_) => h.break(MethodKind.AllocCreate),
+        });
         be.is_floor_door(name, f).then(() { h.break(MethodKind.FloorDoor) });
         be.is_fat_slot(s.ty, f).then(() { h.break(MethodKind.FatSlot) });
         h.break(MethodKind.Ordinary);
@@ -646,10 +659,6 @@ method_kind = (be :: CBackend, d: Dot, s: Site, f: Function, ctx: Ctx)
         Ok(k) => k,
         None  => MethodKind.Ordinary,
     }));
-}
-
-is_member_door = (be: CBackend, a: Access, f: Function) bool {
-    a.name.text.eq("add") && be.sink_door_shape(f)
 }
 
 is_fat_slot = (be: CBackend, rty: TyId, f: Function) bool {
@@ -690,7 +699,17 @@ lower_method = (
             want,
             out
         ),
-        SinkDoor     => be.lower_member_door(d.id, d.c, d.a.base, ctx, out),
+        AllocCreate  => be.lower_create(
+            d.id,
+            d.c,
+            d.a,
+            s.ty,
+            ctx,
+            out
+        ).try().match({
+            true  => Ok(()),
+            false => be.unsupported(d.id, "an allocator create intrinsic", out),
+        }),
         FloorDoor    => be.lower_floor_door(
             d.id,
             d.c,
@@ -714,27 +733,9 @@ lower_ordinary_method = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    method_fault(f).match({
-        Ok(why) => be.unsupported(d.id, why, out),
-        None    => be.write_method_call(d, s, f, ctx, out),
-    })
-}
-
-// A GENERIC RECEIVER IS NOT A REFUSAL: `Vec<GenDiag>.add` is `Vec.add`
-// emitted at `GenDiag`, the receiver's own arguments say which. Refused:
-// a member declaring type parameters OF ITS OWN (instantiating one needs
-// the receiver's arguments plus the call's, and nothing in this tree
-// declares one), and a member with no body that `gen_c_cap.zen` did not
-// claim — a symbol nothing would define. ONE FUNCTION AND NOT TWO: as a
-// predicate beside a wording they asked the same questions twice, and
-// could answer them differently.
-method_fault = (f: Function) Res<str> {
-    (f.tparams.len > 0).match({
-        true  => Ok("a generic method"),
-        false => has_body(f).match({
-            true  => None,
-            false => Ok("a call to a member with no body"),
-        }),
+    has_body(f).match({
+        false => be.unsupported(d.id, "a call to a member with no body", out),
+        true  => be.write_method_call(d, s, f, ctx, out),
     })
 }
 
@@ -749,9 +750,9 @@ write_method_call = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    inst = be.recv_inst(s.ty).try();
+    inst = be.method_inst(d, s, f, ctx).try();
     sig ::= be.alloc.Vec<TyId>();
-    be.method_sig(s.ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
+    be.method_call_sig(s, f, inst, sig).try();
     (be.inst_open(inst) || be.any_open(sig)).match({
         true  => be.unsupported(
             d.id,
@@ -760,6 +761,91 @@ write_method_call = (
         ),
         false => be.emit_method_call(d, s, f, sig, inst, ctx, out),
     })
+}
+
+// A generic member's written parameter types are meaningful only while its
+// own type parameters are in scope. Keep the non-generic path unchanged: it
+// is also used for overloaded primitive doors, whose signatures sema has
+// already resolved without a member-owned type-variable frame.
+method_call_sig = (
+    be   :: CBackend,
+    s    : Site,
+    f    : Function,
+    inst : Inst,
+    sig  :: Vec<TyId>
+) Res<(), AllocError> {
+    f.tparams.len.eq(0).match({
+        true  => be.method_sig(
+            s.ty,
+            s.decl,
+            f,
+            s.decl.module.to_usize(),
+            inst,
+            sig
+        ),
+        false => {
+            owner = owner_of(
+                be.check,
+                s.decl.module.to_usize(),
+                f.name.text
+            ).try();
+            be.generic_method_sig(
+                s.ty,
+                s.decl,
+                f,
+                s.decl.module.to_usize(),
+                owner,
+                inst,
+                sig
+            )
+        },
+    })
+}
+
+// A method's instantiation is the receiver's parameters plus the parameters
+// the method declares. The latter are inferred structurally from written call
+// arguments, using the same unifier as generic free calls.
+method_inst = (be :: CBackend, d: Dot, s: Site, f: Function, ctx: Ctx)
+              Res<Inst, AllocError> {
+    inst ::= be.recv_inst(s.ty).try();
+    owner = owner_of(be.check, s.decl.module.to_usize(), f.name.text).try();
+    // Written arguments belong to the caller's scope. Resolve them before
+    // introducing the callee's equally named parameters, then let structural
+    // inference fill only variables the explicit list did not bind.
+    d.c.targs.loop((h, i, written) {
+        f.tparams.get(i).match({
+            None       => (),
+            Ok(tparam) => {
+                v   = intern_var(be.check, tparam.name.text, owner).try();
+                got = be.check.type_from_ast(written, ctx).try();
+                inst.bind(v, sub(be, got).try()).try();
+            },
+        });
+    });
+    mark = be.enter_struct_tparams(s.decl).try();
+    be.enter_tparams(f.tparams, owner).try();
+    sctx = be.check.self_ctx(s.decl.module.to_usize(), s.ty).try();
+    f.params.loop((h, i, p) {
+        (i > 0).then(() {
+            d.c.args.get(i - 1).match({
+                None       => (),
+                Ok(actual) => {
+                    declared = be.check.param_type(p, sctx).try();
+                    got      = be.arg_type(actual.value, ctx, declared).try();
+                    be.unify(declared, sub(be, got).try(), inst).try();
+                },
+            });
+        });
+    });
+    f.tparams.loop((h, tp) {
+        v = intern_var(be.check, tp.name.text, owner).try();
+        inst.bound(v).match({
+            true  => (),
+            false => { inst.bind(v, v).try(); },
+        });
+    });
+    be.leave_tparams(mark).try();
+    Ok(inst)
 }
 
 // THE RECEIVER IS ALREADY WRITTEN, so the rest is the free-function path
@@ -796,7 +882,7 @@ member_symbol* = (
     inst : Inst
 ) Res<String, AllocError> {
     qname ::= be.alloc.String().try();
-    join(qname, s.qname, name).try();
+    qualify(qname, s.qname, name).try();
     sym ::= be.alloc.String().try();
     sym_fn(sym, be.check.types, be.check.world, qname.view(), sig, inst).try();
     be.need_method(
@@ -833,6 +919,28 @@ method_sig* = (
     f.params.loop((h, p) { be.add_method_param(p, sctx, inst, sig).try() });
     be.leave_tparams(mark).try();
     Ok(());
+}
+
+// `method_sig` deliberately does not introduce member type parameters: many
+// existing callers describe non-generic and erased bound slots. A call or a
+// queued generic body supplies the exact owner its Inst binds and uses this
+// narrower form.
+generic_method_sig* = (
+    be    :: CBackend,
+    rty   : TyId,
+    decl  : DeclId,
+    f     : Function,
+    mi    : usize,
+    owner : str,
+    inst  : Inst,
+    sig   :: Vec<TyId>
+) Res<(), AllocError> {
+    sctx = be.check.self_ctx(mi, rty).try();
+    mark = be.enter_struct_tparams(decl).try();
+    be.enter_tparams(f.tparams, owner).try();
+    f.params.loop((h, p) { be.add_method_param(p, sctx, inst, sig).try() });
+    be.leave_tparams(mark).try();
+    Ok(())
 }
 
 add_method_param = (

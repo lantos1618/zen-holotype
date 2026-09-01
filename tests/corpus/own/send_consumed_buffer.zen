@@ -1,10 +1,6 @@
-// the accept side of send_ref.zen: `consume` at the call site hands
-// the buffer over and kills the name here, so exactly one actor can
-// reach those bytes. an iso is sendable because you lose it.
-//
-// only the actor prints. main printing too would make the output
-// order a race — the behavior runs on foo's turn, not here — and a
-// corpus test with a racy expected file is worse than no test.
+// Deferred until allocator-backed isolated graphs can move into the receiver's
+// arena. Consuming removes the sender's binding, but Vec still needs a deep
+// ownership transfer rather than a shallow pointer copy.
 
 Worker = {}
 
@@ -17,13 +13,13 @@ Worker.impl(Actor, {
     }
 })
 
-Error = AllocError | IoError
+Error = AllocError | IoError | ActorStartError | ActorError
 
 main = (env: Env) Res<i32, Error> {
     alloc ::= env.mem.alloc();
     buf   ::= alloc.Vec<u8>();
     buf.add(7).try();
-    worker = env.spawn(Worker());
-    worker.process(consume buf);
+    worker = env.spawn(Worker()).try();
+    worker.process(consume buf).try();
     Ok(0);
 }

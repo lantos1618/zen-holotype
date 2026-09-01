@@ -1,0 +1,106 @@
+// src/std/cli/cli.zen
+// Declarative option tables and one-pass argv scanning.
+
+Alloc, AllocError = std.mem
+str = std.text
+Vec = std.collections
+Range = std.core
+
+Spec*<T> = {
+    name*: str,
+    id*: T,
+    value*: bool,
+}
+
+Item*<T> = {
+    named*: Res<T>,
+    word*: str,
+}
+
+Options*<T> = {
+    rules :: Vec<Spec<T>>,
+
+    flag* = (self :: @Self, name: str, id: T) Res<(), AllocError> {
+        self.rules.add(Spec<T>(name: name, id: id, value: false))
+    }
+
+    setting* = (self :: @Self, name: str, id: T) Res<(), AllocError> {
+        self.rules.add(Spec<T>(name: name, id: id, value: true))
+    }
+
+    args* = (self: @Self, argv: Vec<str>, start: usize) Args<T> {
+        Args<T>(argv: argv, rules: self.rules, at: start, bad: "")
+    }
+}
+
+options* = <T>(a: Alloc) Options<T> {
+    Options<T>(rules: a.Vec<Spec<T>>())
+}
+
+Args*<T> = {
+    argv: Vec<str>,
+    rules: Vec<Spec<T>>,
+    at :: usize,
+    bad* :: str,
+
+    done* = (self: @Self) bool {
+        self.at >= self.argv.len || !self.bad.is_empty()
+    }
+
+    clean* = (self: @Self) bool { self.bad.is_empty() }
+
+    next* = (self :: @Self) Res<Item<T>> {
+        word    = self.word_at(self.at);
+        self.at = self.at + 1;
+        self.find(word).match({
+            Ok(spec) => spec.value.match({
+                false => Ok(Item<T>(named: Ok(spec.id), word: "")),
+                true  => self.value_for(spec.id, word),
+            }),
+            None     => is_flag(word).match({
+                true  => { self.bad = word; None },
+                false => Ok(Item<T>(named: None, word: word)),
+            }),
+        })
+    }
+
+    reject* = (self :: @Self, word: str) () { self.bad = word; }
+
+    find = (self: @Self, word: str) Res<Spec<T>> {
+        Range(0, self.rules.len).find((i) {
+            self.rules.get(i).match({
+                Ok(spec) => spec.name.eq(word),
+                None     => false,
+            })
+        }).match({
+            Ok(i) => self.rules.get(i),
+            None  => None,
+        })
+    }
+
+    value_for = (self :: @Self, id: T, option: str) Res<Item<T>> {
+        value = self.word_at(self.at);
+        is_word(value).match({
+            true  => {
+                self.at = self.at + 1;
+                Ok(Item<T>(named: Ok(id), word: value))
+            },
+            false => { self.bad = option; None },
+        })
+    }
+
+    word_at = (self: @Self, index: usize) str {
+        arg_at(self.argv, index)
+    }
+}
+
+is_flag* = (word: str) bool {
+    !word.is_empty() && word.index(0) == '-'
+}
+
+is_word* = (word: str) bool { !word.is_empty() && !is_flag(word) }
+
+// A missing argv slot is not a word, so value-taking options reject it.
+arg_at* = (argv: Vec<str>, index: usize) str {
+    argv.get(index).match({ Ok(word) => word, None => "" })
+}

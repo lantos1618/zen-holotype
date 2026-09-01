@@ -1,23 +1,7 @@
 // src/sema/sema_decl.zen
-// What a module's declarations must satisfy, whether or not anything
-// calls them.
-//
-// Everything else in this folder is a QUERY: ask about a node and get an
-// answer. Three of the rules DESIGN.md fixes are not questions about a
-// node at all, and nobody would ever ask them:
-//
-//   - a duplicate signature is wrong at the DECLARATION, "named for both
-//     declarations", and a call site cannot discover it because at a
-//     call site the two are indistinguishable.
-//   - an impl missing a field is wrong at the IMPL, and a program that
-//     never reads the missing field would otherwise compile.
-//   - a body nobody calls still has to type-check, or the checker is a
-//     linter for reachable code.
-//
-// So this is the walk that asks them, and it is deliberately the only
-// walk in the folder. It is a driver over the queries, not a pass with
-// state of its own: everything it computes is memoized where the queries
-// already memoize it.
+// Eager declaration checks that must run even for unreachable code:
+// overload uniqueness, impl completeness, and declared bodies/signatures.
+// This walk drives memoized queries and owns no parallel type state.
 
 Module, Decl, Function, TParam, BlockId, Ident = std.ast
 Struct, Impl, Member, Enum = std.ast
@@ -67,20 +51,10 @@ check_all* = (c :: Checker) Res<(), AllocError> {
     Range(0, c.world.count()).loop((h, mi) {
         c.check_module(mi).try();
     });
-    // these two are whole-program and both run LAST, for the same
-    // reason: a struct nobody mentions still has to have a size, and
-    // asking after the bodies means every field type a body already
-    // resolved is a memo hit rather than a second resolution.
-    //
-    // A THIRD USED TO RUN HERE — the untyped `:`-self walk
-    // `sema_recv.zen` records removing. Member bodies are walked now, so
-    // it only doubled every diagnostic it raised.
+    // Layout and depth require the complete cross-module declaration graph.
     c.check_layout().try();
     c.check_depth().try();
-    // A THIRD WHOLE-PROGRAM RULE, and whole-program for a different
-    // reason: a `vararg` is legal in exactly one POSITION, and a type
-    // node carries its span but not its parent — so the mentions and the
-    // positions that permit them are two walks that have to meet.
+    // Vararg legality is positional, while type nodes do not store parents.
     check_varargs(c).try();
     Ok(());
 }
@@ -159,25 +133,8 @@ check_decl = (c :: Checker, d: Decl, m: Module, mi: usize)
     })
 }
 
-// A CONSTANT'S VALUE IS A TYPED POSITION, and until now it was nobody's:
-// `check_decl` matched the four declaration kinds that own bodies and a
-// `Const` fell through the wildcard — not typed in its declaring module,
-// and with no walk to ask whether the value fits the type written beside
-// it. `UMINUS: u32 = -1` compiled clean and printed 18446744073709551615,
-// while the same sentence as a local binding (`b: u32 = -1;`) was refused
-// at `sema_place.check_assign`.
-//
-// THE TWO CHECKS ARE THE LOCAL BINDING'S, in the order it runs them:
-// `coerce` for the family and then `check_literal` for the value, since
-// `assignable` grants every int literal every integer type and only
-// `literal_fits`'s other half knows -1 does not fit a `u32`. The value is
-// typed FIRST either way, so the memo holds an answer wherever the value
-// is read.
-//
-// NO RESOLUTION OF ITS OWN: a name in the value resolves through
-// `type_of`'s ordinary queries, already memoized where they memoize — so
-// constants naming constants are typed once each and a cycle stays
-// `sema_cycle.zen`'s answer, not this walk's recursion.
+// A constant's written type is a typed position. Apply the same family and
+// literal-fit checks as a local written binding.
 const_body = (c :: Checker, k: Const, mi: usize) Res<(), AllocError> {
     ctx = Ctx(mi, c.types.unknown().try());
     got = c.type_of(k.value, ctx).try();
@@ -187,10 +144,7 @@ const_body = (c :: Checker, k: Const, mi: usize) Res<(), AllocError> {
     })
 }
 
-// The position's word is what was WRITTEN, and it owes the value the
-// same two answers a local binding's written type owes it — which is why
-// this asks nothing when no type was written: there, the value IS the
-// type, `const_decl_type` reads it back, and no position disagrees.
+// Without a written type, the value itself determines the constant's type.
 const_fits = (c :: Checker, id: ExprId, t: TypeId, got: TyId, ctx: Ctx)
              Res<(), AllocError> {
     want = c.type_from_ast(t, ctx).try();
@@ -200,17 +154,7 @@ const_fits = (c :: Checker, id: ExprId, t: TypeId, got: TyId, ctx: Ctx)
     Ok(());
 }
 
-// A VARIANT'S PAYLOAD IS A WRITTEN TYPE, and until now the only thing
-// that resolved one was `cases_of`, which runs when something MATCHES on
-// the enum. An enum nobody matches on had no resolved payload at all:
-// `Expr = Array(ArrayLit)` left `type_memo` with no entry for
-// `ArrayLit`, so a payload naming nothing drew no diagnostic and the LSP
-// had nothing to hover or jump to inside the parentheses. The same rule
-// as a body nobody calls, one line up.
-//
-// THE TYPE PARAMETERS ARE THE ENUM'S, as a struct's are its members' —
-// `Opt<T> = Some(T)` writes `T` in a payload and the declaration that
-// binds it is `Opt`.
+// Resolve every variant payload eagerly in the enum's type-parameter scope.
 enum_payloads = (c :: Checker, e: Enum, mi: usize) Res<(), AllocError> {
     tmark = c.tvar_mark();
     owner = c.owner_of(mi, e.name.text).try();
@@ -220,40 +164,9 @@ enum_payloads = (c :: Checker, e: Enum, mi: usize) Res<(), AllocError> {
     c.release_tvars(tmark)
 }
 
-// A UNION MEMBER THAT BINDS NOTHING IS THE DECLARATION'S OWN MISTAKE,
-// not a reading question. `Error = AllocError | NoSuchErrorAnywhere`
-// parses as an enum (grammar R1a has no lookahead; the bar is all that
-// separates it from `Alias = Shape`), so nothing resolves its members
-// as written types -- `union_reading` decides enum-vs-union by asking
-// whether EVERY bare variant names a type, and a name binding nothing
-// answers no without a word: the alias silently becomes the union of
-// the members that did resolve, and the mistake resurfaces elsewhere
-// as "no implicit error conversion" naming a member the reader can see
-// on the line (issue #780). So the walk that owns rules nobody would
-// ever query for asks the one here.
-//
-// WHICH BARE MEMBERS COUNT AS THE MISTAKE. One name failing while
-// every other bare name denotes a type is a misspelled member: the
-// declaration satisfies the union contract but for that one name, and
-// it is reported at its own position with the ordinary undefined-name
-// fault. Anything else stays silent, on purpose:
-//
-//   - `Color = Red | Green | Blue` -- no bare name denotes a type, so
-//     there is no union reading to fail; this is how the grammar spells
-//     a nominal enum of bare tags.
-//   - `TokenKind = Ident | Int(u64) | .. | Eq | ..` -- one bare name
-//     (`Eq`) shadows a prelude type beside tags that bind nothing. Each
-//     tag has a non-type sibling, so no tag is "the one name standing
-//     between"; refusing them would refuse src/std/lex. The payload
-//     variants already settled this declaration as nominal anyway.
-//   - a second name that binds nothing (`A | T1 | T2`) leaves every
-//     miss with a miss for a sibling -- indistinguishable from tag
-//     soup, and silent exactly as the tree has always been.
-//
-// A bare name that DOES bind a value -- a function, constant, module
-// or module alias -- is defined, so it is nobody's undefined name; its
-// presence marks the declaration as not-a-union-in-progress and quiets
-// the whole rule.
+// For a declaration otherwise shaped as a union, report the single bare
+// member that fails to name a type. Multiple misses remain a nominal enum;
+// payload variants and value-bound names also make it nominal.
 check_members = (c :: Checker, e: Enum, mi: usize)
                 Res<(), AllocError> {
     miss_at    ::= e.variants.len;   // sentinel: no bare member missed
@@ -325,20 +238,8 @@ binds_a_type = (c :: Checker, mi: usize, name: str) Res<bool, AllocError> {
     }))
 }
 
-// A MEMBER'S BODY IS A BODY. It runs the queries, because a query's
-// answer is memoized and lowering reads it back — `supply_memo` above
-// all: `Boxy.area`'s body reads `self.width` off `Boxy`, and it is
-// EMITTED at every type that impls `Boxy`, by which time the bound that
-// says which impl supplies the `width` is gone. Nothing walked these
-// bodies, so there was no answer to read.
-//
-// AND IT RUNS THE DECLARATION RULES, which for a long time it did not:
-// this was `check_body` minus `check_return` and minus `check_own`, on
-// the reasoning that a query only RECORDS while those two REJECT. The
-// reasoning described the change and not the rule. A member declares a
-// return type and a member moves values, so a member's body owed both
-// answers, and a struct-body method returning a `str` where its
-// signature promised an `i32` compiled clean — even when it was called.
+// Member bodies receive the same typing, return, and ownership checks as
+// top-level function bodies. Lowering consumes their memoized answers.
 struct_bodies = (c :: Checker, s: Struct, m: Module, mi: usize)
                 Res<(), AllocError> {
     c.check_fields(s).try();
@@ -431,16 +332,7 @@ unique_field = (c :: Checker, name: Ident, seen :: Vec<Ident>)
     })
 }
 
-// AN IMPL BODY GOT NO WALK AT ALL. `check_decl` matched `Function` and
-// `Struct`, and an `Impl` fell through the wildcard — so a method an
-// impl supplies was typed by nobody and not one rule in this folder
-// reached it. What reached it instead was LOWERING, which is why a name
-// an impl-supplied method could not resolve came back as `codegen cannot
-// resolve` rather than as an undefined name.
-//
-// THE TYPE PARAMETERS ARE THE TARGET'S. `Vec.impl(Eq, ..)` supplies
-// methods on `Vec<T>` whose bodies name `T`, and the declaration that
-// binds `T` is `Vec` — the impl writes no parameter list of its own.
+// Impl bodies are checked in the target type's parameter scope.
 impl_bodies = (c :: Checker, im: Impl, m: Module, mi: usize)
               Res<(), AllocError> {
     name    = im.target.text;
@@ -453,18 +345,8 @@ impl_bodies = (c :: Checker, im: Impl, m: Module, mi: usize)
     Ok(());
 }
 
-// AN IMPL-SUPPLIED FIELD'S VALUE IS A TYPED POSITION. A computed field
-// (`width: self.side * 2`) writes no type of its own — its type is the
-// bound's declaration, read back through `bound_member_type` exactly as
-// `sema_supply.supplied` reads it at a use — so nothing refused a value
-// that does not fit it: a match inside the expression could disagree with
-// itself (i32 in one arm, bool in the other), the wrong arm stored, and
-// the program printed a 1 nobody wrote.
-//
-// THE TWO CHECKS ARE THE CONSTANT'S (`const_body` above), with
-// `bound_member_type` standing where the written type stands. The value is
-// typed first, so the memo holds an answer wherever it is later read; then
-// it is asked whether it fits.
+// An impl-supplied field is checked against the corresponding bound member
+// type after its value has been typed and memoized.
 field_value = (
     c       :: Checker,
     mem     : Member,
@@ -602,25 +484,9 @@ check_function* = (c :: Checker, f: Function, m: Module, mi: usize)
     })
 }
 
-// A BODILESS SIGNATURE WAS RESOLVED BY NOBODY. `check_function` and
-// `member_fn_body` both stopped at `f.body.match` with `None`, and every
-// other reader of a signature resolves it only where the function is
-// USED — `decl_fn_type` at a call, the candidate walk at an overload —
-// so a hook nobody calls had no resolved name in it at all.
-// `Env.spawn*` named `Actor` and `Ref` in `std/env/env.zen` for the
-// life of the tree, and not one diagnostic ever reached either (#810).
-//
-// THE WALK IS `check_body`'S SCOPE DISCIPLINE MINUS THE BODY: the same
-// marks, the same `enter_generics` (which is what resolves the bounds),
-// the same `body_ctx` reading the written return through the ordinary
-// queries and their memos, and `bind_params` putting the parameters in
-// scope. The ORDER differs on purpose: `body_ctx` runs LAST, so a
-// signature's own parameter can type another's or the return —
-// `(d: Rect) Rect` — where a body's return was read first because a
-// statement can always see a parameter bound before it. Nothing a body
-// owes survives here: no `block_type` (no statements), no `check_return`
-// (nothing returned), no `check_own` (nothing moves), no `settle_raised`
-// (nothing is tried).
+// Bodiless signatures still resolve generic bounds, parameters, and return
+// types in declaration scope. Body-only return, ownership, and raised-error
+// checks do not apply.
 check_signature = (
     c       :: Checker,
     f       : Function,

@@ -67,7 +67,7 @@ result* = (tree: Jsons, rid: JsonId, body: str, msg :: String)
           Res<(), AllocError> {
     reply ::= head(tree, rid, msg).try();
     reply.key("result", msg).try();
-    msg.add_bytes(body).try();
+    msg.add(body).try();
     reply.close(msg)
 }
 
@@ -82,7 +82,7 @@ failed* = (
     reply.key("error", msg).try();
     fault ::= obj(msg).try();
     fault.key("code", msg).try();
-    msg.add_byte('-').try();
+    msg.add('-').try();
     write_decimal(rpc_code(code), msg).try();
     fault.key("message", msg).try();
     write_text(why, msg).try();
@@ -108,11 +108,11 @@ parse_error* = (f: JsonFault, msg :: String) Res<(), AllocError> {
     reply ::= obj(msg).try();
     reply.text("jsonrpc", "2.0", msg).try();
     reply.key("id", msg).try();
-    msg.add_bytes("null").try();
+    msg.add("null").try();
     reply.key("error", msg).try();
     why ::= obj(msg).try();
     why.key("code", msg).try();
-    msg.add_byte('-').try();
+    msg.add('-').try();
     write_decimal(rpc_code(RpcFault.ParseError), msg).try();
     why.key("message", msg).try();
     write_fault(f, msg).try();
@@ -123,14 +123,14 @@ parse_error* = (f: JsonFault, msg :: String) Res<(), AllocError> {
 // The fault, with its byte offset — `TESTING.md:17`: "a rejection with
 // the wrong span is a failure".
 write_fault = (f: JsonFault, msg :: String) Res<(), AllocError> {
-    msg.add_byte('"').try();
+    msg.add('"').try();
     said = fault_text(f);
-    msg.add_bytes(said.why).try();
+    msg.add(said.why).try();
     said.at.match({
         None  => written(),
-        Ok(i) => { msg.add_bytes(" at byte ").try(); write_decimal(i, msg) },
+        Ok(i) => { msg.add(" at byte ").try(); write_decimal(i, msg) },
     }).try();
-    msg.add_byte('"')
+    msg.add('"')
 }
 
 // The message and the byte offset from ONE match — a new `JsonFault`
@@ -181,7 +181,7 @@ write_hover* = (h: Hover, out :: String) Res<(), AllocError> {
 // two lines every definition answer shares, once.
 write_target* = (t: Target, body :: String) Res<(), AllocError> {
     t.found.match({
-        false => body.add_bytes("null"),
+        false => body.add("null"),
         true  => write_location(t, body),
     })
 }
@@ -211,11 +211,11 @@ write_target* = (t: Target, body :: String) Res<(), AllocError> {
 // (`lsp_action.zen`). No `resolveProvider` — every action carries its
 // edit up front, so there is nothing to resolve later.
 write_capabilities* = (out :: String) Res<(), AllocError> {
-    out.add_bytes(
+    out.add(
         "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"definitionProvider\":true,\"documentSymbolProvider\":true,\"documentFormattingProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\"]},\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\"]},\"semanticTokensProvider\":{\"legend\":"
     ).try();
     write_legend(out).try();
-    out.add_bytes(
+    out.add(
         ",\"full\":true}},\"serverInfo\":{\"name\":\"zen\",\"version\":\"0\"}}"
     )
 }
@@ -295,6 +295,6 @@ rpc_code = (f: RpcFault) usize {
 // `lsp_serve.zen`, `lsp_diag.zen` and `lsp_built.zen` all call it.
 own_str* = (a: Alloc, s: str) Res<str, AllocError> {
     out ::= a.String().try();
-    out.add_bytes(s).try();
+    out.add(s).try();
     Ok(out.view());
 }

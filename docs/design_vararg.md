@@ -178,8 +178,8 @@ superset that in practice can only match a name.
 | forwardable | no | **yes** |
 | declared with a body | no — bodyless by necessity | yes, ordinarily |
 
-The three format doors — `alloc.String(fmt, ..)`, `<sink>.add(fmt, ..)`,
-`<recv>.fmt(fmt, ..)` (`DESIGN.md:536`, `:749`) — are **heterogeneous**:
+The two format forms — `alloc.String(fmt, ..)` and `<receiver>.fmt(fmt, ..)`
+(`DESIGN.md:536`, `:749`) — are **heterogeneous**:
 `fmt("{} {}", "str", 42)` mixes types in one argument list, which a homogeneous
 pack cannot type. Tier 1 therefore cannot replace them and does not try. They stay
 bodyless and compiler-expanded for exactly the reason `gen_c_sink.zen`'s header

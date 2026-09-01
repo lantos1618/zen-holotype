@@ -1,40 +1,18 @@
 // src/zen/zen_fmt.zen
 // `zen fmt`: read, format, compare or write.
-//
-// EVERYTHING THAT TOUCHES A FILE IS HERE; nothing that decides what
-// "formatted" means is — `src/fmt/` takes a `Lexed` and hands back
-// bytes, needing no capability, so a corpus test can drive it with a
-// made-up string. That is why `tests/corpus/fmt/` can exist.
-//
-// A DIRECTORY IS NOT A PATH THIS COMMAND TAKES. `std.env.Fs` has no
-// listing, on purpose, and unlike a build, a format can't compute its
-// own file set (a file nobody imports still needs formatting) — the
-// file set is the caller's, `make fmt` supplies it via `find`, and a
-// directory handed here is NAMED, not silently skipped.
-//
-// THE PHASES ARE METHODS ON A STRUCT, not free functions, and that is
-// load-bearing: `x.f(..)` resolves across the whole program, so a free
-// `report`/`open`/`named` collides with the same names on
-// `Checker`/`Parser`/`Types` — the bootstrapper reported this outright
-// at two files this lane never touched. A method on `Fmt` collides with
-// nothing.
+// File I/O stays here; `src/fmt/` owns formatting policy and operates on a
+// `Lexed` value. Callers supply explicit files rather than directories.
 
 Alloc, AllocError = std.mem
 str, String = std.text
-FsError = std.env
+FsError, fs_message = std.env
 
 scan, Source, Lexed, message = std.lex.lex
 Render, render = fmt.fmt
 
 FmtJob = zen.zen_cli
-fs_message = zen.zen_write
 
-// What happened to one file.
-//
-// `Failed` and `Differs` are counted apart: an unreadable file is a
-// fault in either mode, an unformatted file only under `--check`.
-// Collapsing them would make plain `zen fmt` report every file it just
-// fixed.
+// A file can fail to format, or differ when running in check mode.
 Outcome = Same | Wrote | Differs | Failed
 
 // One run, and the tally the exit code is.
@@ -42,16 +20,13 @@ Fmt = {
     env: Env,
     alloc: Alloc,
 
-    // `--check`: report, change nothing. Without it the files are
-    // rewritten in place.
+    // Check mode reports differences without writing files.
     check: bool,
 
-    // A file that would not open, lex, or parse — plus the one case
-    // that is this folder's own bug, `unfaithful`.
+    // Files that cannot be read or safely formatted.
     faults :: usize = 0,
 
-    // A file `--check` found unformatted. Not the author's fault, but
-    // still a red build — that IS the gate.
+    // Files that check mode found unformatted.
     unformatted :: usize = 0,
 
     one = (self :: @Self, path: str) Res<(), AllocError> {
@@ -90,10 +65,7 @@ Fmt = {
         Ok(Outcome.Failed);
     }
 
-    // A FILE WITH LEXICAL FAULTS IS REPORTED, NOT PARSED (lex.zen's
-    // contract, same as zen_build.zen). A formatter's own reason: a tree
-    // built from unreadable bytes has spans that no longer describe the
-    // file, and this stage prints from spans.
+    // Lexical faults invalidate the spans the formatter would print from.
     scan_it = (self :: @Self, path: str, text: String) Res<Outcome, AllocError> {
         lexed = scan(self.alloc, Source(file: path, text: text.view())).try();
         lexed.is_clean().match({
@@ -125,10 +97,7 @@ Fmt = {
         Ok(Outcome.Failed);
     }
 
-    // THE GUARD IS NOT ADVISORY: `Render.faithful` false means the
-    // printer changed the token stream, a bug in `src/fmt/`, not the
-    // file — so the file is left as found and the build goes red. A
-    // formatter that writes anyway is an editor.
+    // Never write output that changed the token stream.
     settled = (self :: @Self, path: str, text: String, out: Render)
               Res<Outcome, AllocError> {
         out.faithful.match({
@@ -161,8 +130,7 @@ Fmt = {
         })
     }
 
-    // `--check` NAMES EVERY FILE — "18 files differ" with no names is
-    // output that has to be reproduced by hand before it's actionable.
+    // Check mode names every file that differs.
     name_it = (self :: @Self, path: str) Res<Outcome, AllocError> {
         println("{}", path);
         Ok(Outcome.Differs);
@@ -175,10 +143,7 @@ Fmt = {
         })
     }
 
-    // The summary, printed only when there's something to say — a
-    // gate that prints on green is a gate people learn to skip.
-    //
-    // THE EXIT CODE IS THE TALLY, as for a build.
+    // Successful runs stay quiet; the exit code reflects the tally.
     verdict = (self: @Self, files: usize) Res<i32, AllocError> {
         (self.unformatted > 0).then(() {
             println(

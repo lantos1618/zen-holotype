@@ -1,42 +1,8 @@
 // src/gen/gen_c/gen_c_floor.zen
-// `be.fmt("zg_scope {};\n{}.zg_n = 0;\n", v, v)` — the format door on a
-// type's OWN byte writer, and the one door an `AllocError` function can
-// call.
-// THE CONTRACT, because six conversion lanes read it:
-//   - It is `fmt`, declared bodyless with `gen_c_sink.zen`'s door shape:
-//     a `::` receiver, a `str` format, a variadic tail. Bodyless for
-//     that door's reason — a variadic has no C spelling and `{}` is
-//     resolved by the argument's type, so the call is expanded where it
-//     is WRITTEN.
-//   - It answers exactly what the receiver's byte writer answers, and
-//     the writer is the receiver's own member `add_bytes` or `write`
-//     taking `(self :: @Self, s: str)`. `String.fmt` reaches
-//     `String.add_bytes`, `CBackend.fmt` reaches `CBackend.write`; both
-//     answer `Res<(), AllocError>` and so does the door.
-//   - NOTHING IS CONVERTED, which is the whole reason this is sound. A
-//     failing write leaves its own `Err` in the door's own temporary and
-//     the guard jumps; there is no second error set to widen and no
-//     reason to rename. `gen_c_fmt.zen`'s allocating door DOES rename —
-//     it has to, its writes are a Sink's — and that is exactly the
-//     bargain not repeated here.
-//   - A `str` HOLE IS THE FLOOR'S, AND A WIDER ONE IS NOT. Every writer
-//     a wider hole reaches — the scalars in `text_fmt.zen`, and any
-//     `toString` — answers `WriteError`, so it goes through a `Sink`
-//     record over THE SAME RECEIVER and a failing one is reported as
-//     `OutOfMemory`. That is the allocating door's bargain and not a
-//     second one: `gen_c_sink.write_wider` holds the reason, #755 the
-//     history, `docs/design_fmt.md` §6 the open fork. A receiver that is
-//     not a Sink still gets the refusal by name, because a record over
-//     one has a NULL `write` slot. And `{}` on a `u8` writes a NUMBER —
-//     the trap a conversion lane owes a `{c}` hole for.
-//   - NO IMPLICIT NEWLINE, unlike `writeln`: a line ends where the
-//     format says `\n`. Indentation still happens, because `Emit.bytes`
-//     treats a `\n` as the end of a line wherever it arrives.
-//   - NO ALLOCATION PER CALL. The pieces go straight through the floor,
-//     the way the sink door's do.
-// THE WALK IS NOT HERE. `gen_c_sink.zen` owns what a format string means
-// and what a failing write does; this file owns only WHICH WRITER the
-// pieces go through — the two doors held two walks once and drifted.
+// Lowers a bodyless `fmt` member through the receiver's `add(str)` or `write`
+// byte floor. The floor must return the same result type as `fmt`, because this
+// path performs no error conversion. Format parsing and hole dispatch are
+// shared with `gen_c_sink`; this file selects and invokes the concrete writer.
 
 ExprId, Function, Param, Member, Call, Access = std.ast
 AllocError = std.mem
@@ -55,17 +21,14 @@ Site, member_at, method_sig, member_symbol = gen.gen_c.gen_c_member
 recv_inst, inst_open, any_open = gen.gen_c.gen_c_mono
 Piece, write_pieces, write_ok, write_done = gen.gen_c.gen_c_sink
 bodyless, sink_door_shape = gen.gen_c.gen_c_sink
+FORMAT_DOOR, SINK_FLOOR = gen.gen_c.gen_c_sink
 
-// recognising the door
+RAW_FLOOR: str = "add"
 
-// The name is read off the ACCESS, as the member form of the sink door
-// is: a member has no `Def` to carry one. The shape is that door's, so
-// the two cannot drift into recognising different declarations.
+// Recognize the same signature used by the general sink formatter.
 is_floor_door* = (be: CBackend, name: str, f: Function) bool {
-    name.eq("fmt") && be.sink_door_shape(f)
+    name.eq(FORMAT_DOOR) && be.sink_door_shape(f)
 }
-
-// the floor
 
 // The receiver's own byte writer: which member, and its declaration.
 Floor = {
@@ -92,16 +55,18 @@ lower_floor_door* = (
     })
 }
 
-// `add_bytes` FIRST, then `write`. Both names exist for one job and a
-// type may declare both: a String's `add_bytes` answers `AllocError` and
-// its `write` is the `Sink` impl's, answering `WriteError` — so the
-// order matters, and the answer test below is what makes it safe either
-// way.
+// `add(str)` FIRST, then `write`. `add` is overloaded for raw strings and
+// bytes, so `floor_shape`'s exact `str` parameter check is load-bearing;
+// lookup by name alone could select the byte writer. Both names exist for
+// one job and a type may declare both: a String's `add(str)` answers
+// `AllocError` and its `write` is the `Sink` impl's, answering
+// `WriteError` — so the order matters, and the answer test below is what
+// makes it safe either way.
 floor_of = (be :: CBackend, s: Site, sctx: Ctx, ret: TyId)
            Res<Res<Floor>, AllocError> {
-    be.named_floor(s, sctx, ret, "add_bytes").try().match({
+    be.named_floor(s, sctx, ret, RAW_FLOOR).try().match({
         Ok(w) => Ok(Ok(w)),
-        None  => be.named_floor(s, sctx, ret, "write"),
+        None  => be.named_floor(s, sctx, ret, SINK_FLOOR),
     })
 }
 
@@ -128,9 +93,7 @@ keep_floor = (
     })
 }
 
-// `(self :: @Self, s: str)`, with a body, ANSWERING WHAT THE DOOR
-// ANSWERS. The last test is the sound one: a writer answering anything
-// else would have to be converted, and this door converts nothing.
+// Require a by-reference `str` writer with a body and the same result type.
 keep_floor_fn = (
     be   :: CBackend,
     sctx : Ctx,
@@ -271,5 +234,5 @@ write_floor_door = (
         Ok(first) => write_pieces(be, c, first, 1, p, ctx),
     }).try();
     be.write_done(p.done).try();
-    out.add_bytes(p.tmp)
+    out.add(p.tmp)
 }

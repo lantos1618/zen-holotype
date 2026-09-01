@@ -1,100 +1,116 @@
 // src/std/text/text_string.zen
-// String — owned, growable text. Vec already carries len, capacity and the
-// Alloc it grows with, so String IS the buffer, nothing added on top: no
-// separate StringBuffer type, no second growth policy.
+// String is owned, growable text backed directly by Vec<u8>.
 //
-// THE BORROW RULE, everything else follows from it: `view` BORROWS the
-// buffer, so the str it returns is valid until the next call that can grow
-// the String (`add`/`add_bytes`/`add_byte`) — a realloc moves the bytes and
-// any str taken before it dangles. Take the view after the last write, or
-// take it again.
+// view borrows the current buffer. Any later add or fmt may reallocate and
+// invalidate that str, so callers must obtain a new view after writing.
 //
-// Two error sets meet here: the buffer floor (`add_byte`/`add_bytes`) can
-// only fail to ALLOCATE and says so; `add` (DESIGN.md's door) speaks
-// WriteError, the union naming both. No conversion between the sets is
-// invented — `.try()` merges the narrower into the wider.
-//
-// WHICH IS WHY A FUNCTION DECLARING `AllocError` CANNOT CALL `add`: the
-// merge only runs narrow-to-wide. Such a caller writes `fmt` instead —
-// the same `{}`, the same holes. A `str` hole and every literal run go
-// through `add_bytes`, so they answer the buffer floor's own error and
-// convert nothing. A WIDER HOLE IS THE EXCEPTION and was refused
-// outright until #755: its writers speak WriteError, so it is written
-// through this buffer's own `Sink` and a failing one is reported as
-// `OutOfMemory` — the allocating door's bargain, and
-// `docs/design_fmt.md` §6 is the open fork about it.
-// It may also append with `add_bytes`, or build a fresh buffer with
-// `alloc.String(fmt, ..)` below, the allocating door.
+// add appends raw str or u8 bytes and reports AllocError. fmt interprets its
+// format string at the call site and writes into the same buffer, mapping the
+// String-backed formatting path to AllocError. The allocating constructor
+// builds a fresh String through that fmt path.
 
 Vec = std.collections.collections
 Alloc, AllocError = std.mem.mem
 str, str_at = std.text.text_str
 Sink, WriteError = std.core.io
+Range = std.core.range
+digit, hex_digit = std.core.byte
 
 String* = {
     data :: Vec<u8>,
 
-    // the format door. `{}` routes through each argument's TYPE-directed
-    // toString, expanded where it's written: the compiler steps
-    // text_fmt.fmt_next over `fmt`, emitting `add_bytes` per literal run
-    // and `toString` per hole. No runtime format state. Format rules
-    // (including `{` not followed by `}` being literal) live in text_fmt.zen
-    add* = (self :: @Self, fmt: str, args: ...) Res<(), WriteError>
-
-    // the same door on the buffer's OWN floor: a `str` hole and every
-    // literal run go through `add_bytes` below and answer exactly what
-    // it answers, so nothing is converted and a function declaring
-    // `AllocError` can call this where it cannot call `add`. A wider
-    // hole reaches the writers `add` reaches, through this buffer's own
-    // Sink, and pays that door's error for it — see the header.
-    // Declared not defined, for `add`'s reason
+    // Formatting is expanded at the call site and reports this buffer's
+    // allocation floor.
     fmt* = (self :: @Self, fmt: str, args: ...) Res<(), AllocError>
 
-    // borrows the buffer; see THE BORROW RULE above
+    // Borrows the buffer until the next potentially growing write.
     view* = (self: @Self) str { str_at(self.data.ptr(), self.data.len) }
 
     len* = (self: @Self) usize { self.data.len }
 
     is_empty* = (self: @Self) bool { self.data.len == 0 }
 
-    // the floor `add` expands into, and the writer for a `{}` landing on a
-    // str: bytes, verbatim, no format meaning read. One grow, one memcpy —
-    // the byte-at-a-time `add` loop this replaced paid a capacity branch
-    // per byte
-    add_bytes* = (self :: @Self, s: str) Res<(), AllocError> {
+    // Raw text append and the floor `fmt` expands into: bytes, verbatim, with
+    // no format meaning. One grow, one memcpy.
+    add* = (self :: @Self, s: str) Res<(), AllocError> {
         at = self.data.len;
         self.data.grow_by(s.len).try();
         s.copy_into(self.data.ptr().offset(at));
         Ok(());
     }
 
-    add_byte* = (self :: @Self, b: u8) Res<(), AllocError> { self.data.add(b) }
+    // The byte overload avoids a temporary one-byte str.
+    add* = (self :: @Self, b: u8) Res<(), AllocError> { self.data.add(b) }
+
+    // Decimal with no separators, most significant digit first. This is the
+    // allocating String-floor counterpart to the Sink formatter's integer
+    // writer: compiler and diagnostic code can spell counts without importing
+    // one another merely to share number rendering.
+    write_usize* = (self :: @Self, value: usize) Res<(), AllocError> {
+        (value >= 10).then(() { self.write_usize(value / 10).try() });
+        self.add(digit(value % 10))
+    }
+
+    // Exactly `digits` lowercase hexadecimal digits, zero-padded on the left.
+    // More than sixteen digits traps while constructing the divisor: a u64 has
+    // no seventeenth digit, so that request is a caller bug rather than a
+    // truncation policy for this primitive.
+    write_hex_fixed* = (
+        self   :: @Self,
+        value  : u64,
+        digits : usize
+    ) Res<(), AllocError> {
+        place: u64 ::= 1;
+        Range(1, digits).loop((h, i) { place = place * 16; });
+        Range(0, digits).loop((h, i) {
+            self.add(hex_digit((value / place) % 16)).try();
+            place = place / 16;
+        });
+        Ok(())
+    }
 }
 
-// a String is a Sink: bytes written to it append to the buffer — what lets
+// String implements Sink by appending bytes to the buffer. This lets
 // `{}` format into a String or a console through one signature, the format
 // machinery never learning which it holds.
 //
-// `write` speaks WriteError since Sink does, though a String only ever
-// produces the AllocError half — the IoError half is a cost DESIGN.md
-// accepts knowingly, paid only by a caller matching on the error
+// Sink requires WriteError even though this implementation can produce only
+// its allocation member.
 String.impl(Sink, {
     write = (self :: @Self, bytes: str) Res<(), WriteError> {
-        self.add_bytes(bytes).try();
+        self.add(bytes).try();
         Ok(());
     }
 
     write_byte = (self :: @Self, b: u8) Res<(), WriteError> {
-        self.add_byte(b).try();
+        self.add(b).try();
         Ok(());
     }
 })
 
-// the empty buffer. ufcs constructor (`alloc.String()`, DESIGN.md's
-// surface); dependency points DOWN — text knows mem, mem never knows text
+// Empty UFCS constructor. text depends on mem; mem does not depend on String.
 String* = (a: Alloc) Res<String, AllocError> { Ok(String(data: a.Vec<u8>())) }
 
-// the allocating format form, `alloc.String("{}", x)`. Declared not
-// defined, like `add`: type-directed, expanded where written, into this
-// module's empty form followed by `add`'s own expansion
+// Allocating format form, `alloc.String("{}", x)`. Declared not
+// defined, like `fmt`: type-directed, expanded where written, into this
+// module's empty form followed by `fmt`'s own expansion
 String* = (a: Alloc, fmt: str, args: ...) Res<String, AllocError>
+
+// Allocate a copy with the first matching byte run replaced. A miss returns
+// an unchanged owned copy; an empty needle inserts at the first boundary.
+replace_once* = (
+    self        : str,
+    a           : Alloc,
+    needle      : str,
+    replacement : str
+) Res<String, AllocError> {
+    self.find(needle).match({
+        None   => a.String("{}", self),
+        Ok(at) => a.String(
+            "{}{}{}",
+            self.slice(0, at),
+            replacement,
+            self.slice(at + needle.len, self.len)
+        ),
+    })
+}

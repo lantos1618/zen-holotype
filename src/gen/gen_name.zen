@@ -10,9 +10,8 @@ str, String = std.text
 Vec = std.collections
 Alloc, AllocError = std.mem
 Hasher, Range = std.core
-hex_digit = std.core.byte
-write_usize = sema.sema_diag
-TyId, Types, TyNamed, TyRes, TyArray, ResForm = sema.sema_ty
+TyId, Types, TyNamed, TyRes, TyArray = sema.sema_ty
+res_arity, is_failure = sema.sema_ty
 World = sema.sema_def
 DeclId = sema.sema_id
 Inst = sema.sema_inst
@@ -46,15 +45,14 @@ comp* = (out :: String, name: str) Res<(), AllocError> {
 
 plain_comp = (out :: String, name: str) Res<(), AllocError> {
     out.write_usize(name.len).try();
-    out.add_bytes(name)
+    out.add(name)
 }
 
 escaped_comp = (out :: String, name: str) Res<(), AllocError> {
     out.write_usize(name.len * 2 + 1).try();
-    out.add_bytes("x").try();
+    out.add("x").try();
     Range(0, name.len).loop((h, i) {
-        out.add_byte(hex_digit(name.index(i) / 16)).try();
-        out.add_byte(hex_digit(name.index(i) % 16)).try();
+        out.write_hex_fixed(name.index(i).to_u64(), 2).try();
     });
     Ok(());
 }
@@ -62,25 +60,24 @@ escaped_comp = (out :: String, name: str) Res<(), AllocError> {
 // `[A-Za-z_][A-Za-z0-9_]*`, which is exactly what the language admits
 // as an identifier and exactly what C admits as one.
 is_c_identifier* = (name: str) bool {
-    (name.len > 0) && name.index(0).is_ident_start() && rest_is_ident(name)
-}
-
-rest_is_ident = (name: str) bool {
-    Range(1, name.len).find((i) { name.index(i).is_ident_cont() == false })
-        .match({ Ok(_) => false, None => true })
+    name.is_identifier()
 }
 
 // A list header: `3_`. A count always ends with `_` and a component
 // never does, which is what tells the two apart on the way back.
-count* = (out :: String, n: usize) Res<(), AllocError> {
+write_count = (out :: String, n: usize) Res<(), AllocError> {
     out.write_usize(n).try();
-    out.add_bytes("_")
+    out.add("_")
 }
+
+// Public because `gen_zen` consumers validate and decode the mangling
+// protocol itself; callers generating ordinary symbols use the site helpers.
+count* = (out :: String, n: usize) Res<(), AllocError> { write_count(out, n) }
 
 // A dotted Zen path as a counted list of components:
 // `std.core.result` -> `3_3std4core6result`.
 path* = (out :: String, qname: str) Res<(), AllocError> {
-    count(out, segments(qname)).try();
+    write_count(out, segments(qname)).try();
     (qname.len > 0).then(() { write_segments(out, qname).try() });
     Ok(());
 }
@@ -88,7 +85,7 @@ path* = (out :: String, qname: str) Res<(), AllocError> {
 // A dotted path plus one more component — an enum's path and a variant
 // name, which is the one place a symbol is a path with a tail.
 path_with* = (out :: String, qname: str, tail: str) Res<(), AllocError> {
-    count(out, segments(qname) + 1).try();
+    write_count(out, segments(qname) + 1).try();
     (qname.len > 0).then(() { write_segments(out, qname).try() });
     comp(out, tail).try();
     Ok(());
@@ -99,28 +96,29 @@ path_with* = (out :: String, qname: str, tail: str) Res<(), AllocError> {
 segments* = (qname: str) usize {
     (qname.len == 0).match({
         true  => 0,
-        false => dots(qname) + 1,
+        false => qname.count(".") + 1,
     })
 }
 
-dots = (qname: str) usize {
-    n ::= 0;
-    Range(0, qname.len).loop((h, i) {
-        (qname.index(i) == '.').then(() { n = n + 1; });
-    });
-    n
-}
-
 write_segments = (out :: String, qname: str) Res<(), AllocError> {
-    start ::= 0;
-    Range(0, qname.len).loop((h, i) {
-        (qname.index(i) == '.').then(() {
-            comp(out, qname.slice(start, i)).try();
-            start = i + 1;
+    parts ::= qname.split('.');
+    loop((h) {
+        parts.next().match({
+            None        => h.break(),
+            Ok(segment) => comp(out, segment).try(),
         });
     });
-    comp(out, qname.slice(start, qname.len)).try();
     Ok(());
+}
+
+// A plain dotted qualified name, before target mangling. This used to live in
+// member lowering even though bound thunks, fat slots and type sites all need
+// the same empty-scope rule.
+qualify* = (out :: String, scope: str, leaf: str) Res<(), AllocError> {
+    (scope.len > 0).then(() { out.add(scope).try() });
+    (scope.len > 0).then(() { out.add(".").try() });
+    out.add(leaf).try();
+    Ok(())
 }
 
 // -----------------------------------------------------------------
@@ -133,46 +131,28 @@ sym_type* = (out :: String, a: Alloc, types: Types, world: World, id: TyId)
             Res<(), AllocError> {
     code ::= a.String().try();
     tcode(code, types, world, id).try();
-    out.add_bytes(prefix_of(types, id)).try();
-    out.add_bytes("t").try();
+    out.add(prefix_of(types, id)).try();
+    out.add("t").try();
     type_stem(out, types, id).try();
-    out.add_bytes("_").try();
-    write_hash(out, code.view().hash(Hasher())).try();
+    out.add("_").try();
+    out.write_hex_fixed(code.view().hash(Hasher()), 16).try();
     Ok(());
-}
-
-write_hash = (out :: String, value: u64) Res<(), AllocError> {
-    place: u64 ::= 1152921504606846976;
-    Range(0, 16).loop((h, i) {
-        out.add_byte(hex_u64((value / place) % 16)).try();
-        place = place / 16;
-    });
-    Ok(());
-}
-
-hex_u64 = (n: u64) u8 {
-    n.match({
-        0 => '0', 1 => '1', 2 => '2', 3 => '3',
-        4 => '4', 5 => '5', 6 => '6', 7 => '7',
-        8 => '8', 9 => '9', 10 => 'a', 11 => 'b',
-        12 => 'c', 13 => 'd', 14 => 'e', _ => 'f',
-    })
 }
 
 type_stem = (out :: String, types: Types, id: TyId) Res<(), AllocError> {
     types.at(id).match({
         Prim(p)  => p.name.eq("()").match({
-            true  => out.add_bytes("Unit"),
-            false => out.add_bytes(p.name),
+            true  => out.add("Unit"),
+            false => out.add(p.name),
         }),
-        Named(n) => out.add_bytes(n.name),
-        Res(_)   => out.add_bytes("Res"),
-        Fn(_)    => out.add_bytes("Fn"),
-        Union(_) => out.add_bytes("Union"),
-        Array(_) => out.add_bytes("Array"),
-        Var(_)   => out.add_bytes("Var"),
-        Infer    => out.add_bytes("Infer"),
-        Unknown  => out.add_bytes("Unknown"),
+        Named(n) => out.add(n.name),
+        Res(_)   => out.add("Res"),
+        Fn(_)    => out.add("Fn"),
+        Union(_) => out.add("Union"),
+        Array(_) => out.add("Array"),
+        Var(_)   => out.add("Var"),
+        Infer    => out.add("Infer"),
+        Unknown  => out.add("Unknown"),
     })
 }
 
@@ -217,8 +197,8 @@ sym_fn* = (
 // so, and it is why two runs write the same bytes.
 write_targs = (out :: String, types: Types, world: World, inst: Inst)
               Res<(), AllocError> {
-    out.add_bytes("I").try();
-    count(out, inst.len()).try();
+    out.add("I").try();
+    write_count(out, inst.len()).try();
     Range(0, inst.len()).loop((h, i) {
         write_targ(out, types, world, inst, i).try();
     });
@@ -236,7 +216,7 @@ write_targ = (
     i     : usize
 ) Res<(), AllocError> {
     inst.arg_at(i).match({
-        None  => out.add_bytes("q"),
+        None  => out.add("q"),
         Ok(t) => tcode(out, types, world, t),
     })
 }
@@ -333,7 +313,7 @@ sym_local* = (out :: String, name: str, n: usize) Res<(), AllocError> {
 }
 
 write_shadow = (out :: String, n: usize) Res<(), AllocError> {
-    out.add_bytes("_").try();
+    out.add("_").try();
     out.write_usize(n).try();
     Ok(());
 }
@@ -370,9 +350,9 @@ tcode* = (out :: String, types: Types, world: World, id: TyId)
         Fn(f)    => tcode_fn(out, types, world, f.params, f.ret),
         Union(u) => tcode_section(out, types, world, "u", u.members),
         Array(a) => tcode_array(out, types, world, a),
-        Var(_)   => out.add_bytes("q"),
-        Infer    => out.add_bytes("q"),
-        Unknown  => out.add_bytes("q"),
+        Var(_)   => out.add("q"),
+        Infer    => out.add("q"),
+        Unknown  => out.add("q"),
     }).try();
     Ok(());
 }
@@ -383,13 +363,13 @@ tcode* = (out :: String, types: Types, world: World, id: TyId)
 // backend has to be able to see that without a string compare.
 tcode_prim = (out :: String, name: str) Res<(), AllocError> {
     name.eq("()").match({
-        true  => out.add_bytes("z"),
+        true  => out.add("z"),
         false => tcode_scalar(out, name),
     })
 }
 
 tcode_scalar = (out :: String, name: str) Res<(), AllocError> {
-    out.add_bytes("b").try();
+    out.add("b").try();
     comp(out, name).try();
     Ok(());
 }
@@ -399,8 +379,8 @@ tcode_scalar = (out :: String, name: str) Res<(), AllocError> {
 // every emitted symbol goes through here.
 tcode_of_named = (out :: String, types: Types, world: World, n: TyNamed)
                  Res<(), AllocError> {
-    out.add_bytes("t").try();
-    count(out, segments(module_of(world, n.decl)) + 1).try();
+    out.add("t").try();
+    write_count(out, segments(world.module_name(n.decl)) + 1).try();
     write_module_segments(out, world, n.decl).try();
     comp(out, n.name).try();
     (n.args.len > 0)
@@ -414,21 +394,13 @@ tcode_of_named = (out :: String, types: Types, world: World, n: TyNamed)
 // renders as the absence form, its shape when nothing settles it.
 tcode_res = (out :: String, types: Types, world: World, r: TyRes)
             Res<(), AllocError> {
-    out.add_bytes("t").try();
+    out.add("t").try();
     path(out, RES_PATH).try();
-    out.add_bytes("I").try();
-    count(out, res_arity(r.form)).try();
+    out.add("I").try();
+    write_count(out, res_arity(r.form)).try();
     tcode(out, types, world, r.value).try();
     is_failure(r.form).then(() { tcode(out, types, world, r.error).try() });
     Ok(());
-}
-
-res_arity* = (form: ResForm) usize {
-    form.match({ Failure => 2, Absence => 1, Open => 1 })
-}
-
-is_failure* = (form: ResForm) bool {
-    form.match({ Failure => true, Absence => false, Open => false })
 }
 
 // `[i32, 4]` is `a4_bi32`. THE COUNT IS IN THE NAME because it's in the
@@ -437,8 +409,8 @@ is_failure* = (form: ResForm) bool {
 // element and nothing after can be read as more digits.
 tcode_array = (out :: String, types: Types, world: World, a: TyArray)
               Res<(), AllocError> {
-    out.add_bytes("a").try();
-    count(out, a.count).try();
+    out.add("a").try();
+    write_count(out, a.count).try();
     tcode(out, types, world, a.elem).try();
     Ok(());
 }
@@ -450,7 +422,7 @@ tcode_fn = (
     params : Vec<TyId>,
     ret    : TyId
 ) Res<(), AllocError> {
-    out.add_bytes("f").try();
+    out.add("f").try();
     tcode(out, types, world, ret).try();
     tcode_list(out, types, world, params).try();
     Ok(());
@@ -458,7 +430,7 @@ tcode_fn = (
 
 tcode_list = (out :: String, types: Types, world: World, items: Vec<TyId>)
              Res<(), AllocError> {
-    count(out, items.len).try();
+    write_count(out, items.len).try();
     items.loop((h, t) { tcode(out, types, world, t).try() });
     Ok(());
 }
@@ -479,7 +451,7 @@ tcode_section = (
     tag   : str,
     items : Vec<TyId>
 ) Res<(), AllocError> {
-    out.add_bytes(tag).try();
+    out.add(tag).try();
     tcode_list(out, types, world, items).try();
     Ok(());
 }
@@ -490,16 +462,9 @@ tcode_section = (
 // declaration and a bare name, but the bare name is diagnostic-only —
 // two modules may share a top-level name, so the module is the half
 // that makes the symbol unique.
-module_of* = (world: World, decl: DeclId) str {
-    world.table_at(decl.module.to_usize()).match({
-        Ok(t) => t.name,
-        None  => "",
-    })
-}
-
 write_module_segments = (out :: String, world: World, decl: DeclId)
                         Res<(), AllocError> {
-    name = module_of(world, decl);
+    name = world.module_name(decl);
     (name.len > 0).then(() { write_segments(out, name).try() });
     Ok(());
 }

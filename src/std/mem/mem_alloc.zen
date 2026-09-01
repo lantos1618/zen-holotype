@@ -1,43 +1,28 @@
-// std.mem.mem_alloc
+// Explicit allocation interface. Anything that allocates receives an Alloc,
+// so allocation is visible in the signature.
 //
-// LAW 1: there is NO ambient allocator. Anything that needs memory
-// takes an Alloc, so "does this allocate?" is answered from the
-// signature alone: no Alloc parameter, no allocation.
-//
-// Alloc is an INTERFACE — an ordinary struct whose fields happen to be
-// functions, nothing marked special. An Alloc VALUE is the fat value
-// every trait value is: receiver pointer plus one function pointer per
-// method, stack-built, copied by value, never boxed or allocated.
+// Alloc is a copied handle containing its receiver and operations. The owner
+// behind the handle controls lifetime and cleanup.
 
 Ptr = std.mem.mem_ptr
 
-// One variant, so the bar LEADS: without it `AllocError = OutOfMemory`
-// and `Alias = Shape` are the same three tokens. Exactly one way to
-// run out of memory — law 4 says a reason is never invented.
+// Allocation has one observable failure.
 AllocError* = | OutOfMemory
 
 // The allocator interface. Implementations: an arena (env.mem.alloc(),
 // the one this library ships), a fixed buffer, C's malloc.
 //
-// EVERY METHOD HERE TAKES `self: @Self`, NEVER `self :: @Self` — the
-// load-bearing line in this module: an Alloc is a HANDLE, two words,
-// copies freely, NOT Drop (the Arena behind it owns the memory and is
-// what Drop applies to). Allocating mutates the arena, not the
-// handle's own bytes, so a bitwise copy still sees the change —
-// DESIGN.md's test for `:`.
-//
-// What it buys: Vec stores `alloc: Alloc` as an IMMUTABLE field and
-// Vec.grow calls realloc through it. The other way, that call is
-// illegal and every collection needs a mutable allocator field.
+// Methods borrow the handle because allocation mutates state behind it, not
+// the handle bytes. This lets collections keep copied Alloc fields immutable.
 Alloc* = {
-    // required (`= sig`, no body): an impl must provide these two;
-    // everything else in std is built from them.
+    // Implementations provide raw and realloc; higher-level storage builds on
+    // these primitives.
     //
     // raw is bytes only — size and alignment in, address out. Naming
     // what the bytes are is `Ptr.to`, one level down
     raw* = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError>
 
-    // `count` is the NEW element count. A null p is a fresh
+    // count is the new element count. A null p is a fresh
     // allocation, letting an empty Vec grow through the same call as
     // a full one
     realloc* = <T>(self: @Self, p: Ptr<T>, count: usize) Res<Ptr<T>, AllocError>
@@ -50,11 +35,10 @@ Alloc* = {
     // typed convenience: one T's worth of storage, pre-sized
     create* ::= <T>(self: @Self) Res<Ptr<T>, AllocError>
 
-    // Vec, Map and String are NOT members — each is a ufcs function
-    // beside its own type, taking an Alloc first (DESIGN.md), so
+    // Vec, Map and String stay beside their owning types as UFCS functions, so
     // std.mem never sees inside a Vec and mem/collections don't
-    // cross-import. Vec and Map return a BARE value, not a Res: empty
-    // owns no pages, so construction can't fail. String is the honest
-    // exception: it must hold a formatted result, so it allocates at
+    // cross-import. Vec and Map return a bare value: empty
+    // owns no pages, so construction can't fail. String is the exception: it
+    // must hold a formatted result, so it allocates at
     // once.
 }

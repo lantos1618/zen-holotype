@@ -24,6 +24,7 @@ AllocError = std.mem
 str, String = std.text
 TyId = sema.sema_ty
 Ctx = sema.sema_check
+subst = sema.sema_inst
 stmt_type = sema.sema_type
 type_from_ast = sema.sema_denote
 settled_array = sema.sema_place
@@ -486,13 +487,16 @@ is_store = (be :: CBackend, name: str, b: Bind) bool {
 
 // A STORE TAKES THE PLACE'S OWN TYPE. `i = i + 1` into a `usize` slot is
 // a `usize`, whatever width the value's own reading would have picked —
-// which is "the destination's type wins" said about a name.
+// which is "the destination's type wins" said about a name. Sema records a
+// generic body's type once, so the backend substitutes that answer at the
+// method instantiation before it declares or publishes the local.
 binding_type = (be :: CBackend, b: Bind, ctx: Ctx) Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
-    b.type.match({
+    raw     = b.type.match({
         Ok(t) => be.check.type_from_ast(t, ctx),
         None  => be.inferred_type(b, ctx, unknown),
-    })
+    }).try();
+    subst(be.check, raw, be.inst)
 }
 
 inferred_type = (be :: CBackend, b: Bind, ctx: Ctx, unknown: TyId)

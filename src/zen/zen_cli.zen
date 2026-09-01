@@ -1,100 +1,31 @@
 // src/zen/zen_cli.zen
-// The command line, and nothing else.
+// Command selection and argument meaning. Option declarations use the caller's
+// arena; argv and option values remain borrowed.
 //
-// THE INVOCATION IS FIXED BY THE SELF-HOST BUILD, not by taste:
-//
-//     zen build <root> --emit-c -o <file.c>
-//
-// so this argument shape is the compiler's interface to the project's
-// strongest test — getting it wrong is the gate failing to run at all.
-// `--entry` is added BESIDE that line, never into it: the fixpoint
-// passes no entry and must keep finding one.
-//
-// This file reads one capability, `env.var("ZEN_STD")`, for the
-// external stdlib path; everything else is a `Vec<str>` so corpus
-// tests can still drive the parser with argument vectors they build
-// by hand (`tests/corpus/cli/` hands it argv it will never see for real).
-//
-// `--repeat N` / `--permute <mode>` EXIST FOR A GATE, NOT A USER —
-// deliberately absent from `USAGE` (tests/determinism/README.md
-// specifies both). Neither changes what a build with neither emits.
-//
-// `build` AND `fmt` ARE WRITTEN; `test` is stage 1's `build.zen`. `lsp`
-// has a server, dispatched by name in `zen.zen` since it takes no
-// arguments this file would decide about. Both are still NAMED here and
-// answered "not yet" — a silent no-op is worse than saying a command is
-// not written.
+// `--repeat` and `--permute` support the determinism gate and remain outside
+// user-facing usage. `test` and `lsp` are recognized future commands; lsp's
+// argument-free dispatch remains in zen.zen.
 
 Alloc, AllocError = std.mem
 str = std.text
 Vec = std.collections
 Range = std.core
 Env = std.env
+BuildArgs, BuildFlags, build_options = std.build
+FLAG_EMIT_C, ZEN_STD_ENV = std.build
+Options, options, is_word, arg_at = std.cli
 
-// What the command line asked for.
-//
-// Four cases, not one: collapsing any pair sends the caller to fix the
-// wrong thing. `zen fmt` unwritten isn't the same as a meaningless
-// command; a missing required flag isn't the same as a misspelled one
-// (nothing the caller wrote is wrong).
-Cli* = Build(Job)
+// Usage carries the offending word; Missing carries a required option that
+// was absent. Later distinguishes a recognized command from a typo.
+Cli* = Build(BuildArgs)
      | Fmt(FmtJob)
      | Later(str)     // test / lsp — named, and not yet written
      | Usage(str)     // the word that made no sense; empty means nothing was said
      | Missing(str)   // a flag the build needs and did not get
 
-// Everything `build` needs. `emit_c` is a flag not a mode enum: there's
-// exactly one mode (PLAN.md: C is the backend).
-Job* = {
-    root*: str,      // the compilation root: a DIRECTORY, always
-    out*: str,       // where the C goes; empty when `-o` was not given
-    // WHERE THE C GOES WHEN IT IS MANY FILES: one `.c` per module and a
-    // `zen.h` beside them, written into this DIRECTORY, which must
-    // already exist (`std.env.Fs` writes files, and nothing else).
-    // Empty means one file — the shape the committed seed is built by,
-    // and the shape `make seed` writes.
-    dir* :: str = "",
-    // where to START inside the root, relative to it. THE DEFAULT IS
-    // WRITTEN DOWN NOW: "empty means the driver probes" was true and
-    // rode on C zero-init, which is a value nobody wrote and which the
-    // checker refuses since it started asking for required fields.
-    entry* :: str = "",
-    // directory that CONTAINS the `std/` package tree. When empty,
-    // `std.*` resolves under the compilation root, preserving the old
-    // behaviour. Set by `--std <path>` or the `ZEN_STD` environment
-    // variable; the flag wins when both are present.
-    std_root* :: str = "",
-    symbol_map* :: str = "",
-    emit_c*: bool,
-    // KEPT FOR BACKWARD COMPATIBILITY. Bodyless non-generic free
-    // functions are now always lowered as foreign C symbols, so this flag
-    // no longer gates emission. `--ffi` is still parsed and reflected in
-    // `job.ffi` for callers that read it; it is not an error.
-    ffi* :: bool = false,
-    debug*: Debug,
-}
-
-// THE TWO GATE FLAGS, kept in their own struct so `Job`'s four fields
-// stay "what is this build" and these stay "how is it measured".
-// Neither changes what a clean build emits.
-//
-// tests/determinism/README.md calls both a CONTRACT: `check.sh` cannot
-// write its first check without `--repeat`, and without `--permute` its
-// third check has nothing to vary. A gate that cannot vary its input
-// cannot go red.
-Debug* = {
-    repeat*: usize,  // run the whole pipeline this many times, in one
-                     // process; 1 is one build and no extra files
-    permute*: str,   // reverse | rotate | interleave; empty is the
-                     // order the imports are written in
-}
-
-// `zen fmt` takes FILES, never a directory; `zen_fmt.zen`'s header says
-// why, and is where one is refused.
+// `zen fmt` takes files; zen_fmt validates that they are not directories.
 FmtJob* = {
-    // The whole command line. Paths (words after `fmt`) are read back
-    // out, not copied at parse time — `cli` takes no `Alloc`, and law 1
-    // says the allocating signature says so.
+    // Keep argv borrowed; paths are copied only when a caller supplies Alloc.
     argv*: Vec<str>,
 
     // `--check`: report, change nothing. Without it the files are
@@ -115,35 +46,39 @@ FmtJob* = {
     }
 }
 
-// `argv.get(0)` is the program path, `argv.get(1)` the command, so a
-// command's own arguments start here. Spelled once: a stray `2` in one
-// of the two scans that read it would silently start on the command.
+// argv[0] is the program and argv[1] is the command.
 ARGS*: usize = 2
 
 USAGE*: str = "usage: zen build <root> [--entry <file>] [--std <path>] [--ffi] [--symbol-map <file>] --emit-c -o <file.c>\n       zen build <root> [--entry <file>] [--std <path>] [--ffi] [--symbol-map <file>] --emit-c-dir <dir>\n       zen fmt [--check] <file.zen>..."
 
-// What one argument is. A classifier, not a chain of matches at the
-// scan site — the scan stays readable while it carries the cursor.
-Arg = EmitC | EmitDir | Out | Entry | Std | SymbolMap | Repeat | Permute | Ffi | Flag | Word
+COMMAND_BUILD: str = "build"
+COMMAND_FMT: str = "fmt"
+COMMAND_TEST: str = "test"
+COMMAND_LSP: str = "lsp"
+FLAG_FMT_CHECK: str = "--check"
 
-cli* = (env: Env, argv: Vec<str>) Cli {
+FmtFlag = | Check
+
+cli* = (env: Env, argv: Vec<str>) Res<Cli, AllocError> {
+    alloc = env.mem.alloc();
     argv.get(1).match({
-        None     => Cli.Usage(""),
-        Ok(name) => command(env, argv, name),
+        None     => Ok(Cli.Usage("")),
+        Ok(name) => command(env, alloc, argv, name),
     })
 }
 
-command = (env: Env, argv: Vec<str>, name: str) Cli {
-    name.eq("build").match({
-        true  => job_of(env, argv),
-        false => not_build(argv, name),
+command = (env: Env, a: Alloc, argv: Vec<str>, name: str)
+          Res<Cli, AllocError> {
+    name.eq(COMMAND_BUILD).match({
+        true  => job_of(env, a, argv),
+        false => not_build(a, argv, name),
     })
 }
 
-not_build = (argv: Vec<str>, name: str) Cli {
-    name.eq("fmt").match({
-        true  => fmt_of(argv),
-        false => not_written(name),
+not_build = (a: Alloc, argv: Vec<str>, name: str) Res<Cli, AllocError> {
+    name.eq(COMMAND_FMT).match({
+        true  => fmt_of(a, argv),
+        false => Ok(not_written(name)),
     })
 }
 
@@ -155,30 +90,31 @@ not_written = (name: str) Cli {
 }
 
 is_later = (name: str) bool {
-    name.eq("test") || name.eq("lsp")
+    name.eq(COMMAND_TEST) || name.eq(COMMAND_LSP)
 }
 
-// `zen fmt [--check] <file.zen>...`. One flag, a list of paths — the
-// build's scan with four cases collapsed to two: a word is a path, and
-// every path is kept.
-//
-// A FORMAT WITH NO PATHS IS NOT A SMALLER FORMAT, it is nothing — the
-// same reading `built` gives a build with no `--emit-c`.
-fmt_of = (argv: Vec<str>) Cli {
+// `zen fmt [--check] <file.zen>...` requires at least one path.
+fmt_of = (a: Alloc, argv: Vec<str>) Res<Cli, AllocError> {
+    declared = fmt_options(a).try();
+    scan  ::= declared.args(argv, ARGS);
     check ::= false;
-    bad   ::= "";
     words ::= 0;
-    Range(ARGS, argv.len).loop((h, i) {
-        word = arg_at(argv, i);
-        word.eq("--check").match({
-            true  => { check = true; },
-            false => is_flag(word).match({
-                true  => { bad = word; h.break(); },
-                false => { words = words + word_count(word); },
+    loop(() { !scan.done() }, (h) {
+        scan.next().match({
+            Ok(item) => item.named.match({
+                Ok(flag) => flag.match({ Check => { check = true; } }),
+                None     => { words = words + word_count(item.word); },
             }),
+            None     => (),
         });
     });
-    fmt_verdict(argv, check, bad, words);
+    Ok(fmt_verdict(argv, check, scan.bad, words));
+}
+
+fmt_options = (a: Alloc) Res<Options<FmtFlag>, AllocError> {
+    declared ::= options<FmtFlag>(a);
+    declared.flag(FLAG_FMT_CHECK, FmtFlag.Check).try();
+    Ok(declared)
 }
 
 word_count = (word: str) usize {
@@ -198,198 +134,39 @@ fmt_verdict = (argv: Vec<str>, check: bool, bad: str, words: usize) Cli {
     })
 }
 
-// A path, as opposed to a flag or a gap in a test's argument vector.
-// `paths` and `fmt_of` must agree on this, so they read one function.
-is_word = (word: str) bool { !word.is_empty() && !is_flag(word) }
-
-// The scan. One pass, one cursor, a `bad` that stops it: the first
-// argument that makes no sense is worth naming; a fifth would bury it.
-job_of = (env: Env, argv: Vec<str>) Cli {
-    root       ::= "";
-    out        ::= "";
-    dir        ::= "";
-    entry      ::= "";
-    std_root   ::= env.var("ZEN_STD").match({ Ok(p) => p, None => "" });
-    symbol_map ::= "";
-    runs       ::= 1;
-    perm       ::= "";
-    emit       ::= false;
-    ffi        ::= false;
-    bad        ::= "";
-    i          ::= ARGS;
-    loop(() { i < argv.len && bad.is_empty() }, (h) {
-        arg  = arg_at(argv, i);
-        i    = i + 1;
-        kind = classify(arg);
-        (takes_value(kind) && !is_word(arg_at(argv, i))).match({
-            true  => { bad = arg; },
-            false => kind.match({
-                EmitC   => { emit = true; },
-                EmitDir => {
-                    emit = true;
-                    dir  = arg_at(argv, i);
-                    i    = i + 1;
-                },
-                Out     => { out = arg_at(argv, i); i = i + 1; },
-                Entry   => { entry = arg_at(argv, i); i = i + 1; },
-                Std     => { std_root = arg_at(argv, i); i = i + 1; },
-                SymbolMap => { symbol_map = arg_at(argv, i); i = i + 1; },
-                Repeat  => { runs = arg_at(argv, i).runs_of(); i = i + 1; },
-                Permute => { perm = arg_at(argv, i); i = i + 1; },
-                Ffi     => { ffi = true; },
-                Flag    => { bad = arg; },
-                Word    => root.is_empty().match({
-                    true  => { root = arg; },
-                    false => { bad = arg; },
+// The scan is split by responsibility: std.cli handles argv mechanics, this
+// file declares meanings, and std.build.BuildFlags is the one raw destination.
+job_of = (env: Env, a: Alloc, argv: Vec<str>) Res<Cli, AllocError> {
+    parsed ::= BuildFlags(
+        std_root: env.var(ZEN_STD_ENV).match({ Ok(p) => p, None => "" })
+    );
+    declared = build_options(a).try();
+    scan ::= declared.args(argv, ARGS);
+    loop(() { !scan.done() }, (h) {
+        scan.next().match({
+            Ok(item) => item.named.match({
+                Ok(flag) => item.word.is_empty().match({
+                    true  => parsed.apply_switch(flag),
+                    false => parsed.apply_setting(flag, item.word),
+                }),
+                None     => parsed.root.is_empty().match({
+                    true  => parsed.set_root(item.word),
+                    false => scan.reject(item.word),
                 }),
             }),
+            None     => (),
         });
     });
-    verdict(
-        Where(
-            root: root,
-            out: out,
-            dir: dir,
-            entry: entry,
-            std_root: std_root,
-            symbol_map: symbol_map
-        ),
-        emit,
-        bad,
-        Debug(repeat: runs, permute: perm),
-        ffi
-    );
+    Ok(verdict(parsed, scan.bad));
 }
 
-// The paths one scan produced, bundled so `verdict` and `built` stay flat.
-Where = {
-    root*: str,
-    out*: str,
-    dir*: str,
-    entry*: str,
-    std_root*: str,
-    symbol_map*: str,
-}
-
-verdict = (w: Where, emit: bool, bad: str, dbg: Debug, ffi: bool) Cli {
+verdict = (args: BuildFlags, bad: str) Cli {
     bad.is_empty().match({
         false => Cli.Usage(bad),
-        true  => w.root.is_empty().match({
-            true  => Cli.Usage(""),
-            false => built(w, emit, dbg, ffi),
+        true  => args.finish().match({
+            Err(MissingRoot) => Cli.Usage(""),
+            Err(MissingEmit) => Cli.Missing(FLAG_EMIT_C),
+            Ok(job)          => Cli.Build(job),
         }),
     })
-}
-
-// `--emit-c` IS THE BUILD; without it a build is not smaller, it's
-// nothing. Emission is the only thing this compiler does with the tree
-// it checked; drop the flag and it type-checks the world, throws the
-// answer away, exits 0 having written no file. That silent bug once
-// held long enough that `make build` produced no binary — taking
-// `test`, `fmt` and `determinism` down with it, since a target that
-// can't run can't go red either.
-built = (w: Where, emit: bool, dbg: Debug, ffi: bool) Cli {
-    emit.match({
-        false => Cli.Missing("--emit-c"),
-        true  => Cli.Build(Job(
-            root: w.root,
-            out: w.out,
-            dir: w.dir,
-            entry: w.entry,
-            std_root: w.std_root,
-            symbol_map: w.symbol_map,
-            emit_c: emit,
-            ffi: ffi,
-            debug: dbg
-        )),
-    })
-}
-
-// `--entry <file>` is a FILE INSIDE THE ROOT, not a second root — a
-// flag with an argument, like `-o`. The root stays positional (a build
-// is a root); the entry says where to start in it, knowledge the
-// caller has and the compiler can't recover (`std.env.Fs` has no
-// listing, on purpose).
-//
-// The two debug flags sit in the same flat list: they were split into
-// their own link only while this was a match pyramid, and the flat
-// form has no depth to manage. They take an argument like `-o`/
-// `--entry`, so a missing one leaves the default rather than
-// swallowing the next word.
-classify = (a: str) Arg {
-    found: Res<Arg> = loop<Arg>((h) {
-        a.eq("--emit-c").then(() { h.break(Arg.EmitC) });
-        a.eq("--emit-c-dir").then(() { h.break(Arg.EmitDir) });
-        a.eq("-o").then(() { h.break(Arg.Out) });
-        a.eq("--entry").then(() { h.break(Arg.Entry) });
-        a.eq("--std").then(() { h.break(Arg.Std) });
-        a.eq("--symbol-map").then(() { h.break(Arg.SymbolMap) });
-        a.eq("--repeat").then(() { h.break(Arg.Repeat) });
-        a.eq("--permute").then(() { h.break(Arg.Permute) });
-        a.eq("--ffi").then(() { h.break(Arg.Ffi) });
-        is_flag(a).then(() { h.break(Arg.Flag) });
-        h.break(Arg.Word);
-    });
-    found.match({
-        Ok(one) => one,
-        None    => Arg.Word,
-    });
-}
-
-takes_value = (a: Arg) bool {
-    a.match({
-        EmitDir => true,
-        Out     => true,
-        Entry   => true,
-        Std     => true,
-        SymbolMap => true,
-        Repeat  => true,
-        Permute => true,
-        _       => false,
-    })
-}
-
-// A leading `-` is a flag whatever follows it, so an unknown one is
-// named rather than silently read as the root — otherwise a typo in
-// `--emit-c` compiles the wrong tree, quietly.
-is_flag = (a: str) bool {
-    a.is_empty().match({
-        true  => false,
-        false => a.index(0) == '-',
-    })
-}
-
-// An argument past the end is the empty string. The build scan also
-// refuses it, or another flag, where a value-taking flag needs a word.
-arg_at = (argv: Vec<str>, i: usize) str {
-    argv.get(i).match({
-        Ok(s) => s,
-        None  => "",
-    })
-}
-
-// How many runs `--repeat <n>` asks for. Digits only, ANYTHING ELSE IS
-// ONE, never zero — a debug flag quietly running the pipeline zero
-// times would make its own check pass by emitting nothing: a gate that
-// succeeds when it can't run.
-runs_of = (text: str) usize {
-    n      ::= 0;
-    digits ::= text.is_empty() == false;
-    Range(0, text.len).loop((h, i) {
-        b = text.index(i);
-        b.is_digit().match({
-            true  => { n = n * 10 + place_of(b); },
-            false => { digits = false; },
-        });
-    });
-    (digits && n > 0).match({
-        true  => n,
-        false => 1,
-    })
-}
-
-// The value of one digit byte, widened. Guarded by `is_digit` at its
-// one call site, so the subtraction can't underflow.
-place_of = (b: u8) usize {
-    (b - '0').to_u32().to_usize()
 }

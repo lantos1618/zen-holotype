@@ -1,39 +1,13 @@
 // src/gen/gen_diag.zen
-// What a backend says when it cannot lower something.
-//
-// Shape mirrors `sema_diag.zen`: A DIAGNOSTIC IS A VALUE, NOT A RAISE.
-// The only `Err` in this folder is `AllocError`, so a half-understood
-// program still emits the C it could, plus the faults it owes; the
-// caller decides whether that's a translation unit or a report.
-//
-// Fault set is small on purpose. All but one entry mean "not lowered
-// yet" — a backend has no opinion on a program's meaning, sema already
-// does, so there is deliberately no type-mismatch fault: if the backend
-// disagrees with sema about a type, the bug is in the backend.
-//
-// `Overrun` is the odd one out, and exists because the alternative was
-// measured: a backend that silently stops at its bound emits a
-// translation unit with functions missing, `cc` reports the first call
-// site, and the reader debugs the wrong program.
-//
-// This lives in shared plumbing, not `gen_c`: every backend fails the
-// same three ways (unlowered form, unresolved name, unspellable type),
-// none of which names C.
+// Backend diagnostics. Semantic errors are reported before this layer;
+// these faults describe source forms or types that code generation could not
+// translate, plus the backend's explicit reachability bound.
 
 Span = std.ast.ast_span
 str, String = std.text
 AllocError = std.mem
-write_usize = sema.sema_diag
 
-// Something the backend was handed and could not turn into code.
-//
-// `what` is the node form or name, never a built sentence: a `Diag`
-// stays copyable and costs no allocation to raise; `render` is the one
-// place a sentence exists.
-//
-// `Overrun` carries a NUMBER, not a name — the number IS the message,
-// so a reader learns which constant to raise, not just that a program
-// was large.
+// Payloads stay unformatted until render_gen builds the diagnostic text.
 GenFault* = Unsupported(str)     // a node form this backend does not lower yet
           | Unresolved(str)      // a name with no declaration behind it
           | Ambiguous(str)       // a name with more than one, and no overload rule
@@ -41,32 +15,21 @@ GenFault* = Unsupported(str)     // a node form this backend does not lower yet
           | Unspellable(str)     // a type with no C spelling yet
           | Overrun(usize)       // more functions reachable than the backend's bound
 
-// One fault, and where it is.
-//
-// `file` rides beside `span` (same pairing as `sema.Diag`) because a
-// `Span` names a file relative to the compilation root and the two must
-// not drift.
-//
-// NAMED `GenDiag`, NOT `Diag` — STYLE.md's grep test: grep `GenDiag`,
-// get one file.
+// A fault and its source location.
 GenDiag* = {
     file*: str,
     span*: Span,
     fault*: GenFault,
 }
 
-// `file:line:col: message`, one line, no trailing newline — caller adds
-// its own separator, so a `Vec` of these renders into one buffer.
-// Free function, not a method, for the `GenDiag`-naming reason above.
-// `d.span.start` is a `Pos` with its own `Display` (`ast_span.zen`).
+// Writes one `file:line:col: message` without a trailing newline.
 render_gen* = (d: GenDiag, out :: String) Res<(), AllocError> {
     out.fmt("{}:{}: {}", d.file, d.span.start, message(d.fault)).try();
     detail(d.fault, out).try();
     Ok(());
 }
 
-// The sentence, with nothing filled in. A fault's own words, so a
-// caller that only wants to classify never has to build a string.
+// The fixed sentence prefix for a fault.
 message* = (fault: GenFault) str {
     fault.match({
         Unsupported(_) => "codegen does not lower this yet:",
@@ -78,7 +41,7 @@ message* = (fault: GenFault) str {
     })
 }
 
-// What the fault names: a name quoted, or a bound written out.
+// Writes the fault-specific detail.
 detail* = (fault: GenFault, out :: String) Res<(), AllocError> {
     fault.match({
         Unsupported(w) => write_quoted(out, w),
@@ -95,9 +58,8 @@ write_quoted = (out :: String, w: str) Res<(), AllocError> {
     Ok(());
 }
 
-// Names the constant, not just the number — see `GenFault.Overrun`.
 write_bound = (out :: String, n: usize) Res<(), AllocError> {
-    out.add_bytes(" gen_c_decl.MAX_FUNCTIONS = ").try();
+    out.add(" gen_c_decl.MAX_FUNCTIONS = ").try();
     out.write_usize(n).try();
     Ok(());
 }

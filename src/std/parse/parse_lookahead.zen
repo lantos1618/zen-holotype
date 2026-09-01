@@ -1,40 +1,9 @@
 // src/std/parse/parse_lookahead.zen
-// Everything this parser knows without consuming a token.
+// Side-effect-free lookahead for ambiguous token sequences.
 //
-// It is one subject and it is the parser's whole design story. Zen has
-// three places where one token sequence has two readings, and a fourth
-// where seven declarations are written the same way; NONE of them is
-// resolved by backtracking, by a position rule, or by what the tokens
-// turn out to mean. Each is a scan to a matching delimiter and a look
-// at the token past it — bounded, side-effect free, and answered
-// before the construct is parsed rather than after.
-//
-// THE FOUR QUESTIONS:
-//
-//   `(..)` — a lambda's parameters, or a parenthesized expression?
-//   `[..]` — a fixed array type applied to arguments, or a literal?
-//   `<..>` — type arguments, or a comparison?
-//   `Name = <thing>` — which of seven declarations is this?
-//
-// WHY THESE ARE NOT IN parse_expr.zen AND parse_decl.zen: STYLE.md's
-// direction test — both need a bracket scanner, and a declaration
-// classifier importing one from the expression parser points the
-// dependency the wrong way. The general part goes down; this is it.
-//
-// NOTHING HERE MUTATES. Every function takes `p :: Parser` only
-// because a `Vec` read goes through a receiver; not one of them moves
-// the cursor, adds a node, or records a diagnostic. That is the
-// property that makes a wrong guess cheap: it costs a rescan and never
-// a rewind.
-//
-// AND NOTHING HERE MAY READ A RAW INDEX. The cursor never lands on
-// trivia — `drain` guarantees it — but every scan below runs PAST the
-// cursor, into a stream that still holds comments. A question of the
-// form "what follows this group" answered with a comment is answered
-// wrong, and the mistake surfaces a line later on a construct that has
-// nothing to do with the comment: `K = A // c` then `| B(u64)` was read
-// as an alias, and the diagnostic landed on the payload. So every index
-// this file looks a kind up at goes through `live_at`.
+// Each query scans to a matching delimiter and inspects the next live
+// token. None advances the parser or records diagnostics. Scans use
+// `live_at` because formatter trivia remains in the token stream.
 
 TokenKind, is_trivia = std.parse.parse_token
 Parser = std.parse.parser
@@ -59,9 +28,7 @@ ValueShape* = StructValue
 // lookahead.
 // -------------------------------------------------------------------
 
-// The first index at or after `from` holding a token the grammar can
-// see. Trivia is in the stream because the formatter needs it there, so
-// every question below has to step over it.
+// The first index at or after `from` holding a non-trivia token.
 live_at* = (p :: Parser, from: usize) usize {
     out ::= p.tokens_len();
     Range(from, p.tokens_len()).loop((h, k) {
@@ -78,42 +45,20 @@ live_kind* = (p :: Parser, from: usize) TokenKind {
     p.token_kind_at(p.live_at(from))
 }
 
-// A `(` here opens a lambda's parameters if a block or a return type
-// follows its `)`.
-//
-// A `(` after the `)` is deliberately NOT a return type: `(f)(x)` is a
-// call of a parenthesized callee and it is the commoner reading, while
-// a lambda whose return type is written `()` or `(a: i32) i32` never
-// occurs in argument position — every lambda DESIGN.md writes there
-// omits its return type. The ONE way this question differs from the
-// same one asked of a declaration's value — see `fn_value_after`.
+// A parenthesized group starts a lambda when a block or return type follows.
+// Another `(` is treated as a call; declaration values handle unit returns
+// separately in `fn_value_after`.
 lambda_ahead* = (p :: Parser) bool {
     after = p.live_kind(p.group_end_at(p.at));
     after == TokenKind.BraceOpen || after.ret_start()
 }
 
-// What may follow a parameter list's `)` and still be a return type.
-//
-// `<` is refused, and that is P2: `<T>(a: T) T` is the one type that
-// begins with an angle, so `(i + 1) < f.len` read as a parameter list
-// followed by a generic function type — and the parser then wanted a
-// parameter name at `f`. A lambda or a signature whose RETURN TYPE is a
-// generic function type appears nowhere in DESIGN.md or in this
-// compiler's own source; a parenthesised comparison appears constantly.
-// `(x + 1) == y` never broke, which is the whole tell: `==` cannot
-// begin a type and `<` can.
-//
-// `(` is refused here and accepted by `fn_value_after` — the one place
-// the expression and declaration readings genuinely disagree.
+// `<` and `(` are excluded because comparison and call syntax take priority.
 ret_start* = (kind: TokenKind) bool {
     kind.starts_type_kind() && !kind.is_in([TokenKind.Lt, TokenKind.ParenOpen])
 }
 
-// The same question for a DECLARATION'S value, where a `(` after the
-// `)` is a return type written `()` — `strip_bom = (lx :: Lexer) () {..}`
-// — rather than a call of a parenthesised callee. A module level has no
-// expression statements, so nothing is given up; an expression keeps
-// the other reading, above.
+// At declaration level, a following `(` may begin a written return type.
 fn_value_after* = (kind: TokenKind) bool {
     kind.is_in([TokenKind.BraceOpen, TokenKind.ParenOpen]) || kind.ret_start()
 }

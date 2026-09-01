@@ -37,44 +37,33 @@ string_from_c = (a: Alloc, p: Ptr<u8>, n: usize) Res<String, ProcError> {
     @scope.defer(() { free(p.to<()>()) });
     s ::= a.String().try(ProcError.ReadFailed);
     view = str_at(p, n);
-    s.add_bytes(view).try(ProcError.ReadFailed);
+    s.add(view).try(ProcError.ReadFailed);
     Ok(s);
 }
 
 Process* = {
     run* = (self: @Self, a: Alloc, cwd: str, cmd: str) Res<ProcOutput, ProcError> {
-        // One-element Vecs provide writable slots until Zen has `&`.
-        code_vec ::= a.Vec<i32>();
-        code_vec.add(0).try(ProcError.ReadFailed);
+        code_p ::= a.create<i32>().try(ProcError.ReadFailed);
+        code_p.write(0, 0);
+        out_p_p ::= a.create<Ptr<u8>>().try(ProcError.ReadFailed);
+        out_p_p.write(0, null_ptr<u8>());
+        out_n_p ::= a.create<usize>().try(ProcError.ReadFailed);
+        out_n_p.write(0, 0);
+        err_p_p ::= a.create<Ptr<u8>>().try(ProcError.ReadFailed);
+        err_p_p.write(0, null_ptr<u8>());
+        err_n_p ::= a.create<usize>().try(ProcError.ReadFailed);
+        err_n_p.write(0, 0);
 
-        out_p_vec ::= a.Vec<Ptr<u8>>();
-        out_p_vec.add(null_ptr<u8>()).try(ProcError.ReadFailed);
-        out_n_vec ::= a.Vec<usize>();
-        out_n_vec.add(0).try(ProcError.ReadFailed);
-
-        err_p_vec ::= a.Vec<Ptr<u8>>();
-        err_p_vec.add(null_ptr<u8>()).try(ProcError.ReadFailed);
-        err_n_vec ::= a.Vec<usize>();
-        err_n_vec.add(0).try(ProcError.ReadFailed);
-
-        rc = zg_proc_run(
-            cwd,
-            cmd,
-            code_vec.ptr(),
-            out_p_vec.ptr(),
-            out_n_vec.ptr(),
-            err_p_vec.ptr(),
-            err_n_vec.ptr()
-        );
+        rc = zg_proc_run(cwd, cmd, code_p, out_p_p, out_n_p, err_p_p, err_n_p);
 
         (rc == 0).match({
             false => Err(proc_error(rc)),
             true  => {
-                code  = code_vec.get(0).ok_or(ProcError.ReadFailed).try();
-                out_p = out_p_vec.get(0).ok_or(ProcError.ReadFailed).try();
-                out_n = out_n_vec.get(0).ok_or(ProcError.ReadFailed).try();
-                err_p = err_p_vec.get(0).ok_or(ProcError.ReadFailed).try();
-                err_n = err_n_vec.get(0).ok_or(ProcError.ReadFailed).try();
+                code  = code_p.read(0);
+                out_p = out_p_p.read(0);
+                out_n = out_n_p.read(0);
+                err_p = err_p_p.read(0);
+                err_n = err_n_p.read(0);
 
                 string_from_c(a, out_p, out_n).match({
                     Err(e)    => {

@@ -1,29 +1,7 @@
 // src/gen/gen_c/gen_c_meta.zen
-// M4 slice 2's residue: the field walk, lowered.
-// `@meta(name: T).fields().loop((h, field) { .. })` was checked ONCE
-// PER FIELD at sema time (`sema_meta.meta_walk_chain`); what remains
-// here is to WRITE one block per field — the unrolling sema performed,
-// made C. The name list travels in `Checker.meta_walks`, keyed on the
-// call's own node.
-// Two comptime reads survive into the body and are answered PER PASS:
-// `field.name` folds to the pass's field name as an ordinary string
-// literal (the marker is `Checker.meta_name_reads`, read in
-// `gen_c_expr.lower_meta_or_access`; the text is `Checker.walk_now`'s
-// top), and `recv.at(field)` lowers as the ordinary field read
-// `recv.<name>` — a synthetic Access handed to the same `lower_access`
-// every other dot goes through. The argument the user wrote is never
-// lowered: it is a comptime term and has no C reading.
-// `h` IS AN ORDINARY HANDLE. Each pass pushes a LoopFrame whose `brk`
-// every pass shares and whose `cnt` is the pass's own, so `h.break()`
-// leaves the whole walk and `h.next()` leaves the pass — `goto`s, as
-// `gen_c_handle.zen` owns them, unwinding through `gen_c_own` like any
-// jump out of a loop. A walk has no value (`has_result: false`; the
-// `0` stands where one would go, as `open_result` does for a loop
-// nothing asked), so a `h.break(v)` that survived sema meets the same
-// refusal a value-less loop's does.
-// AN EMPTY FIELD LIST EMITS NOTHING BUT THE `0`: zero passes, no
-// labels, and the body's diagnostics were sema's to give — it gave
-// them zero times, there being nothing to check the body against.
+// Lowers a checked meta field walk into one C block per field. `field.name`
+// becomes the current field's string and `recv.at(field)` reuses ordinary
+// field access lowering. `break` exits the walk; `next` exits one pass.
 
 ExprId, Access, Call, Ident, Lambda = std.ast
 AllocError = std.mem
@@ -39,9 +17,7 @@ lower_access = gen.gen_c.gen_c_read
 write_label = gen.gen_c.gen_c_loop
 spelled_lambda = gen.gen_c.gen_c_inline
 
-// THE WALK'S VALUE IS `()`, written as the `0` a discarded loop writes
-// (`open_result`, gen_c_loop.zen) — the passes are statements and go to
-// the emitter's own buffer, so the expression buffer gets the value.
+// A field walk is an effect expression and therefore writes unit to `out`.
 lower_meta_walk* = (
     be    :: CBackend,
     id    : ExprId,
@@ -50,7 +26,7 @@ lower_meta_walk* = (
     ctx   : Ctx,
     out   :: String
 ) Res<(), AllocError> {
-    out.add_bytes("0").try();
+    out.add("0").try();
     (names.len == 0).match({
         true  => Ok(()),
         false => c.args.get(0).match({
@@ -63,10 +39,7 @@ lower_meta_walk* = (
     })
 }
 
-// One block per field, all sharing the one break label — `h.break()`
-// anywhere leaves the WHOLE walk, which is what "unrolled" means for
-// the verb. The label is written after the last pass, where a jump
-// from any pass lands.
+// Every pass shares the final break label.
 walk_unrolled = (
     be    :: CBackend,
     lam   : Lambda,
@@ -83,11 +56,7 @@ walk_unrolled = (
     Ok(())
 }
 
-// ONE PASS: braces of its own (a body's `let` is that pass's, twice
-// declared would be one C name twice), the frame pushed so the body's
-// `h` verbs find it, the body's block lowered discarding, and the
-// pass's `cnt` label written where `h.next()` lands — the same tail
-// `close_pass` writes, minus the counter there is nothing to step.
+// Each pass gets a C scope so body locals may be redeclared safely.
 walk_pass = (
     be    :: CBackend,
     brk   : usize,
@@ -123,12 +92,8 @@ walk_pass = (
     Ok(())
 }
 
-// `h` is bound exactly as a loop's handle is (`bind_handle`,
-// gen_c_loop.zen): a slot holding the frame's DEPTH, never storage.
-// The field binder gets no slot — its two readings folded at sema and
-// sema refused the rest — but it IS bound in the checker at `unknown`,
-// so a stray re-type of the body reads a poison, never "undefined
-// name".
+// The handle stores the loop-frame depth. Field uses were folded by sema and
+// need no runtime slot.
 bind_walk_params = (be :: CBackend, lam: Lambda) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
     lam.params.get(0).match({
@@ -145,12 +110,8 @@ bind_walk_params = (be :: CBackend, lam: Lambda) Res<(), AllocError> {
     Ok(())
 }
 
-// THE PROJECTION'S RESIDUE. The field the CURRENT pass is for comes off
-// `walk_now`; the rewrite is a synthetic Access — R3's rewrite without
-// touching the arena — handed to the ordinary access lowering, which
-// reuses the stored or computed spelling a written `recv.<name>` would
-// get. A marker with no walk on the stack is a bug in the dispatch, not
-// a program to lower, and is said so.
+// Rewrite the current meta projection as an ordinary field access. A marker
+// outside a field walk indicates an internal dispatch error.
 lower_meta_proj* = (
     be   :: CBackend,
     id   : ExprId,

@@ -36,7 +36,6 @@ Ctx = sema.sema_check
 Inst = sema.sema_inst
 type_from_ast = sema.sema_denote
 satisfies_bound = sema.sema_bound
-write_usize = sema.sema_diag
 pack_slot, pack_elem = sema.sema_vararg
 sym_member, sym_variant, sym_fn = gen.gen_name
 RES_PATH = gen.gen_name
@@ -47,6 +46,7 @@ settled_inst, inst_open, enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
 complete_inst = gen.gen_c.gen_c_infer
 ctype, is_unit, has_storage, c_prim, spellable, declared_ret = gen.gen_c.gen_c_type
 c_prim_known = gen.gen_c.gen_c_type
+lower_checked_narrow = gen.gen_c.gen_c_num
 expr, ty_of, want_of = gen.gen_c.gen_c_expr
 value_held, holds = gen.gen_c.gen_c_expr
 Dest, deliver = gen.gen_c.gen_c_stmt
@@ -129,7 +129,7 @@ write_res_payload* = (
         true  => Ok(()),
         false => be.write_payload_init(variant, value, payload, ctx, out),
     }).try();
-    out.add_bytes(" }").try();
+    out.add(" }").try();
     Ok(());
 }
 
@@ -154,9 +154,9 @@ write_payload_init = (
     out     :: String
 )
                      Res<(), AllocError> {
-    out.add_bytes(", .zg_data.").try();
+    out.add(", .zg_data.").try();
     out.sym_member(variant).try();
-    out.add_bytes(" = ").try();
+    out.add(" = ").try();
     be.expr(value, ctx, payload, out).try();
     Ok(());
 }
@@ -230,15 +230,15 @@ write_indirect = (
     out    :: String
 ) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
-    out.add_bytes("(").try();
+    out.add("(").try();
     be.expr(c.callee, ctx, unknown, out).try();
-    out.add_bytes(")(").try();
+    out.add(")(").try();
     c.args.loop((h, i, a) {
-        (i > 0).then(() { out.add_bytes(", ").try() });
+        (i > 0).then(() { out.add(", ").try() });
         hold = be.holds(c, i, 0);
         be.write_indirect_arg(a, i, hold, params, ctx, out).try();
     });
-    out.add_bytes(")").try();
+    out.add(")").try();
     Ok(());
 }
 
@@ -681,9 +681,30 @@ call_or_convert = (
     out :: String
 )
                   Res<(), AllocError> {
-    convert_target(d, f).match({
-        Ok(t) => be.lower_convert(s.c, d, t, s.recv, s.ctx, out),
-        None  => be.call_or_plain(s, d, f, out),
+    checked_narrow(d, f).match({
+        true  => be.lower_narrow_call(s, d, out),
+        false => convert_target(d, f).match({
+            Ok(t) => be.lower_convert(s.c, d, t, s.recv, s.ctx, out),
+            None  => be.call_or_plain(s, d, f, out),
+        }),
+    })
+}
+
+checked_narrow = (d: Def, f: Function) bool {
+    d.qname.eq("std.core.num.to_u8") && d.name.eq("to_u8") && convert_shape(f)
+}
+
+lower_narrow_call = (be :: CBackend, s: CallSite, d: Def, out :: String)
+                    Res<(), AllocError> {
+    inst ::= be.alloc.Inst();
+    sig  ::= be.alloc.Vec<TyId>();
+    be.signature_of(d, inst, sig).try();
+    unknown = be.check.types.unknown().try();
+    src     = sig.get(0).match({ Ok(t) => t, None => unknown });
+    ret     = be.check.type_of(s.id, s.ctx).try();
+    recv_arg(s.c, s.recv).match({
+        None      => out.add("0"),
+        Ok(value) => be.lower_checked_narrow(s.id, value, src, ret, s.ctx, out),
     })
 }
 
@@ -915,23 +936,23 @@ foreign_proto = (
     sig  : Vec<TyId>,
     out  :: String
 ) Res<(), AllocError> {
-    out.add_bytes("extern ").try();
+    out.add("extern ").try();
     be.ctype(ret, out).try();
     out.fmt(" {name}(").try();
     (f.params.len == 0).match({
-        true  => out.add_bytes("void"),
+        true  => out.add("void"),
         false => be.foreign_params(f, sig, out),
     }).try();
-    out.add_bytes(")")
+    out.add(")")
 }
 
 foreign_params = (be :: CBackend, f: Function, sig: Vec<TyId>, out :: String)
                  Res<(), AllocError> {
     f.params.loop((h, i, p) {
-        (i > 0).then(() { out.add_bytes(", ").try() });
+        (i > 0).then(() { out.add(", ").try() });
         ty = sig.get(i).match({ Ok(t) => t, None => TyId(index: 0) });
         be.ctype(ty, out).try();
-        (p.mutable).then(() { out.add_bytes(" *").try() });
+        (p.mutable).then(() { out.add(" *").try() });
     });
     Ok(())
 }
@@ -978,7 +999,7 @@ lower_convert = (
 )
                 Res<(), AllocError> {
     recv_arg(c, recv).match({
-        None  => out.add_bytes("0"),
+        None  => out.add("0"),
         Ok(v) => be.write_convert(d, v, target, ctx, out),
     })
 }
@@ -1016,7 +1037,7 @@ write_convert = (
     src     = sig.get(0).match({ Ok(t) => t, None => unknown });
     out.fmt("({})(", c_prim(target)).try();
     be.expr(v, ctx, src, out).try();
-    out.add_bytes(")")
+    out.add(")")
 }
 
 call_signature = (
@@ -1181,7 +1202,7 @@ write_call = (
     out.fmt("{sym}(").try();
     first = be.write_receiver(s.recv, s.c, f, sig, s.ctx, out).try();
     be.write_call_args(s.c, first, f, sig, s.ctx, out).try();
-    out.add_bytes(")").try();
+    out.add(")").try();
     Ok(());
 }
 
@@ -1222,7 +1243,7 @@ write_written_args = (
         be.has_storage(ty).match({
             false => be.deliver(a.value, ctx, ty, Dest.Discard),
             true  => {
-                written.then(() { out.add_bytes(", ").try() });
+                written.then(() { out.add(", ").try() });
                 hold = be.holds(c, pos, first);
                 be.write_arg_at(a.value, pos, hold, f, sig, ctx, out).try();
                 written = true;
@@ -1250,12 +1271,12 @@ write_to_pack = (
 ) Res<(), AllocError> {
     c.args.loop((h, i, a) {
         ((i + first) < slot).then(() {
-            (i + first > 0).then(() { out.add_bytes(", ").try() });
+            (i + first > 0).then(() { out.add(", ").try() });
             hold = be.holds(c, i + first, first);
             be.write_arg_at(a.value, i + first, hold, f, sig, ctx, out).try();
         });
     });
-    (slot > 0).then(() { out.add_bytes(", ").try() });
+    (slot > 0).then(() { out.add(", ").try() });
     pack = sig.get(slot).match({ Ok(t) => t, None => TyId(index: 0) });
     be.write_pack(c, first, slot, pack, ctx, out);
 }
@@ -1349,11 +1370,11 @@ write_spread = (
     ctx   : Ctx,
     out   :: String
 ) Res<(), AllocError> {
-    out.add_bytes("(").try();
+    out.add("(").try();
     be.ctype(pack, out).try();
-    out.add_bytes(")").try();
+    out.add(")").try();
     ((c.args.len + first) == slot).match({
-        true  => out.add_bytes("{ 0 }"),
+        true  => out.add("{ 0 }"),
         false => be.write_run(c, first, slot, pack, ctx, out),
     })
 }
@@ -1368,17 +1389,17 @@ write_run = (
     out   :: String
 ) Res<(), AllocError> {
     elem = pack_elem(be.types(), pack).match({ Ok(t) => t, None => pack });
-    out.add_bytes("{ .").try();
+    out.add("{ .").try();
     sym_member(out, "data").try();
-    out.add_bytes(" = (").try();
+    out.add(" = (").try();
     be.ctype(elem, out).try();
-    out.add_bytes("[]){ ").try();
+    out.add("[]){ ").try();
     be.write_pack_elems(c, first, slot, elem, ctx, out).try();
-    out.add_bytes(" }, .").try();
+    out.add(" }, .").try();
     sym_member(out, "len").try();
-    out.add_bytes(" = ").try();
+    out.add(" = ").try();
     out.write_usize(c.args.len + first - slot).try();
-    out.add_bytes("u }").try();
+    out.add("u }").try();
     Ok(());
 }
 
@@ -1395,7 +1416,7 @@ write_pack_elems = (
 ) Res<(), AllocError> {
     c.args.loop((h, i, a) {
         ((i + first) >= slot).then(() {
-            ((i + first) > slot).then(() { out.add_bytes(", ").try() });
+            ((i + first) > slot).then(() { out.add(", ").try() });
             hold = be.holds(c, i + first, first);
             be.value_held(a.value, ctx, elem, hold, out).try();
         });

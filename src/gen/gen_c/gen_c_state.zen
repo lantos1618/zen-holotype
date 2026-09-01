@@ -150,6 +150,14 @@ CBackend* = {
     spawn_envs :: Vec<String>,
     spawn_sites :: usize,
 
+    // Actor lowering owns a distinct pthread family: one long-lived worker
+    // per actor, plus concrete actor/message records discovered at spawn and
+    // send sites. Definitions are buffered until the header/type section is
+    // assembled, as closure capture records are above.
+    actor_used :: bool,
+    actor_defs :: Vec<String>,
+    actor_sites :: usize,
+
     // the functions to lower, and the ones already lowered. A QUEUE
     // rather than a list of every declaration because the walk is
     // reachability-driven — `gen_c_decl.zen`'s header says why.
@@ -267,7 +275,7 @@ CBackend* = {
     render_diags* = (self: @Self, out :: String) Res<(), AllocError> {
         self.diags.loop((h, d) {
             render_gen(d, out).try();
-            out.add_bytes("\n").try();
+            out.add("\n").try();
         });
         Ok(());
     }
@@ -356,7 +364,7 @@ CBackend* = {
 
     add_helpers = (self :: @Self, prim: str) Res<(), AllocError> {
         owned ::= self.alloc.String().try();
-        owned.add_bytes(prim).try();
+        owned.add(prim).try();
         self.helper_types.add(owned)
     }
 
@@ -451,6 +459,29 @@ CBackend* = {
 
     spawn_env_at* = (self: @Self, i: usize) Res<String> {
         self.spawn_envs.get(i)
+    }
+
+    // -----------------------------------------------------------------
+    // the actor floor
+    // -----------------------------------------------------------------
+
+    need_actor* = (self :: @Self) () { self.actor_used = true; }
+
+    uses_actor* = (self: @Self) bool { self.actor_used }
+
+    next_actor_site* = (self :: @Self) usize {
+        self.actor_sites = self.actor_sites + 1;
+        self.actor_sites
+    }
+
+    add_actor_def* = (self :: @Self, text: String) Res<(), AllocError> {
+        self.actor_defs.add(text)
+    }
+
+    actor_def_count* = (self: @Self) usize { self.actor_defs.len }
+
+    actor_def_at* = (self: @Self, i: usize) Res<String> {
+        self.actor_defs.get(i)
     }
 
     // -----------------------------------------------------------------
@@ -552,7 +583,7 @@ CBackend* = {
     // `be.fmt("zg_scope {};\n{}.zg_n = 0;\n", v, v)` — five `write`s as
     // one. Declared not defined, like every format door: `{}` resolves
     // by the ARGUMENT'S type, so the call is expanded where it is
-    // written. Every piece goes through `write` above and answers
+    // written. Every piece goes through the receiver's raw floor and answers
     // exactly what `write` answers, so nothing is converted — which is
     // what lets an `AllocError` body call it at all. NO IMPLICIT
     // NEWLINE, and a hole must be a `str`: `gen_c_floor.zen` holds the
@@ -642,7 +673,7 @@ CBackend* = {
             }),
             None  => {
                 owned ::= self.alloc.String().try();
-                owned.add_bytes(name).try();
+                owned.add(name).try();
                 self.extern_names.add(owned).try();
                 self.extern_protos.add(proto).try();
                 Ok(true)
@@ -724,7 +755,7 @@ CBackend* = {
 
     remember = (self :: @Self, sym: str) Res<(), AllocError> {
         owned ::= self.alloc.String().try();
-        owned.add_bytes(sym).try();
+        owned.add(sym).try();
         self.fn_seen.add(owned)
     }
 
@@ -831,7 +862,7 @@ CBackend* = {
     reserve* = (self :: @Self, name: str) Res<usize, AllocError> {
         n = self.declared_count(name) + 1;
         owned ::= self.alloc.String().try();
-        owned.add_bytes(name).try();
+        owned.add(name).try();
         self.declared.add(owned).try();
         Ok(n);
     }
@@ -1061,6 +1092,9 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         spawn_used: false,
         spawn_envs: a.Vec<String>(),
         spawn_sites: 0,
+        actor_used: false,
+        actor_defs: a.Vec<String>(),
+        actor_sites: 0,
         scope_used: false,
         defer_envs: a.Vec<String>(),
         defer_env_ids: a.Vec<usize>(),

@@ -1,0 +1,43 @@
+// tests/corpus/string-basic/format_and_raw_adds_share_one_buffer/main.zen
+// THREE append shapes, ONE buffer: `fmt` expands format strings at the
+// call site, `add(str)` copies text verbatim, and `add(u8)` writes one
+// byte. All three answer the String buffer's AllocError floor.
+//
+// What makes this worth pinning: the doors must assemble the bytes in
+// WRITTEN ORDER through different lowering paths. `fmt` emits literal
+// runs and typed writer calls; both raw `add` overloads bypass formatting
+// entirely. A backend that lowered one operation to a
+// copy, or appended at the wrong end of the buffer, prints bytes that
+// are plausible-looking text in the wrong order — which no zero-value
+// expectation can catch.
+//
+// The format writer dispatch is also here: the first `fmt` writes an i64
+// and the second writes strs. Both land in one buffer and len() counts
+// every byte.
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    sb    ::= alloc.String().try();
+
+    println("empty {} {}", sb.len(), sb.is_empty());
+
+    // the format door with an integer hole
+    sb.fmt("one={} ", 1).try();
+    println("after-add {} [{}]", sb.len(), sb.view());
+
+    // the same format door with str holes
+    sb.fmt("two={} three={}", "2", "3").try();
+    println("after-fmt {} [{}]", sb.len(), sb.view());
+
+    // the two raw add overloads: bytes verbatim, no format meaning
+    sb.add("+4").try();
+    sb.add('!').try();
+    println("after-raw {} [{}]", sb.len(), sb.view());
+
+    // an empty append is legal and changes nothing but proves the
+    // loop-over-zero-bytes path runs
+    sb.add("").try();
+    println("still {} {}", sb.len(), sb.is_empty());
+
+    Ok(0);
+}

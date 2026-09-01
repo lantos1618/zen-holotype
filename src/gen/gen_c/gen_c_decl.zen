@@ -27,6 +27,7 @@ TyId = sema.sema_ty
 Def, decl_at = sema.sema_def
 Ctx = sema.sema_check
 Inst = sema.sema_inst
+owner_of = sema.sema_inst
 param_type = sema.sema_denote
 self_ctx = sema.sema_member
 ty_at = sema.sema_cand
@@ -46,7 +47,7 @@ emit_types = gen.gen_c.gen_c_layout
 Dest, block = gen.gen_c.gen_c_stmt
 takes_closure = gen.gen_c.gen_c_inline
 impl_member_at, by_arity, kept_or_arity = gen.gen_c.gen_c_impl
-method_sig = gen.gen_c.gen_c_member
+method_sig, generic_method_sig = gen.gen_c.gen_c_member
 emit_main = gen.gen_c.gen_c_main
 emit_banner, emit_floor, emit_helpers, emit_print, emit_stderr = gen.gen_c.gen_c_runtime
 emit_fs, emit_scope, emit_scope_floor = gen.gen_c.gen_c_runtime
@@ -54,6 +55,7 @@ emit_stdin = gen.gen_c.gen_c_stdin
 emit_env = gen.gen_c.gen_c_env
 emit_clock = gen.gen_c.gen_c_clock
 emit_threads, emit_spawn_envs = gen.gen_c.gen_c_threads
+emit_actor_floor, emit_actor_defs = gen.gen_c.gen_c_actor
 
 // A bound on the reachable set, and a diagnostic at it rather than a
 // walk that does not terminate.
@@ -103,6 +105,7 @@ emit_prelude = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     be.emit_env(out).try();
     be.emit_clock(out).try();
     be.emit_threads(out).try();
+    be.emit_actor_floor(out).try();
     emit_print(be, out).try();
     emit_stderr(be, out).try();
     emit_helpers(be, out).try();
@@ -112,6 +115,7 @@ emit_prelude = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     // The spawned closure's heap record obeys the same ordering for the
     // same reason.
     be.emit_spawn_envs(out).try();
+    be.emit_actor_defs(out).try();
     emit_scope(be, out).try();
     Ok(());
 }
@@ -465,14 +469,32 @@ keep_if_same_sig = (
     kept :: Vec<Member>
 ) Res<(), AllocError> {
     sig ::= be.alloc.Vec<TyId>();
-    be.method_sig(
-        m.self_ty,
-        m.decl,
-        f,
-        m.decl.module.to_usize(),
-        be.inst,
-        sig
-    ).try();
+    f.tparams.len.eq(0).match({
+        true  => be.method_sig(
+            m.self_ty,
+            m.decl,
+            f,
+            m.decl.module.to_usize(),
+            be.inst,
+            sig
+        ),
+        false => {
+            owner = be.method_tparam_owner(
+                f,
+                m.decl.module.to_usize(),
+                m.qname
+            ).try();
+            be.generic_method_sig(
+                m.self_ty,
+                m.decl,
+                f,
+                m.decl.module.to_usize(),
+                owner,
+                be.inst,
+                sig
+            )
+        },
+    }).try();
     same_tys(sig, m.sig).match({
         true  => kept.add(mem),
         false => Ok(()),
@@ -519,10 +541,26 @@ method_shape = (
     // reached through a bound's erased slot is emitted at the byte type,
     // and `T` in its body means nothing unless the same owner that bound
     // it in the queue entry binds it again here.
-    be.enter_tparams(f.tparams, m.qname).try();
+    owner = be.method_tparam_owner(f, mi, m.qname).try();
+    be.enter_tparams(f.tparams, owner).try();
     be.lower_shape(f, blk, m.qname, m.name, mem.span, ctx, self_ty, mi).try();
     be.leave_tparams(mark).try();
     Ok(());
+}
+
+method_tparam_owner = (be :: CBackend, f: Function, mi: usize, queued: str)
+                      Res<str, AllocError> {
+    ordinary = owner_of(be.check, mi, f.name.text).try();
+    f.tparams.get(0).match({
+        None   => Ok(ordinary),
+        Ok(tp) => {
+            v = be.check.types.var(tp.name.text, ordinary).try();
+            be.inst.bound(v).match({
+                true  => Ok(ordinary),
+                false => Ok(queued),
+            })
+        },
+    })
 }
 
 // `@Self` FOR A GENERIC RECEIVER IS THE DECLARATION'S OWN TYPE; for
@@ -685,20 +723,20 @@ write_proto = (
 )
               Res<(), AllocError> {
     be.check_spellable(name, span, ret, sig).try();
-    out.add_bytes(be.linkage()).try();
+    out.add(be.linkage()).try();
     be.ctype(ret, out).try();
-    out.add_bytes(" ").try();
+    out.add(" ").try();
     sym_fn(out, be.check.types, be.check.world, qname, sig, be.inst).try();
-    out.add_bytes("(").try();
+    out.add("(").try();
     be.write_params(f, sig, out).try();
-    out.add_bytes(")").try();
+    out.add(")").try();
     Ok(());
 }
 
 write_params = (be :: CBackend, f: Function, sig: Vec<TyId>, out :: String)
                Res<(), AllocError> {
     (f.params.len == 0).match({
-        true  => out.add_bytes("void"),
+        true  => out.add("void"),
         false => be.write_param_list(f, sig, out),
     })
 }
@@ -714,12 +752,12 @@ write_param_list = (
     f.params.loop((h, i, p) {
         ty = sig.get(i).match({ Ok(t) => t, None => unknown });
         be.has_storage(ty).then(() {
-            written.then(() { out.add_bytes(", ").try() });
+            written.then(() { out.add(", ").try() });
             be.write_param(p, i, sig, out).try();
             written = true;
         });
     });
-    (written == false).then(() { out.add_bytes("void").try() });
+    (written == false).then(() { out.add("void").try() });
     Ok(());
 }
 
@@ -829,8 +867,8 @@ keep = (be :: CBackend, qname: str, sig: Vec<TyId>, proto: String, span: Span)
 
 // Paths are root-relative like diagnostics; escaping keeps one record per row.
 render_symbol_map* = (be :: CBackend, out :: String) Res<(), AllocError> {
-    out.add_bytes("zen-symbol-map-v1\n").try();
-    out.add_bytes("symbol\tfile\tline\tcolumn\n").try();
+    out.add("zen-symbol-map-v1\n").try();
+    out.add("symbol\tfile\tline\tcolumn\n").try();
     seq = order(be.alloc, be.fn_names).try();
     seq.loop((h, i) { be.write_symbol_at(i, out).try() });
     Ok(());
@@ -850,23 +888,23 @@ write_symbol_at = (be :: CBackend, i: usize, out :: String)
 write_symbol_row = (symbol: str, span: Span, out :: String)
                    Res<(), AllocError> {
     write_map_field(symbol, out).try();
-    out.add_byte('\t').try();
+    out.add('\t').try();
     write_map_field(span.file, out).try();
-    out.add_byte('\t').try();
+    out.add('\t').try();
     out.write_usize(span.start.line).try();
-    out.add_byte('\t').try();
+    out.add('\t').try();
     out.write_usize(span.start.col).try();
-    out.add_byte('\n')
+    out.add('\n')
 }
 
 write_map_field = (text: str, out :: String) Res<(), AllocError> {
     Range(0, text.len).loop((h, i) {
         text.index(i).match({
-            '\\' => out.add_bytes("\\\\"),
-            '\t' => out.add_bytes("\\t"),
-            '\n' => out.add_bytes("\\n"),
-            '\r' => out.add_bytes("\\r"),
-            b    => out.add_byte(b),
+            '\\' => out.add("\\\\"),
+            '\t' => out.add("\\t"),
+            '\n' => out.add("\\n"),
+            '\r' => out.add("\\r"),
+            b    => out.add(b),
         }).try();
     });
     Ok(());

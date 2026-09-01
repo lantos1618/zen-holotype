@@ -6,7 +6,7 @@
 Alloc, AllocError = std.mem
 str, String = std.text
 Vec = std.collections
-Os, Arch, Abi, CImport = std.build
+Target, CImport = std.build
 Ast, Module, CHeader, CTypeBinding, CBinding, CBindingId = std.ast
 
 CImportRequest* = {
@@ -42,7 +42,7 @@ CImportModule* = {
 
 request* = (a: Alloc, spec: CImport) Res<CImportRequest, AllocError> {
     out ::= a.String("c-import-v1|").try();
-    target(out, spec.target.os, spec.target.arch, spec.target.abi).try();
+    target(out, spec.target).try();
     add_list(out, "headers", spec.headers).try();
     add_list(out, "include-paths", spec.include_paths).try();
     add_list(out, "defines", spec.defines).try();
@@ -50,21 +50,13 @@ request* = (a: Alloc, spec: CImport) Res<CImportRequest, AllocError> {
     Ok(CImportRequest(spec: spec, identity: out))
 }
 
-target = (out :: String, os: Os, arch: Arch, abi: Abi)
-         Res<(), AllocError> {
-    out.fmt("target-v1|{}|{}|{}|", os_name(os), arch_name(arch), abi_name(abi))
-}
-
-os_name = (os: Os) str {
-    os.match({ Macos => "macos", Linux => "linux", Windows => "windows" })
-}
-
-arch_name = (arch: Arch) str {
-    arch.match({ X86_64 => "x86_64", Arm64 => "arm64" })
-}
-
-abi_name = (abi: Abi) str {
-    abi.match({ Gnu => "gnu", Musl => "musl", Msvc => "msvc", Darwin => "darwin" })
+target = (out :: String, selected: Target) Res<(), AllocError> {
+    out.fmt(
+        "target-v1|{}|{}|{}|",
+        selected.os.stable_name(),
+        selected.arch.stable_name(),
+        selected.abi.stable_name()
+    )
 }
 
 add_piece = (out :: String, value: str) Res<(), AllocError> {

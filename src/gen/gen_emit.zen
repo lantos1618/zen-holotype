@@ -23,7 +23,6 @@ Alloc, AllocError = std.mem
 str, String = std.text
 Vec = std.collections
 Range = std.core
-write_usize = sema.sema_diag
 before = std.text
 
 // Four spaces, once. A backend asking for an indent should not also be
@@ -70,7 +69,7 @@ Emit* = {
 
     open_run = (self :: @Self, s: str) Res<(), AllocError> {
         self.open_line().try();
-        self.text.add_bytes(s)
+        self.text.add(s)
     }
 
     byte* = (self :: @Self, b: u8) Res<(), AllocError> {
@@ -82,22 +81,19 @@ Emit* = {
 
     open_byte = (self :: @Self, b: u8) Res<(), AllocError> {
         self.open_line().try();
-        self.text.add_byte(b)
+        self.text.add(b)
     }
 
-    // A decimal, no separators, most significant digit first. Lives
-    // here (not per-backend) since every backend writes numbers.
-    // `std.text` has no `AllocError`-only integer writer — the format
-    // machinery speaks `WriteError` (std gap, docs/SEMA_BOOTSTRAP_FIXES.md)
-    // — so this borrows sema's until one exists.
+    // A decimal, no separators, most significant digit first. String owns
+    // the AllocError-only writer; Emit owns only opening the indented line.
     number* = (self :: @Self, v: usize) Res<(), AllocError> {
         self.open_line().try();
-        write_usize(self.text, v)
+        self.text.write_usize(v)
     }
 
     // End the line. A blank line is `line` twice and gets no indent.
     line* = (self :: @Self) Res<(), AllocError> {
-        self.text.add_byte('\n').try();
+        self.text.add('\n').try();
         self.fresh = true;
         Ok(());
     }
@@ -116,7 +112,7 @@ Emit* = {
 
     write_indent = (self :: @Self) Res<(), AllocError> {
         Range(0, self.depth * INDENT).loop((h, i) {
-            self.text.add_byte(' ').try();
+            self.text.add(' ').try();
         });
         Ok(());
     }
@@ -224,7 +220,7 @@ merge_run = (
     Range(start, end).loop((h, at) {
         take_right = right_first(src, keys, left, mid, right, end);
         from       = take_right.match({ true => right, false => left });
-        put(dst, at, index_at(src, from)).try();
+        put(dst, at, src.get(from).value_or(0)).try();
         take_right.match({
             true  => { right = right + 1; },
             false => { left = left + 1; },
@@ -245,13 +241,19 @@ right_first = (
         true  => true,
         false => (right == end).match({
             true  => false,
-            false => earlier(keys, index_at(src, right), index_at(src, left)),
+            false => earlier(
+                keys,
+                src.get(right).value_or(0),
+                src.get(left).value_or(0)
+            ),
         }),
     })
 }
 
 copy_order = (src: Vec<usize>, dst :: Vec<usize>) Res<(), AllocError> {
-    Range(0, src.len).loop((h, i) { put(dst, i, index_at(src, i)).try(); });
+    Range(0, src.len).loop((h, i) {
+        put(dst, i, src.get(i).value_or(0)).try();
+    });
     Ok(())
 }
 
@@ -264,10 +266,6 @@ earlier = (keys: Vec<String>, i: usize, j: usize) bool {
 
 view_at = (keys: Vec<String>, i: usize) str {
     keys.get(i).match({ Ok(s) => s.view(), None => "" })
-}
-
-index_at = (v: Vec<usize>, i: usize) usize {
-    v.get(i).match({ Ok(n) => n, None => 0 })
 }
 
 // `Vec.set` refuses an out-of-range index with a bare `Res<()>` (no

@@ -1,27 +1,9 @@
 // src/sema/sema_layout.zen
-// Whether a struct has a size at all.
+// Whole-program rejection of by-value struct layout cycles.
 //
-// DESIGN.md's rule has two halves: `Node = { next: Ptr<Node> }` is legal
-// (a pointer is one word, layout terminates); `Node = { next: Node }` is
-// not. The second half was named a fault but never raised — nothing
-// asked the layout question, so a self-containing struct reached gen_c
-// and became C a C compiler rejects, with no Zen diagnostic to say why.
-//
-// A declaration walk, not a query: nobody asks a node this (`Room` and
-// `Door` in the mutual case are mentioned by no expression anywhere and
-// still need sizes).
-//
-// What stops the walk, each an indirection or abstention, never an
-// oversight: a field whose type isn't a declared nominal (primitive,
-// function, union, `Res`) can't close a cycle of by-value fields; a
-// GENERIC struct at either end abstains too — `Ptr<T>`/`Vec<T>` are the
-// named indirections, and a cycle visible only after substitution needs
-// `sema_inst.zen` to see it, so asking here would make the walk
-// instantiate. Declining costs a diagnostic, never a program.
-//
-// One mistake, one diagnostic — what `done` is for: `Room -> Door ->
-// Room` is marked the moment it's reported, so the walk from the other
-// end says nothing.
+// Pointer-like and non-nominal fields terminate a path. Generic structs
+// abstain because cycles requiring substitution belong to instantiation.
+// Each cycle is reported once at its earliest source edge.
 
 Decl, Struct, Member, Field = std.ast
 Ident, Pos, TypeId = std.ast

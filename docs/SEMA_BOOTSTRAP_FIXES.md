@@ -164,31 +164,16 @@ moment it exists, `key_before` deletes and an import replaces it.
 
 ---
 
-## 5. `String.add` speaks `WriteError`, so no single-error-set function
-   can format a number
+## 5. CLOSED: `String.fmt` keeps the buffer's `AllocError` floor
 
-**The language working exactly as specified, with a cost worth naming.**
-
-`String.add(fmt, args)` returns `Res<(), WriteError>`, and `WriteError`
-is `AllocError | IoError`. `src/sema/` returns `Res<_, AllocError>`
-everywhere, because the seed subset is "one nominal error enum per
-function". There is no From, so `.add("{}", n).try()` cannot propagate:
-
-```
-sema_ty.zen:219:51: no implicit error conversion: AllocError | IoError
-                    is not part of AllocError
-```
-
-This is law 4 doing its job. But it means **any** function that both
-formats a number and keeps one error set has to spell the digits itself.
-`sema_diag.zen` carries `write_usize`, which writes a decimal a digit at
-a time by recursion, purely to render `line:col`.
-
-**What is wanted:** an `AllocError`-only integer writer in
-`std.text.text_fmt` — the digits already exist there, since `Sink`'s
-`write_byte` was introduced precisely so "printing an integer" need not
-allocate. Exposing it would delete `write_usize` and stop the next
-compiler component from writing a third copy.
+The old `String.add(fmt, args)` spelling selected the generic Sink door and
+therefore returned `WriteError` (`AllocError | IoError`). That forced
+allocation-only compiler code to hand-roll integer formatting. Formatting is
+now explicit: `String.fmt("{}", n)` expands through the concrete buffer and
+answers `AllocError`, while `String.add(str)` and `String.add(u8)` are raw
+appends. A
+receiver typed as `Sink` still uses `.fmt(..)` with the honest `WriteError`
+floor.
 
 ---
 
@@ -373,7 +358,7 @@ comment citing §10 to justify a workaround is citing a gap that is not there.
 ```groovy
 Fault = { name*: str }
 show = (f: Fault, out :: String) Res<(), AllocError> {
-    (f.name.len > 0).then(() { out.add_bytes(f.name).try() });   // bootstrap:
+    (f.name.len > 0).then(() { out.add(f.name).try() });   // bootstrap:
     Ok(());                                    // `no member `name` on this value`
 }
 ```

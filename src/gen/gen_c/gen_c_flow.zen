@@ -11,16 +11,15 @@ AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
-TyId, TyNamed, TyRes = sema.sema_ty
+TyId, TyNamed, TyRes, is_failure = sema.sema_ty
 decl_at = sema.sema_def
 Ctx = sema.sema_check
 Inst = sema.sema_inst
 last_segment = sema.sema_match
-write_usize = sema.sema_diag
 member_of = sema.sema_union
 sym_local, sym_member, sym_variant = gen.gen_name
 sym_union_member = gen.gen_name
-RES_PATH, is_failure = gen.gen_name
+RES_PATH = gen.gen_name
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
 enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
@@ -58,7 +57,7 @@ PatternSite = {
            Res<(), AllocError> {
         pat = be.tree.pattern_at(pid);
         pat.kind.match({
-            Wild           => out.add_bytes("1"),
+            Wild           => out.add("1"),
             Literal(l)     => self.literal_cond(be, pat, l, out),
             Name(p)        => self.name_cond(be, p.name, out),
             Destructure(d) => self.destructure_cond(be, d, out),
@@ -132,7 +131,7 @@ PatternSite = {
                          ty: TyId, out :: String) Res<(), AllocError> {
         place ::= be.alloc.String().try();
         be.payload_place(last_segment(d.name), self.place, place).try();
-        out.add_bytes(" && ").try();
+        out.add(" && ").try();
         self.at(ty, place.view()).cond(be, d.binder, out)
     }
 
@@ -166,7 +165,7 @@ PatternSite = {
     set_name_cond = (self: @Self, be :: CBackend, text: str,
                      out :: String) Res<(), AllocError> {
         member_of(be.check, self.ty, text).match({
-            None    => out.add_bytes("1"),
+            None    => out.add("1"),
             Ok(mty) => self.set_name_arm(be, mty, text, out),
         })
     }
@@ -189,7 +188,7 @@ PatternSite = {
         be.enum_path(self.ty, qname).try();
         out.fmt(" && ({}.zg_tag == ", self.place).try();
         out.sym_variant(qname.view(), case).try();
-        out.add_bytes(")")
+        out.add(")")
     }
 
     tag_cond = (self: @Self, be :: CBackend, q: QualifiedName,
@@ -203,7 +202,7 @@ PatternSite = {
         be.enum_path(self.ty, qname).try();
         out.fmt("({}.zg_tag == ", self.place).try();
         out.sym_variant(qname.view(), name).try();
-        out.add_bytes(")")
+        out.add(")")
     }
 
     bind = (self: @Self, be :: CBackend, pid: PatternId)
@@ -431,7 +430,7 @@ report_nested = (be :: CBackend, inner: Pattern) Res<(), AllocError> {
 
 bool_cond = (text: str, scrut: str, out :: String) Res<(), AllocError> {
     text.eq("true").match({
-        true  => out.add_bytes(scrut),
+        true  => out.add(scrut),
         false => negate(scrut, out),
     })
 }
@@ -449,12 +448,12 @@ write_str_cond = (l: Literal, scrut: str, out :: String)
     n = decoded_len(l.text);
     out.fmt("({scrut}.len == ").try();
     out.write_usize(n).try();
-    out.add_bytes("u").try();
+    out.add("u").try();
     (n > 0).match({
         true  => str_bytes_cond(l, scrut, n, out),
         false => Ok(()),
     }).try();
-    out.add_bytes(")").try();
+    out.add(")").try();
     Ok(());
 }
 
@@ -465,7 +464,7 @@ str_bytes_cond = (l: Literal, scrut: str, n: usize, out :: String)
                  Res<(), AllocError> {
     out.fmt(" && memcmp({scrut}.data, {}, ", l.text).try();
     out.write_usize(n).try();
-    out.add_bytes("u) == 0").try();
+    out.add("u) == 0").try();
     Ok(());
 }
 
@@ -479,7 +478,7 @@ unsupported_cond = (be :: CBackend, pat: Pattern, out :: String)
         pat.span,
         GenFault.Unsupported("a string pattern")
     ).try();
-    out.add_bytes("0")
+    out.add("0")
 }
 
 // The tag test and sema read a set member's name from the same declaration.
@@ -508,7 +507,7 @@ bind_local = (be :: CBackend, name: str, ty: TyId, init: str)
     be.check.bind(name, ty, false, false).try();
     decl ::= be.alloc.String().try();
     be.ctype(ty, decl).try();
-    decl.add_bytes(" ").try();
+    decl.add(" ").try();
     sym_local(decl, name, n).try();
     be.fmt("{} = {init};\n", decl.view())
 }
@@ -563,7 +562,7 @@ variants_have = (variants: Vec<Variant>, name: str) bool {
 // The path a tag constant is built from.
 enum_path* = (be :: CBackend, st: TyId, out :: String) Res<(), AllocError> {
     be.check.types.at(st).match({
-        Res(_)   => out.add_bytes(RES_PATH),
+        Res(_)   => out.add(RES_PATH),
         Named(n) => be.write_qname(out, n),
         _        => Ok(()),
     })
@@ -700,7 +699,7 @@ write_assign_ok_unit* = (be :: CBackend, ret: TyId, dst: str)
 write_assign_ok* = (be :: CBackend, ret: TyId, payload: str, dst: str)
                   Res<(), AllocError> {
     value ::= be.res_head(ret, "Ok").try();
-    value.add_bytes(", .zg_data.").try();
+    value.add(", .zg_data.").try();
     sym_member(value, "Ok").try();
     value.fmt(" = {payload}").try();
     be.finish_res(value, dst)
@@ -728,13 +727,13 @@ write_err_variant = (be :: CBackend, ety: TyId, name: str, out :: String)
                     Res<(), AllocError> {
     path ::= be.alloc.String().try();
     be.enum_path(ety, path).try();
-    out.add_bytes(", .zg_data.").try();
+    out.add(", .zg_data.").try();
     out.sym_member("Err").try();
-    out.add_bytes(" = ((").try();
+    out.add(" = ((").try();
     be.ctype(ety, out).try();
-    out.add_bytes("){ .zg_tag = ").try();
+    out.add("){ .zg_tag = ").try();
     out.sym_variant(path.view(), name).try();
-    out.add_bytes(" })").try();
+    out.add(" })").try();
     Ok(());
 }
 
@@ -742,14 +741,14 @@ res_head = (be :: CBackend, ret: TyId, variant: str)
            Res<String, AllocError> {
     out ::= be.alloc.String("((").try();
     be.ctype(ret, out).try();
-    out.add_bytes("){ .zg_tag = ").try();
+    out.add("){ .zg_tag = ").try();
     out.sym_variant(RES_PATH, variant).try();
     Ok(out)
 }
 
 finish_res = (be :: CBackend, value :: String, dst: str)
              Res<(), AllocError> {
-    value.add_bytes(" })").try();
+    value.add(" })").try();
     be.set_line(dst, value.view())
 }
 

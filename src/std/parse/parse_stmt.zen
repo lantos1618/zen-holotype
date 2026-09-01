@@ -1,20 +1,7 @@
 // src/std/parse/parse_stmt.zen
-// Blocks, and the four things a statement can be.
-//
-// "A statement ends with `;`. A declaration does not." That is the
-// whole rule and it holds without a lexer that counts newlines, which
-// is why this file needs no notion of a line at all.
-//
-// A BLOCK IS A VALUE: the optional final expression — the one with no
-// `;` — is the block's value, and `Block` in ast_node.zen says why the
-// `;`-terminated tail DESIGN.md also allows is sema's question and not
-// this file's. A formatter must not add or remove that semicolon.
-//
-// RECOVERY LIVES HERE. A statement is the unit a syntax error is
-// contained in: one bad statement produces one diagnostic and the
-// parser resumes at the next `;` or at the closing `}`, so the
-// fiftieth error in a file is still the fiftieth mistake and not the
-// first mistake seen fifty times.
+// Blocks and statements. A semicolon distinguishes a statement; an optional
+// final expression is the block's value. Recovery is contained to statement
+// boundaries so one malformed statement does not consume the rest of a block.
 
 AllocError = std.mem
 no_trivia = std.ast.ast_span
@@ -45,11 +32,7 @@ block_guarded = (p :: Parser) Res<BlockId, AllocError> {
 block_here = (p :: Parser) Res<BlockId, AllocError> {
     m    = p.open();
     open = p.here_span();
-    // A BLOCK THAT NEVER OPENED IS NOT A STATEMENT BOUNDARY. `resume`
-    // ends the containment of one mistake, and a `{` the parser only
-    // wished for is the wrong place to end it: `(i + 1 < f.len;` read
-    // as a lambda arrives here with no brace at all, and everything the
-    // "body" then contains is still the same unclosed `(`.
+    // A synthesized opener does not establish a statement boundary.
     opened = p.expect(
         TokenKind.BraceOpen,
         "expected `{` to open a block"
@@ -73,13 +56,7 @@ block_here = (p :: Parser) Res<BlockId, AllocError> {
             false => (),
         });
     });
-    // Claim what stands before the closing brace BEFORE the brace is
-    // bumped. Bumping drains the trivia PAST the brace and overwrites
-    // `pending` with the run beyond it — a claim made after `expect_close`
-    // captures an empty run (or, worse, the NEXT node's leading trivia),
-    // which is exactly how issue #740's first patch silently kept the
-    // bug while looking fixed. Same precondition as `claim_leading`:
-    // claim at ENTRY to the delimiter, before consuming anything.
+    // Claim closing trivia before consuming the brace; bump drains the next run.
     close = p.claim_close();
     p.expect_close(
         TokenKind.BraceClose,
@@ -160,14 +137,8 @@ binding_item = (
     });
 }
 
-// `A.impl(B, { .. })` INSIDE A BODY. DESIGN.md shows an impl at module
-// level only, and a declaration inside a body would have to say what
-// its scope is — so this is refused rather than guessed at.
-//
-// It is still PARSED as the impl it plainly is. Left to the expression
-// parser it reads as a method call, and the only thing said about it
-// was "no such field or method `impl`" from sema — a sentence about a
-// method nobody wrote, on a line whose real mistake is where it stands.
+// Impl declarations are parsed for recovery but diagnosed inside bodies;
+// their scope is module-only.
 impl_item = (p :: Parser, stmts :: Vec<Stmt>, m: Mark) Res<(), AllocError> {
     p.error(
         "`.impl` declares an impl, so it is legal only at module level, never inside a body"

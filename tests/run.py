@@ -150,7 +150,7 @@ CRASH_MARKERS = (
 
 # Link only native floors named by generated C; keep libraries after sources.
 NATIVE_FLOORS: tuple[tuple[bytes, tuple[Path, ...], tuple[str, ...]], ...] = (
-    (b"SSL_CTX_new", (), ("-lssl", "-lcrypto")),
+    (b"SSL_", (), ("-lssl", "-lcrypto")),
     (b"zg_proc_", (REPO_ROOT / "src/std/proc/proc.c",), ()),
 )
 
@@ -1300,8 +1300,8 @@ NATIVE_LINK_CASES: list[tuple[str, bytes, tuple[str, ...]]] = [
         (),
     ),
     (
-        "openssl-reference-selects-only-system-libraries",
-        b"extern void SSL_CTX_new(void); void f(void) { SSL_CTX_new(); }\n",
+        "any-openssl-reference-selects-only-system-libraries",
+        b"extern void SSL_read_ex(void); void f(void) { SSL_read_ex(); }\n",
         ("-lssl", "-lcrypto"),
     ),
     (

@@ -1,29 +1,5 @@
-// std.actor's declared surface, exercised by hand.
-//
-// The runtime is not written, so nothing here spawns: this program
-// calls the lifecycle hooks itself instead of letting a scheduler
-// call them, and builds the `Context` a scheduler would hand in. What
-// it pins is exactly what a scheduler will stand on — that `Actor` is
-// a real bound a generic function can be written against, that both
-// hooks are genuinely OPTIONAL, and that a `Context` carries a LIVE
-// `Env` and a LIVE `Alloc` rather than the zeroed handles C leaves
-// behind.
-//
-// THE ALLOC IS READ BACK ON PURPOSE. A `Context` whose `alloc` came
-// back zeroed would still let this program print, and the print would
-// look right — the shape of every silent wrong answer this tree has
-// had. So the hook allocates through `ctx.alloc`, writes a number
-// derived from the actor's own state, and prints what it reads back;
-// a dead allocator cannot produce 51.
-//
-// TWO IMPLS OF ONE TRAIT, and each says its own tag, because dispatch
-// answering the last impl registered for a method name is a live
-// defect in this compiler. `printer 7` and `collector 9` are the
-// check: one wrong impl and both lines carry the same tag.
-
-Actor, Context = std.actor
-
-Error = AllocError | IoError
+// Spawn supplies Context, behavior calls enqueue work, and stop drains the
+// accepted turns before the actor's stopped lifecycle hook runs.
 
 Printer = {
     tag: u64,
@@ -34,55 +10,29 @@ Printer.impl(Actor, {
         ctx.env.out.println("printer {} started", self.tag)
     }
 
-    // `stopped` is provided here and NOT by Collector below: that is
-    // the whole test of `::=` meaning optional.
+    answer = (self :: @Self, ctx: Context, n: u64) {
+        values ::= ctx.alloc.Vec<u64>();
+        values.add(n + 10).match({
+            Err(_) => (),
+            Ok(_)  => values.get(0).match({
+                None         => (),
+                Ok(answered) => {
+                    ctx.env.out.println("arena answered {}", answered);
+                },
+            }),
+        });
+    }
+
     stopped = (self :: @Self, ctx: Context) {
         ctx.env.out.println("printer {} stopped", self.tag)
     }
 })
 
-Collector = {
-    tag: u64,
-}
-
-Collector.impl(Actor, {
-    started = (self :: @Self, ctx: Context) {
-        ctx.env.out.println("collector {} started", self.tag)
-    }
-})
-
-// `Env.spawn` is declared `<A: Actor>(self: @Self, actor: A) Ref<A>`.
-// This is that bound, with the receiver a scheduler would have: if
-// `Actor` did not name a usable bound, this function would not
-// compile, and the two calls below would not reach two different
-// bodies.
-start_one = <A: Actor>(a :: A, ctx: Context) () {
-    a.started(ctx)
-}
-
-// The allocator half, through the Context and nothing else. Returns
-// what it read back out of the arena, so the caller prints a number
-// the arena actually stored.
-through_the_arena = (ctx: Context, n: u64) Res<u64, Error> {
-    v ::= ctx.alloc.Vec<u64>();
-    v.add(n + 10).try();
-    Ok(v.get(0).ok_or(IoError.Closed).try());
-}
+Error = ActorStartError | ActorError
 
 main = (env: Env) Res<i32, Error> {
-    arena ::= env.mem.alloc();
-    ctx = Context(env: env, alloc: arena);
-
-    p ::= Printer(tag: 7);
-    c ::= Collector(tag: 9);
-
-    start_one(p, ctx);
-    start_one(c, ctx);
-
-    n = through_the_arena(ctx, 41).try();
-    ctx.env.out.println("arena answered {}", n).try();
-
-    p.stopped(ctx);
-
+    printer = env.spawn(Printer(tag: 7)).try();
+    printer.answer(41).try();
+    printer.stop();
     Ok(0);
 }

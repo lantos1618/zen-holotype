@@ -1,43 +1,9 @@
 // src/lsp/lsp_diag.zen
 // `textDocument/publishDiagnostics`: what a build found, said to a client.
-//
-// The queries are somebody else's — `Build` answers `diag_count`/`diag_at`
-// for lex and parse, the `Checker` `Build.whole` hands back answers the
-// same pair for sema; the build itself, and the arena it dies by, are
-// `lsp_built.zen`'s. What is left here is POLICY, and the argument behind
-// every line of it is `docs/design_lsp.md` §5.
-//
-// WHEN — A CHANGE MARKS, A SETTLE POINT BUILDS. `didOpen`/`didChange`
-// record which document is owed a build; the transport calls `settled`
-// once it has answered everything it currently holds, so a batch
-// coalesces to ONE build of the LAST buffer. Not a timed debounce: a
-// quiet interval cannot be observed from here (§5). And `settled` does
-// not build, it ENSURES — `lsp_built.zen`'s single flight — so a settle
-// for a state a query already built costs one key comparison. Over
-// `lsp_stdio.zen` a settle point is every message, since `short_by` asks
-// for exactly one message's bytes, so what coalesces for a real editor is
-// the BUILD: that slot, `lsp_serve.zen`'s byte-identical `didChange`
-// skip, and `say_one` below.
-//
-// WHICH FILE — a build reports across the whole program, so every
-// diagnostic is grouped by the URI its own span names, one notification
-// per URI.
-//
-// CLEARING IS THE HARD HALF. The protocol has no "remove" — a
-// notification REPLACES a file's list — so every build publishes for
-// three sets: the edited file (always), every file this build found
-// something in, and every file `showing` (the URIs currently carrying
-// errors) holds that this build found nothing in.
-//
-// AND NOTHING IS SAID TWICE: `say_one` skips a body byte-identical to the
-// last one sent for that URI (`said`). The clearing still works — a file
-// that stops being wrong has a DIFFERENT body, the empty list — and
-// `showing` updates whether or not a frame was written, because the dedup
-// is about the wire and never about the state.
-//
-// SEVERITY IS 1, ERROR, FOR EVERYTHING, and `Diag.note` becomes
-// `relatedInformation` rather than part of the message; a `PairFault`'s
-// second position stays inside `sema_diag.zen`'s own sentence.
+// Changes mark a pending whole-program build; settling ensures that build and
+// publishes one notification per affected URI. Empty lists clear previous
+// diagnostics. Byte-identical notifications are suppressed without changing
+// the server's remembered state.
 
 str, String = std.text
 Vec, Map = std.collections
@@ -49,86 +15,57 @@ write_range = lsp.lsp_pos
 obj, arr, Nest, written = std.json
 write_frame, write_decimal = lsp.lsp_frame
 path_of = lsp.lsp_uri
-// The one arena string-copy, exported (`lsp_reply.zen`).
+// Arena-backed string ownership helper.
 own_str = lsp.lsp_reply
-// The one build the session keeps, and what it gathered. `Spot` is
-// RE-EXPORTED, not moved in spirit: a diagnostic already belonging to a
-// file is shaped where the build that produced it lives.
+// The build retained by the session and its diagnostic rows.
 Built, Spot* = lsp.lsp_built
-// The semantic half of colour: what the held build settled about each
-// name, gathered by `lsp_names.zen` off the SAME `Checker` the
-// diagnostics come from — a second build per keystroke is the cost
-// `design_lsp.md` §5 prices, and it is paid nowhere twice.
+// Semantic name classifications gathered from the retained build.
 Classed = lsp.lsp_colour
 
-// What a query borrows from the held build: the checker (a header copy,
-// read-only — `lsp_built.zen`'s header is the doctrine) and the root it
-// ran against, which a definition needs to turn another module's span
-// into a URI. `c` is a `Res` because a successful `ensure` having left a
-// build in the slot is a fact the type system cannot see.
+// Read-only query access to a retained checker and its compilation root.
 Shared* = {
     c*: Res<Checker>,
     root*: str,
 }
 
-// The server's diagnostics half: which document owes a build, which
-// files are showing errors right now, and the one build everything
-// shares. A TYPE OF ITS OWN rather than four fields on `Server`: the
-// server owns the documents, this owns what has been said about them.
+// Pending diagnostic work, published state, and the shared build.
 Diagnostics* = {
     a: Alloc,
 
-    // The document a build is owed to, or "" when none — one, not a
-    // queue: a build is whole-program, so the newest document answers
-    // for every older one.
+    // The newest document requiring a whole-program build, or empty.
     owed :: str = "",
 
-    // Every URI currently carrying a non-empty list — the ONLY thing
-    // that makes clearing possible. SESSION-ARENA COPIES: the spots they
-    // were read from die with the slot's next build, and this set must
-    // not.
+    // Session-owned URIs currently carrying non-empty diagnostics.
     showing :: Vec<str>,
 
-    // Closed documents whose diagnostics must be cleared at the next
-    // settle. A Vec, not one slot: a client may close a whole window in
-    // one buffered batch.
+    // Closed documents awaiting an empty diagnostic notification.
     closing :: Vec<str>,
 
-    // THE ONE BUILD, shared with every query. See `lsp_built.zen`.
+    // Build shared by diagnostics and document queries.
     built :: Built,
 
-    // Whether `classed` may be served. A change stales it (`owes`): the
-    // rows describe the text the last SETTLE saw, not the text the
-    // buffer now holds. A query-driven rebuild does NOT set this —
-    // colour follows the settle, and the lexical fallback is never wrong.
+    // Semantic classes are valid only for the most recently settled text.
     fresh :: bool = false,
 
-    // THE LAST NOTIFICATION SENT, per URI — the dedup `say_one` applies.
-    // Keys and bodies are session-arena copies for the same reason
-    // `showing` is.
+    // Last notification body per URI, owned by the session arena.
     said :: Map<str, str>,
 
-    // A document changed. Nothing is built here — see the header. The
-    // freshness goes with the change; the slot's own key notices the new
-    // bytes at the next `ensure`.
+    // Mark changed text for the next settle and stale semantic classes.
     owes* = (self :: @Self, uri: str) () {
         self.built.invalidate();
         self.owed  = uri;
         self.fresh = false;
     }
 
-    // A watched `.zen` file changed outside the document overlay. Keep an
-    // already-owed editor buffer as the build entry, but always retire the
-    // held build: its key cannot see bytes read from disk.
+    // Disk changes retire the build because its cache key covers overlays,
+    // not dependency bytes read from disk.
     stales* = (self :: @Self, uri: str) () {
         self.built.invalidate();
         self.fresh = false;
         self.owed.is_empty().then(() { self.owed = uri; });
     }
 
-    // A closed buffer no longer belongs to the overlay. Retire the build
-    // that borrowed that overlay, clear anything published for the closed
-    // URI, and rebuild from another open entry when one remains.
+    // Closing retires the overlay build and schedules a diagnostic clear.
     closed* = (self :: @Self, uri: str, next: str)
               Res<(), AllocError> {
         self.built.invalidate();
@@ -140,11 +77,8 @@ Diagnostics* = {
         })
     }
 
-    // The names the last settle classified in `uri`, sorted for
-    // `lsp_colour.zen`'s search. AN EMPTY VEC IS THE WHOLE FALLBACK:
-    // no workspace, no build yet, a change not yet settled and a build
-    // with faults all look alike here, and all mean "lexical colours".
-    // The returned Vec borrows a lazy per-file cache in the held build.
+    // Sorted semantic classifications from the last settle. Empty means the
+    // caller should use lexical classifications.
     classes_for* = (self :: @Self, t: Alloc, uri: str)
                    Res<Vec<Classed>, AllocError> {
         self.fresh.match({
@@ -153,11 +87,7 @@ Diagnostics* = {
         })
     }
 
-    // WHAT A QUERY SHARES, with the caller having ruled out the
-    // lone-module case (an empty workspace is ITS branch). The slot is
-    // ensured for the document being asked about — building once if the
-    // state is new — and its checker answers. The `None` arm at the call
-    // site is unreachable and falls back to a build of its own.
+    // Ensure the workspace build and expose it to a document query.
     shared* = (self :: @Self, env: Env, workspace: str, uris: Vec<str>,
                docs: Map<str, str>, path: str, t: Alloc)
               Res<Shared, AllocError> {
@@ -166,14 +96,8 @@ Diagnostics* = {
         Ok(Shared(c: self.built.checker(), root: self.built.root()));
     }
 
-    // THE SETTLE POINT: if a build is owed, it happens here — or is
-    // FOUND here, when a query already built this exact state (the
-    // slot's key is the document bytes; a queued `didChange` followed by
-    // a query is one build, with the publish below reading its spots).
-    // `uris` and `docs` are the server's open documents; the overlay
-    // must carry EVERY unsaved buffer, not only the edited one — a build
-    // reading disk for the others would report errors already fixed on
-    // screen. `t` is scratch for this settle alone.
+    // Ensure one whole-program build for the pending state and publish it.
+    // The overlay includes every open document; `t` is settle-local scratch.
     settled* = (self :: @Self, env: Env, workspace: str, uris: Vec<str>,
                 docs: Map<str, str>, t: Alloc, out :: String)
                Res<(), AllocError> {
@@ -203,13 +127,8 @@ Diagnostics* = {
         Ok(())
     }
 
-    // NO WORKSPACE, NO DIAGNOSTICS — a refusal, not a gap. Without a
-    // root there is nothing to build but the open file alone, and a
-    // lone-module check reports every imported name as undefined: a
-    // screen of red about a program that is fine. Hover degrades to the
-    // lone module because its failure is silence; this one's is noise,
-    // so it does not degrade at all. A document not under the workspace
-    // (`root_for` climbs to "") is treated the same way.
+    // Without a workspace root, suppress diagnostics rather than report
+    // imported names as undefined from an incomplete single-file build.
     build_owed = (self :: @Self, env: Env, workspace: str, uris: Vec<str>,
                   docs: Map<str, str>, t: Alloc, out :: String)
                  Res<(), AllocError> {
@@ -237,16 +156,14 @@ Diagnostics* = {
            Res<(), AllocError> {
         self.built.ensure(env, root, entry, uris, docs).try();
         self.fresh = true;
-        // `ensure` just left the spots in the slot; `None` is
-        // unreachable and answered by publishing nothing, never by
-        // guessing.
+        // If the retained build is unexpectedly absent, publish nothing.
         self.built.spots().match({
             None      => written(),
             Ok(spots) => self.say_all(env, t, uri, uris, docs, spots, out),
         })
     }
 
-    // THE THREE SETS the header names, in that order.
+    // Publish the edited URI, current diagnostic URIs, then required clears.
     say_all = (self :: @Self, env: Env, t: Alloc, uri: str, uris: Vec<str>,
                docs: Map<str, str>, spots: Vec<Spot>, out :: String)
               Res<(), AllocError> {
@@ -264,9 +181,7 @@ Diagnostics* = {
         Ok(());
     }
 
-    // `showing` OUTLIVES the build the URIs were read from, so each is
-    // copied into the session arena — a set pointing into the slot's
-    // freed pages is a use-after-free, not a stale string.
+    // Copy URIs into the session arena because the build arena is replaceable.
     remember_showing = (self :: @Self, now: Vec<str>) Res<(), AllocError> {
         self.showing = self.a.Vec<str>();
         now.loop((h, u) {
@@ -276,9 +191,7 @@ Diagnostics* = {
         Ok(());
     }
 
-    // ONE FILE'S LIST, SAID AT MOST ONCE PER CONTENT — the header's
-    // dedup. The body is built, compared against the last one sent for
-    // this URI, and written only when different.
+    // Send one URI's list only when its serialized body changed.
     say_one = (self :: @Self, env: Env, t: Alloc, uri: str, uris: Vec<str>,
                docs: Map<str, str>, spots: Vec<Spot>, out :: String)
               Res<(), AllocError> {
@@ -307,8 +220,7 @@ Diagnostics* = {
         write_frame(body.view(), out)
     }
 
-    // AN EMPTY LIST FOR EVERY FILE THAT HAS STOPPED BEING WRONG. The
-    // edited document is excluded — already published once.
+    // Clear previously showing URIs absent from the current result.
     take_back = (self :: @Self, env: Env, t: Alloc, uri: str, now: Vec<str>,
                  uris: Vec<str>, docs: Map<str, str>, spots: Vec<Spot>,
                  out :: String) Res<(), AllocError> {
@@ -361,10 +273,8 @@ uris_of = (spots: Vec<Spot>, into :: Vec<str>) Res<(), AllocError> {
 // --- the notification --------------------------------------------------
 
 // The bytes the spans in `uri` were measured against: the open buffer if
-// there is one, disk otherwise, "" when neither answers. "" IS NOT A
-// SILENT FAILURE: `to_wire` clamps, so an unreadable file's positions
-// convert to 0:0 — the diagnostic still reaches the client and names the
-// file; only the underline is off. Worse to drop the diagnostic.
+// there is one, disk otherwise, or empty when neither answers. `to_wire`
+// clamps positions for missing text so the diagnostic still reaches the client.
 text_of = (env: Env, t: Alloc, uri: str, docs: Map<str, str>) str {
     docs.get(uri).match({
         Ok(text) => text,
@@ -379,10 +289,8 @@ on_disk = (env: Env, t: Alloc, path: str) str {
     })
 }
 
-// ONE FILE'S WHOLE LIST, framed — an empty `diagnostics` array is the
-// only way a client is told an error is gone. THE TEXT IS THE FILE'S
-// OWN: converting a span against another file's bytes would underline
-// the right file at the wrong position.
+// Frame one file's complete list. An empty list clears prior diagnostics;
+// spans are converted against that file's own text.
 publish* = (a: Alloc, uri: str, text: str, spots: Vec<Spot>, out :: String)
            Res<(), AllocError> {
     body ::= a.String().try();
@@ -390,9 +298,7 @@ publish* = (a: Alloc, uri: str, text: str, spots: Vec<Spot>, out :: String)
     write_frame(body.view(), out)
 }
 
-// `textDocument/publishDiagnostics`, as the protocol spells it. A
-// NOTIFICATION AND NOT A REPLY: no `id`, the one message this server
-// sends unprompted.
+// `textDocument/publishDiagnostics` is a notification and therefore has no id.
 write_notification = (
     a     : Alloc,
     uri   : str,
@@ -441,11 +347,7 @@ write_spot = (s: Spot, text: str, out :: String) Res<(), AllocError> {
     spot.close(out)
 }
 
-// THE NOTE, AS THE SECOND PLACE TO LOOK. THE NOTE'S URI IS THE
-// DIAGNOSTIC'S: `parse_diag.zen`'s only builder of a note,
-// `expect_close`, anchors on the opening delimiter of the same file it
-// is reading — reusing the URI already in hand avoids a second
-// path-to-URI conversion that could disagree.
+// Related information points to the diagnostic's URI and note span.
 write_note = (
     s    : Spot,
     text : str,
@@ -458,9 +360,7 @@ write_note = (
     })
 }
 
-// ONE ENTRY, AND `next` IS STILL CALLED FOR IT: the separator belongs to
-// the array whether or not this list has ever held two, and an entry
-// added without it is a missing comma nothing would catch.
+// `next` owns array separators for every related-information entry.
 write_related = (uri: str, n: Note, text: str, spot :: Nest, out :: String)
                 Res<(), AllocError> {
     spot.key("relatedInformation", out).try();
@@ -478,6 +378,5 @@ write_related = (uri: str, n: Note, text: str, spot :: Nest, out :: String)
     notes.close(out)
 }
 
-// `DiagnosticSeverity.Error` — the constant that changes the day there
-// is a second severity.
+// LSP `DiagnosticSeverity.Error`.
 ERROR*: usize = 1

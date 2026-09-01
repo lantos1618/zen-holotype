@@ -79,7 +79,7 @@ some_static_string = "hello";
 
 ### C008 — string literal containing `{}` format placeholders
 ```groovy
-sb.add("circle: {}", circle.radius),
+sb.fmt("circle: {}", circle.radius),
 ```
 `DESIGN.md:1037`. `{}` is **not** interpolation syntax — arguments are positional and
 follow the literal. Also `"{} {"` (`365`), `"build/{}-{}/example_zen{}"` (`919`),
@@ -766,8 +766,8 @@ block_bodied_arm_needs_no_comma pins the comma-less spelling for both parsers.
 ### C091 — match on `self`, enum variant patterns with payload binding
 ```groovy
         self.match({
-            Circle(circle) => sb.add("circle: {}", circle.radius),
-            Rect(rect) => sb.add("rect: {} {}", rect.width, rect.height),
+            Circle(circle) => sb.fmt("circle: {}", circle.radius),
+            Rect(rect) => sb.fmt("rect: {} {}", rect.width, rect.height),
             Unit => sb.add("unit"),
         })
 ```
@@ -848,7 +848,7 @@ type, passed as an argument.
 ### C099 — closure with untyped parameters
 ```groovy
     n.fields.loop((h, field) {
-        sb.add("{}: {}", field.name, field.value);
+        sb.fmt("{}: {}", field.name, field.value);
     })
 ```
 `DESIGN.md:1046-1048`. CONTRADICTION with `DESIGN.md:223`: "that parameter is
@@ -1165,8 +1165,8 @@ comma. `self` is in scope with no parameter declaring it. No terminating `;`.
 Shape.impl(Display, {
     toString ::= (self: @Self, sb :: String) Res<(), IoError> {
         self.match({
-            Circle(circle) => sb.add("circle: {}", circle.radius),
-            Rect(rect) => sb.add("rect: {} {}", rect.width, rect.height),
+            Circle(circle) => sb.fmt("circle: {}", circle.radius),
+            Rect(rect) => sb.fmt("rect: {} {}", rect.width, rect.height),
             Unit => sb.add("unit"),
         })
     }
@@ -1259,7 +1259,7 @@ See C084. Type position only.
 
 ### C147 — `@meta` applied to `self: @Self`
 ```groovy
-        sb.add("{} {", @meta(self: @Self).name);
+        sb.fmt("{} {", @meta(self: @Self).name);
         @meta(self: @Self).fields.loop((h, field) {
 ```
 `DESIGN.md:365-366`. FLAG: the argument is written `self: @Self` — a `name: Type`
@@ -1329,9 +1329,9 @@ following `Ok(());` is.
 ### C154 — `DumpAst`, four monomorphic overloads plus a generic entry
 ```groovy
 DumpAst = (sb :: String, n: Enum) Res<(), IoError> {
-    sb.add("Enum {}", n.name);
+    sb.fmt("Enum {}", n.name);
     n.fields.loop((h, field) {
-        sb.add("{}: {}", field.name, field.value);
+        sb.fmt("{}: {}", field.name, field.value);
     })
 }
 ```

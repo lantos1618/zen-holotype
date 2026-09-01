@@ -1,26 +1,10 @@
 // src/gen/gen_c/gen_c_settle.zen
-// What a call handed a lambda EVALUATES TO.
-// `gen_c_inline.zen` puts a body where a call was; this answers the one
-// question that has to be settled BEFORE it does. `then<T>(b: bool, f:
-// () T)` reaches `T` only through the closure, and a closure infers FROM
-// a signature rather than into one — so sema hands back `Res<T>` with
-// nothing bound, and a temporary declared at that answer and filled by
-// the lowering's would be C that does not compile.
-// TWO SOURCES SETTLE A TYPE PARAMETER HERE, and the second is why this
-// file exists at all:
-//   - an ORDINARY argument settles a parameter written as that
-//     parameter — `find(range: R, ..)` handed a `Range` says `R`
-//   - a LAMBDA argument settles the parameter its declared RETURN type
-//     names — `then(f: () T)` says `T`, and nothing else can
-// AND ONE MORE, WHICH IS A BOUND RATHER THAN AN ARGUMENT. `find<R:
-// Range<T>, T>` names `T` only inside another parameter's bound.
-// `gen_c_loop.zen` already answers that shape for a loop — "a range that
-// stores its own start and end walks its own index space, so its element
-// is usize" — and `range_element` is the same rule said about a call.
-// ONE IMPLEMENTATION AND TWO CALLERS. `inline_result_type` is the query
-// `ty_of` asks and `inline_free` is the lowering, and both go through
-// `inline_ret` — because the two have to agree by construction rather
-// than by inspection.
+// Infer generic results settled only by call arguments.
+//
+// Ordinary arguments bind matching parameters, lambda return types bind type
+// variables in declared closure results, and range bounds can supply an
+// element type. Query and lowering share `inline_ret` so instantiated result
+// types agree.
 
 ExprId, Lambda, Param = std.ast
 Decl, Function, Access, Call = std.ast
@@ -103,9 +87,7 @@ inline_ret* = (
     })
 }
 
-// WHAT THE CALL SETTLES THAT THE CALL SITE DID NOT WRITE DOWN — the
-// two sources the header names, an ordinary argument and a lambda's
-// declared return type.
+// Bind variables supplied by ordinary arguments or lambda return types.
 call_bindings* = (
     be    :: CBackend,
     argv  : Vec<ExprId>,
@@ -180,12 +162,8 @@ settle_bare = (
     })
 }
 
-// AN OPEN ARGUMENT TYPE STILL ANSWERS THIS ONE. `Range(0, 10)` interns
-// as `Range<T>` with `T` free, and that is not a failure — "a type
-// argument no storage member reads does not change the layout", which is
-// the rule `construct_struct` already turns on. What `R` has to become
-// is the type the argument IS, whatever its own arguments are; only a
-// type sema could not name at all says nothing.
+// An open generic argument still supplies its named type; only an unknown
+// argument leaves the variable unsettled.
 bind_arg_type = (
     be    :: CBackend,
     value : ExprId,
@@ -212,11 +190,8 @@ settle_params* = (
     Ok(());
 }
 
-// THE INSTANTIATION THE BODY IS LOWERED UNDER, which is the call's own
-// answers put through what this file worked out. Sema binds a parameter
-// nothing settled TO ITSELF so that the list keeps its length; composing
-// is where that placeholder becomes the answer, and every type the body
-// reads goes through `sub` against exactly this.
+// Compose call-site and inferred answers into the instantiation used to lower
+// the body. Self-bound placeholders are replaced here when an answer exists.
 compose* = (be :: CBackend, inst: Inst, extra: Inst) Res<Inst, AllocError> {
     full ::= be.alloc.Inst();
     Range(0, inst.len()).loop((h, i) { be.carry(inst, extra, i, full).try() });
@@ -318,16 +293,8 @@ keep_var = (be :: CBackend, t: TyId) Res<TyId> {
     })
 }
 
-// THE BODY IS READ WITH ITS OWN PARAMETERS BOUND. "A closure passed to
-// a function whose signature is already known infers its parameter
-// types FROM that signature", and this is the half of that sentence the
-// backend owes: without it `map`'s `(h, index, value) { value * 2 }`
-// types `value` as nothing, answers `()`, and `U` becomes a Vec of
-// nothing rather than a Vec of what the body made — which is a wrong
-// answer with no diagnostic until something tries to print an element.
-// The bindings are TYPES ONLY and are rewound immediately: nothing is
-// emitted, and the same parameters are declared again with C storage
-// when the body is actually lowered.
+// Read a closure body with parameter types supplied by the declared signature.
+// These temporary type bindings are rewound before C storage is declared.
 bind_body_type = (
     be    :: CBackend,
     l     : Lambda,
@@ -403,17 +370,8 @@ declare_peek_slot = (be :: CBackend, name: str, ty: TyId)
     Ok(());
 }
 
-// WHAT A LAMBDA BODY EVALUATES TO, WHICHEVER WAY THE TAIL WAS WRITTEN.
-// `Block.value` is only the tail written WITHOUT a `;`, so reading it
-// alone made `() { 42; }` evaluate to `()` while `sema_type.block_type`
-// carried the last statement's type out — sema said `i32`, this said
-// `()`, and the emitted C computed the 42, discarded it, and assigned a
-// literal 0. `sema_hoist.tail_expr` is the reconciliation and is what
-// `tail_index` below already lowers, so both halves read one expression.
-// Where sema has no answer for that expression the honest one is still
-// `()`: a body with nothing to give gives nothing, and
-// `write_res_payload` evaluates a unit payload for its effect rather
-// than dropping it, so nothing is lost by saying so.
+// Use sema's tail-expression rule for both terminated and unterminated block
+// tails. An unsettled or absent tail evaluates to unit.
 lambda_value_type = (be :: CBackend, l: Lambda, ctx: Ctx)
                     Res<TyId, AllocError> {
     unit = be.check.types.prim("()").try();

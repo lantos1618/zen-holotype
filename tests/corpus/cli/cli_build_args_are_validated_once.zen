@@ -1,0 +1,73 @@
+Alloc, AllocError = std.mem
+Vec = std.collections
+str = std.text
+Cli, cli = zen
+Emission = std.build
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    show(env, line(a, "src", "--emit-c", "", "", "", "").try()).try();
+    show(
+        env,
+        line(a, "-o", "out.c", "src", "--repeat", "3", "--emit-c").try()
+    ).try();
+    show(
+        env,
+        line(
+            a,
+            "--emit-c-dir",
+            "gen",
+            "src",
+            "-o",
+            "ignored.c",
+            "--emit-c"
+        ).try()
+    ).try();
+    show(env, line(a, "src", "--permute", "reverse", "", "", "").try()).try();
+    Ok(0)
+}
+
+show = (env: Env, argv: Vec<str>) Res<(), AllocError> {
+    cli(env, argv).try().match({
+        Build(job)    => job.emission.match({
+            CStdout     => println(
+                "stdout root={} repeat={} permute={}",
+                job.root,
+                job.repeat,
+                job.permute.stable_name()
+            ),
+            CFile(path) => println(
+                "file {} root={} repeat={} permute={}",
+                path,
+                job.root,
+                job.repeat,
+                job.permute.stable_name()
+            ),
+            CDir(path)  => println("dir {} root={}", path, job.root),
+            Check       => println("check"),
+        }),
+        Missing(flag) => println("missing {}", flag),
+        Usage(word)   => println("usage {}", word),
+        Fmt(_)        => println("fmt"),
+        Later(name)   => println("later {}", name),
+    });
+    Ok(())
+}
+
+line = (a: Alloc, w0: str, w1: str, w2: str, w3: str, w4: str, w5: str)
+       Res<Vec<str>, AllocError> {
+    argv ::= a.Vec<str>();
+    argv.add("zen").try();
+    argv.add("build").try();
+    argv.push(w0).try();
+    argv.push(w1).try();
+    argv.push(w2).try();
+    argv.push(w3).try();
+    argv.push(w4).try();
+    argv.push(w5).try();
+    Ok(argv)
+}
+
+push = (argv :: Vec<str>, word: str) Res<(), AllocError> {
+    word.is_empty().match({ true => Ok(()), false => argv.add(word) })
+}

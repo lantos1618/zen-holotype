@@ -230,13 +230,13 @@ A `Sink` dissolves it. A console is a sink, a `String` is a sink, and `println` 
 
 `Sink.write` returns `WriteError`, the union, and that is the part worth arguing about. Writing to a console fails with `IoError` and writing to a growable `String` fails with `AllocError`; there is no `From`, so a single sink type cannot pretend those are one error. The union is the honest type — which is exactly the reason `WriteError` was introduced. **Cost to accept knowingly:** a caller writing into a `String` must handle an `IoError` that a `String` can never produce, and a caller writing to a console must handle an `AllocError` it can never produce. `.try()` merges either into the caller's set for free, so the cost is paid only where someone actually matches on the error.
 
-**The format language, in full.** `{}` is a hole, filled by the next argument through its `toString`. `{name}` is a hole too, filled by the binding `name` has where the hole is written. `{{` writes a literal `{` and `}}` writes a literal `}`, so `{{}}` writes `{}` — the conventional doubling, and the only escape. A `{` followed by none of `}`, `{` or an identifier character is a literal brace, and so is a lone `}`; `Display.dump` relies on that, writing `sb.add("{} {", ..)` and expecting the trailing `{` to print. There is no width, no precision and no argument index. The walk is left to right and never backs up, which is what settles the two shapes that could read either way: `{}}` is a hole then a literal `}`, and `{{}` is a literal `{` then a literal `}` — and a doubled brace is classified before a name is ever looked for, so `{{name}}` is a `{`, the bytes `name`, and a `}`.
+**The format language, in full.** `{}` is a hole, filled by the next argument through its `toString`. `{name}` is a hole too, filled by the binding `name` has where the hole is written. `{{` writes a literal `{` and `}}` writes a literal `}`, so `{{}}` writes `{}` — the conventional doubling, and the only escape. A `{` followed by none of `}`, `{` or an identifier character is a literal brace, and so is a lone `}`; `Display.dump` relies on that, writing `out.fmt("{} {", ..)` and expecting the trailing `{` to print. There is no width, no precision and no argument index. The walk is left to right and never backs up, which is what settles the two shapes that could read either way: `{}}` is a hole then a literal `}`, and `{{}` is a literal `{` then a literal `}` — and a doubled brace is classified before a name is ever looked for, so `{{name}}` is a `{`, the bytes `name`, and a `}`.
 
-**A named hole consumes no argument, so the two spellings mix freely.** `add("{a} of {}", n)` passes the one argument its one positional hole wants. Counting a named hole would make that call claim two.
+**A named hole consumes no argument, so the two spellings mix freely.** `fmt("{a} of {}", n)` passes the one argument its one positional hole wants. Counting a named hole would make that call claim two.
 
 **A format hole is not an expression language, and the refusal is the design.** `{name}` holds an identifier and nothing else: no field read, no call, no operator. Each of those would give a format string a second parser with its own precedence and diagnostics, and none is bought by the syntax it saves. What makes the refusal statable rather than a special case is that **a `{` followed by an identifier character always meant a hole** — so `{p.x}` is a compile error naming its own position, and cannot fall back to printing itself, which is the wrong answer nobody reads twice. `{{p.x}` is the escape at such a site.
 
-**A format string is read at compile time.** Both hole spellings are expanded where they are *written* — the compiler steps the format at the call site, emits one byte write per literal run and one writer call per hole, and resolves `{name}` in the frame it is standing in, exactly as it resolves a bare identifier. So there is no runtime format state and no allocation for either; a computed format is not a format at all; a name with no binding is a compile error at the hole's own position rather than a `?` in the output; and a hole count that disagrees with the argument count is a compile error too. This is also why the escape has a cost worth stating: a plain byte writer such as `add_bytes` reads no format meaning, so `add_bytes("]}}")` writes two braces where `add("]}}")` writes one. Converting a byte writer into a format call is therefore a change of output wherever the bytes hold a doubled brace.
+**A format string is read at compile time.** Both hole spellings are expanded where they are *written* — the compiler steps the format at the call site, emits one byte write per literal run and one writer call per hole, and resolves `{name}` in the frame it is standing in, exactly as it resolves a bare identifier. So there is no runtime format state and no allocation for either; a computed format is not a format at all; a name with no binding is a compile error at the hole's own position rather than a `?` in the output; and a hole count that disagrees with the argument count is a compile error too. This is also why the escape has a cost worth stating: a plain byte writer such as `String.add` reads no format meaning, so `s.add("]}}")` writes two braces where `s.fmt("]}}")` writes one. Converting a byte writer into a format call is therefore a change of output wherever the bytes hold a doubled brace.
 
 ---
 
@@ -577,11 +577,11 @@ Display* = {
     // comptime-substituted projection — this instance's value
     // for that field
     dump* = (self: @Self, out :: Sink) Res<(), WriteError> {
-        out.add("{} {", @meta(self: @Self).name);
+        out.fmt("{} {", @meta(self: @Self).name);
         @meta(self: @Self).fields().loop((h, field) {
-            out.add(" {}: {},", field.name, self.at(field));
+            out.fmt(" {}: {},", field.name, self.at(field));
         });
-        out.add(" }");
+        out.fmt(" }");
         Ok(());
     }
 
@@ -1321,36 +1321,36 @@ Shape.impl(Display, {
     // dump stays available for free alongside it
     toString ::= (self: @Self, out :: Sink) Res<(), WriteError> {
         self.match({
-            Circle(circle) => out.add("circle: {}", circle.radius),
-            Rect(rect) => out.add("rect: {} {}", rect.width, rect.height),
-            Unit => out.add("unit"),
+            Circle(circle) => out.fmt("circle: {}", circle.radius),
+            Rect(rect) => out.fmt("rect: {} {}", rect.width, rect.height),
+            Unit => out.fmt("unit"),
         });
     }
 })
 
-DumpAst = (sb :: String, n: Enum) Res<(), IoError> {
-    sb.add("Enum {}", n.name);
+DumpAst = (sb :: String, n: Enum) Res<(), AllocError> {
+    sb.fmt("Enum {}", n.name);
     n.variants.loop((h, variant) {
-        sb.add("{}: {}", variant.name, variant.payload);
+        sb.fmt("{}: {}", variant.name, variant.payload);
     });
 }
 
-DumpAst = (sb :: String, n: Struct) Res<(), IoError> {
-    sb.add("Struct {}", n.name);
+DumpAst = (sb :: String, n: Struct) Res<(), AllocError> {
+    sb.fmt("Struct {}", n.name);
     n.fields().loop((h, field) {
-        sb.add("{}: {}", field.name, field.value);
+        sb.fmt("{}: {}", field.name, field.value);
     });
 }
 
-DumpAst = (sb :: String, n: Function) Res<(), IoError> {
-    sb.add("Function {}", n.name);
+DumpAst = (sb :: String, n: Function) Res<(), AllocError> {
+    sb.fmt("Function {}", n.name);
     n.params.loop((h, param) {
-        sb.add("{}: {}", param.name, param.value);
+        sb.fmt("{}: {}", param.name, param.value);
     });
 }
 
-DumpAst = (sb :: String, n: Other) Res<(), IoError> {
-    sb.add("Other {}", n.name);
+DumpAst = (sb :: String, n: Other) Res<(), AllocError> {
+    sb.fmt("Other {}", n.name);
 }
 
 // generic entry: comptime match on the declaration of n's type.

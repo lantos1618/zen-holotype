@@ -1,63 +1,37 @@
-// src/std/text/text_num.zen
-// reading a number out of text — the conversion std never had (issue
-// #774: "the first CLI anybody writes does not compile"). The mirror of
-// text_fmt.add_i64, which writes values back out as bytes: this reads
-// them back in. str is BYTES (text_str.zen), so every question here is
-// asked over u8 with the char-literal spelling, and nothing allocates.
-//
-// UFCS puts parse_i64 on str: `arg.parse_i64()` needs no import beyond
-// the prelude — a free function whose first parameter is the type,
-// exactly like is_digit on u8.
-//
-// THE NAME IS parse_i64, NOT to_i64, and that is a law not a taste
-// (num.zen states its mirror for impl fields): the widening family
-// `to_*` is num.zen's LOSSLESS conversions, and gen_c lowers a bound
-// member `widen_i64 = to_i64` as THE CALL THE ALIAS NAMES — a bare
-// name re-gathered by module visibility plus the travelled pool. A
-// str-side `to_i64` joined every generic `<T: ToI64>(x: T)` body's
-// pool there, where declared signatures cannot discriminate it, and
-// `sole_def` answered `codegen found more than one declaration of
-// `to_i64`` on three corpus programs (parity lane 774). A name outside
-// the family pools alone; `parse` says exactly what this does — read a
-// number OUT of text — and answers Res, which no lossless conversion
-// ever does.
-//
-// Res<i64>, not a trap: text that is not a number is an ABSENCE — an
-// empty row, a word where a count was expected — and law 4 keeps that
-// apart from a bug. A value past i64's range is the same absence: the
-// number named is not a number this type can hold.
+// Non-allocating integer parsers on str. They accept a complete decimal
+// spelling and return None for empty, malformed, or out-of-range input.
+// Signed parsers accept one optional leading minus; a leading plus is not
+// part of the grammar.
 //
 //   ""            None  no digits at all
 //   "-3"          Ok    one leading minus; "--3" and "- 3" are not
 //                       numbers, and neither is "+3"
-//   "3x"          None  digits must run to the END of the bytes
-//   past i64      None  checked BEFORE each multiply — signed overflow
+//   "3x"          None  digits must run to the end of the bytes
+//   past i64      None  checked before each multiply — signed overflow
 //                       is UB in C, so checking after is not an answer
 
-// THE one conversion. The fold runs NEGATIVE — add_i64's own trick: a
+// The signed fold runs negative: a
 // negative accumulator can absorb i64.MIN exactly, where a positive one
 // loses MAX+1 before it can ever look at the sign. The sign is applied
 // once, at the end, where the two halves of the range part ways: under
 // a minus every magnitude down to MIN is in range, without one only
 // magnitudes up to MAX are — so the accumulator landing on MIN with no
 // sign is one-past-MAX text, and that is an absence.
-DIGIT_ZERO = std.core.byte
+DIGIT_ZERO, digit_value = std.core.byte
 
 parse_i64* = (self: str) Res<i64> {
     parsed: Res<i64> = loop<i64>((h) {
-        // "" has no first byte to ask — the absence comes before any
-        // question about signs, and never a trap
+        // Reject empty input before reading the optional sign.
         (self.len == 0).then(() { h.break() });
 
-        // one leading minus; digits start after it
+        // Digits begin after one optional leading minus.
         negative ::= self[0] == '-';
         first    ::= negative.match({
             true  => 1,
             false => 0,
         });
 
-        // one pass over the tail: how many digits lead it, and the byte
-        // that stopped the run (self.len when none did)
+        // Find the first non-digit, or self.len when the tail is all digits.
         count : usize = 0;
         stop  : usize = self.len;
         Range(first, self.len).loop((hh, i) {
@@ -67,8 +41,7 @@ parse_i64* = (self: str) Res<i64> {
             });
         });
 
-        // a number is digits from `first` to the END of the bytes, at
-        // least one of them — "3x" stops early, "-" never starts
+        // The digit run must be non-empty and consume the entire input.
         (count == 0 || stop != self.len).then(() { h.break() });
 
         // Check quotient and sign-specific final digit before multiplying.
@@ -77,9 +50,7 @@ parse_i64* = (self: str) Res<i64> {
         acc     : i64  = 0;
         overrun : bool = false;
         Range(first, self.len).loop((hh, i) {
-            // every byte here was proven a digit by the pass above, so
-            // this is '0'..'9' arithmetic and not a second question —
-            // and no binder rides an arm payload where gen_c cannot see it
+            // The preceding pass proved every byte here is '0'..'9'.
             d ::= self[i] - DIGIT_ZERO;
             (acc < 0 - edge || (acc == 0 - edge && d > limit)).then(() {
                 overrun = true;
@@ -88,15 +59,15 @@ parse_i64* = (self: str) Res<i64> {
             acc = acc * 10 - d;
         });
 
-        // past the range: the number named is not a number i64 holds
+        // Out-of-range text has no i64 value.
         overrun.then(() { h.break() });
 
-        // without a sign, a magnitude of exactly MIN is one past MAX
+        // Without a sign, a magnitude of exactly MIN is one past MAX.
         (!negative).then(() {
             (acc == i64.MIN).then(() { h.break() });
         });
 
-        // neg carries the sign; acc is already negative under it
+        // acc is already negative; only the unsigned spelling is negated.
         h.break(negative.match({
             true  => acc,
             false => 0 - acc,
@@ -109,7 +80,7 @@ parse_usize* = (self: str) Res<usize> {
     n  ::= 0;
     ok ::= !self.is_empty();
     Range(0, self.len).loop((h, i) {
-        decimal(self[i]).match({
+        digit_value(self[i]).match({
             None  => { ok = false; h.break(); },
             Ok(d) => (n > (usize.MAX - d.to_usize()) / 10).match({
                 true  => { ok = false; h.break(); },
@@ -124,7 +95,7 @@ parse_u16* = (self: str) Res<u16> {
     n: u16 ::= 0;
     ok     ::= !self.is_empty();
     Range(0, self.len).loop((h, i) {
-        decimal(self[i]).match({
+        digit_value(self[i]).match({
             None  => { ok = false; h.break(); },
             Ok(d) => (n > (u16.MAX - d.to_u16()) / 10).match({
                 true  => { ok = false; h.break(); },
@@ -147,7 +118,7 @@ parse_i32* = (self: str) Res<i32> {
         n: i32 ::= 0;
         ok     ::= true;
         Range(first, self.len).loop((hh, i) {
-            decimal(self[i]).match({
+            digit_value(self[i]).match({
                 None  => { ok = false; hh.break(); },
                 Ok(d) => (n < 0 - edge || (n == 0 - edge && d > limit))
                     .match({
@@ -160,8 +131,4 @@ parse_i32* = (self: str) Res<i32> {
         h.break(negative.match({ true => n, false => 0 - n }));
     });
     parsed
-}
-
-decimal = (b: u8) Res<u8> {
-    b.is_digit().match({ true => Ok(b - DIGIT_ZERO), false => None })
 }

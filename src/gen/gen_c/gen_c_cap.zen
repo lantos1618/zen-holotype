@@ -41,6 +41,7 @@ is_defer, lower_defer = gen.gen_c.gen_c_scope
 write_position = gen.gen_c.gen_c_op
 lower_clock_read = gen.gen_c.gen_c_clock
 lower_sleep, lower_spawn, lower_join = gen.gen_c.gen_c_threads
+lower_actor_spawn, lower_actor_stop = gen.gen_c.gen_c_actor
 
 // Classification is closed and travels with MethodKind into lowering,
 // so receiver ownership and an overloaded name such as `read` are
@@ -56,6 +57,8 @@ CapabilityKind* = NotCapability
     | FsProbe
     | LockUnlock
     | EnvVar
+    | ActorSpawn
+    | ActorStop
     | ClockRead
     | ThreadsSleep
     | ThreadsSpawn
@@ -79,6 +82,12 @@ capability_kind* = (be :: CBackend, rty: TyId, name: str) CapabilityKind {
         });
         (owner.eq("Lock") && name.eq("unlock")).then(() { h.break(LockUnlock) });
         (owner.eq("Env") && name.eq("var")).then(() { h.break(EnvVar) });
+        (owner.eq("Env") && name.eq("spawn")).then(() {
+            h.break(ActorSpawn)
+        });
+        (owner.eq("Ref") && name.eq("stop")).then(() {
+            h.break(ActorStop)
+        });
         (owner.eq("Clock") && name.is_in(["since_start", "unix"])).then(() {
             h.break(ClockRead)
         });
@@ -112,13 +121,11 @@ owner_of = (be :: CBackend, rty: TyId) str {
 }
 
 capability_owner = (be :: CBackend, n: TyNamed) str {
-    be.check.world.table_at(n.decl.module.to_usize()).match({
-        None  => "",
-        Ok(t) => (
-            (n.name.eq("Mem") && t.name.eq("std.mem.mem_arena"))
-            || (n.name.is_in(["Fs", "Lock", "Env", "Clock", "Threads", "Thread", "Console", "Stdin"]) && t.name.eq("std.env.env"))
-        ).match({ true => n.name, false => "" }),
-    })
+    module = be.check.world.module_name(n.decl);
+    ((n.name.eq("Mem") && module.eq("std.mem.mem_arena"))
+        || (n.name.is_in(["Fs", "Lock", "Env", "Clock", "Threads", "Thread", "Console", "Stdin"]) && module.eq("std.env.env"))
+        || (n.name.eq("Ref") && module.eq("std.actor.actor_core")))
+        .match({ true => n.name, false => "" })
 }
 
 // the entry point
@@ -142,6 +149,11 @@ lower_capability* = (
 ) Res<(), AllocError> {
     kind.match({
         ScopeDefer    => be.lower_defer(id, c, a, ctx, out),
+        // Actor spawn's type parameter is inferred from its argument and
+        // appears in the result. The checked call type is therefore the
+        // authoritative instantiated result, not the open declaration.
+        ActorSpawn    => be.lower_actor_spawn(id, c, a, rty, ctx, out),
+        ActorStop     => be.lower_actor_stop(a, rty, ctx, out),
         // `join` is generic in a parameter NOTHING settles — its `T`
         // lives only in the return type — so the typed path's
         // `cap_ret` would request a type with a free variable in it.
@@ -418,7 +430,7 @@ write_page = (
     ).try();
     be.write_page_ok(ret, cty.view(), raw.view(), dst.view()).try();
     be.close_brace().try();
-    out.add_bytes(dst.view())
+    out.add(dst.view())
 }
 
 write_page_malloc = (be :: CBackend, raw: str, cty: str, szt: str)
@@ -463,7 +475,7 @@ lower_release = (be :: CBackend, c: Call, ctx: Ctx, out :: String)
     page ::= be.alloc.String().try();
     be.arg_text(c, 0, unknown, ctx, page).try();
     be.fmt("free((void *)({}));\n", page.view()).try();
-    out.add_bytes("0")
+    out.add("0")
 }
 
 // The `prev` argument, or a null pointer when the call left it out.
@@ -471,7 +483,7 @@ prev_text = (be :: CBackend, c: Call, ctx: Ctx, out :: String)
             Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
     c.args.get(1).match({
-        None  => out.add_bytes("NULL"),
+        None  => out.add("NULL"),
         Ok(a) => expr(be, a.value, ctx, unknown, out),
     })
 }

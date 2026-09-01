@@ -2,44 +2,15 @@
 // What the parser asks of a token, and nothing else.
 //
 // The alphabet is `src/std/lex/lex_token.zen`'s, re-exported unchanged so a
-// sibling writes `TokenKind` once. This file adds two questions the lexer
-// had no reason to answer: are two kinds the same kind, and is this kind
-// trivia.
+// sibling writes `TokenKind` once. This file owns parser-specific trivia,
+// wildcard, and empty-stream behavior.
 //
-// THE ALPHABET, as `src/std/lex/` really defines it — this file was
-// written against a stated interface while the lexer was built in
-// parallel, and three of those assumptions did not survive:
-//
-//   Comments are tokens, not a second list — the parser sees everything
-//   and decides ownership once. Exactly one `Eof`, last, spanning
-//   nothing. Kinds are FLAT, not a nested `Punct(..)`. A token is a
-//   kind and a span.
-//
-//   A TOKEN CARRIES NO TEXT: the shape is `{kind, span}`, and bytes
-//   come from `text_of(source, token)` slicing the `Source`. A `str`
-//   field would be two words per token of a ten-megabyte file to hold
-//   what both span ends already name. The parser carries the `Source`
-//   instead — see `Parser.source`.
-//
-//   THERE IS NO `Blank` TOKEN. The lexer emits no whitespace at all —
-//   "recoverable exactly from the gap between two spans... rather than
-//   a stored fact that can go stale" — so the parser derives it in
-//   `drain`.
-//
-//   THERE IS NO `Underscore` TOKEN. `_` matches the identifier rule
-//   deliberately: "the parser reads the wildcard pattern, the lexer
-//   only sees a name". `_` arrives as `Ident`; a wildcard pattern and
-//   an inferred type compare its text — right, since `_` is a spelling
-//   question in two grammatical positions, not a lexical one.
-//
-// ONE DISAGREEMENT IS STILL OPEN, NOT THIS MODULE'S TO CLOSE: `lex` and
-// `ast` each declare a `Pos`/`Span`, and they differ (the lexer's `Pos`
-// has `offset`; its `Span` has no `file`, since one lex run shares it).
-// Both are right for a lexer, neither for an AST node, which outlives its
-// `Source` and is compared across files. The parser CONVERTS once, in
-// `Parser.span_of` — the honest place, but `ast_span.zen` landing after
-// `lex_token.zen` means nobody has decided whether one type should serve
-// both. Reported; `src/std/lex/` and `src/std/ast/` are not ours to edit.
+// Comments remain tokens so the parser can attach them; whitespace is derived
+// from gaps between spans. Token text is borrowed from Source through text_of
+// instead of being duplicated in every token. `_` is an Ident token and is
+// interpreted as a wildcard only in the grammar positions that permit one.
+// Parser.span_of is the single conversion from source-local lex spans to AST
+// spans that carry a file identity.
 
 Token*, TokenKind*, Source*, Lexed*, text_of*, kind_name* = std.lex.lex
 
@@ -52,12 +23,8 @@ Pos, Span = std.lex.lex
 // one crashes on a bug somewhere else, and the crash is what nobody
 // can diagnose.
 //
-// Built HERE rather than in parser.zen because of a bootstrapper bug, not
-// a design choice: `lex` and `ast` both declare a `Span`, so parser.zen
-// can't name the lexer's, and constructing through an alias (`LexSpan* =
-// Span`, then `LexSpan(..)`) emits the ALIAS'S ZEN NAME as a C function
-// call and doesn't compile (reported with a reproducer). This file
-// imports only the lexer's, so the name is unambiguous here.
+// This constructor lives with the lex Token and Span names, avoiding an
+// ambiguous lex/AST Span at parser call sites.
 empty_eof* = () Token {
     at = Pos(offset: 0, line: 1, col: 1);
     Token(kind: TokenKind.Eof, span: Span(start: at, end: at));

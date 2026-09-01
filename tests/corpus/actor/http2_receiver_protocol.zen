@@ -1,0 +1,61 @@
+Actor, ActorError, ActorStartError, Context, Ref = std.actor
+H2Chunk, H2Client, H2Error, H2Head, H2Receiver, H2StreamError, h2_chunk = std.net.http2
+
+Receiver = {}
+
+Receiver.impl(Actor, {})
+
+Receiver.impl(H2Receiver, {
+    headers = (self :: @Self, ctx: Context, head: H2Head) {
+        head.match({
+            Informational(status) => println("informational {}", status),
+            Response(status)      => println("response {}", status),
+            Trailers              => println("trailers"),
+        })
+    }
+
+    data = (self :: @Self, ctx: Context, chunk: H2Chunk) {
+        chunk.copy(ctx.alloc).match({
+            Ok(text) => println("data {}", text.view()),
+            Err(_)   => println("data allocation failed"),
+        })
+    }
+
+    completed = (self :: @Self, ctx: Context) {
+        println("completed")
+    }
+
+    failed = (self :: @Self, ctx: Context, error: H2Error) {
+        error.match({
+            RecvFailed => println("failed recv"),
+            _          => println("failed other"),
+        })
+    }
+})
+
+deliver = <R: Actor + H2Receiver>(receiver: Ref<R>, chunk: H2Chunk)
+          Res<(), ActorError> {
+    receiver.headers(H2Head.Response(200)).try();
+    receiver.data(chunk).try();
+    receiver.completed().try();
+    receiver.failed(H2Error.RecvFailed)
+}
+
+// Type-check and lower the public streaming door without opening a socket.
+stream_call = (
+    client   :: H2Client,
+    alloc    : Alloc,
+    headers  : Vec<str>,
+    receiver : Ref<Receiver>
+) Res<(), H2StreamError> {
+    client.post_stream(alloc, headers, "", receiver)
+}
+
+Error = AllocError | ActorStartError | ActorError | H2Error
+
+main = (env: Env) Res<(), Error> {
+    receiver = env.spawn(Receiver()).try();
+    chunk    = h2_chunk("hello").try();
+    deliver(receiver, chunk).try();
+    Ok(())
+}

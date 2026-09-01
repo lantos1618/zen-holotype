@@ -3,6 +3,7 @@ Range = std.core
 Vec = std.collections
 str = std.text
 Cli, cli = zen
+Emission = std.build
 
 main = (env: Env) Res<i32, AllocError> {
     a     ::= env.mem.alloc();
@@ -18,9 +19,9 @@ main = (env: Env) Res<i32, AllocError> {
     Range(0, flags.len).loop((h, i) {
         next = (i == 0).match({ true => "--emit-c", false => "--ffi" });
         flag = flags.get(i).match({ Ok(s) => s, None => "" });
-        show(env, missing(a, flag, next).try());
+        show(env, missing(a, flag, next).try()).try();
     });
-    show(env, valid(a).try());
+    show(env, valid(a).try()).try();
     Ok(0);
 }
 
@@ -50,19 +51,23 @@ valid = (a: Alloc) Res<Vec<str>, AllocError> {
     Ok(argv);
 }
 
-show = (env: Env, argv: Vec<str>) () {
-    cli(env, argv).match({
-        Build(j)   => println(
-            "build root={} entry={} out={} symbols={} ffi={}",
-            j.root,
-            j.entry,
-            j.out,
-            j.symbol_map,
-            j.ffi
-        ),
+show = (env: Env, argv: Vec<str>) Res<(), AllocError> {
+    cli(env, argv).try().match({
+        Build(j)   => j.emission.match({
+            CFile(out) => println(
+                "build root={} entry={} out={} symbols={} ffi={}",
+                j.root,
+                j.entry,
+                out,
+                j.symbol_map,
+                j.ffi
+            ),
+            _          => println("unexpected emission"),
+        }),
         Usage(w)   => println("usage `{}`", w),
         Missing(f) => println("missing `{}`", f),
         Fmt(_)     => println("fmt"),
         Later(n)   => println("later {}", n),
     });
+    Ok(())
 }

@@ -1,22 +1,10 @@
 // src/gen/gen_c/gen_c_fold.zen
-// THE SIXTH SHAPE: an accumulator, and what a fold evaluates to.
-// `gen_c_loop.zen` writes the five shapes that walk and discard; this
-// is the one that THREADS: "init seeds acc, acc threads through
-// iterations, the loop evaluates to the final acc — or to
-// `h.break(value)`, which is what makes the two forms one thing".
-// Three things follow, and this file is those three:
-//   - `acc` is ONE AUTOMATIC LOCAL. "index and acc thread BY VALUE, so
-//     no cell is heap-allocated" — seeded before the first pass, and
-//     the body's own value written back at the end of every one. The
-//     assignment IS the thread.
-//   - The result is `Ok(acc)`, WRITTEN BEFORE THE BREAK LABEL. A fold
-//     that ran to the end has an answer where a walk has none;
-//     `h.break(v)` jumps PAST that line, so the break's value wins.
-//     Writing it after the label would make a break silently return
-//     the accumulator instead — which is what `bootstrap/gen_c.py`
-//     does today.
-//   - A fold evaluates to its accumulator, not what it walked:
-//     `Res<A>`, never `Res<T>`. The seed says which.
+// Lower fold loops with one automatic accumulator.
+//
+// The seed initializes the accumulator, each iteration writes the body value
+// back, normal completion returns `Ok(acc)`, and `h.break(value)` jumps past
+// that result. The accumulator type is the seed/result payload, not the walked
+// element type.
 
 ExprId, Lambda, Function, Call = std.ast
 AllocError = std.mem
@@ -157,9 +145,8 @@ lower_with_acc = (
     )
 }
 
-// `acc` IS THE PARAMETER AFTER THE THREE THE WALK BINDS, and which of
-// those are present is the declaration's answer — the same question
-// `bind_threaded` asks one function up, and the same positions.
+// The accumulator parameter follows the index/value parameters selected by
+// the declared loop shape.
 bind_acc* = (be :: CBackend, sh: Shape, lam: Lambda, fold: Fold)
            Res<(), AllocError> {
     fold.has.match({
@@ -173,10 +160,7 @@ acc_slot = (sh: Shape) usize {
       + sh.wants_value.match({ true => 1, false => 0 })
 }
 
-// A FOLD EVALUATES TO ITS ACCUMULATOR: `Res<A>` and never `Res<T>`.
-// The seed says which, and it is the argument before the body — one
-// place, so the type a temporary is declared at and the type the loop
-// assigns cannot disagree.
+// A fold evaluates to `Res<A>`, where the seed supplies `A`.
 result_element* = (be :: CBackend, id: ExprId, ctx: Ctx)
                  Res<Res<TyId>, AllocError> {
     be.seed_arg(id).match({
@@ -189,11 +173,7 @@ seed_element = (be :: CBackend, seed: ExprId, ctx: Ctx)
                Res<Res<TyId>, AllocError> {
     unknown = be.check.types.unknown().try();
     t       = be.ty_of(seed, ctx, unknown).try();
-    // A LITERAL SEED STANDS AT ITS FAMILY (`0` is `int`, `0.0` is
-    // `float`), and the family reaches every integer position without
-    // being one. Minted to its default here so the loop settles at a
-    // CONCRETE payload and the break gate has a real type to hold the
-    // body's sites against.
+    // Materialize a literal seed at its family's default concrete type.
     settled = be.check.is_literal_ty(t).match({
         true  => be.check.types.prim(literal_default(be.check.prim_name(
             t

@@ -251,8 +251,8 @@ write_decl_note = (c : Checker, dd: Decl, all: bool, out :: String)
                   Res<(), AllocError> {
     doc = doc_block(c.alloc, c.tree, dd.leading).try();
     (doc.len > 0).then(() {
-        out.add_bytes(" — ").try();
-        out.add_bytes(doc).try();
+        out.add(" — ").try();
+        out.add(doc).try();
     });
     write_members(c, dd, Shown(joined: joiner(doc), all: all), out)
 }
@@ -297,8 +297,8 @@ write_members = (c : Checker, dd: Decl, shown: Shown, out :: String)
         _         => Ok(()),
     }).try();
     (body.len() > 0).then(() {
-        out.add_bytes(shown.joined).try();
-        out.add_bytes(body.view()).try();
+        out.add(shown.joined).try();
+        out.add(body.view()).try();
     });
     Ok(());
 }
@@ -324,8 +324,8 @@ write_member_run = (c : Checker, ms: Vec<Member>, all: bool, body :: String)
     names ::= c.alloc.Vec<str>();
     ms.loop((h, m) { write_one_member(c, m, all, names, list).try(); });
     (list.len() > 0).then(() {
-        body.add_bytes(MEMBERS).try();
-        body.add_bytes(list.view()).try();
+        body.add(MEMBERS).try();
+        body.add(list.view()).try();
     });
     Ok(());
 }
@@ -367,7 +367,7 @@ write_typed = (
         false => Ok(()),
         true  => {
             separate(body).try();
-            body.add_bytes(name).try();
+            body.add(name).try();
             write_type_suffix(c, ty, body)
         },
     })
@@ -382,8 +382,8 @@ write_type_suffix = (c : Checker, ty: Res<TypeId>, body :: String)
         Ok(id) => {
             scratch ::= c.alloc.String().try();
             write_ty(c, id, scratch).try().then(() {
-                body.add_bytes(": ").try();
-                body.add_bytes(scratch.view()).try();
+                body.add(": ").try();
+                body.add(scratch.view()).try();
             });
             Ok(());
         },
@@ -418,8 +418,8 @@ write_fn_member = (
             whole = write_decl_sig(c, f, scratch).try();
             separate(body).try();
             whole.match({
-                true  => body.add_bytes(scratch.view()),
-                false => body.add_bytes(f.name.text),
+                true  => body.add(scratch.view()),
+                false => body.add(f.name.text),
             })
             },
         }),
@@ -433,8 +433,8 @@ write_fn_member = (
 write_variant_run = (c : Checker, vs: Vec<Variant>, body :: String)
                     Res<(), AllocError> {
     vs.loop((h, i, v) {
-        (i > 0).then(() { body.add_bytes(" | ").try() });
-        body.add_bytes(v.name.text).try();
+        (i > 0).then(() { body.add(" | ").try() });
+        body.add(v.name.text).try();
         write_payload(c, v.payload, body).try();
     });
     Ok(());
@@ -447,9 +447,9 @@ write_payload = (c : Checker, payload: Res<TypeId>, body :: String)
         Ok(id) => {
             scratch ::= c.alloc.String().try();
             write_ty(c, id, scratch).try().then(() {
-                body.add_bytes("(").try();
-                body.add_bytes(scratch.view()).try();
-                body.add_bytes(")").try();
+                body.add("(").try();
+                body.add(scratch.view()).try();
+                body.add(")").try();
             });
             Ok(());
         },
@@ -457,7 +457,7 @@ write_payload = (c : Checker, payload: Res<TypeId>, body :: String)
 }
 
 separate = (body :: String) Res<(), AllocError> {
-    (body.len() > 0).match({ true => body.add_bytes(", "), false => Ok(()) })
+    (body.len() > 0).match({ true => body.add(", "), false => Ok(()) })
 }
 
 // The declaration's prose, and TWO RULES DECIDE WHICH PROSE IT IS.
@@ -526,8 +526,8 @@ after_last_blank = (tree: Ast, run: TriviaRun) usize {
 
 add_doc_line = (line: str, doc :: String) Res<(), AllocError> {
     (line.len > 0).then(() {
-        (doc.len() > 0).then(() { doc.add_bytes(" ").try() });
-        doc.add_bytes(line).try();
+        (doc.len() > 0).then(() { doc.add(" ").try() });
+        doc.add(line).try();
     });
     Ok(());
 }
@@ -610,41 +610,34 @@ write_decl_sig = (
     f   : Function,
     out :: String
 ) Res<bool, AllocError> {
-    out.add_bytes(f.name.text).try();
-    out.add_bytes(" = ").try();
+    out.add(f.name.text).try();
+    out.add(" = ").try();
     write_tparams(f, out).try();
-    out.add_bytes("(").try();
+    out.add("(").try();
     whole ::= true;
     f.params.loop((h, i, prm) {
-        (i > 0).then(() { out.add_bytes(", ").try() });
-        out.add_bytes(prm.name.text).try();
-        out.add_bytes(binder(prm.mutable)).try();
+        (i > 0).then(() { out.add(", ").try() });
+        out.add(prm.name.text).try();
+        out.add(prm.binder()).try();
         whole = write_opt_ty(c, prm.type, out).try() && whole;
     });
-    out.add_bytes(") ").try();
+    out.add(") ").try();
     Ok(write_opt_ty(c, f.ret, out).try() && whole);
 }
 
 write_tparams = (f: Function, out :: String) Res<(), AllocError> {
     (f.tparams.len == 0).match({
         true  => Ok(()),
-        false => write_tparam_list(f, out),
+        false => {
+            out.add("<").try();
+            f.tparams.loop((h, i, tparam) {
+                (i > 0).then(() { out.add(", ").try() });
+                out.add(tparam.name.text).try();
+            });
+            out.add(">").try();
+            Ok(())
+        },
     })
-}
-
-write_tparam_list = (f: Function, out :: String) Res<(), AllocError> {
-    out.add_bytes("<").try();
-    f.tparams.loop((h, i, tparam) {
-        (i > 0).then(() { out.add_bytes(", ").try() });
-        out.add_bytes(tparam.name.text).try();
-    });
-    out.add_bytes(">")
-}
-
-// `self :: @Self` and `a: i32` differ in whether the parameter may be
-// mutated, so a reprinted signature keeps it.
-binder = (mutable: bool) str {
-    mutable.match({ true => " :: ", false => ": " })
 }
 
 // A TYPE THAT WAS NOT WRITTEN IS NOT GUESSED. `Param.type` is absent in

@@ -30,8 +30,8 @@ Field, Const, Function = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
-DeclId = sema.sema_id
-TyId, TyNamed, Prim = sema.sema_ty
+DeclId, ImplId = sema.sema_id
+TyId, TyNamed, TyFn, Prim = sema.sema_ty
 Def, DefKind, decl_at, module_display = sema.sema_def
 SemaFault, TypeFault, PairFault = sema.sema_diag
 ExportFault = sema.sema_diag
@@ -39,6 +39,7 @@ Checker, Ctx, Binding = sema.sema_check
 Inst, subst, inst_of_named, owner_of, push_tparams = sema.sema_inst
 is_prim = sema.sema_ty
 impl_members, bound_member_types = sema.sema_supply
+impl_bound_type, impl_span = sema.sema_supply
 type_of = sema.sema_type
 type_from_ast, param_type = sema.sema_denote
 global_name_type, def_type = sema.sema_type
@@ -533,7 +534,255 @@ members_of* = (c :: Checker, ty: TyId, name: str, out :: Vec<Found>)
         Var(v)   => c.bound_reachable(v.name, ty, name, out),
         _        => Ok(()),
     }).try();
+    (out.len == 0).then(() { c.behavior_members(ty, name, out).try() });
     Ok(());
+}
+
+// A behavior is declared on the actor's `Actor` impl, but selected through
+// its address. `Ref<A>.work(x)` therefore exposes the impl member with the
+// runtime-owned `(self, Context)` prefix removed. Unlike an ordinary method
+// call, the answer says whether the message entered the mailbox.
+behavior_members = (c :: Checker, ty: TyId, name: str, out :: Vec<Found>)
+                   Res<(), AllocError> {
+    c.ref_of_actor(ty).try().match({
+        None  => Ok(()),
+        Ok(a) => c.behavior_set(a, name, out),
+    })
+}
+
+behavior_set = (c :: Checker, a: TyId, name: str, out :: Vec<Found>)
+               Res<(), AllocError> {
+    c.types.at(a).match({
+        Named(n) => c.behavior_impls(n, a, name, out),
+        Var(v)   => c.behavior_bounds(v.name, a, name, out),
+        _        => Ok(()),
+    })
+}
+
+behavior_bounds = (
+    c     :: Checker,
+    owner : str,
+    a     : TyId,
+    name  : str,
+    out   :: Vec<Found>
+) Res<(), AllocError> {
+    declared ::= c.alloc.Vec<Found>();
+    c.bound_reachable(owner, a, name, declared).try();
+    declared.loop((h, f) {
+        out.add(Found(
+            name: f.name,
+            ty: c.message_type(f.ty).try(),
+            computed: true,
+            constant: false,
+            mutable: false,
+            exported: f.exported,
+            module: f.module,
+            bound: f.bound,
+            span: f.span,
+        )).try();
+    });
+    Ok(())
+}
+
+behavior_impls = (
+    c    :: Checker,
+    n    : TyNamed,
+    a    : TyId,
+    name : str,
+    out  :: Vec<Found>
+) Res<(), AllocError> {
+    ids ::= c.alloc.Vec<ImplId>();
+    c.world.impls_named(c.tree, n.name, ids).try();
+    ids.loop((h, id) { c.behavior_in(n, a, name, id, out).try() });
+    Ok(())
+}
+
+behavior_in = (
+    c    :: Checker,
+    n    : TyNamed,
+    a    : TyId,
+    name : str,
+    id   : ImplId,
+    out  :: Vec<Found>
+) Res<(), AllocError> {
+    (n.decl.module == id.decl.module).match({
+        false => Ok(()),
+        true  => c.world.impl_at(c.tree, id).match({
+            None   => Ok(()),
+            Ok(im) => {
+                bound = c.impl_bound_type(im, n.decl.module.to_usize()).try();
+                c.send_members(im.members, a, name, id, bound, out)
+            },
+        }),
+    })
+}
+
+send_members = (
+    c     :: Checker,
+    ms    : Vec<Member>,
+    a     : TyId,
+    name  : str,
+    id    : ImplId,
+    actor : TyId,
+    out   :: Vec<Found>
+)
+               Res<(), AllocError> {
+    ms.loop((h, m) {
+        m.named(name).then(() { c.send_found(m, a, name, id, actor, out).try() });
+    });
+    Ok(())
+}
+
+send_found = (
+    c     :: Checker,
+    m     : Member,
+    a     : TyId,
+    name  : str,
+    id    : ImplId,
+    actor : TyId,
+    out   :: Vec<Found>
+) Res<(), AllocError> {
+    m.kind.match({
+        Function(f) => f.body.match({
+            None  => Ok(()),
+            Ok(_) => {
+                full = c.member_type(m, id.decl.module.to_usize(), a).try();
+                send = c.message_type(full).try();
+                out.add(Found(
+                    name: name,
+                    ty: send,
+                    computed: true,
+                    constant: false,
+                    mutable: false,
+                    exported: true,
+                    module: 0,
+                    bound: actor,
+                    span: c.impl_span(id),
+                ))
+            },
+        }),
+        _           => Ok(()),
+    })
+}
+
+message_type = (c :: Checker, full: TyId) Res<TyId, AllocError> {
+    c.types.at(full).match({
+        Fn(sig) => c.message_fn(sig),
+        _       => Ok(full),
+    })
+}
+
+message_fn = (c :: Checker, sig: TyFn) Res<TyId, AllocError> {
+    ps ::= c.alloc.Vec<TyId>();
+    sig.params.loop((h, i, p) { (i > 1).then(() { ps.add(p).try() }); });
+    unit  = c.types.prim("()").try();
+    error = c.actor_error_type().try().match({
+        None    => c.types.unknown(),
+        Ok(err) => Ok(err),
+    }).try();
+    ret   = c.types.res_failure(unit, error).try();
+    c.types.fn_ty(ps, ret)
+}
+
+ref_of_actor* = (c :: Checker, ty: TyId) Res<Res<TyId>, AllocError> {
+    c.types.at(ty).match({
+        Named(n) => c.actor_ref(n),
+        _        => Ok(None),
+    })
+}
+
+actor_ref = (c :: Checker, n: TyNamed) Res<Res<TyId>, AllocError> {
+    ((n.name.eq("Ref"))
+        && c.world.module_name(n.decl).eq("std.actor.actor_core")).match({
+        false => Ok(None),
+        true  => n.args.get(0).match({
+            None  => Ok(None),
+            // Ref's declaration already constrains its actor parameter at
+            // construction/spawn sites. Behavior lookup below verifies the
+            // concrete impl; repeating bound satisfaction here loses empty
+            // marker impls and makes a valid Ref look ordinary.
+            Ok(a) => Ok(Ok(a)),
+        }),
+    })
+}
+
+actor_type = (c :: Checker) Res<Res<TyId>, AllocError> {
+    c.actor_named_type("Actor")
+}
+
+actor_error_type = (c :: Checker) Res<Res<TyId>, AllocError> {
+    c.actor_named_type("ActorError")
+}
+
+// Env.spawn's type parameter is settled by the actor value. Generic member
+// signatures otherwise retain their declaration Var in the current member
+// path, so construct this intrinsic result from the checked argument type.
+actor_spawn_ret* = (
+    c        :: Checker,
+    recv     : TyId,
+    name     : str,
+    actor    : TyId,
+    ordinary : TyId
+) Res<TyId, AllocError> {
+    is_actor_spawn(c, recv, name).match({
+        false => Ok(ordinary),
+        true  => c.spawn_result(actor, ordinary),
+    })
+}
+
+is_actor_spawn = (c: Checker, recv: TyId, name: str) bool {
+    name.eq("spawn") && c.types.at(recv).match({
+        Named(n) => n.name.eq("Env")
+            && c.world.module_name(n.decl).eq("std.env.env"),
+        _        => false,
+    })
+}
+
+spawn_result = (c :: Checker, actor: TyId, ordinary: TyId)
+               Res<TyId, AllocError> {
+    defs ::= c.alloc.Vec<Def>();
+    c.world.exported_named("Ref", defs).try();
+    found ::= c.alloc.Vec<TyId>();
+    defs.loop((h, d) {
+        d.qname.eq("std.actor.actor_core.Ref").then(() {
+            args ::= c.alloc.Vec<TyId>();
+            args.add(actor).try();
+            found.add(c.types.named(d.id, d.qname, d.name, args).try()).try();
+            h.break();
+        });
+    });
+    found.get(0).match({
+        None       => Ok(ordinary),
+        Ok(ref_ty) => c.actor_named_type("ActorStartError").try().match({
+            None         => Ok(ordinary),
+            Ok(error_ty) => c.types.res_failure(ref_ty, error_ty),
+        }),
+    })
+}
+
+// Resolve through the world, then pin the declaration's home. A user type
+// named `Actor` or `Ref` is not runtime syntax merely because it is spelled
+// the same way.
+actor_named_type = (c :: Checker, name: str) Res<Res<TyId>, AllocError> {
+    defs ::= c.alloc.Vec<Def>();
+    c.world.exported_named(name, defs).try();
+    found ::= c.alloc.Vec<TyId>();
+    defs.loop((h, d) {
+        (d.name.eq(name) && d.qname.eq(actor_path(name))).then(() {
+            found.add(c.def_type(d).try()).try();
+            h.break();
+        });
+    });
+    Ok(found.get(0))
+}
+
+actor_path = (name: str) str {
+    name.match({
+        "Actor"           => "std.actor.actor_core.Actor",
+        "ActorError"      => "std.actor.actor_core.ActorError",
+        "ActorStartError" => "std.actor.actor_core.ActorStartError",
+        _                 => "",
+    })
 }
 
 // "A prelude declaration of a primitive's name IS that primitive"

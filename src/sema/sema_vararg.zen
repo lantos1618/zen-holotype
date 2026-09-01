@@ -1,33 +1,8 @@
 // src/sema/sema_vararg.zen
-// `vararg<T>` — the one position it may be written, and the two
-// questions a call site asks about it.
-//
-// A vararg is an ORDINARY DECLARED STRUCT (`collections_vararg.zen`), so
-// nothing here is about what it MEANS: it means what `Vec<i32>` means,
-// resolved by `lookup_named` and interned as a `Ty.Named` like any other
-// nominal. That is the whole design, and it is why this file is short.
-// Two things about it are not ordinary.
-//
-// WHERE IT MAY BE WRITTEN: only as the whole type of a function's LAST
-// parameter. That is not a simplification for later — it is what makes
-// the pack sound with no lifetime machinery at all. A pack BORROWS the
-// caller's frame (`gen_c_call.zen` writes the run as a compound literal
-// in the calling block), so a vararg in a return type, in a field, or
-// inside a type argument would be a borrow outliving what it borrows
-// from. `g = () vararg<i32> { f(1, 2, 3) }` is the shape, and it dangles.
-// Refusing every other position costs one scan and is exact, where an
-// escape analysis would be neither.
-//
-// WHAT A CALL SITE ASKS: does the last parameter swallow the rest
-// (`pack_slot`), and what must each swallowed argument be (`pack_elem`).
-// Both are answered on the INTERNED type, so `sema_cand.zen` and
-// `gen_c_call.zen` read ONE implementation — the arity a call is checked
-// against and the arity it is emitted at cannot drift.
-//
-// `...` IS NOT THIS AND IS NOT TOUCHED. It stays the bare marker the
-// three format doors are declared with, because those doors are
-// heterogeneous and a homogeneous pack cannot type them
-// (`docs/design_vararg.md`).
+// `vararg<T>` is an ordinary nominal type restricted to the final parameter.
+// Its storage borrows the caller's frame, so other positions would let it
+// escape. `pack_slot` and `pack_elem` are shared by call checking and lowering.
+// The separate `...` marker remains the heterogeneous formatting form.
 
 Ast, Module, Decl, Function, Struct, Impl, Member, Type, TypeId = std.ast
 AllocError = std.mem
@@ -108,15 +83,8 @@ param_is_pack = (tree: Ast, f: Function, i: usize) bool {
     })
 }
 
-// ---------------------------------------------------------------------
-// where it may be written
-//
-// A WHOLE-PROGRAM SCAN, and it has to be: the rule is about a written
-// type's position, and a node carries its span but not its parent. So
-// every `vararg` the compilation wrote is gathered first — the scan
-// costs one match per type node and finds nothing in a tree with no
-// varargs — and then the positions that are allowed name themselves.
-// ---------------------------------------------------------------------
+// Written type nodes do not store parents, so positional validation gathers
+// all mentions and all legal final-parameter positions before comparing them.
 
 check_varargs* = (c :: Checker) Res<(), AllocError> {
     found ::= c.alloc.Vec<TypeId>();
@@ -163,10 +131,7 @@ check_mention = (c :: Checker, t: TypeId, tails: Vec<TypeId>)
     })
 }
 
-// EXACTLY ONE ARGUMENT, AND NOT ITSELF A PACK. Zero arguments leaves the
-// element type a free parameter, so no call site could say what its
-// arguments must be; two says nothing at all. A pack of packs has no
-// call site that could build the inner runs.
+// A pack has exactly one element argument, which cannot itself be a pack.
 check_element = (c :: Checker, t: TypeId) Res<(), AllocError> {
     element_ok(c, t).match({
         true  => Ok(()),

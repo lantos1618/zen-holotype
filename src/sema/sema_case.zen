@@ -48,18 +48,8 @@ cases_of* = (c :: Checker, ty: TyId, out :: Vec<Case>) Res<bool, AllocError> {
     })
 }
 
-// A structural `A | B` has no case list here — a hold, not a reading.
-// DESIGN.md's "a union is its members" means `Ty.Union`'s members ARE
-// the cases, so `e: AllocError | Fault` matches exactly as declared
-// `Error = AllocError | Fault` does.
-//
-// KNOWN GAP (gen_c): a match on a structural set lowers arms through
-// `sym_variant(type_qname(set), name)`, but the tag layout wrote is
-// `sym_union_variant`'s `zg_e<set><member>` — every arm tests an
-// undeclared constant, C doesn't compile. Returning a bare member where
-// the set is expected has the same gap (`pick = () Error { Snag(..) }`
-// returns the raw member struct). Until both close, "match is not
-// exhaustive" here is a rejection standing in for a miscompile.
+// Structural unions are not enumerated here; only named union declarations
+// have the codegen representation needed for case tags.
 
 // The payload `name` carries in `ty`, or poison when `ty` does not
 // declare that case. Poison rather than a diagnostic: a pattern naming
@@ -68,8 +58,7 @@ cases_of* = (c :: Checker, ty: TyId, out :: Vec<Case>) Res<bool, AllocError> {
 case_payload* = (c :: Checker, ty: TyId, name: str) Res<TyId, AllocError> {
     cases ::= c.alloc.Vec<Case>();
     c.cases_of(ty, cases).try();
-    // the arm whose type is WRITTEN leads: a match takes its type from
-    // its first arm. See docs/SEMA_BOOTSTRAP_FIXES.md.
+    // The declared case supplies the payload type.
     find_case(cases, name).match({
         None   => c.types.unknown(),
         Ok(cs) => Ok(cs.payload),
@@ -162,9 +151,8 @@ enum_cases = (c :: Checker, d: Decl, n: TyNamed, out :: Vec<Case>)
     })
 }
 
-// The two readings of `A | B` are two case lists (DESIGN.md: "a union
-// is its members"): a nominal enum's variant is a tag that may carry a
-// written payload; a union's variant IS a type and always carries one.
+// A nominal enum variant may carry a payload; a union member always carries
+// the type named by that member.
 variant_cases = (c :: Checker, e: Enum, n: TyNamed, out :: Vec<Case>)
                 Res<bool, AllocError> {
     c.union_reading(n.decl).match({
@@ -173,19 +161,7 @@ variant_cases = (c :: Checker, e: Enum, n: TyNamed, out :: Vec<Case>)
     })
 }
 
-// A union member carries itself: `Error = AllocError | IoError` matched
-// `IoError(io)` binds `io: IoError` — nothing else could it be, since a
-// set that only remembered "some IoError" would have to invent one on
-// the way back out.
-//
-// BUG FOUND THE HARD WAY (`corpus/std/res_try_error_set_keeps_the_
-// variant`): reading these as payloadless tags bound `io` to `()`,
-// which has no case list, so `Closed` read as a BINDER and made every
-// arm after the first unreachable. Fix: payload is the type the
-// variant NAMES, not the set it flattens to — matching what
-// `gen_c_type.zen`'s `union_member_type` emits. Sema checking one type
-// while the backend emits another is this compiler's worst failure
-// class.
+// A union member carries its named type rather than the flattened set.
 add_members = (c :: Checker, e: Enum, n: TyNamed, out :: Vec<Case>)
               Res<bool, AllocError> {
     e.variants.loop((h, v) {

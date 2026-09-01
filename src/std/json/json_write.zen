@@ -1,37 +1,25 @@
 // src/std/json/json_write.zen
 // JSON as a value, an arena over it, and the writer.
 //
-// MOVED HERE FROM `src/lsp/lsp_json.zen`, per that header's own note:
-// `STYLE.md`'s stranger test put JSON in `std` on sight ("parses a
-// JSON document" names no module) and the second-caller rule moved it
-// the day something that is not the LSP wanted it. `src/std/env/env.zen`'s
-// warning — every member of `std` is one the self-hosted compiler must
-// keep working forever — stands, and the answer to it is what this
-// module always was: a streaming value arena with no tree allocation,
-// not a document model the compiler would ever need to parse.
+// This belongs in std rather than in any one protocol client: parsing or
+// writing a JSON document names no higher-level subsystem. It stays a
+// streaming value arena with no recursive tree allocation, not a document
+// model the compiler itself must depend on.
 //
-// A CHILD IS AN ID, NEVER A VALUE (`src/AST_CONTRACT.md` rule 2): an
-// `Obj` holding a `Json` holding an `Obj` has no size, so recursion goes
-// through an arena exactly as `Expr` does. An array and object each name
-// a contiguous RUN in a side list.
+// Children are ids rather than embedded values, which keeps recursive values
+// fixed-size. Arrays and objects each name a contiguous run in a side list.
 //
-// A NUMBER IS ITS LEXEME: `Num` carries the bytes it was written with,
-// not a parsed value. JSON's number grammar is not Zen's (`1e10`, `-0`
-// are valid JSON; `DESIGN.md:99` rejects a leading zero) so parsing into
-// a Zen numeric type would REJECT valid JSON, which a transport may not
-// do. Every number this server reads is a small non-negative integer
-// (`whole` is that narrow reading), and keeping the lexeme makes the
-// writer byte-exact for free — what makes the round-trip gate mean
-// something.
+// Num stores its original lexeme because JSON accepts spellings that Zen
+// numeric literals do not, including exponents and negative zero. `whole`
+// provides the narrower non-negative-integer view when a protocol needs it.
 
 str, String = std.text
 Vec = std.collections
 Alloc, AllocError = std.mem
 Range = std.core
-hex_digit = std.core.byte
+hex_digit, HEX_BASE = std.core.byte
 
-// An index into a `Jsons`. A struct, not a bare usize — same reason
-// `ExprId` is not one.
+// A typed index into a Jsons arena.
 JsonId* = { index*: usize }
 
 // A contiguous run in one of the side lists: arrays name a run of
@@ -41,7 +29,7 @@ Run* = {
     len*: usize,
 }
 
-// One member of an object: the DECODED key, and its value — a lookup
+// One object member: the decoded key and its value. A lookup
 // comparing raw lexemes would miss members whose escapes differ.
 Pair* = {
     key*: str,
@@ -64,9 +52,7 @@ Jsons* = {
     items :: Vec<JsonId>,
     pairs :: Vec<Pair>,
 
-    // An id no `Jsons` handed out is a caller bug, so it TRAPS rather
-    // than answering `Null`. The subtraction IS the check, `str.index`'s
-    // idiom.
+    // An id outside this arena is a caller bug and traps through subtraction.
     at* = (self: @Self, id: JsonId) Json {
         self.nodes.len - id.index - 1;
         self.nodes.get(id.index).match({
@@ -81,13 +67,13 @@ Jsons* = {
         Ok(id);
     }
 
-    // Append a built-up list of children as ONE run, copied from a
+    // Append a built-up list of children as one run, copied from a
     // caller-owned `Vec` since a nested array's own children land in
     // `items` between its siblings'.
     add_items* = (self :: @Self, ids: Vec<JsonId>) Res<Run, AllocError> {
         run = Run(at: self.items.len, len: ids.len);
         Range(0, ids.len).loop((h, i) {
-            self.items.add(id_or_zero(ids.get(i))).try();
+            self.items.add(ids.get(i).value_or(JsonId(index: 0))).try();
         });
         Ok(run);
     }
@@ -95,7 +81,7 @@ Jsons* = {
     add_pairs* = (self :: @Self, ps: Vec<Pair>) Res<Run, AllocError> {
         run = Run(at: self.pairs.len, len: ps.len);
         Range(0, ps.len).loop((h, i) {
-            self.pairs.add(pair_or_empty(ps.get(i))).try();
+            self.pairs.add(ps.get(i).value_or(Pair(key: "", value: JsonId(index: 0)))).try();
         });
         Ok(run);
     }
@@ -105,9 +91,7 @@ Jsons* = {
     // Every one of these answers `None` rather than failing: a missing
     // field is refused by name, not a reason to stop reading the stream.
 
-    // The member named `name`, if `id` is an object that has one. LAST
-    // WINS on a duplicate key (RFC 8259 leaves it undefined; every
-    // mainstream implementation takes the last).
+    // The named member, if id is an object. Duplicate keys use the last value.
     field* = (self: @Self, id: JsonId, name: str) Res<JsonId> {
         self.at(id).match({
             Obj(run) => self.scan(run, name),
@@ -119,7 +103,7 @@ Jsons* = {
         found ::= JsonId(index: 0);
         have  ::= false;
         Range(run.at, run.at + run.len).loop((h, i) {
-            p = pair_or_empty(self.pairs.get(i));
+            p = self.pairs.get(i).value_or(Pair(key: "", value: JsonId(index: 0)));
             p.key.eq(name).then(() {
                 found = p.value;
                 have  = true;
@@ -128,8 +112,7 @@ Jsons* = {
         have.match({ true => Ok(found), false => None })
     }
 
-    // Element `i` of an array — `contentChanges[0]` is how a Full-sync
-    // `didChange` carries its text, the only array this server reads.
+    // Element i when id is an array and the index is in range.
     item* = (self: @Self, id: JsonId, i: usize) Res<JsonId> {
         self.at(id).match({
             Arr(run) => (i < run.len).match({
@@ -144,10 +127,8 @@ Jsons* = {
         self.at(id).match({ Text(s) => Ok(s), _ => None })
     }
 
-    // A JSON number read as a non-negative integer (id, line, character,
-    // length). `None` unless the lexeme is exactly digits — a sign,
-    // point or exponent is a valid JSON number and NOT a whole one, and
-    // answering 1 for `1e10` is a quiet wrong.
+    // A JSON number read as a non-negative integer. None unless the complete
+    // lexeme is decimal digits; signs, fractions, and exponents are rejected.
     whole* = (self: @Self, id: JsonId) Res<usize> {
         self.at(id).match({
             Num(lex) => lex.parse_usize(),
@@ -162,11 +143,9 @@ Jsons* = {
     // input produce one byte string — the round-trip gate's property.
     write* = (self: @Self, id: JsonId, out :: String) Res<(), AllocError> {
         self.at(id).match({
-            Null     => out.add_bytes("null"),
-            Bool(b)  => out.add_bytes(
-                b.match({ true => "true", false => "false" })
-            ),
-            Num(lex) => out.add_bytes(lex),
+            Null     => out.add("null"),
+            Bool(b)  => out.add(b.match({ true => "true", false => "false" })),
+            Num(lex) => out.add(lex),
             Text(s)  => write_text(s, out),
             Arr(run) => self.write_items(run, out),
             Obj(run) => self.write_pairs(run, out),
@@ -177,7 +156,10 @@ Jsons* = {
         items ::= arr(out).try();
         Range(0, run.len).loop((h, i) {
             items.next(out).try();
-            self.write(id_or_zero(self.items.get(run.at + i)), out).try();
+            self.write(
+                self.items.get(run.at + i).value_or(JsonId(index: 0)),
+                out
+            ).try();
         });
         items.close(out)
     }
@@ -185,7 +167,7 @@ Jsons* = {
     write_pairs = (self: @Self, run: Run, out :: String) Res<(), AllocError> {
         pairs ::= obj(out).try();
         Range(0, run.len).loop((h, i) {
-            p = pair_or_empty(self.pairs.get(run.at + i));
+            p = self.pairs.get(run.at + i).value_or(Pair(key: "", value: JsonId(index: 0)));
             pairs.key(p.key, out).try();
             self.write(p.value, out).try();
         });
@@ -201,50 +183,28 @@ Jsons* = (a: Alloc) Jsons {
 written* = () Res<(), AllocError> { Ok(()) }
 
 // --- a container being written ----------------------------------------
-//
-// A REPLY IS ASSEMBLED AS TEXT AND NOT THROUGH THE ARENA — the reason is
-// `lsp_reply.zen`'s and it is a measured one: `semanticTokens` runs on
-// every keystroke and puts five integers on the wire per token, 4,448
-// tokens for one 31KB file. Through the arena each of those integers is
-// a `Num` carrying an allocated lexeme, so a tree would trade the
-// current ZERO allocations on that path for twenty thousand of them.
-//
-// So the punctuation is written straight out — and this type owns it.
-// `Nest` is what an open `{` or `[` knows: whether anything is inside it
-// yet, which is the whole of the comma rule, and WHICH BRACKET CLOSES
-// IT, remembered from the opener rather than typed again at the end. A
-// value of two bytes, on the stack; it allocates nothing and it makes
-// three mistakes unwritable.
-//
-// THE THREE. A missing or doubled comma, because no caller writes one.
-// An unescaped key, because `key` is the only way to name a member and
-// it goes through `write_text`. And a closer that does not match its
-// opener — `"}]}}}"` was a real line in `lsp_action.zen`, five brackets
-// counted by eye.
-//
-// WHAT IT DOES NOT OWN is nesting depth: a nested container is its own
-// `Nest`, opened after `key` and closed by name, so the two are as
-// visible as the values between them. A caller that forgets to close is
-// the one error left, and it is one an eye can see because the opener
-// and the closer are the same word.
+// Nest streams container punctuation without building an arena value. It
+// owns separator placement, key escaping, and the matching closing bracket.
+// A nested container has its own Nest, so nesting depth remains explicit in
+// the caller.
 Nest* = {
     said :: bool,
     ends: u8,
 
     // The separator this container owes before its next member, which is
-    // nothing before the first — an ARRAY element calls this directly,
+    // nothing before the first — an array element calls this directly,
     // an object member gets it from `key`.
     next* = (self :: @Self, out :: String) Res<(), AllocError> {
         owed      = self.said;
         self.said = true;
-        owed.match({ true => out.add_byte(','), false => written() })
+        owed.match({ true => out.add(','), false => written() })
     }
 
     // `"name":`, with the comma before it and the escaping inside it.
     key* = (self :: @Self, name: str, out :: String) Res<(), AllocError> {
         self.next(out).try();
         write_text(name, out).try();
-        out.add_byte(':')
+        out.add(':')
     }
 
     // A member whose value is a string — the common case, and the one
@@ -258,66 +218,48 @@ Nest* = {
 
     // The bracket this container opened with, whichever it was.
     close* = (self: @Self, out :: String) Res<(), AllocError> {
-        out.add_byte(self.ends)
+        out.add(self.ends)
     }
 }
 
 // `{`, and the `}` that will close it.
 obj* = (out :: String) Res<Nest, AllocError> {
-    out.add_byte('{').try();
+    out.add('{').try();
     Ok(Nest(said: false, ends: '}'));
 }
 
 // `[`, and the `]` that will close it.
 arr* = (out :: String) Res<Nest, AllocError> {
-    out.add_byte('[').try();
+    out.add('[').try();
     Ok(Nest(said: false, ends: ']'));
-}
-
-// An in-range `get`, bounds-checked by construction — `Res` has no `or`,
-// and writing the match five times would bury what matters.
-id_or_zero = (r: Res<JsonId>) JsonId {
-    r.match({ Ok(v) => v, None => JsonId(index: 0) })
-}
-
-pair_or_empty = (r: Res<Pair>) Pair {
-    r.match({ Ok(v) => v, None => Pair(key: "", value: JsonId(index: 0)) })
 }
 
 // A JSON string literal, escaped, quotes included.
 //
-// SHARED BY THE WRITER AND BY EVERY REPLY, a free function rather than a
-// method on `Jsons`: a reply is assembled as text with no arena behind
-// it. The escape set is the minimum JSON requires — quote, backslash,
-// everything below 32; `/` is NOT escaped (legal bare; "accepts `\/`,
-// never writes it" is what every implementation ships). BYTES ABOVE 127
-// PASS THROUGH UNTOUCHED — valid UTF-8 is valid JSON as itself, and
-// re-encoding to `\u` escapes risks corrupting a non-ASCII identifier for
-// no reason.
+// Shared by the arena writer and direct reply writers, so this is a free
+// function rather than a method on Jsons. The escape set is the JSON-required
+// quote, backslash, and control
+// bytes. Slash and UTF-8 bytes above 127 pass through unchanged.
 write_text* = (s: str, out :: String) Res<(), AllocError> {
-    out.add_byte('"').try();
+    out.add('"').try();
     Range(0, s.len).loop((h, i) {
         escaped(s.index(i), out).try();
     });
-    out.add_byte('"')
+    out.add('"')
 }
 
-// ONE MATCH ON THE BYTE, not a pyramid of `==`: the five bytes with a
-// name of their own are arms, and the only test left is the range one —
-// everything below 32 must be escaped somehow, and `\u00XX` is how. The
-// three control NAMES are worth having because a newline inside a
-// diagnostic message is common, and a hex escape there would make
-// expected files unreadable.
+// Named escapes cover common controls; every other byte below 32 uses
+// `\u00XX`.
 escaped = (b: u8, out :: String) Res<(), AllocError> {
     b.match({
-        '"'  => out.add_bytes("\\\""),
-        '\\' => out.add_bytes("\\\\"),
-        '\n' => out.add_bytes("\\n"),
-        '\r' => out.add_bytes("\\r"),
-        '\t' => out.add_bytes("\\t"),
+        '"'  => out.add("\\\""),
+        '\\' => out.add("\\\\"),
+        '\n' => out.add("\\n"),
+        '\r' => out.add("\\r"),
+        '\t' => out.add("\\t"),
         _    => (b < SPACE).match({
             true  => hex_escape(b, out),
-            false => out.add_byte(b),
+            false => out.add(b),
         }),
     })
 }
@@ -325,10 +267,9 @@ escaped = (b: u8, out :: String) Res<(), AllocError> {
 // `\u00XX`, reachable only for a byte below 32 — the high two digits are
 // always `00` and are written rather than computed.
 hex_escape = (b: u8, out :: String) Res<(), AllocError> {
-    out.add_bytes("\\u00").try();
-    out.add_byte(hex_digit(b / NIBBLE_BASE)).try();
-    out.add_byte(hex_digit(b % NIBBLE_BASE))
+    out.add("\\u00").try();
+    out.add(hex_digit(b / HEX_BASE)).try();
+    out.add(hex_digit(b % HEX_BASE))
 }
 
-SPACE*: u8 = 32
-NIBBLE_BASE*: u8 = 16
+SPACE*: u8 = ' '

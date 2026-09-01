@@ -23,7 +23,7 @@ Alloc, AllocError = std.mem
 str, String = std.text
 Vec = std.collections
 Range = std.core
-FsError = std.env
+FsError, fs_message = std.env
 
 Ast = std.ast.ast_arena
 
@@ -40,8 +40,15 @@ lower_program, emit_header, emit_unit, unit_used = gen.gen
 // single-file path does it: the header is assembled first because
 // assembling it is what emits the type definitions, and everything a
 // unit adds after that is bytes already lowered.
-emit_units* = (a: Alloc, env: Env, tree: Ast, c :: Checker, dir: str,
-               ffi: bool, symbol_map: str)
+emit_units* = (
+    a          : Alloc,
+    env        : Env,
+    tree       : Ast,
+    c          :: Checker,
+    dir        : str,
+    ffi        : bool,
+    symbol_map : str
+)
               Res<usize, AllocError> {
     be ::= a.CBackend(tree, c).try();
     (ffi).then(() { be.enable_ffi(); });
@@ -136,10 +143,10 @@ write_unit_at = (
 // a compiler-cache miss.
 unit_file* = (tree: Ast, u: usize, out :: String) Res<(), AllocError> {
     tree.module_at(u).match({
-        None  => out.add_bytes("zg_unit"),
-        Ok(m) => out.add_bytes(m.name),
+        None  => out.add("zg_unit"),
+        Ok(m) => out.add(m.name),
     }).try();
-    out.add_bytes(".c")
+    out.add(".c")
 }
 
 // A write that fails is a fault, not a trap: a full disk or unwritable
@@ -158,18 +165,4 @@ write_at = (a: Alloc, env: Env, dir: str, name: str, bytes: str)
 unit_write_failed = (path: str, e: FsError) Res<usize, AllocError> {
     println("--emit-c-dir {}: {}", path, fs_message(e));
     Ok(1);
-}
-
-// What went wrong with a file. Every one of these names what actually
-// happened, because "bad arguments" is not a reason and neither is
-// "io error".
-fs_message* = (e: FsError) str {
-    e.match({
-        NotFound    => "nothing is at that path",
-        Denied      => "this process may not read it",
-        IsDir       => "the path names a directory, and a directory is not bytes",
-        Exists      => "something is already locked at that path",
-        Failed      => "the read started and did not finish",
-        OutOfMemory => "the buffer could not be obtained",
-    })
 }

@@ -3,7 +3,7 @@
 One line per test: path -- the one-line compiler change that would redden it.
 
     a_string_grows_through_three_reallocs/ -- gen_c: emit Vec.grow's doubling as `8` constant (or grow-on-`len > capacity` instead of `==`) and byte 9 truncates or shifts the view
-    three_append_doors_one_buffer/ -- gen_c sink expansion: lower String.fmt's pieces to add (WriteError) instead of add_bytes (AllocError), or append at buffer start, and door order/bytes diverge
+    format_and_raw_adds_share_one_buffer/ -- gen_c format expansion: route String.fmt through the generic Sink floor instead of raw String.add's AllocError floor, or append at buffer start, and operation order/bytes diverge
     a_view_borrows_and_grow_moves_it/ -- sema/gen_c: make String.view return a fresh copy (or a live re-read of data.ptr) and stale-len prints 9/29 instead of the frozen 8
     a_hole_picks_its_writer_by_type/ -- gen_c_sink.zen signed_writer: flip is_signed's u64 arm to add_i64 and UINT64_MAX prints -1; drop add_bool for write("true") via i64 and booleans print 1/0
     a_slice_is_a_view_not_a_copy/ -- text_str.slice: compute len as `to - from` with either bound off by one (drop the tail subtraction) and head/mid widths shift one byte
@@ -14,7 +14,7 @@ One line per test: path -- the one-line compiler change that would redden it.
     empty_means_zero_bytes_not_null/ -- collections_vec.zen grow: skip the null-data first-grow branch and the post-empty `alive !` line traps or prints nothing
     two_buffers_grow_without_touching/ -- gen_c realloc call: pass one String's data pointer where the other's is read (stale-handle reuse) and b's seed bytes vanish into a's digits
     a_view_feeds_the_next_append/ -- gen_c arg evaluation order vs realloc emission: read the alias after the store instead of before and self-append prints ab-- or ab-ab-ab instead of ab-ab
-    byte_values_round_trip_through_the_buffer/ -- gen_c add_byte lowering: widen u8 to i32 at the call (signed char) and index reads print -55-style negatives; utf8 len prints 1 not 2
+    byte_values_round_trip_through_the_buffer/ -- gen_c add lowering: widen u8 to i32 at the call (signed char) and index reads print -55-style negatives; utf8 len prints 1 not 2
     recursion_appends_deepest_frame_first/ -- gen_c match-arm ordering: emit the append before the recursive call (straight-line lowering of arms) and "12345" becomes "54321"
     the_allocating_constructor_formats/ -- gen_c ufcs overload pick for String(fmt, ..): resolve to the 1-arg empty form and "{}-{}" prints verbatim with braces intact
     a_float_fits_the_buffer/ -- gen_c_sink writer_of: drop the float arm back to sink_display and every float hole refuses `formatting a value of this type`; bypass %g in the intrinsic render and 100 prints 100.0

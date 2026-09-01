@@ -1,32 +1,7 @@
 // src/std/parse/parser.zen
-// The machine: where the parser is in the token stream, what it has
-// built, and what it has to complain about.
-//
-// `parse.zen` is the folder's surface and every sibling is one
-// grammatical subject. This file is the state they share and the six
-// primitives they are all written in terms of (`peek`, `at`, `eat`,
-// `expect`, `error`, `bump`). A subject file never touches `p.at` or
-// `p.tree` directly.
-//
-// OVER 500 LINES, JUSTIFIED: the cursor, the trivia pump and the depth
-// guard all read the same token stream in the same order, and
-// splitting them would mean three modules agreeing about an index.
-// Everything that could leave has: parse_token.zen, parse_diag.zen,
-// parse_lookahead.zen.
-//
-// THE FAILURE MODEL, and the reason every signature below reads
-// `Res<X, AllocError>` rather than `Res<X, ParseError>`:
-//
-//   A SYNTAX ERROR IS NOT A RETURNED FAILURE. It is a `Diag` appended
-//   to `p.diags` and a poison node put in the tree, so parsing
-//   continues and the second mistake is found on the first run.
-//   TESTING.md's "one syntax error must not cascade into fifty" is
-//   unachievable otherwise.
-//
-//   RUNNING OUT OF MEMORY IS — `AllocError` because that is what
-//   `Ast.add_expr` and `Vec.add` return, and the seed subset has no
-//   error unions and no conversion, so `Res<X, ParseError>` would make
-//   `.try()` illegal on every node the parser builds.
+// Shared parser state: cursor, AST, diagnostics, trivia ownership, and depth.
+// Syntax errors append diagnostics and poison nodes so parsing can continue;
+// allocation failure is the only returned failure.
 
 Alloc, AllocError = std.mem
 Ast = std.ast.ast_arena
@@ -34,51 +9,8 @@ Span, Pos, Trivia, TriviaKind, TriviaRun, no_trivia, Ident = std.ast.ast_span
 Token, TokenKind, Source, Lexed, is_trivia, text_of, empty_eof = std.parse.parse_token
 Diag, diag, diag_at, truncated = std.parse.parse_diag
 
-// How deep a nested construct may be before the parser stops rather
-// than crashes. TESTING.md: "10,000 nested parens or blocks. A
-// recursive-descent parser stack-overflows and this is a crash, not a
-// diagnostic. Decide the depth limit and emit an error at it."
-//
-// THE BOUND IS THE PIPELINE'S, NOT THE PARSER'S: sema walks the same
-// nesting through `type_of` and gen_c through `expr`, with frames two
-// orders larger and no bound of their own, so this one must hold for
-// the hungriest phase. MEASURED, one nesting level at a time until it
-// segfaulted, at the default eight-megabyte stack:
-//
-//     parentheses      ~1,150 levels     ~7KB  per level
-//     nested calls       ~313 levels    ~24KB  per level
-//     nested `.match`     ~255 levels    ~32KB  per level
-//
-// The old 256 had ONE level of margin on the hungriest construct, not
-// the two orders its reasoning claimed — that counted only this
-// parser's own frames.
-//
-// 304 IS WHAT `tests/corpus/codegen/nesting_expr.zen` NEEDS, NOT A BYTE
-// MORE: that file writes 300 parentheses, and the enclosing block and
-// statement cost two more levels, so it needs 302. Refusing it is a
-// false refusal — as bad as a crash and easier to ship.
-//
-// A `.match` is POSTFIX, recognised on the way back out but CHARGED on
-// the way in: the postfix loop takes a level per link before it takes
-// the step (`parse_expr.zen`), so a `.match` costs its scrutinee's
-// level plus its own, same as a nested call. That is why cost varying
-// 4.6x by construct does not reopen the window it once seemed to.
-// Measured against this same 304, by bisection, the deepest program
-// accepted per shape:
-//
-//     parentheses         302        `.match`     151
-//     nested calls        151        `x.a.a..`    302
-//     `f(1)(1)..`         301        `x[0][0]..`  301
-//
-// Each is comfortably under its measured segfault depth above. The
-// cost is that a 200-deep nested call is now refused where it used to
-// compile — nine levels short of the crash.
-//
-// WHAT IS STILL NOT BOUNDED HERE: the binary spine. `1 + 1 + ..` builds
-// a left-nested `Binary` chain in a loop and charges nothing, so its
-// depth is the file's length. It survives 200,000 terms because sema
-// walks that spine iteratively; the day something walks it by recursion
-// it will need a link charged the same way.
+// Shared nesting limit for recursive parser, sema, and codegen walks. Binary
+// spines are iterative and therefore do not consume this budget.
 MAX_DEPTH*: usize = 304
 
 // A node, opened. The two facts that are true at a node's first token
@@ -440,10 +372,7 @@ Parser* = {
         });
     }
 
-    // The two halves of `expect`, as functions rather than blocks in
-    // the arms — the same bootstrapper bug `nothing` names. One arm
-    // returning a typed `Res<T, E>` pins the whole match, which is what
-    // these two do; when it is fixed they fold back into their caller.
+    // Separate typed arms keep the result type explicit.
     took = (self :: @Self) Res<bool, AllocError> {
         self.bump().try();
         Ok(true);
@@ -526,22 +455,8 @@ Parser* = {
         ));
     }
 
-    // SILENT UNTIL THE PARSER BELIEVES WHAT IT READS AGAIN. Two things
-    // stop it saying anything, both "one mistake, one diagnostic"
-    // (TESTING.md) rather than politeness.
-    //
-    // `too_deep`: past the limit the parser stops descending, so every
-    // frame it unwinds through finds a delimiter it cannot close and
-    // would say so — 256 sentences for one mistake, the real one at the
-    // top.
-    //
-    // `said`: everything after a syntax error inside one statement is a
-    // CONSEQUENCE of it. `(i + 1 < f.len;` was read as a lambda's
-    // parameter list because a `<` followed the `)` the author never
-    // typed, and that one wrong fork unwound into SEVEN sentences —
-    // a missing `{`, a missing expression, a missing `;`, an unclosed
-    // block — none of which the author can act on. `resume` is where
-    // the containment ends.
+    // Suppress follow-on diagnostics while unwinding a depth refusal or after
+    // the first syntax error in a statement. `resume` ends that containment.
     hushed = (self: @Self) bool { self.too_deep || self.said }
 
     // A statement or a declaration boundary: whatever the parser reads
@@ -640,15 +555,9 @@ Parser* = {
     // before recursing again, which unwinds a 10,000-deep file instead
     // of riding it into the stack guard.
     //
-    // THE COUNT IS THE TREE'S AND NOT THIS PARSER'S — that distinction
-    // cost a segfault: the postfix chain is a LOOP, so `a.b.c` is one
-    // frame here but three levels in the tree, and a counter that only
-    // charged recursion let the chain grow unbounded. sema and gen_c
-    // then walked what was BUILT — `x` with a thousand `.a`s, or the
-    // run of `(` a bailed-out parser wrapped into calls — and died past
-    // a bound that had already said everything was fine. So a link
-    // costs a level like anything else, and `unwind` gives back what a
-    // loop charged, one at a time.
+    // Depth counts AST links, including links built by postfix loops, because
+    // later phases recursively walk the resulting tree. `unwind` releases
+    // loop-charged links one at a time.
     // -----------------------------------------------------------------
 
     enter* = (self :: @Self) Res<(), AllocError> {

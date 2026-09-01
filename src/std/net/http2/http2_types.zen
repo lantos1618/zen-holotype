@@ -2,7 +2,9 @@
 // Shared HTTP/2 errors, response values, and wire types.
 
 str, String = std.text
-WriteError = std.core
+Range, Res = std.core
+ActorError, Context = std.actor
+Alloc, AllocError = std.mem
 
 H2Error* = ConnectFailed
     | TlsFailed
@@ -13,14 +15,72 @@ H2Error* = ConnectFailed
     | Closed
     | Status(i32)
 
-// Transport/protocol failures and the caller's own response sink failure stay
-// distinct. A streaming caller can decide whether Full/Interrupted is
-// retryable for its sink; the HTTP client must not turn it into RecvFailed.
-H2StreamError* = H2Error | WriteError
-
 H2Response* = {
     status*: i32,
     body*:   String,
+}
+
+// Every variant is value-only and can cross a mailbox without borrowing the
+// decoder's arena. Informational responses are visible instead of being
+// silently discarded, and trailers need no sentinel status.
+H2Head* = Informational(i32) | Response(i32) | Trailers
+
+// A streaming request can fail in the connection or at the receiver mailbox.
+// FailureDelivery retains both causes when the receiver could not accept the
+// HTTP failure notification.
+H2StreamError* = Http(H2Error)
+    | Receiver(ActorError)
+    | FailureDelivery(H2FailureDelivery)
+
+H2FailureDelivery* = {
+    http*:     H2Error,
+    receiver*: ActorError,
+}
+
+// Implement this protocol on an Actor. Each method is a behavior: calls made
+// through Ref enqueue a message and return Res<(), ActorError> immediately.
+H2Receiver* = {
+    headers* = (self :: @Self, ctx: Context, head: H2Head) ()
+    data* = (self :: @Self, ctx: Context, bytes: H2Chunk) ()
+    completed* = (self :: @Self, ctx: Context) ()
+    failed* = (self :: @Self, ctx: Context, error: H2Error) ()
+}
+
+// The frame size every peer must accept; this client never advertises more.
+MAX_SEND*: usize = 16384
+
+// DATA is copied into the mailbox itself. Its fixed capacity is HTTP/2's
+// default maximum frame size; this client never advertises a larger one.
+H2Chunk* = {
+    bytes :: [u8, MAX_SEND],
+    len*:  usize,
+
+    get* = (self: @Self, at: usize) Res<u8> {
+        (at < self.len).match({
+            true  => Ok(self.bytes[at]),
+            false => None,
+        })
+    }
+
+    append_to* = (self: @Self, out :: String) Res<(), AllocError> {
+        Range(0, self.len).loop((h, i) { out.add(self.bytes[i]).try(); });
+        Ok(())
+    }
+
+    // Make actor-owned text when a consumer needs a contiguous view. The
+    // mailbox value itself remains allocation-free and independently owned.
+    copy* = (self: @Self, a: Alloc) Res<String, AllocError> {
+        out ::= a.String().try();
+        self.append_to(out).try();
+        Ok(out);
+    }
+}
+
+h2_chunk* = (src: str) Res<H2Chunk, H2Error> {
+    (src.len <= MAX_SEND).ensure(H2Error.ProtocolFailed).try();
+    chunk ::= H2Chunk(bytes: [u8, MAX_SEND](), len: src.len);
+    Range(0, src.len).loop((h, i) { chunk.bytes[i] = src[i]; });
+    Ok(chunk);
 }
 
 // RFC 7540 §6 frame kinds. Zen enums intentionally do not promise a wire
@@ -78,9 +138,6 @@ FLAG_PRIORITY*:    u8 = 32  // HEADERS
 
 SET_HEADER_TABLE*:   usize = 1
 SET_INITIAL_WINDOW*: usize = 4
-
-// the frame size every peer must accept; we never send larger
-MAX_SEND*: usize = 16384
 
 // the receive window we advertise, per stream and once on the connection
 WINDOW*: usize = 16777216

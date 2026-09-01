@@ -1,32 +1,9 @@
 // src/gen/gen_c/gen_c_alloc.zen
-// `alloc.create<T>()` — the one member of `Alloc` whose body is this
-// backend's.
-// `mem_alloc.zen` declares it as a hook with no body, and no impl in the
-// language supplies one — `gen_c_fat.zen` puts a NULL in its slot for
-// that reason. DESIGN.md calls it "the typed conveniences: one T's
-// worth of storage, already named": storage is `raw`, naming it is
-// `Ptr.to`.
-// WITHOUT THIS FILE THE CALL RESOLVES TO NOTHING: `p =
-// alloc.create<Node>().try()` left `p` untyped, so `p.write(0, ..)` and
-// `p.read(0)` were reported unresolved a line later — one missing
-// member surfacing as three errors, none naming it.
-// NO NEW MACHINERY: the `raw` called is the receiver's OWN, under the
-// symbol `raw_call` builds. Its `Res<Ptr<u8>, E>` is rebuilt at
-// `Res<Ptr<T>, E>` by `gen_c_bound.zen`'s `convert`, out of a temporary
-// — so `raw` is called ONCE, not twice with the second allocation
-// leaking. The argument list is written as TEXT, since there's no call
-// node for it: the source wrote `create`, not `raw`.
-// 16 IS ALIGN_MAX, not a guess — `mem_arena.zen` re-requests every run
-// at the strictest alignment any Zen value needs, so this asks for what
-// the arena would give anyway and keeps its size header intact.
-// `gen_c_fs.zen` writes the same 16 for the same reason.
-// ELEMENT TYPE IS NOT LOOKED UP BY NAME. `Ptr`/`AllocError` are prelude
-// names; interning them here would be a second opinion on which
-// declaration they are. Both come off `raw`'s own declared return type
-// (`Res<Ptr<u8>, AllocError>`) instead — element is the only thing that
-// changes, error set is the allocator's own.
+// Lowers `alloc.create<T>()` through the allocator's dynamic `raw` slot.
+// The erased byte-pointer result is rebuilt as `Ptr<T>` without calling
+// `raw` twice. The fixed alignment is the allocator ABI's maximum alignment.
 
-ExprId, Access, Call, Function, TypeId = std.ast
+ExprId, Access, Call, Function, TypeId, Member = std.ast
 AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -38,27 +15,22 @@ CBackend = gen.gen_c.gen_c_state
 untyped = gen.gen_c.gen_c_report
 sub, recv_inst, inst_open, any_open = gen.gen_c.gen_c_mono
 request_type = gen.gen_c.gen_c_type
-Site, site_of, method_sig, member_symbol = gen.gen_c.gen_c_member
-impl_member_of = gen.gen_c.gen_c_impl
+Site, site_of, method_sig, member_symbol, member_at = gen.gen_c.gen_c_member
+by_arity, impl_member_of = gen.gen_c.gen_c_impl
 write_arg = gen.gen_c.gen_c_call
-convert, write_sizeof = gen.gen_c.gen_c_bound
+convert, write_sizeof, slot_call = gen.gen_c.gen_c_bound
+init_temp = gen.gen_c.gen_c_flow
+is_fat = gen.gen_c.gen_c_fat
 ptr_at = gen.gen_c.gen_c_ptr
 
-// recognising
-
-// The receiver's own `raw`, and the site its symbol is built from. One
-// value rather than two lookups: recognising `create` and lowering it
-// ask the same question, and asking it twice is how the two come to
-// disagree about which allocator they meant.
+// The receiver's `raw` declaration and its owning type.
 RawFn* = {
     site*: Site,
     f*: Function,
 }
 
-// The name AND a receiver that really allocates: a type with no `raw`
-// has no `create` this file could write.
-// Asked LAST, after the receiver's own declaration and impls are
-// searched, so a type declaring its own `create` still wins.
+// A type participates only when the requested member is `create` and it
+// declares or implements `raw`.
 alloc_raw* = (be :: CBackend, rty: TyId, name: str)
              Res<Res<RawFn>, AllocError> {
     name.eq("create").match({
@@ -74,29 +46,34 @@ raw_of = (be :: CBackend, rty: TyId) Res<Res<RawFn>, AllocError> {
     })
 }
 
-// `(self, size, align)` is three, and the arity is asked because
-// "resolution is on declared parameter types and arity" — a `raw` of
-// another shape is another function.
+// `raw` has the receiver, size and alignment parameters.
 raw_at_site = (be :: CBackend, s: Site) Res<Res<RawFn>, AllocError> {
-    be.impl_member_of(s.decl, "raw", 3).try().match({
-        None  => Ok(None),
-        Ok(f) => Ok(Ok(RawFn(site: s, f: f))),
+    found ::= be.alloc.Vec<Member>();
+    member_at(be, s, "raw", found).try();
+    by_arity(be, found, 3).match({
+        None  => be.raw_from_impl(s),
+        Ok(m) => m.kind.match({
+            Function(f) => Ok(Ok(RawFn(site: s, f: f))),
+            _           => Ok(None),
+        }),
     })
 }
 
-// what it evaluates to
+raw_from_impl = (be :: CBackend, s: Site) Res<Res<RawFn>, AllocError> {
+    be.impl_member_of(s.decl, "raw", 3).try().match({
+        None    => Ok(None),
+        Ok(fun) => Ok(Ok(RawFn(site: s, f: fun))),
+    })
+}
 
-// The three types one `create` settles: what is being made, what `raw`
-// answers with, and what the call itself is.
+// Types needed to convert `raw`'s byte pointer into the requested pointer.
 Created* = {
     elem*: TyId,
     raw_ret*: TyId,
     ret*: TyId,
 }
 
-// `Res<Ptr<T>, AllocError>`. Sema doesn't answer it — `create` is a
-// generic member with no body, so the memo holds an unknown — and an
-// unanswered `.try()` operand is a temporary declared at nothing.
+// Supply the type sema cannot derive from the bodiless generic member.
 create_type* = (be :: CBackend, c: Call, a: Access, rty: TyId, ctx: Ctx)
                Res<Res<TyId>, AllocError> {
     be.alloc_raw(rty, a.name.text).try().match({
@@ -113,10 +90,7 @@ created_type = (be :: CBackend, c: Call, rty: TyId, r: RawFn, ctx: Ctx)
     })
 }
 
-// THE WRITTEN TYPE ARGUMENT AND NOTHING ELSE. `create` takes no
-// argument to infer from, so `create()` with nothing to name is a
-// refusal: the element is what the size is taken of, and inventing one
-// is a `malloc` of the wrong length that links and runs.
+// `T` must be explicit because the call has no value argument to infer it from.
 created = (be :: CBackend, c: Call, rty: TyId, r: RawFn, ctx: Ctx)
           Res<Res<Created>, AllocError> {
     c.targs.get(0).match({
@@ -148,8 +122,7 @@ created_res = (be :: CBackend, elem: TyId, rt: TyId, x: TyRes)
     })
 }
 
-// A `raw` answering anything but a run of bytes is not an allocator,
-// and this file has nothing to say about its `create`.
+// Only byte-pointer allocators have the representation this lowering expects.
 created_named = (be :: CBackend, elem: TyId, rt: TyId, x: TyRes, n: TyNamed)
                 Res<Res<Created>, AllocError> {
     n.name.eq("Ptr").match({
@@ -165,9 +138,7 @@ created_ptr = (be :: CBackend, elem: TyId, rt: TyId, x: TyRes, n: TyNamed)
     Ok(Ok(Created(elem: elem, raw_ret: rt, ret: ret)));
 }
 
-// What `raw` answers, READ OFF ITS OWN DECLARATION with `@Self` bound
-// to this receiver — read and not built, so the temporary `convert`
-// declares carries the callee's own C type.
+// Read `raw`'s result with `@Self` bound to this receiver.
 raw_result = (be :: CBackend, rty: TyId, r: RawFn) Res<TyId, AllocError> {
     sctx = be.check.self_ctx(r.site.decl.module.to_usize(), rty).try();
     r.f.ret.match({
@@ -176,12 +147,7 @@ raw_result = (be :: CBackend, rty: TyId, r: RawFn) Res<TyId, AllocError> {
     })
 }
 
-// the body
-
-// `false` when the receiver is not an allocator, which is the caller's
-// signal to carry on down the ordinary path — the same shape
-// `lower_eq_call` uses, and for the same reason: this file answering
-// "not mine" must not look like this file answering "no such member".
+// `false` lets the caller continue with ordinary member resolution.
 lower_create* = (
     be  :: CBackend,
     id  : ExprId,
@@ -242,10 +208,8 @@ rebuild_at_elem = (be :: CBackend, call: str, x: Created, out :: String)
     Ok(true);
 }
 
-// The receiver's own `raw`, under the symbol `a.raw(..)` would have
-// produced: the same qualified name over the same signature, and the
-// same queue entry — so the call this file writes and the call the
-// source could have written cannot come out as two functions.
+// Build the declared signature so the receiver is written at the type
+// expected by `raw`; the actual call still goes through the bound value.
 raw_call = (
     be   :: CBackend,
     recv : ExprId,
@@ -282,10 +246,49 @@ write_raw_call = (
     ctx  : Ctx,
     out  :: String
 ) Res<bool, AllocError> {
+    be.is_fat(rty).match({
+        true  => be.write_raw_slot(recv, rty, r, x, sig, ctx, out),
+        false => be.write_static_raw(recv, rty, r, x, sig, inst, ctx, out),
+    })
+}
+
+write_raw_slot = (
+    be   :: CBackend,
+    recv : ExprId,
+    rty  : TyId,
+    r    : RawFn,
+    x    : Created,
+    sig  : Vec<TyId>,
+    ctx  : Ctx,
+    out  :: String
+) Res<bool, AllocError> {
+    value ::= be.alloc.String().try();
+    be.write_arg(recv, 0, r.f, sig, ctx, value).try();
+    held = be.init_temp(rty, "alloc", value.view()).try();
+    args ::= be.alloc.String().try();
+    be.write_sizeof(x.elem, args).try();
+    args.add(", 16").try();
+    be.slot_call(held.view(), rty, "raw", args.view(), 2, out).try().match({
+        None     => Ok(false),
+        Ok(slot) => Ok(true),
+    })
+}
+
+write_static_raw = (
+    be   :: CBackend,
+    recv : ExprId,
+    rty  : TyId,
+    r    : RawFn,
+    x    : Created,
+    sig  : Vec<TyId>,
+    inst : Inst,
+    ctx  : Ctx,
+    out  :: String
+) Res<bool, AllocError> {
     sym = be.member_symbol(rty, r.site, "raw", sig, inst).try();
     out.fmt("{}(", sym.view()).try();
     be.write_arg(recv, 0, r.f, sig, ctx, out).try();
     be.write_sizeof(x.elem, out).try();
-    out.add_bytes(", 16)").try();
+    out.add(", 16)").try();
     Ok(true);
 }

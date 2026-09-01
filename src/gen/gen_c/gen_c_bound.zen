@@ -13,13 +13,14 @@ str, String = std.text
 Ast = std.ast
 ImplId = sema.sema_id
 Range = std.core
-TyId, TyNamed, TyRes = sema.sema_ty
+TyId, TyNamed, TyRes, is_failure = sema.sema_ty
 Ctx = sema.sema_check
 Inst, has_var = sema.sema_inst
 self_ctx = sema.sema_member
 param_type = sema.sema_denote
 sym_member, sym_variant = gen.gen_name
-RES_PATH, is_failure = gen.gen_name
+qualify = gen.gen_name
+RES_PATH = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
 sub_with, enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
@@ -29,7 +30,7 @@ ctype, is_unit, request_type, is_ptr_named, declared_ret = gen.gen_c.gen_c_type
 expr, ty_of, value_held, holds = gen.gen_c.gen_c_expr
 write_set_value = gen.gen_c.gen_c_widen
 init_temp = gen.gen_c.gen_c_flow
-Site, site_of, join = gen.gen_c.gen_c_member
+Site, site_of = gen.gen_c.gen_c_member
 Slot, slots_of = gen.gen_c.gen_c_fat
 has_body = gen.gen_c.gen_c_impl
 
@@ -40,7 +41,7 @@ has_body = gen.gen_c.gen_c_impl
 convert* = (be :: CBackend, code: str, src: TyId, dst: TyId, out :: String)
            Res<(), AllocError> {
     src.eq(dst).match({
-        true  => out.add_bytes(code),
+        true  => out.add(code),
         false => be.convert_kind(code, src, dst, out),
     })
 }
@@ -56,17 +57,18 @@ convert_kind = (
         Named(n) => be.convert_named(code, dst, n, out),
         Res(r)   => be.convert_res(code, src, dst, r, out),
         Union(_) => be.convert_set(code, src, dst, out),
-        _        => out.add_bytes(code),
+        _        => out.add(code),
     })
 }
 
-// A MEMBER REACHING A SET IS TAGGED, NOT COPIED. `rebuild_res` walks
+// A value entering an error set is rebuilt with the destination tag.
+// `rebuild_res` walks
 // into the error payload with `convert` again, so `Res<(), AllocError>`
 // rebuilt at `Res<(), AllocError | Fault>` lands here with the member on
 // one side and the set on the other — two different C structs, so a bare
 // copy is a program `cc` refuses. Built by the same
 // `gen_c_widen.write_set_value` that builds the written form.
-// A SET REACHING A WIDER SET IS LEFT ALONE: its tags are numbered over
+// A set reaching a wider set is left alone: its tags are numbered over
 // its OWN members, so copying one across means a different member on
 // the other side — a wrong error variant at runtime, from C that
 // compiles. `gen_c_try.write_retag` maps it member by member as a
@@ -79,7 +81,7 @@ convert_set = (
     out  :: String
 ) Res<(), AllocError> {
     be.tags_as_member(src, dst).match({
-        false => out.add_bytes(code),
+        false => out.add(code),
         true  => be.write_set_value(code, src, dst, out),
     })
 }
@@ -100,7 +102,7 @@ convert_named = (
 ) Res<(), AllocError> {
     is_ptr_named(n).match({
         true  => be.write_cast(code, dst, out),
-        false => out.add_bytes(code),
+        false => out.add(code),
     })
 }
 
@@ -121,7 +123,7 @@ convert_res = (
 ) Res<(), AllocError> {
     be.types().at(src).match({
         Res(s) => rebuild_res(be, code, src, s, dst, d, out),
-        _      => out.add_bytes(code),
+        _      => out.add(code),
     })
 }
 
@@ -179,7 +181,7 @@ res_arm = (
 bare_arm = (be :: CBackend, v: str, dst: TyId, out :: String)
            Res<(), AllocError> {
     be.arm_head(v, dst, out).try();
-    out.add_bytes(" })").try();
+    out.add(" })").try();
     Ok(());
 }
 
@@ -212,43 +214,18 @@ arm_head = (be :: CBackend, v: str, dst: TyId, out :: String)
     Ok(());
 }
 
-// the call through the record
-// The value IS the bound, so which function runs is decided by the
+// Calls through the bound record use the implementation stored in the
+// receiver. Concrete receivers continue to call monomorphised functions
+// directly.
+// The value is the bound, so which function runs is decided by the
 // impl behind the receiver and nothing static can say which. Every
 // other call — a concrete-type receiver — is the impl's own function,
 // called directly and monomorphised.
 
-// A BODILESS MEMBER REACHING THE FAT BRANCH IS REFUSED HERE AND NOW,
-// before any C is written. A slot is a body an impl can answer; a member
-// with no body anywhere has no symbol to dispatch to, so its slot
-// initialises NULL -- and a call through it is issue 781's crash:
-// `env.threads.sleep(10)` passed sema, passed `cc`, and died calling
-// through the zeroed field. The refusal sits in THIS lowering and not in
-// `slots_of` because every reader of a bound's shape comes through that
-// walk -- layout, display, `slot_call` -- while std's capability structs
-// are behaviour-only with bodiless members BY DESIGN; refusing in the
-// walk fired fifty-five diagnostics at std's declaration spans for a
-// program that had done nothing.
-// A BODILESS MEMBER REACHING THE FAT BRANCH IS ANSWERED OR IT IS A
-// NULL SLOT. A slot is filled by an IMPL somewhere in the program; a
-// member with a body nowhere -- bound declaration AND every impl alike
-// -- has no symbol to dispatch to, so its slot initialises NULL and a
-// call through it is issue 781's crash: `env.threads.sleep(10)` passed
-// sema, passed `cc`, and died calling through the zeroed field.
-// THE GATE IS NOT `has_body` ALONE. A bound's own declarations are
-// bodiless BY DESIGN -- `Alloc.realloc`, dispatched through `Vec`'s
-// `alloc: Alloc`, is exactly that shape with `Arena.impl(Alloc, ..)`
-// behind it -- so refusing every bodiless member reported eighty-nine
-// diagnostics inside std itself. The question here is the one the crash
-// turns on: does ANYTHING answer? `bound_answered` walks the whole
-// world's impls once per refused candidate; a call that reaches it is
-// already the rare path.
-// The refusal sits in THIS lowering and not in `slots_of` because every
-// reader of a bound's shape comes through that walk -- layout, display,
-// `slot_call` -- while std's capability structs are behaviour-only with
-// bodiless members BY DESIGN; refusing in the walk fired fifty-five
-// diagnostics at std's declaration spans for a program that had done
-// nothing.
+// A dynamic call is valid only when the bound member itself or at least one
+// implementation supplies a body. Otherwise every record would carry a null
+// slot. The check belongs at the call site: slots_of also describes capability
+// shapes whose bodiless members are lowered by another backend path.
 lower_fat_call* = (
     be  :: CBackend,
     id  : ExprId,
@@ -270,14 +247,9 @@ lower_fat_call* = (
     })
 }
 
-// THE SLOT WALK, reached only once the member is known to be answered
-// somewhere. It is a function of its own so that the refusal above can
-// STOP. It used to report and then fall through to here, and for
-// `env.threads.spawn` -- bodiless AND generic in a parameter nothing
-// settles -- `settle_call` then refused the same call a second time at
-// the same position. `must-fail` counts diagnostics and allows one:
-// one mistake must not cascade, and the root cause is the missing
-// body, not the type argument that could not be read off it.
+// Slot selection begins only after the member is known to have an
+// implementation, preventing a missing body from cascading into type-argument
+// diagnostics.
 lower_answered_call = (
     be  :: CBackend,
     id  : ExprId,
@@ -300,9 +272,7 @@ lower_answered_call = (
     })
 }
 
-// THE GATE'S TWO HALVES: the member carries a body of its own, or some
-// impl of this bound supplies one. Neither answering is issue 781's
-// crash -- the slot stays NULL and the call reads it.
+// A member is dispatchable when it carries a body or an impl supplies one.
 member_answered = (be :: CBackend, f: Function, rty: TyId, name: str) bool {
     has_body(f).match({
         true  => true,
@@ -310,13 +280,8 @@ member_answered = (be :: CBackend, f: Function, rty: TyId, name: str) bool {
     })
 }
 
-// TRUE when some impl OF THIS BOUND supplies the named member with a
-// body -- the slot can be filled, whatever the receiver turns out to
-// be. FALSE when nothing does, which is the crash: the C reads a vtable
-// slot no record ever populates. The bound is matched at the impl's
-// written form (`X.impl(Bound, ..)` carries the bound as a named type
-// node); there are no orphan impls, so a whole-world walk sees
-// everything that could ever fill the slot.
+// Whether any impl of this bound supplies the named member. Orphan impls are
+// forbidden, so the world tables contain every possible slot provider.
 bound_answered = (be :: CBackend, rty: TyId, name: str) bool {
     b ::= be.owner_name(rty);
     Range(0, be.check.world.count()).find((mi) {
@@ -361,10 +326,10 @@ impl_supplies = (tree: Ast, im: Impl, bound: str, name: str) bool {
     })
 }
 
-// The bound's name AS WRITTEN at the impl site. An impl names its bound
+// The bound name written at the impl site. An impl names its bound
 // bare (`X.impl(Alloc, ..)`); a parameterised bound would carry type
 // arguments this read ignores, which is right: the slot answers the
-// NAME, whatever the arguments settle to.
+// name, whatever the arguments settle to.
 bound_of = (tree: Ast, tid: TypeId) str {
     tree.type_at(tid).kind.match({
         Named(n) => n.name.text,
@@ -394,8 +359,8 @@ owner_name = (be :: CBackend, rty: TyId) str {
     })
 }
 
-// A CALL THROUGH A BOUND'S RECORD THAT THE SOURCE DID NOT WRITE: a
-// capability's body IS this backend, so there is no call node to lower
+// Backend-generated calls through a bound record use this path. A
+// capability's body is this backend, so there is no call node to lower
 // and the record is still the only way to reach the impl — `Fs.read`
 // allocating through its `Alloc`, `Sink.write` through its writer. The
 // slot comes back too, since the caller needs a temporary at the type
@@ -433,7 +398,8 @@ write_named_slot = (
     Ok(Ok(slot));
 }
 
-// By name and by ARITY: "resolution is on declared parameter types and
+// Select by name and arity; a bound may declare overloads of one name.
+// Resolution is on declared parameter types and
 // arity", and a bound may declare two members of one name.
 pick_slot = (slots: Vec<Slot>, name: str, args: usize) Res<Slot> {
     Range(0, slots.len).find((i) {
@@ -447,7 +413,7 @@ pick_slot = (slots: Vec<Slot>, name: str, args: usize) Res<Slot> {
     })
 }
 
-// WHAT THE MEMBER'S OWN TYPE PARAMETERS BECAME, read off the arguments.
+// Infer the member's type parameters from the arguments.
 // The slot is erased, so the element size the call hands it comes from
 // here — a parameter nothing settles is a refusal, not a `sizeof` of the
 // wrong thing.
@@ -486,7 +452,7 @@ settle_call = (
     })
 }
 
-// THE DECLARATION'S OWN READING OF A SLOT: parameter types as written,
+// Read a slot using its declaration's parameter and return types.
 // return type as written, and what the arguments make of the member's
 // type parameters. `settle_call` writes the call from these,
 // `fat_ret_type` answers with them, and the two must not disagree — the
@@ -504,7 +470,7 @@ read_slot = (
 )
             Res<TyId, AllocError> {
     owner ::= be.alloc.String().try();
-    join(owner, s.qname, slot.name).try();
+    qualify(owner, s.qname, slot.name).try();
     sctx = be.check.self_ctx(s.decl.module.to_usize(), rty).try();
     mark = be.enter_struct_tparams(s.decl).try();
     be.enter_tparams(slot.f.tparams, owner.view()).try();
@@ -515,19 +481,9 @@ read_slot = (
     Ok(ret);
 }
 
-// WHAT A CALL THROUGH A RECORD IS WORTH, for a caller that has to name
-// the type before the call is written.
-// A BOUND'S MEMBER IS NOT A DECLARATION THE WORLD HOLDS: `realloc` is
-// declared inside `Alloc`, so `gen_c_infer`'s walk over `defs_of` finds
-// nothing and hands back the caller's own guess — for a generic member,
-// the DECLARED `Res<Ptr<T>, E>`, a C struct with an unresolved element.
-// `Buf.grow` caught it: `self.alloc.realloc(self.data, cap).try()`
-// declared its temporary at `Res<Ptr<q>, AllocError>` and assigned the
-// slot's `Res<Ptr<u8>, AllocError>` into it — `cc` rejected a program
-// sema had admitted.
-// The answer is `sub_with(ret, targs)`, the same value `fat_result`
-// converts the erased answer BACK to, read off the same `read_slot` —
-// two derivations of one type would be two chances to disagree.
+// Determine the result type before writing a record call. Bound members are
+// not world declarations, so the type comes from the same read_slot and
+// substitution used when rebuilding the erased result.
 fat_ret_type* = (be :: CBackend, c: Call, a: Access, ctx: Ctx)
                 Res<Res<TyId>, AllocError> {
     unknown = be.check.types.unknown().try();
@@ -548,7 +504,7 @@ slot_ret_type = (be :: CBackend, c: Call, rty: TyId, slot: Slot, ctx: Ctx)
     })
 }
 
-// A TYPE ARGUMENT NOTHING SETTLES IS NO ANSWER — the same refusal
+// An unsettled type argument yields no result type — the same refusal
 // `settle_call` makes one door along: the call it would describe is one
 // this backend goes on to refuse, so answering here would name a type
 // no call is ever written at.
@@ -633,7 +589,7 @@ infer_against = (be :: CBackend, arg: Arg, d: TyId, ctx: Ctx, out :: Inst)
 
 // Every parameter bound, and bound to something closed. A free argument
 // would become a `sizeof` of a type C has no name for. Named for its own
-// question -- are the TYPE ARGUMENTS settled -- and not `settled`, which
+// question -- are the type arguments settled -- and not `settled`, which
 // gen_c_settle.zen answers about a single TyId.
 targs_settled = (be: CBackend, slot: Slot, targs: Inst) bool {
     (targs.len() == slot.elems) && be.all_closed(targs)
@@ -667,7 +623,7 @@ emit_fat_call = (
     call.fmt("{}.{}({}.zg_self", r.view(), slot.sym.view(), r.view()).try();
     be.fat_args(c, slot, declared, targs, ctx, call).try();
     be.fat_sizes(targs, call).try();
-    call.add_bytes(")").try();
+    call.add(")").try();
     be.fat_result(slot, ret, targs, call.view(), out)
 }
 
@@ -687,7 +643,7 @@ fat_args = (
     Ok(());
 }
 
-// The argument at the type the DECLARATION gives it — which is what
+// The argument at its declared type — which is what
 // turns an `Arena` into an `Alloc` one level down — then converted to
 // the erased type the slot carries.
 fat_arg = (
@@ -702,16 +658,17 @@ fat_arg = (
     out      :: String
 )
           Res<(), AllocError> {
-    want = be.sub_with(at_or_zero(declared, i), targs).try();
+    want = be.sub_with(declared.get(i).value_or(TyId(index: 0)), targs).try();
     text ::= be.alloc.String().try();
     be.value_held(arg.value, ctx, want, hold, text).try();
-    out.add_bytes(", ").try();
-    be.convert(text.view(), want, at_or_zero(slot.params, i), out).try();
+    out.add(", ").try();
+    be.convert(
+        text.view(),
+        want,
+        slot.params.get(i).value_or(TyId(index: 0)),
+        out
+    ).try();
     Ok(());
-}
-
-at_or_zero = (v: Vec<TyId>, i: usize) TyId {
-    v.get(i).match({ Ok(t) => t, None => TyId(index: 0) })
 }
 
 // The element size the slot's erasure dropped, one per parameter, in
@@ -725,7 +682,7 @@ fat_sizes = (be :: CBackend, targs: Inst, out :: String)
 fat_size = (be :: CBackend, targs: Inst, i: usize, out :: String)
            Res<(), AllocError> {
     targs.arg_at(i).match({
-        None  => out.add_bytes(", 1"),
+        None  => out.add(", 1"),
         Ok(t) => be.write_sizeof(t, out),
     })
 }
@@ -734,7 +691,7 @@ fat_size = (be :: CBackend, targs: Inst, i: usize, out :: String)
 write_sizeof* = (be :: CBackend, t: TyId, out :: String)
                Res<(), AllocError> {
     be.is_unit(t).match({
-        true  => out.add_bytes(", 1"),
+        true  => out.add(", 1"),
         false => {
             be.request_type(t).try();
             cty ::= be.alloc.String().try();
@@ -744,7 +701,7 @@ write_sizeof* = (be :: CBackend, t: TyId, out :: String)
     })
 }
 
-// The slot answers at the ERASED type; the caller asked at its own. A
+// The slot answers at the erased type; the caller asked at its own. A
 // void-returning slot has nothing to rebuild and still has to run.
 fat_result = (
     be    :: CBackend,
@@ -764,7 +721,7 @@ fat_result = (
 fat_effect = (be :: CBackend, call: str, out :: String)
              Res<(), AllocError> {
     be.fmt("{call};\n").try();
-    out.add_bytes("0")
+    out.add("0")
 }
 
 fat_value_back = (

@@ -118,9 +118,9 @@ There was a further ambiguity `tests/parse/constructs.md` flagged as **A-META-AR
 Read `DESIGN.md:564` closely:
 
 ```groovy
-out.add("{} {", @meta(self: @Self).name);
+out.fmt("{} {", @meta(self: @Self).name);
 @meta(self: @Self).fields().loop((h, field) {
-    out.add(" {}: {},", field.name, self.at(field));
+    out.fmt(" {}: {},", field.name, self.at(field));
 });
 ```
 
@@ -140,7 +140,7 @@ Consequences, and they are the load-bearing paragraphs of this document:
 
 Rejected. The residue would never be type-checked; `genJs` would need a second copy of the expander, which is a second definition of the language; and `@meta`'s diagnostics would come from the phase that `sema_meta.zen`'s own header argues is the wrong one.
 
-**(b) In sema, as an AST → AST rewrite at instantiation time.** The expander is a *fourth consumer* of `std.ast` that also **produces** it: `@meta` disappears, and what is left is `out.add(" x: {},", self.x)` — ordinary nodes the backend already lowers, with no backend change at all and nothing for a second backend to duplicate. The residue goes through the type checker like any other code. It is also the honest reading of "one AST, three consumers": the fourth one writes.
+**(b) In sema, as an AST → AST rewrite at instantiation time.** The expander is a *fourth consumer* of `std.ast` that also **produces** it: `@meta` disappears, and what is left is `out.fmt(" x: {},", self.x)` — ordinary nodes the backend already lowers, with no backend change at all and nothing for a second backend to duplicate. The residue goes through the type checker like any other code. It is also the honest reading of "one AST, three consumers": the fourth one writes.
 
 **Recommended: (b).** Its two prerequisites are real and should be measured before M2 starts:
 

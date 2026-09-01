@@ -1,32 +1,12 @@
-// src/std/core/range.zen
-// what every loop word walks.
-//
-// DESIGN.md types the loop family's first parameter `range: Range`,
-// passing a fixed array, a Vec, a Map — without ever declaring Range.
-// One name carries both readings:
-//
-//   CONCRETE: `Range(0, 5)` constructs one — half-open storage, so
-//   five passes (the off-by-one that makes it six has a corpus test).
-//
-//   A BOUND: an ordinary struct used as a bound (DESIGN.md: "a bound
-//   is just which struct's shape do I need"). A Vec satisfies it as
-//   Circle satisfies Rect — supplying values for fields it doesn't store.
-//
-// So the family is `<R: Range<T>, T> = (range: R, ..)`, not
-// `(range: Range<T>, ..)`: an interface-TYPED param is a fat value
-// carrying function pointers, not a plain C for-loop. A bound
-// monomorphises instead — `at` is a direct call, the body inlines,
-// and tests/bench/bench_loop.zen holds a fold at allocs_op: 0 --
-// MEASURED and enforced since 2026-08-16: `make test` runs
-// `bench.py --allocs-only`, which counts the driver's mallocs at N
-// and 2N iterations and fails on a non-zero slope. Nothing
-// is impl'd here: a trait sits BELOW the types that satisfy it — the
-// two impls this file needs live with their types, named at the bottom.
+// The common input to loop operations. `Range(start, end)` is a concrete
+// half-open index interval, while `<R: Range<T>>` accepts any type that
+// supplies the same bounds and indexed access. Implementations live beside
+// their owning types to preserve the dependency direction of std.core.
 
 Res = std.core.result
 
-// a half-open index interval [start, end), plus what lives at an
-// index. `at` is the ONE thing an impl supplies; a None ends the walk
+// A half-open index interval [start, end), plus what lives at an
+// index. `at` is the one operation an impl supplies; None ends the walk
 // early, so a container whose length moved under the loop stops rather
 // than reading past itself. Optional hook (`::=`, no body): supplying
 // none walks the index space itself — `Range(0, v.len)` is the
@@ -38,22 +18,7 @@ Range*<T> = {
     at* ::= (self: @Self, index: usize) Res<T>
 }
 
-// THE TWO IMPLS THIS FILE SPECIFIES AND DOES NOT OWN
-//
-// A VEC is a Range of its elements — one line, since `get` already
-// answers what `at` asks, including the None past the end. Lives in
-// std.collections.collections_vec, beside the type:
-//
-//     Vec.impl(Range<T>, {
-//         start: 0,
-//         end: self.len,
-//         at ::= (self: @Self, index: usize) Res<T> { self.get(index) }
-//     })
-// start/end are supplied, not stored, so growing mid-loop reports the
-// new end, not a stale one.
-//
-// A FIXED ARRAY satisfies Range intrinsically — the one place the
-// compiler supplies what no module could write: `[T, N]` is a type
-// constructor, not a name, so there's no `[T, N].impl(..)` to write.
-// Its start is 0, end is the comptime length, `at` the bounds-checked
-// index that already traps.
+// Vec implements Range beside Vec and forwards `at` to get. Its bounds are
+// supplied values rather than stored fields, so a loop observes a changed
+// length before its next iteration. Fixed arrays receive their implementation
+// from the compiler because an array type constructor has no owning module.

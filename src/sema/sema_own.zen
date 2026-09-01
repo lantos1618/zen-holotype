@@ -288,13 +288,38 @@ own_expr = (c :: Checker, o :: Own, id: ExprId, ctx: Ctx)
         Paren(p)      => c.own_expr(o, p.inner, ctx),
         Try(t)        => c.own_try(o, t, ctx),
         Unary(u)      => c.own_expr(o, u.operand, ctx),
-        Binary(bi)    => c.own_pair(o, bi.lhs, bi.rhs, ctx),
+        Binary(bi)    => c.own_binary(o, bi, ctx),
         Index(x)      => c.own_pair(o, x.base, x.index, ctx),
         Array(a)      => c.own_elems(o, a.elems, ctx),
         FixedArray(a) => c.own_elems(o, a.elems, ctx),
         Record(r)     => c.own_record(o, r.entries, ctx),
         _             => Ok(()),
     })
+}
+
+// Binary expressions are commonly a left-associated spine. Walking that
+// spine recursively makes an otherwise valid long expression consume the C
+// stack, so keep only its right operands and visit them in source order.
+own_binary = (c :: Checker, o :: Own, first: Binary, ctx: Ctx)
+             Res<(), AllocError> {
+    rights ::= o.alloc.Vec<ExprId>();
+    left   ::= first.lhs;
+    done   ::= false;
+    rights.add(first.rhs).try();
+    loop(() { done == false }, (h) {
+        c.tree.expr_at(left).kind.match({
+            Binary(next) => {
+                rights.add(next.rhs).try();
+                left = next.lhs;
+            },
+            _            => { done = true; },
+        });
+    });
+    c.own_expr(o, left, ctx).try();
+    Range(0, rights.len).loop((h, i) {
+        c.opt_expr(o, rights.get(rights.len - 1 - i), ctx).try();
+    });
+    Ok(())
 }
 
 own_try = (c :: Checker, o :: Own, t: Try, ctx: Ctx)

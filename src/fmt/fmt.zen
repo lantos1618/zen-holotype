@@ -1,52 +1,8 @@
 // src/fmt/fmt.zen
-// PLAN.md stage 2: `parse |> print`.
-//
-// THE SAME PARSER AND THE SAME TRIVIA — nothing here reads a byte of
-// Zen; `lex` reads bytes, `parse` builds the tree, this file walks the
-// same tree the compiler is checked against. PLAN.md rule 2: never a
-// second parser, never a second AST, never a "just for the formatter"
-// path.
-//
-// WHAT THIS STAGE FORMATS, deliberately narrow:
-//   - the file's SHAPE: declarations in source order, one per line,
-//     with their leading/trailing comments.
-//   - BLANK LINES: a run collapses to one; dropped before the first
-//     decl or after the last; file ends with exactly one newline
-//     (`fmt_out.zen`).
-//   - trailing whitespace after a declaration.
-//   - the WIDTH OF THE GAP before a match arm's `=>`, a binding's
-//     `=`/`::=`, and a broken parameter list's `:`/`::` (`fmt_decl.zen`,
-//     the one rule here that knows what it's looking at — DESIGN.md
-//     asks for aligned arms and the parser already locates every `=>`).
-//   - LISTS PACKED PAST 80 COLUMNS: argument lists, union bars and
-//     array literals, joined onto one line and then broken if they do
-//     not fit (`fmt_break.zen` owns the rule and argues it).
-//
-//     A PASS OF ITS OWN, BETWEEN TWO ROUNDS OF PADS. It re-lexes and
-//     re-parses what the first wrote, because its edits change line
-//     counts and `fmt_decl.zen`'s table is keyed by line. The pads run
-//     AGAIN after it because which parameters have a line of their own
-//     is that rule's answer, and a column worked out before it is one
-//     run stale.
-//
-// WHAT IT PASSES THROUGH VERBATIM: every declaration's own text, minus
-// that one gap and those line breaks — struct bodies, signatures, arm
-// bodies, everything. These forms could be rebuilt from the AST, but
-// rebuilding means layout decisions nobody has written down yet, and a
-// printer inventing them would silently reflow the whole corpus on its
-// first run. Remaining rules (short arms on one line, wrapping, trailing
-// commas) each MOVE or ADD a token — the line the guard below draws,
-// and why the whitespace-only rules went first.
-//
-// WHAT IT REFUSES: a file with lexical or syntactic faults — a tree
-// with a hole no longer describes the source, and printing from one is
-// how a formatter eats code.
-//
-// THE GUARD — `faithful` below: formatting moves whitespace and nothing
-// else, so the output's token stream must equal the input's, one for
-// one, comments included. One extra `scan` turns "silently reflowed
-// something unmodeled" from a shipped bug into an outcome that cannot
-// leave this function.
+// Formats the compiler's parsed tree while preserving its token stream.
+// Current rules normalize blank lines, trailing whitespace, selected
+// alignment gaps, and over-wide lists. Declarations otherwise retain their
+// source text. Files with lexical or syntactic faults are left unchanged.
 
 Alloc, AllocError = std.mem
 str, String = std.text
@@ -64,27 +20,20 @@ Aligned* = fmt.fmt_decl
 align_columns = fmt.fmt_decl
 break_lines = fmt.fmt_break
 
-// What formatting one file came to. Three fields, not a three-way enum:
-// a caller acts on all three at once (print diags, compare text, refuse
-// to write when the guard fails), which an enum would force into a match
-// over things never in conflict.
+// The formatted bytes, source diagnostics, and token-preservation result.
 Render* = {
-    // Meaningful only when `diags` is empty and `faithful` is true;
-    // empty otherwise.
+    // Empty when formatting was refused.
     text*: String,
 
-    // Non-empty means the file was NOT formatted — caller reports these
-    // and leaves the bytes alone.
+    // Non-empty diagnostics leave the source unchanged.
     diags*: Vec<Diag>,
 
-    // The output lexes to the same tokens as the input. False is a bug
-    // in this folder; writing anyway turns a formatter into an editor.
+    // False means a formatting rule changed a token.
     faithful*: bool,
 }
 
-// Format one already-lexed file. Takes `Lexed` not bytes so LEXICAL
-// faults stay with the caller — `lex.zen`'s contract, and the same
-// split `zen_build.zen` makes.
+// Formatting starts from an already-lexed file so lexical faults remain
+// available to the caller.
 render* = (a: Alloc, lexed: Lexed) Res<Render, AllocError> {
     src = a.Src(lexed.source.text).try();
     p ::= a.Parser(lexed);
@@ -109,13 +58,7 @@ printed = (a: Alloc, src: Src, tree: Ast, m: Module, lexed: Lexed)
     Ok(Render(text: text, diags: a.Vec<Diag>(), faithful: ok));
 }
 
-// -------------------------------------------------------------------
-// printing
-// -------------------------------------------------------------------
-
-// The file: every declaration in source order, and the trivia that
-// belongs to each. `Module.decls` IS the file, imports included (see
-// ast_node.zen), so there's one loop here and no second pass.
+// Print declarations and their trivia in source order.
 write_module* = (
     out  :: Out,
     a    : Alloc,
@@ -132,9 +75,7 @@ write_module* = (
     Ok(());
 }
 
-// A run of comments and blanks, at the left margin. `text` is the raw
-// source slice, so a six-line block comment is one `say` of six lines.
-// Nothing here parses or rewraps a comment (ast_span.zen).
+// Comments are copied as source slices and are not rewrapped.
 write_trivia = (out :: Out, tree: Ast, run: TriviaRun) Res<(), AllocError> {
     Range(0, run.len).loop((h, i) {
         piece = tree.trivia_at(run, i);
@@ -146,23 +87,8 @@ write_trivia = (out :: Out, tree: Ast, run: TriviaRun) Res<(), AllocError> {
     Ok(());
 }
 
-// One declaration, as its author wrote it: from its first token to the
-// start of the next printed thing, trailing whitespace trimmed.
-//
-// BOUNDED BY THE NEXT PRINTED ITEM, NOT THE DECLARATION'S OWN SPAN —
-// the difference between a formatter and one that eats comments. In
-// `Cli* = Build(Job) | Missing(str)   // a flag ..` the trailing comment
-// belongs to the last VARIANT, not the declaration, so `Decl.span`/
-// `Decl.trailing` stop short and a slice cut to either would drop it.
-// Copying the whole gap also preserves the comment's alignment column.
-//
-// DELETED: trailing whitespace (not a token, per the guard) and blank
-// lines (they live as `Blank` trivia in the NEXT item's leading run).
-//
-// WIDENED/NARROWED: the gap before a match arm's `=>` (`fmt_decl.zen`),
-// applied HERE inside the verbatim copy rather than by a rebuilding
-// printer — the bytes stay the author's, only that one gap's width is
-// set. Over-wide lists are broken later, in `fmt_break.zen`.
+// Copy through the next printable item rather than stopping at Decl.span;
+// trailing comments can belong to a declaration's last nested node.
 write_decl = (
     out  :: Out,
     a    : Alloc,
@@ -208,19 +134,7 @@ run_start = (tree: Ast, run: TriviaRun) Res<Pos> {
     })
 }
 
-// -------------------------------------------------------------------
-// the guard
-// -------------------------------------------------------------------
-
-// The output says exactly what the input said.
-//
-// Whitespace is not a token, a comment IS one — everything this stage
-// may change is invisible to the lexer, everything it may not is a
-// token. So the streams must match one for one (count, kind, bytes),
-// and any rule added later is checked by the same three lines.
-//
-// Not named `faithful` (that is `Render`'s field): a free function and
-// a field of one name would collide for the resolver.
+// The formatted output must contain the same token kinds and bytes.
 unchanged_tokens = (a: Alloc, before: Lexed, text: str) Res<bool, AllocError> {
     after = scan(a, Source(file: before.source.file, text: text)).try();
     Ok(after.is_clean() && same_stream(before, after));
@@ -241,9 +155,7 @@ every_token_same = (before: Lexed, after: Lexed) bool {
     ok;
 }
 
-// Kind AND bytes: kind alone would let one identifier become another,
-// and bytes alone would suffice only if the lexer is context-free.
-// Asking both removes the need to be sure of that.
+// Compare both kind and bytes so neither token identity nor spelling changes.
 token_same = (before: Lexed, after: Lexed, i: usize) bool {
     before.tokens.get(i).match({
         None  => false,

@@ -11,12 +11,24 @@
 Ptr = std.mem.mem
 Eq, Hash, Hasher = std.core.core
 Range, loop, to_lower = std.core.core
+is_ident_start, is_ident_cont = std.core.core
 
 str* = {
     data: Ptr<u8>,
     len*: usize,      // * so a byte count is readable outside this module
 
     is_empty* = (self: @Self) bool { self.len == 0 }
+
+    // The ASCII identifier shape shared by Zen source and portable C:
+    // `[A-Za-z_][A-Za-z0-9_]*`. Keywords are deliberately a caller's
+    // question; different languages reserve different words over this one
+    // byte grammar.
+    is_identifier* = (self: @Self) bool {
+        (self.len > 0) && self.index(0).is_ident_start()
+            && Range(1, self.len).find((i) {
+                self.index(i).is_ident_cont() == false
+            }).match({ Ok(_) => false, None => true })
+    }
 
     // Borrow the first byte for raw external calls. The same lifetime rule as
     // String.view applies: the owner must not move or grow the backing run
@@ -50,7 +62,7 @@ str* = {
         str(data: self.data.offset(from), len: self.len - from - tail);
     }
 
-    // one memcpy of the whole self into dst — String.add_bytes' batch
+    // one memcpy of the whole self into dst — String.add' batch
     // door, so `data` keeps its star-less privacy while a buffer append
     // stops paying a capacity branch per byte. dst must hold self.len
     // bytes: the caller's promise, same as every Ptr.write.
@@ -133,6 +145,22 @@ contains* = (self: str, needle: u8) bool {
 
 contains* = (self: str, needle: str) bool {
     self.find(needle).match({ Ok(_) => true, None => false })
+}
+
+// Number of non-overlapping occurrences. An empty needle names no concrete
+// byte run, so it has zero occurrences rather than one at every boundary.
+count* = (self: str, needle: str) usize {
+    n ::= 0;
+    (needle.len > 0).then(() {
+        at ::= 0;
+        loop(at <= self.len, (h) {
+            self.slice(at, self.len).find(needle).match({
+                Ok(i) => { n = n + 1; at = at + i + needle.len; },
+                None  => h.break(),
+            });
+        });
+    });
+    n
 }
 
 // do other's bytes appear in self starting at `from`? The shared walk

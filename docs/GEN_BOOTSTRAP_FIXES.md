@@ -654,7 +654,7 @@ was a payload binder reaching a local.
 **Workaround now load-bearing for nothing:** `src/gen/gen_diag.zen:95-105`,
 `detail`, writes the payload straight into the sink in each of five arms, and
 its comment names this entry as the reason. It can be one `fault.match({..})`
-bound to a local and one `out.add_bytes(w)`.
+bound to a local and one `out.add(w)`.
 
 ## 7. A `str` scrutinee against string-literal patterns — confirmed again
 

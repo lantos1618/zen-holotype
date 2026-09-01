@@ -3,15 +3,24 @@
 
 Alloc = std.mem
 str, String, str_at = std.text
-Res, Sink, WriteError = std.core
+Res = std.core
 Vec = std.collections
 ParsedUrl = std.net.url
-H2Error, H2StreamError, H2Response, FrameType, FLAG_END_STREAM, FLAG_ACK, FLAG_END_HEADERS, SET_HEADER_TABLE, SET_INITIAL_WINDOW, MAX_SEND, WINDOW, MAX_WINDOW, PREFACE = std.net.http2.http2_types
+Actor, ActorError, Ref = std.actor
+H2Error, H2StreamError, H2FailureDelivery, H2Response, H2Head, H2Chunk, H2Receiver, h2_chunk, FrameType, FLAG_END_STREAM, FLAG_ACK, FLAG_END_HEADERS, SET_HEADER_TABLE, SET_INITIAL_WINDOW, MAX_SEND, WINDOW, MAX_WINDOW, PREFACE = std.net.http2.http2_types
 Stream, http_url, stream_write, stream_close, dial, alpn_check = std.net.http2.http2_transport
 Frame, has_flag, read_frame, write_frame, settings_add, u32_add, u31_of, content_range = std.net.http2.http2_frame
-hpack_status, block_add_header, block_add_user_header = std.net.http2.http2_hpack
+hpack_response_headers, hpack_trailer_headers, block_add_header, block_add_user_header = std.net.http2.http2_hpack
 
 H2ReadState = { status :: i32, got_final :: bool, done :: bool }
+
+H2Data = {
+    bytes:       H2Chunk,
+    credit:      usize,
+    stream_open: bool,
+}
+
+H2Event = Headers(H2Head) | Data(H2Data)
 
 H2Client* = {
     stream   :: Stream,
@@ -42,9 +51,9 @@ H2Client* = {
         });
 
         host ::= a.String().try(H2Error.ConnectFailed);
-        host.add_bytes(parsed.host).try(H2Error.ConnectFailed);
+        host.add(parsed.host).try(H2Error.ConnectFailed);
         path ::= a.String().try(H2Error.ConnectFailed);
-        path.add_bytes(parsed.path).try(H2Error.ConnectFailed);
+        path.add(parsed.path).try(H2Error.ConnectFailed);
 
         c ::= H2Client(
             stream: stream, sid: 1, open: true, secure: secure,
@@ -56,8 +65,8 @@ H2Client* = {
 
         stream.stream_write(PREFACE).try();
 
-        // No dynamic HPACK table; a wide receive window replenished as the
-        // response sink consumes DATA.
+        // No dynamic HPACK table; receive credit is replenished only after
+        // the response consumer accepts DATA.
         settings ::= a.String().try(H2Error.SendFailed);
         settings.settings_add(SET_HEADER_TABLE, 0).try();
         settings.settings_add(SET_INITIAL_WINDOW, WINDOW).try();
@@ -80,8 +89,8 @@ H2Client* = {
         Ok(c);
     }
 
-    // Open one POST stream and send its request. Response ownership stays in
-    // read_response, so buffered and streaming callers cannot drift apart.
+    // Open one POST stream and send its request. next_response_event owns all
+    // response parsing for both buffered and actor consumers.
     send_post = (self :: @Self, a: Alloc, headers: Vec<str>, body: str)
                 Res<u32, H2Error> {
         self.open.ensure(H2Error.Closed).try();
@@ -158,30 +167,136 @@ H2Client* = {
         Ok(sid);
     }
 
-    // Stream DATA frames into a caller-owned sink. The status is metadata,
-    // not a transport failure: even a 4xx response is returned after its body
-    // has been delivered. Sink failures retain their WriteError identity.
-    post_stream* = (
-        self    :: @Self,
-        a       : Alloc,
-        headers : Vec<str>,
-        body    : str,
-        out     :: Sink
-    ) Res<i32, H2StreamError> {
-        sid = self.send_post(a, headers, body).try();
-        self.read_response(a, sid, out);
+    // Deliver one response to a receiver actor. The client keeps the socket
+    // and parser; the receiver owns only accepted event values. HTTP status,
+    // including 4xx/5xx, is a head event; failed reports transport or protocol
+    // failure.
+    post_stream* = <R: Actor + H2Receiver>(
+        self     :: @Self,
+        a        : Alloc,
+        headers  : Vec<str>,
+        body     : str,
+        receiver : Ref<R>
+    ) Res<(), H2StreamError> {
+        self.send_post(a, headers, body).match({
+            Err(error) => self.stream_failed(receiver, error),
+            Ok(sid)    => self.stream_response(a, sid, receiver),
+        })
     }
 
-    read_response = (self :: @Self, a: Alloc, sid: u32, out :: Sink)
-                    Res<i32, H2StreamError> {
+    stream_response = <R: Actor + H2Receiver>(
+        self     :: @Self,
+        a        : Alloc,
+        sid      : u32,
+        receiver : Ref<R>
+    ) Res<(), H2StreamError> {
         state ::= H2ReadState(status: 0, got_final: false, done: false);
 
         loop((h) {
             state.done.then(() { h.break(); });
+            self.next_response_event(a, sid, state).match({
+                Err(error) => self.stream_failed(receiver, error).try(),
+                Ok(event)  => event.match({
+                    Headers(head) => receiver.headers(head).match({
+                        Ok(_)      => (),
+                        Err(error) => self.receiver_refused(
+                            !state.done,
+                            error
+                        ).try(),
+                    }),
+                    Data(data)    => receiver.data(data.bytes).match({
+                        Err(error) => self.receiver_refused(
+                            !state.done,
+                            error
+                        ).try(),
+                        Ok(_)      => self.restore_recv_window(
+                            a,
+                            sid,
+                            data.credit,
+                            data.stream_open
+                        ).match({
+                            Ok(_)      => (),
+                            Err(error) => self.stream_failed(
+                                receiver,
+                                error
+                            ).try(),
+                        }),
+                    }),
+                }),
+            });
+        });
+
+        self.active = 0;
+        receiver.completed().match({
+            Ok(_)      => Ok(()),
+            Err(error) => Err(H2StreamError.Receiver(error)),
+        })
+    }
+
+    stream_failed = <R: Actor + H2Receiver>(
+        self     :: @Self,
+        receiver : Ref<R>,
+        error    : H2Error
+    ) Res<(), H2StreamError> {
+        self.active = 0;
+        self.open   = false;
+        receiver.failed(error).match({
+            Ok(_)            => Err(H2StreamError.Http(error)),
+            Err(actor_error) => Err(H2StreamError.FailureDelivery(H2FailureDelivery(
+                http: error,
+                receiver: actor_error
+            ))),
+        })
+    }
+
+    receiver_refused = (
+        self   :: @Self,
+        unread : bool,
+        error  : ActorError
+    ) Res<(), H2StreamError> {
+        unread.then(() { self.open = false; });
+        self.active = 0;
+        Err(H2StreamError.Receiver(error))
+    }
+
+    // The buffered API and actor API both consume this event stream. Frame
+    // parsing and flow-control decisions therefore have one implementation.
+    read_response = (self :: @Self, a: Alloc, sid: u32, out :: String)
+                    Res<i32, H2Error> {
+        state ::= H2ReadState(status: 0, got_final: false, done: false);
+
+        loop((h) {
+            state.done.then(() { h.break(); });
+            self.next_response_event(a, sid, state).try().match({
+                Headers(_) => (),
+                Data(data) => {
+                    data.bytes.append_to(out).try(H2Error.RecvFailed);
+                    self.restore_recv_window(
+                        a,
+                        sid,
+                        data.credit,
+                        data.stream_open
+                    ).try();
+                },
+            });
+        });
+
+        (state.status != 0).ensure(H2Error.DecodeFailed).try();
+        self.active = 0;
+        Ok(state.status);
+    }
+
+    next_response_event = (
+        self  :: @Self,
+        a     : Alloc,
+        sid   : u32,
+        state :: H2ReadState
+    ) Res<H2Event, H2Error> {
+        event: Res<H2Event> ::= None;
+        loop((h) {
             f = self.stream.read_frame(a).try();
 
             self.control(a, f).try().then(() {
-                // A GOAWAY may consume the frame and still terminate this stream.
                 f.ftype.match({
                     GoAway => (!(self.got_goaway
                         && sid.to_usize() > self.peer_last))
@@ -193,86 +308,85 @@ H2Client* = {
 
             (f.sid == sid).ensure(H2Error.ProtocolFailed).try();
             f.ftype.match({
-                Headers  => self.read_headers(a, f, state).try(),
-                Data     => self.read_data(a, sid, f, out, state).try(),
-                Priority => (),
+                Headers  => {
+                    event = Ok(self.headers_event(a, f, state).try());
+                    h.break();
+                },
+                Data     => {
+                    event = Ok(self.data_event(f, state).try());
+                    h.break();
+                },
+                Priority => h.next(),
                 _        => Err(H2Error.ProtocolFailed).try(),
             });
         });
-
-        (state.status != 0).ensure(H2Error.DecodeFailed).try();
-        self.active = 0;
-        Ok(state.status);
+        Ok(event.ok_or(H2Error.ProtocolFailed).try());
     }
 
-    read_headers = (
-        self  :: @Self,
+    headers_event = (
+        self  : @Self,
         a     : Alloc,
         f     : Frame,
         state :: H2ReadState
-    ) Res<(), H2StreamError> {
+    ) Res<H2Event, H2Error> {
         // CONTINUATION is deliberately unsupported, so every block ends here.
         f.has_flag(FLAG_END_HEADERS)
             .ensure(H2Error.ProtocolFailed).try();
         range = f.content_range().try();
 
-        (!state.got_final).then(() {
-            seen          = f.payload.hpack_status(
+        headers ::= state.got_final.match({
+            true  => f.payload.hpack_trailer_headers(
                 a,
                 range.from,
                 range.len
-            ).try();
-            informational = seen >= 100 && seen < 200;
-            (!(informational && f.has_flag(FLAG_END_STREAM)))
-                .ensure(H2Error.ProtocolFailed).try();
-            (!informational).then(() {
-                state.status    = seen;
+            ).try(),
+            false => f.payload.hpack_response_headers(
+                a,
+                range.from,
+                range.len
+            ).try(),
+        });
+
+        headers.match({
+            Informational(_) => {
+                (!f.has_flag(FLAG_END_STREAM))
+                    .ensure(H2Error.ProtocolFailed).try();
+            },
+            Response(status) => {
+                state.status    = status;
                 state.got_final = true;
-            });
+            },
+            Trailers         => f.has_flag(FLAG_END_STREAM)
+                .ensure(H2Error.ProtocolFailed).try(),
         });
         f.has_flag(FLAG_END_STREAM).then(() { state.done = true; });
-        Ok(());
+        Ok(H2Event.Headers(headers));
     }
 
-    read_data = (
-        self  :: @Self,
-        a     : Alloc,
-        sid   : u32,
+    data_event = (
+        self  : @Self,
         f     : Frame,
-        out   :: Sink,
         state :: H2ReadState
-    ) Res<(), H2StreamError> {
+    ) Res<H2Event, H2Error> {
         state.got_final.ensure(H2Error.ProtocolFailed).try();
         range = f.content_range().try();
-        (range.len > 0).then(() {
-            self.deliver_data(
-                out,
-                str_at(f.payload.ptr().offset(range.from), range.len)
-            ).try();
-        });
+        bytes = h2_chunk(str_at(
+            f.payload.ptr().offset(range.from),
+            range.len
+        )).try();
         ended = f.has_flag(FLAG_END_STREAM);
-        self.restore_recv_window(a, sid, f.payload.len, !ended).try();
         ended.then(() { state.done = true; });
-        Ok(());
+        Ok(H2Event.Data(H2Data(
+            bytes: bytes,
+            credit: f.payload.len,
+            stream_open: !ended,
+        )));
     }
 
-    // A failed sink consumed an unknown prefix of this frame. There is no
-    // sound retry point, so stop reusing the connection and preserve the
-    // exact WriteError for the caller.
-    deliver_data = (self :: @Self, out :: Sink, bytes: str)
-                   Res<(), H2StreamError> {
-        out.write(bytes).match({
-            Ok(_)  => Ok(()),
-            Err(e) => {
-                self.open = false;
-                Err(H2StreamError.WriteError(e))
-            },
-        });
-    }
-
-    // Credit is returned only after the sink accepted the frame. That makes
-    // the synchronous sink the backpressure boundary. DATA padding consumes
-    // flow-control credit too, hence payload_len rather than content length.
+    // Credit is returned only after the consumer accepts the frame. For an
+    // actor that means mailbox admission; for post() it means a successful
+    // body append. Padding consumes credit too, hence payload_len rather than
+    // content length.
     restore_recv_window = (
         self        :: @Self,
         a           : Alloc,
@@ -306,20 +420,15 @@ H2Client* = {
         });
     }
 
-    // Compatibility buffer: the streaming path owns all protocol and flow
-    // control. Preserve post()'s historical >=400 and allocation semantics.
+    // Buffered request API. HTTP status failures retain their status payload.
     post* = (self :: @Self, a: Alloc, headers: Vec<str>, body: str)
             Res<H2Response, H2Error> {
         resp_body ::= a.String().try(H2Error.RecvFailed);
-        self.post_stream(a, headers, body, resp_body).match({
-            Ok(status) => (status >= 400).match({
-                true  => Err(H2Error.Status(status)),
-                false => Ok(H2Response(status: status, body: resp_body)),
-            }),
-            Err(e)     => e.match({
-                H2Error(h)    => Err(h),
-                WriteError(_) => Err(H2Error.RecvFailed),
-            }),
+        sid    = self.send_post(a, headers, body).try();
+        status = self.read_response(a, sid, resp_body).try();
+        (status >= 400).match({
+            true  => Err(H2Error.Status(status)),
+            false => Ok(H2Response(status: status, body: resp_body)),
         });
     }
 

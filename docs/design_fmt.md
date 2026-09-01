@@ -29,17 +29,17 @@ through the type's own `toString`. So dispatch is already type-directed, and the
 writers are already library code. What `gen_c` hard-codes is only the *choice* —
 about fifteen lines (`gen_c_sink.zen:710-727`).
 
-**Three doors, and the newest one is the general mechanism.**
+**Two forms, one explicit format spelling.**
 
 | door | declared in | answers |
 |---|---|---|
 | `alloc.String(fmt, ..)` | `text_string.zen` | `Res<String, AllocError>` |
-| `<sink>.add(fmt, ..)` | `text_string.zen:37` | `Res<(), WriteError>` |
-| `<recv>.fmt(fmt, ..)` | `text_string.zen:44`, `gen_c_state.zen:396` | the receiver's floor error |
+| `<sink>.fmt(fmt, ..)` | `text_fmt.zen` | `Res<(), WriteError>` |
+| `<concrete>.fmt(fmt, ..)` | `text_string.zen`, `gen_c_state.zen` | the receiver's floor error |
 
-The third writes through **the receiver's own concrete byte writer** —
-`add_bytes`, else `write` — and is *required to answer exactly what the door
-declares*. `String.fmt` → `String.add_bytes` → `AllocError`; `CBackend.fmt` →
+The concrete form writes through **the receiver's own byte writer** —
+`add`, else `write` — and is *required to answer exactly what the door
+declares*. `String.fmt` → `String.add` → `AllocError`; `CBackend.fmt` →
 `CBackend.write` → `AllocError`. A type whose only writer is a `Sink` impl
 returning `WriteError` is **refused by name**, never relabelled. That answer test
 is what makes it sound rather than hopeful.
@@ -49,10 +49,10 @@ trait slot fixed at `WriteError`. The floor door sidesteps the slot rather than
 lying about it.
 
 **Except for a hole that is not a `str`** — closed 2026-08-24 (#755). The floor
-has no `add_bytes` for a number, so a wider hole was refused outright: the same
+has no `add` for a number, so a wider hole was refused outright: the same
 format string wrote `n=7` through `alloc.String(..)` and was a diagnostic through
 `buf.fmt(..)`. It now goes through a `Sink` record over *the same receiver*, with
-`gen_c_sink.value_call` picking the writer exactly as it does for the sink door,
+`gen_c_sink.value_call` picking the writer exactly as it does for a Sink receiver,
 and a failing wider write reported as `OutOfMemory` — §6's bargain, now shared by
 two doors. A receiver that is **not** a `Sink` still gets the refusal by name,
 because a record over one has a NULL `write` slot. Nothing else moved: a `str`
@@ -63,7 +63,7 @@ byte for byte.
 Why it WAS the keystone — closed 2026-08-25 (#755, fixed by d9c02c14d): the
 refusal used to be why nothing in `src/` implemented `Display`. Measured
 2026-08-25: `src/` held 0 impls and repo-wide 25 (tests/corpus mostly), with
-402 hand-rolled `add_bytes` runs in `src/`, 375 sites taking an
+402 hand-rolled `add` runs in `src/`, 375 sites taking an
 `out :: String` param, and only 7 real `:: Sink` params. The door is open:
 the first impl under `src/` is `Pos.impl(Display, ..)` in
 `src/std/ast/ast_span.zen`, whose seven hand-rolled renderings across sema,
@@ -95,7 +95,7 @@ nothing:** a doubled brace ends the literal run **on the first brace of the
 pair** and resumes past the second, so the run stays a *slice* of the format
 string and the emitted C still copies it verbatim — no decoded copy, no second
 escape table. Four walks carry it: `text_fmt.fmt_next` (the reference),
-`gen_c_print.is_doubled_brace` (shared by `println` and every sink door), and
+`gen_c_print.is_doubled_brace` (shared by `println` and every format door), and
 `bootstrap/gen_c.py`'s `fmt_pieces`. The bootstrapper's `println` used to keep
 its own `split(b"{}")`, which agreed only while the language had a single rule;
 it now goes through `fmt_pieces`, so there is one implementation of two rules
@@ -109,14 +109,14 @@ strings in the tree changed meaning**, and both compilers agree at
 
 ### The trap, and why it is guarded rather than commented
 
-**A byte writer reads no format meaning.** So `add_bytes("]}}")` writes two
-braces and `add("]}}")` writes one — not a wart of the escape but what
+**A byte writer reads no format meaning.** So `String.add("]}}")` writes two
+braces and `String.fmt("]}}")` writes one — not a wart of the escape but what
 "expanded at the call site" means. That makes **converting a byte writer into a
 format call a silent change of output wherever the bytes hold a doubled brace**,
 which is the plausible-wrong-answer class: no diagnostic, no crash, malformed
 JSON.
 
-Escaping those literals *now* would be wrong — they are `add_bytes` calls, so
+Escaping those literals *now* would be wrong — they are `add` calls, so
 `"}}}}"` would immediately write four braces. Commenting ~100 sites would be a
 guard a conversion lane can walk past. So the question asked instead was
 **whether anything would notice**, and it was answered by mutation rather than by
@@ -205,7 +205,7 @@ identifier grammar itself is `std.core.byte`'s `is_ident_start` /
 The classification lives in **one** function per compiler —
 `gen_c_print.fmt_at`, returning a `FmtAt` that carries `keep` (where the run
 before it ends) and `next` (where the walk resumes), and `fmt_pieces` in the
-bootstrapper. `println` and every sink door read it, so they cannot drift on what
+bootstrapper. `println` and every format door read it, so they cannot drift on what
 a position means; what each still owns is only *where the bytes go*.
 
 The bootstrapper's walk moved from the decoded bytes to the **raw source text**
@@ -246,22 +246,15 @@ function taking the boxed path deliberately, and it must not disturb the door.
 
 ---
 
-## 4. Gap three — `String.add` and `String.fmt` are the same door twice
+## 4. Gap three — CLOSED: raw append and formatting have distinct names
 
-    add* = (self :: @Self, fmt: str, args: ...) Res<(), WriteError>   // :37
-    fmt* = (self :: @Self, fmt: str, args: ...) Res<(), AllocError>   // :44
-
-Identical signatures, differing only in error set. Redundant now that the floor
-mechanism *derives* the error from the receiver, so one name can serve both:
-concrete `String` → `AllocError`, generic `out :: Sink` → `WriteError`.
-
-**Cost to collapse: 15 call sites** (`grep -rn '\.add("' src --include='*.zen'`).
-
-Naming, since `fmt` is overloaded three ways in this tree — `src/fmt/` is the
-*source* formatter behind `./zen fmt`, `text_fmt.zen` is the format-string
-machinery, and `.fmt()` is now a method. Choosing `add` as the single door name
-leaves `fmt` meaning only "formatter". The counter-argument is that one mechanism
-with two spellings (`String.add`, `CBackend.fmt`) is its own inconsistency.
+`String.add(str)` appends text verbatim, `String.add(u8)` appends one byte,
+and both answer `AllocError`.
+`receiver.fmt(fmt, ..)` is the compiler-expanded format door: a concrete
+`String` answers `AllocError`, while a receiver typed as `Sink` answers
+`WriteError`. The names now state whether braces have format meaning and remove
+the former overload where `String.add` could mean either raw copying or format
+expansion depending on arity.
 
 **`fmt` cannot be folded into `write`.** `write` must stay a plain byte writer,
 because `gen_c_print.zen:219` emits `zg_print_bytes("{}", 2);` — the compiler
@@ -381,7 +374,7 @@ grow — "carry the error across" and "name `OutOfMemory`" build the *same value
 The lie is only ever on the `IoError` arm, which for a `String` sink can come
 from nowhere but a user's `toString`.
 
-This fork also gates a separate cleanup: collapsing consecutive `add_bytes` runs
+This fork also gates a separate cleanup: collapsing consecutive `add` runs
 would **double this bug's blast radius**, from doors that own their buffer to
 doors handed one. Fix the fork first.
 
@@ -396,13 +389,13 @@ purely mechanical; 9 runs / 31 calls need judgement.
 
 The judgement cases are worth naming, because they are traps:
 
-- **`add_byte` writing a character** — 5 runs, and 21 further sites outside runs.
+- **`add` writing a character** — 5 runs, and 21 further sites outside runs.
   `{}` on a `u8` prints a **number**, so a mechanical conversion silently
   corrupts output. **This trap is now live.** The floor door used to refuse every
   non-`str` hole (`a format hole on this door that is not a str`) and those sites
   would not compile; since #755 a `u8` hole compiles and writes a number. A `{c}`
   hole is the fix and is a grammar change, i.e. §2's decision — until it lands,
-  a conversion lane owes `add_byte` at every one of those 26 sites, and the
+  a conversion lane owes `add` at every one of those 26 sites, and the
   refusal is no longer the thing that catches it.
 - **Embedded newlines and indentation.** `Emit.fresh` is set true in exactly one
   place (`gen_emit.zen:69`, inside `line()`), so a `\n` pushed through as bytes
@@ -419,7 +412,7 @@ this file. A lane will also find `{p.x}` refused where it was previously literal
 — loudly, at the hole's column, with `{{p.x}` as the fix; the tree contains zero
 such sites today.
 
-`{c}`-style holes are still owed and are what the `add_byte` judgement cases in
+`{c}`-style holes are still owed and are what the `add` judgement cases in
 this section need — a `u8` hole printing a *number* is the trap named above.
 `{name}` did not open that door: a hole holds an identifier, and a format spec is
 a separate grammar decision.

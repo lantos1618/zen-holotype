@@ -1,0 +1,25 @@
+// The sender's arena dies before program shutdown lets the receiver drain.
+// A correct mailbox owns the str bytes rather than retaining this view.
+
+Reader = {}
+
+Reader.impl(Actor, {
+    read = (self :: @Self, ctx: Context, text: str) {
+        ctx.env.out.println("{}", text)
+    }
+})
+
+Error = AllocError | IoError | ActorStartError | ActorError
+
+send_from_short_arena = (env: Env, reader: Ref<Reader>) Res<(), Error> {
+    arena ::= env.mem.alloc();
+    text = arena.String("dynamic {}", "bytes survive").try();
+    reader.read(text.view()).try();
+    Ok(())
+}
+
+main = (env: Env) Res<i32, Error> {
+    reader = env.spawn(Reader()).try();
+    send_from_short_arena(env, reader).try();
+    Ok(0)
+}

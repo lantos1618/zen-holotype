@@ -21,13 +21,12 @@ AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
-TyId, TyNamed, TyRes, TyUnion = sema.sema_ty
+TyId, TyNamed, TyRes, TyUnion, is_failure = sema.sema_ty
 decl_at = sema.sema_def
 Ctx = sema.sema_check
-write_usize = sema.sema_diag
 Emit, order = gen.gen_emit
 sym_type, sym_variant, sym_member = gen.gen_name
-is_failure, RES_PATH = gen.gen_name
+RES_PATH = gen.gen_name
 sym_union_variant, sym_union_member = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 GenFault = gen.gen_diag
@@ -136,9 +135,9 @@ add_union_tag = (
 ) Res<(), AllocError> {
     line ::= be.alloc.String().try();
     sym_union_variant(line, be.types(), be.world(), id, m).try();
-    line.add_bytes(" = ").try();
-    write_usize(line, value).try();
-    line.add_bytes(",").try();
+    line.add(" = ").try();
+    line.write_usize(value).try();
+    line.add(",").try();
     has_line(seen, line.view()).match({
         false => seen.add(line),
         true  => Ok(()),
@@ -324,9 +323,9 @@ add_tag = (
 ) Res<(), AllocError> {
     line ::= be.alloc.String().try();
     sym_variant(line, qname, variant).try();
-    line.add_bytes(" = ").try();
-    write_usize(line, value).try();
-    line.add_bytes(",").try();
+    line.add(" = ").try();
+    line.write_usize(value).try();
+    line.add(",").try();
     has_line(seen, line.view()).match({
         false => seen.add(line),
         true  => Ok(()),
@@ -343,11 +342,8 @@ has_line = (seen: Vec<String>, text: str) bool {
 // constant is a path of.
 write_qname* = (be :: CBackend, out :: String, n: TyNamed)
                Res<(), AllocError> {
-    be.world().table_at(n.decl.module.to_usize()).match({
-        None  => Ok(()),
-        Ok(t) => write_dotted(out, t.name),
-    }).try();
-    out.add_bytes(n.name).try();
+    write_dotted(out, be.world().module_name(n.decl)).try();
+    out.add(n.name).try();
     Ok(());
 }
 
@@ -755,7 +751,7 @@ write_field = (be :: CBackend, out :: Emit, m: Member, t: TyId)
     name.sym_member(m.name().text).try();
     decl ::= be.alloc.String().try();
     be.declarator(t, name.view(), decl).try();
-    decl.add_bytes(";").try();
+    decl.add(";").try();
     out.say(decl.view())
 }
 
@@ -850,6 +846,6 @@ write_member_line = (be :: CBackend, out :: Emit, name: str, t: TyId)
                     Res<(), AllocError> {
     decl ::= be.alloc.String().try();
     be.declarator(t, name, decl).try();
-    decl.add_bytes(";").try();
+    decl.add(";").try();
     out.say(decl.view())
 }

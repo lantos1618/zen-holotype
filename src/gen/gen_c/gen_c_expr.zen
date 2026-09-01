@@ -36,7 +36,6 @@ Def, decl_at = sema.sema_def
 Ctx = sema.sema_check
 type_of = sema.sema_type
 type_from_ast = sema.sema_denote
-write_usize = sema.sema_diag
 sym_local = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 LocalSlot = gen.gen_c.gen_c_frame
@@ -854,7 +853,7 @@ spill_effect = (
     out :: String
 ) Res<(), AllocError> {
     be.deliver(id, ctx, ty, Dest.Discard).try();
-    out.add_bytes("0")
+    out.add("0")
 }
 
 spill_valued = (
@@ -870,7 +869,7 @@ spill_valued = (
     be.declarator(ty, tmp.view(), line).try();
     be.fmt("{};\n", line.view()).try();
     be.deliver(id, ctx, ty, Dest.Into(tmp.view())).try();
-    out.add_bytes(tmp.view())
+    out.add(tmp.view())
 }
 
 // A value put in a temporary WHERE IT WAS WRITTEN, so that what it does
@@ -930,7 +929,7 @@ write_expr = (
         Index(x)      => be.lower_index(id, x, ctx, out),
         Array(a)      => be.lower_array_lit(id, a, ctx, want, out),
         FixedArray(f) => be.lower_fixed_array(id, f, ctx, want, out),
-        Unit          => out.add_bytes("0"),
+        Unit          => out.add("0"),
         Scope         => be.lower_scope_ref(id, out),
         Consume(x)    => be.lower_consume(x, ctx, want, out),
         _             => be.unsupported(id, "this expression form", out),
@@ -970,9 +969,9 @@ lower_paren = (
     want : TyId,
     out  :: String
 ) Res<(), AllocError> {
-    out.add_bytes("(").try();
+    out.add("(").try();
     expr(be, id, ctx, want, out).try();
-    out.add_bytes(")").try();
+    out.add(")").try();
     Ok(());
 }
 
@@ -992,9 +991,9 @@ lower_literal = (
     l.kind.match({
         Str   => be.lower_str_literal(l, out),
         Int   => lower_int_literal(l.text, out),
-        Float => out.add_bytes(l.text),
-        Char  => out.add_bytes(l.text),
-        Bool  => out.add_bytes(l.text),
+        Float => out.add(l.text),
+        Char  => out.add(l.text),
+        Bool  => out.add(l.text),
     }).try();
     Ok(());
 }
@@ -1006,9 +1005,9 @@ lower_literal = (
 // the settled type: a value `i64` can hold needs nothing, and one it
 // cannot hold cannot be signed.
 lower_int_literal = (text: str, out :: String) Res<(), AllocError> {
-    out.add_bytes(text).try();
+    out.add(text).try();
     over_i64(text).match({
-        true  => out.add_bytes("ULL"),
+        true  => out.add("ULL"),
         false => Ok(()),
     })
 }
@@ -1029,7 +1028,7 @@ lower_str_literal = (be :: CBackend, l: Literal, out :: String)
                     Res<(), AllocError> {
     out.fmt("(zg_str){ (unsigned char *){}, ", l.text).try();
     out.write_usize(decoded_len(l.text)).try();
-    out.add_bytes("u }").try();
+    out.add("u }").try();
     Ok(());
 }
 
@@ -1130,7 +1129,7 @@ chain_count = (be :: CBackend, call_id: ExprId, out :: String)
 lower_meta_name = (text: str, out :: String) Res<(), AllocError> {
     out.fmt("(zg_str){ (unsigned char *)\"{}\", ", text).try();
     out.write_usize(text.len).try();
-    out.add_bytes("u }").try();
+    out.add("u }").try();
     Ok(());
 }
 
@@ -1185,7 +1184,7 @@ write_name_slot* = (
     be.closure_storage(span, slot, "a lambda read as a value").try().match({
         true  => be.has_storage(slot.ty).match({
             true  => be.write_local(name, slot, out),
-            false => out.add_bytes("0"),
+            false => out.add("0"),
         }),
         false => sym_local(out, name, 1),
     })
@@ -1234,9 +1233,9 @@ write_local = (be :: CBackend, text: str, slot: LocalSlot, out :: String)
 
 write_deref = (be :: CBackend, text: str, slot: LocalSlot, out :: String)
               Res<(), AllocError> {
-    out.add_bytes("(*").try();
+    out.add("(*").try();
     sym_local(out, text, slot.index).try();
-    out.add_bytes(")").try();
+    out.add(")").try();
     Ok(());
 }
 

@@ -1,56 +1,29 @@
-// src/std/core/display.zen
-//
 // The display protocol. One method an impl defines — write yourself
-// into a caller's buffer — plus two sealed forms built on top of it,
-// so a type can never print two different ways.
+// into a caller-owned Sink — plus an allocating form derived from it.
 //
-// `toString` takes a Sink the CALLER owns, so nesting and console
+// `toString` takes a Sink the caller owns, so nesting and console
 // printing allocate nothing. A String param instead would need an
 // Alloc `println` doesn't have — allocating behind the caller's back
-// (law 1) or forcing hello-world into an arena. The allocating form
-// is DERIVED from the sink form, so "they can never diverge" is true
-// of the code, not a promise.
+// or forcing simple printing into an arena. Deriving the allocating form
+// keeps both representations identical.
 
 Alloc = std.mem
 String = std.text
 Sink, WriteError = std.core.io
 
-// every form here speaks WriteError, the union: a sink write fails
-// with IoError, growing a buffer fails with AllocError, no From
-// between them, so `.try()` merges it into the caller's set for free.
-// std.core.io's types are imported directly, not through the prelude:
-// this file IS the prelude, so relying on it would depend on its own
-// assembly order.
+// Every form speaks WriteError: a Sink may report I/O failure and the derived
+// String form may report allocation failure.
 
 Display* = {
-    // SEALED (=) once it has a body: mechanical debug dump, always
-    // there, never overridden — `{}` falls back to it when a type
-    // defines no toString. STAGE 5: body is an @meta field-wise walk;
-    // @meta is outside the seed subset (PLAN.md 0.5), arriving with
-    // src/meta/meta.zen. Kept verbatim from DESIGN.md so the gap is a
-    // missing body, not an open design question:
-    //
-    //     out.add("{} {", @meta(self: @Self).name);
-    //     @meta(self: @Self).fields().loop((h, field) {
-    //         out.add(" {}: {},", field.name, self.at(field));
-    //     });
-    //     out.add(" }");
-    //     Ok(());
-    //
-    // REQUIRED (`= sig`) is sealed's opposite — obliges every impl to
-    // supply what they must never supply. The optional hook (`::= sig`)
-    // obliges nobody, what "always there, never yours" degrades to
-    // without a body. Gains one and seals at stage 5.
+    // Optional structural fallback used when an impl has no pretty form.
+    // Its eventual default body depends on field reflection.
     dump* ::= (self: @Self, out :: Sink) Res<(), WriteError>
 
-    // OUTLINED (::=, no body): the pretty representation. Impls define
-    // THIS and nothing else; `{}` routes through it, falling back to
-    // dump when absent.
+    // The pretty representation. Formatting routes through this when present
+    // and otherwise uses dump.
     toString* ::= (self: @Self, out :: Sink) Res<(), WriteError>
 
-    // SEALED (=): the allocating form, DERIVED — makes a buffer, calls
-    // the outlined form — so an impl defining toString gets this free.
-    // Resolved by parameter type: buffer or allocator.
+    // Allocating convenience derived from the Sink form.
     toString* = (self: @Self, a: Alloc) Res<String, WriteError> {
         sb ::= a.String().try();
         self.toString(sb).try();

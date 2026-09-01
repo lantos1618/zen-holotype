@@ -18,7 +18,7 @@
 str, String, parse_usize = std.text
 Range = std.core
 AllocError = std.mem
-to_lower = std.core.byte
+to_lower, digit = std.core.byte
 
 // One message, and where the next one starts. `next` rather than a
 // consumed cursor, so the caller can walk a buffer of frames without this
@@ -136,7 +136,7 @@ length_in = (bytes: str, at: usize, blank: usize) Res<usize, FrameFault> {
         stop = line_end(bytes, from, blank);
         is_length(bytes, from, stop).then(() {
             found = true;
-            parse_usize(trimmed(bytes, from + NAME_LEN, stop)).match({
+            parse_usize(trimmed(bytes, from + NAME.len, stop)).match({
                 Ok(n) => { value = n; },
                 None  => { bad = true; found = false; },
             });
@@ -164,9 +164,9 @@ line_end = (bytes: str, from: usize, blank: usize) usize {
 // the NAME; the colon must be there too — `Content-Lengthy: 3` is a
 // different header.
 is_length = (bytes: str, from: usize, stop: usize) bool {
-    fits = from + NAME_LEN <= stop;
+    fits = from + NAME.len <= stop;
     same ::= fits;
-    Range(0, NAME_LEN).loop((h, i) {
+    Range(0, NAME.len).loop((h, i) {
         same = same && to_lower(bytes.index(from + i)) == NAME.index(i);
     });
     same;
@@ -188,10 +188,10 @@ blankish = (b: u8) bool { b == ' ' || b == '\t' }
 // NEWLINE — `Console.println` (`src/std/env/env.zen:45`) appends one
 // `\n` and is unusable for this.
 write_frame* = (body: str, out :: String) Res<(), AllocError> {
-    out.add_bytes("Content-Length: ").try();
+    out.add("Content-Length: ").try();
     write_decimal(body.len, out).try();
-    out.add_bytes("\r\n\r\n").try();
-    out.add_bytes(body)
+    out.add("\r\n\r\n").try();
+    out.add(body)
 }
 
 // A usize, in decimal, with no allocation. The digit comes from a TABLE
@@ -200,17 +200,15 @@ write_frame* = (body: str, out :: String) Res<(), AllocError> {
 // already known to be under ten is that conversion, spelled as a lookup.
 write_decimal* = (n: usize, out :: String) Res<(), AllocError> {
     (n < 10).match({
-        true  => out.add_byte(DIGITS.index(n)),
+        true  => out.add(digit(n)),
         false => {
             write_decimal(n / 10, out).try();
-            out.add_byte(DIGITS.index(n % 10))
+            out.add(digit(n % 10))
         },
     })
 }
 
-DIGITS*: str = "0123456789"
 NAME*: str = "content-length:"
 BLANK*: str = "\r\n\r\n"
-NAME_LEN*: usize = 15
 BLANK_LEN*: usize = 4
 CRLF_LEN*: usize = 2

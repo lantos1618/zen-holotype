@@ -1,22 +1,9 @@
 // src/sema/sema_place.zen
-// `target = value;` — the one statement Zen spells two ways.
-//
-// `ast.Bind` writes a DECLARATION and a WRITE identically: one target
-// expression, one value, no flag saying which. Every rule about an
-// assignment starts by deciding which it's looking at — this file's
-// subject.
-//
-// A bare name DECLARES: nothing to disagree with, so the only work is
-// putting the name in scope. Anything else is a PLACE, which already
-// has a type, an owner and a marker — `p.x = e` / `buf[i] = e` write
-// into storage declared elsewhere, so the value must FIT it, the field
-// must be writable, and it must have storage at all. Three rules about
-// the target, none asked of a declaration.
-//
-// Lives beside `sema_type.zen` ("what does this node mean") rather than
-// in it ("what does this statement do"). `sema_own.zen` and
-// `sema_recv.zen` ask the remaining two questions, who owns the place
-// and who may write through it: types here, permission there.
+// Type checking for Bind statements. The AST uses one shape for declarations
+// and writes: a bare fresh name introduces storage, while an existing name,
+// access, or index writes storage owned elsewhere. This module determines the
+// destination type and storage validity; ownership and receiver permission are
+// checked by sema_own and sema_recv.
 
 Expr, ExprId, Bind, Access = std.ast
 AllocError = std.mem
@@ -32,28 +19,20 @@ type_of = sema.sema_type
 type_from_ast = sema.sema_denote
 settle_variant_at = sema.sema_apply
 
-// `LoopHandle` by WHERE IT IS DECLARED, not by who names it: a program
-// may call its own struct `LoopHandle` and bind that freely — the
-// refusal answers the library type alone. Written here once for the
-// same reason `gen_name.RES_PATH` is: the type is structural in the
-// language but answers to a library name, and this check asks that
-// name. An unknown module reads as NOT the handle — fail-open, since a
-// missed check only misses while a false one refuses a legal program.
+// LoopHandle is identified by its declaring module, not only its spelling, so a
+// user type with the same name remains legal. An unknown module fails open.
 HANDLE_MODULE* : str = "std.core.loop.loop_handle"
 HANDLE_NAME* : str = "LoopHandle"
 
-// THE HANDLE LAW LIVES IN `sema_handle.zen` now, one file for every
-// seat that can give the handle C storage — bind, call argument, block
-// tail, construction field. This file keeps only what it calls itself;
-// every other caller imports `sema.sema_handle` direct.
+// sema_handle owns the shared refusal rule for every position that could give
+// a loop handle storage.
 
 refuse_handle_value = sema.sema_handle
 
 // `x = e;`, `x: T ::= e;`.
 //
-// ONE MISTAKE, ONE DIAGNOSTIC: a refused rebinding types as poison, so
-// the value's own type is never contrasted against a binding the
-// statement was not allowed to make.
+// A refused rebinding uses poison as its destination to avoid a second,
+// misleading value-type mismatch.
 bind_stmt* = (c :: Checker, b: Bind, ctx: Ctx) Res<TyId, AllocError> {
     got = c.type_of(b.value, ctx).try();
     c.refuse_handle_value(b.value, got).try();
@@ -67,25 +46,15 @@ bind_stmt* = (c :: Checker, b: Bind, ctx: Ctx) Res<TyId, AllocError> {
     c.types.prim("()")
 }
 
-// A PLAIN `=` WITH NO TYPE WRITTEN, which is the only spelling that can
-// mean a write. `x: T ::= e` and `x ::= e` both DECLARE, whatever else
-// is in scope, and the backend agrees: `gen_c_stmt.is_store` asks these
-// same two questions before it asks the third.
+// Only plain `=` with no written type can mean a write. Mutable or explicitly
+// typed forms always declare.
 plain_write = (b: Bind) bool {
     written = b.type.match({ Ok(_) => true, None => false });
     (b.mutable == false) && (written == false)
 }
 
-// WHICH BINDING A BARE NAME WRITES TO, when it writes to one at all.
-//
-// WORD FOR WORD `gen_c_stmt.is_store`, which is the point: the backend
-// has always decided this question, and decided it this way — a plain
-// `=`, no type written, a name already bound in the body. Sema answered
-// "a fresh binding" to all three, so a rebinding was typed at the
-// VALUE's type while the emitted C stored into the SLOT's, and
-// `n ::= 42; n = 3.5;` became `zu_l1n = 3.5;` inside an `int64_t` with
-// nothing but C to object. Two answers to one question is the defect;
-// this deletes the second copy rather than adding a rule.
+// Resolve the existing binding targeted by a plain-name write. This predicate
+// must stay identical to the backend's store classification.
 assign_binding = (c :: Checker, b: Bind) Res<Binding> {
     plain_write(b).match({
         false => None,
@@ -96,18 +65,8 @@ assign_binding = (c :: Checker, b: Bind) Res<Binding> {
     })
 }
 
-// A SECOND `=` BINDING OF ONE NAME IN ONE BLOCK, refused, naming both.
-// Answers whether it fired.
-//
-// The first binding is `=` too, so it is set once and never written;
-// and it is still live, so the block holds two bindings of one name
-// with one C slot between them. Sema accepted that AT ANOTHER TYPE,
-// because `lookup` walks from the top down and shadowing "falls out for
-// free" (`sema_check.zen`) — freedom that is right for a nested block
-// and wrong here, where nothing was nested.
-//
-// `lookup_here` and not `lookup`: a nested block IS how shadowing is
-// spelled, and a match binder shadows legally.
+// Refuse a second immutable `=` binding in the same block and report both
+// sites. lookup_here preserves legal shadowing in nested blocks.
 check_rebound* = (c :: Checker, b: Bind) Res<bool, AllocError> {
     c.rebound_of(b).match({
         None    => Ok(false),
@@ -125,8 +84,7 @@ rebound_of = (c :: Checker, b: Bind) Res<Binding> {
     })
 }
 
-// A MUTABLE FIRST BINDING IS NOT A MISTAKE: `::=` is exactly the
-// permission to be written again, which is the fix this fault names.
+// A mutable first binding is writable and therefore not a rebound fault.
 settled_binding = (found: Res<Binding>) Res<Binding> {
     found.match({
         Ok(old) => old.mutable.match({ true => None, false => Ok(old) }),
@@ -149,12 +107,9 @@ report_rebound = (c :: Checker, b: Bind, old: Binding)
     Ok(true);
 }
 
-// What the value has to fit. A written type wins; with none, a WRITE
-// takes the storage's type and a fresh binding takes the value's. BUG
-// this replaced: answering `got` for both asked whether the value fits
-// itself, a check no value can fail — `self.n = "not an int"` on an
-// `n :: i32` compiled clean. Value is typed BEFORE this is asked, since
-// asking the place first would type a target that may not exist.
+// Choose the destination type. A written type wins; otherwise a write uses the
+// existing place type and a declaration uses the value type. The value is
+// typed first because a declaration target may not exist yet.
 bind_want* = (c :: Checker, b: Bind, got: TyId, ctx: Ctx)
              Res<TyId, AllocError> {
     b.type.match({
@@ -166,13 +121,9 @@ bind_want* = (c :: Checker, b: Bind, got: TyId, ctx: Ctx)
     })
 }
 
-// A WRITE TAKES THE STORAGE'S TYPE, whatever the value's is — the
-// bare-name half of `place_want`'s rule, and the half that was missing:
-// `n ::= 42; n = 3.5;` emitted `zu_l1n = 3.5;` into an `int64_t`, and
-// nothing but C had an opinion.
-//
-// EXCEPT THAT AN UNSETTLED SLOT HAS NOT CHOSEN A WIDTH. `n ::= 0`
-// freezes the FAMILY and nothing more — `int` is the literal's own
+// A settled write uses its storage type. An unsettled literal slot has not
+// chosen a width: `n ::= 0`
+// freezes the family and nothing more — `int` is the literal's own
 // type, the slot it emits is an `int64_t`, and every integer reaches
 // one — so `fields ::= 0; fields = fields + m.NULL` stores an `i32`
 // exactly, while `n = 3.5` still has no integer to be. A settled slot
@@ -195,17 +146,17 @@ place_want* = (c :: Checker, id: ExprId, got: TyId, ctx: Ctx)
     })
 }
 
-// A DECLARATION WITH NOTHING WRITTEN ON IT FREEZES WHAT THE VALUE IS
-// WORTH, and an array's element cannot be left unsettled there the way
+// An inferred declaration settles array element literals because an array's
+// element cannot remain unsettled the way
 // a scalar's can. `n = 1` may stay `int` — C converts an `int64_t` into
-// every integer position — but `[i32, 3]` is a STRUCT, and a local
+// every integer position — but `[i32, 3]` is a struct, and a local
 // declared `[int, 3]` reaches no `[i32, 3]` in the program.
 // `sema_apply.settled_arg_ty` settles a type argument for this reason
 // and in these words: a literal settles before it is minted into
 // another type. `gen_c_stmt.settled_value_type` is the same call at the
 // same statement.
 //
-// ONLY WHERE NOTHING SAYS OTHERWISE. A written `[u8, 3]` IS the
+// This runs only without a written type. A written `[u8, 3]` is the
 // elements' context and reaches them through `assignable`, so it never
 // arrives here — settling ahead of it would refuse what it accepts.
 settled_array* = (c :: Checker, ty: TyId) Res<TyId, AllocError> {
@@ -229,7 +180,7 @@ settled_elem = (c :: Checker, ty: TyId, a: TyArray) Res<TyId, AllocError> {
 check_assign* = (c :: Checker, b: Bind, got: TyId, want: TyId, ctx: Ctx)
                Res<(), AllocError> {
     node = c.tree.expr_at(b.value);
-    // A position with a WRITTEN answer settles a bare nullary head
+    // A position with a written answer settles a bare nullary head
     // (`nullary_settles`); everywhere else the mismatch stands.
     // Asked here rather than through `coerce`, which reports as it
     // answers and would have fired before this position got its say.
@@ -245,18 +196,13 @@ check_assign* = (c :: Checker, b: Bind, got: TyId, want: TyId, ctx: Ctx)
     Ok(());
 }
 
-// AN ARM STANDS WHERE THE MATCH STANDS (`sema_hoist.check_arms`), and a
+// Match arms stand in the match expression's expected position. A
 // declaration with a written type is such a place: `n: i32 = b.match({
 // true => 1, false => false })` puts both arms where `i32` is, and
 // `coerce` above only ever saw the first one's type.
 //
-// WHICH WORD THE ARMS OWE, and never no word at all. `x := <match>`
-// takes `want` FROM the value, so the position has none of its own —
-// "expected" would name whichever arm came first, and no arm is
-// entitled to speak for the position. What is still true is that the
-// arms owe EACH OTHER, and `check_arms_agree` holds them to their own
-// join and says so in the arms' voice. Answering `Ok(())` here instead
-// is what let the mismatched-arm program through a binding.
+// An inferred binding has no external expected type, so its arms must agree
+// with one another rather than treating the first arm as authoritative.
 written_want = (c :: Checker, b: Bind, want: TyId) Res<(), AllocError> {
     b.type.match({
         Ok(_) => c.check_arms(b.value, want),
@@ -278,13 +224,8 @@ bind_target* = (c :: Checker, b: Bind, ty: TyId, ctx: Ctx)
     Ok(());
 }
 
-// A WRITE INTRODUCES NOTHING. Binding the name a second time would put
-// two rows on the scope stack for one C slot, and the second row's type
-// is what every later read would answer with — which is how `n = 3.5`
-// came to read back as an `f64` from an `int64_t`.
-//
-// AND NOTHING AT MODULE LEVEL EITHER: when the lookup misses, the name
-// may still be bound one scope out, which `fresh_or_refused` decides.
+// A write introduces no binding. When local lookup misses,
+// fresh_or_refused checks whether a module constant blocks the write.
 bind_name = (
     c      :: Checker,
     b      : Bind,
@@ -300,20 +241,9 @@ bind_name = (
     })
 }
 
-// A MODULE-LEVEL BINDING PARSES AS A CONSTANT WHICHEVER MARKER IT
-// CARRIES (`parse_decl.const_decl`), so a bare `=` reaching past the
-// frame lands on a constant: the write would be discarded, the reads
-// folded to the initializer, and the counter would never count
-// (issue #783). Refused with the fault already spelled for an immutable
-// target, at the target name.
-//
-// ONLY WHERE THE STATEMENT COULD BE A WRITE. A written type makes the
-// sentence a declaration — "whatever else is in scope", like `::=` — so
-// `C: i32 = 5` under a constant `C` still declares, ordinary shadowing;
-// `const_def` itself resolves frame first for the same reason
-// (`corpus/constants/local_shadows_constant_and_leaves_it`). A bare `=`
-// is the one spelling that asks what it landed on, and it asks only
-// after the frame said no.
+// A plain write that misses the local frame may target an immutable module
+// constant and is refused. Explicitly typed and mutable forms remain fresh
+// declarations and may shadow that constant.
 fresh_or_refused = (
     c      :: Checker,
     b      : Bind,

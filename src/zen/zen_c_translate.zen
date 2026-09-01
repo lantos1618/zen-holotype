@@ -7,9 +7,9 @@ str, String = std.text
 Vec = std.collections
 Json, JsonId, Jsons, Run, read = std.json
 ProcError = std.proc
-Os, Arch, Abi, CImport = std.build
+CImport = std.build
 Ast, Module = std.ast
-Source, Lexed, scan = std.lex
+Source, Lexed, scan, is_zen_name = std.lex
 Parser = std.parse
 CImportRequest, CImportModule = zen.zen_c_import
 
@@ -157,67 +157,28 @@ clang_command = (a: Alloc, clang: str, spec: CImport)
         true  => {
             out ::= a.String().try(CTranslateFault.NoMemory);
             shell_word(out, clang).try();
-            out.add_bytes(
-                " -Xclang -ast-dump=json -fsyntax-only -x c --target="
-            )
+            out.add(" -Xclang -ast-dump=json -fsyntax-only -x c --target=")
                 .try(CTranslateFault.NoMemory);
-            out.add_bytes(
-                target_name(
-                    spec.target.os,
-                    spec.target.arch,
-                    spec.target.abi
+            out.add(
+                spec.target.clang_triple().ok_or(
+                    CTranslateFault.UnsupportedTarget
                 ).try()
             ).try(CTranslateFault.NoMemory);
             spec.include_paths.loop((h, path) {
-                out.add_bytes(" -I").try(CTranslateFault.NoMemory);
+                out.add(" -I").try(CTranslateFault.NoMemory);
                 shell_word(out, path).try();
             });
             spec.defines.loop((h, define) {
-                out.add_bytes(" -D").try(CTranslateFault.NoMemory);
+                out.add(" -D").try(CTranslateFault.NoMemory);
                 shell_word(out, define).try();
             });
-            out.add_bytes(" -- ").try(CTranslateFault.NoMemory);
+            out.add(" -- ").try(CTranslateFault.NoMemory);
             shell_word(out, spec.headers.get(0).match({
                 Ok(header) => header,
                 None       => "",
             })).try();
             Ok(out)
         },
-    })
-}
-
-target_name = (os: Os, arch: Arch, abi: Abi) Res<str, CTranslateFault> {
-    os.match({
-        Linux   => arch.match({
-            X86_64 => abi.match({
-                Gnu  => Ok("x86_64-linux-gnu"),
-                Musl => Ok("x86_64-linux-musl"),
-                _    => Err(CTranslateFault.UnsupportedTarget),
-            }),
-            Arm64  => abi.match({
-                Gnu  => Ok("aarch64-linux-gnu"),
-                Musl => Ok("aarch64-linux-musl"),
-                _    => Err(CTranslateFault.UnsupportedTarget),
-            }),
-        }),
-        Macos   => abi.match({
-            Darwin => arch.match({
-                X86_64 => Ok("x86_64-apple-darwin"),
-                Arm64  => Ok("arm64-apple-darwin"),
-            }),
-            _      => Err(CTranslateFault.UnsupportedTarget),
-        }),
-        Windows => arch.match({
-            X86_64 => abi.match({
-                Msvc => Ok("x86_64-pc-windows-msvc"),
-                Gnu  => Ok("x86_64-w64-windows-gnu"),
-                _    => Err(CTranslateFault.UnsupportedTarget),
-            }),
-            Arm64  => abi.match({
-                Msvc => Ok("aarch64-pc-windows-msvc"),
-                _    => Err(CTranslateFault.UnsupportedTarget),
-            }),
-        }),
     })
 }
 
@@ -230,17 +191,15 @@ shell_word = (out :: String, word: str) Res<(), CTranslateFault> {
     safe.match({
         false => Err(CTranslateFault.UnsafeArgument(word)),
         true  => {
-            out.add_byte('\'').try(CTranslateFault.NoMemory);
+            out.add('\'').try(CTranslateFault.NoMemory);
             Range(0, word.len).loop((h, i) {
                 b = word.index(i);
                 (b == '\'').match({
-                    true  => out.add_bytes(
-                        "'\\''"
-                    ).try(CTranslateFault.NoMemory),
-                    false => out.add_byte(b).try(CTranslateFault.NoMemory),
+                    true  => out.add("'\\''").try(CTranslateFault.NoMemory),
+                    false => out.add(b).try(CTranslateFault.NoMemory),
                 });
             });
-            out.add_byte('\'').replace_err(CTranslateFault.NoMemory)
+            out.add('\'').replace_err(CTranslateFault.NoMemory)
         },
     })
 }
@@ -248,7 +207,7 @@ shell_word = (out :: String, word: str) Res<(), CTranslateFault> {
 emit_function = (tree: Jsons, node: JsonId, out :: String)
                 Res<(), CTranslateFault> {
     name = text_field(tree, node, "name").try();
-    identifier(name).match({
+    is_zen_name(name).match({
         false => Err(CTranslateFault.UnsupportedFunction(name)),
         true  => forbidden_function(tree, node, name).match({
             Ok(_)  => {
@@ -324,7 +283,7 @@ emit_params = (tree: Jsons, node: JsonId, out :: String)
                     kind  = text_field(tree, child, "kind").try();
                     kind.eq("ParmVarDecl").then(() {
                         said.then(() {
-                            out.add_bytes(", ").try(CTranslateFault.NoMemory);
+                            out.add(", ").try(CTranslateFault.NoMemory);
                         });
                         name = optional_text(tree, child, "name").match({
                             Ok(s) => s,
@@ -335,8 +294,8 @@ emit_params = (tree: Jsons, node: JsonId, out :: String)
                                 "arg{}",
                                 arg
                             ).try(CTranslateFault.NoMemory),
-                            false => identifier(name).match({
-                                true  => out.add_bytes(
+                            false => is_zen_name(name).match({
+                                true  => out.add(
                                     name
                                 ).try(CTranslateFault.NoMemory),
                                 false => { bad = name; h.break(); },
@@ -390,16 +349,6 @@ zen_type = (c: str, allow_void: bool) Res<str, CTranslateFault> {
         "void *"             => Ok("Ptr<()>"),
         _                    => Err(CTranslateFault.UnsupportedType(c)),
     })
-}
-
-identifier = (name: str) bool {
-    valid ::= !name.is_empty() && name.index(0).is_ident_start();
-    Range(1, name.len).loop((h, i) {
-        (!name.index(i).is_ident_cont()).then(() { valid = false; h.break(); });
-    });
-    valid && !name.is_in([
-        "impl", "match", "loop", "true", "false", "struct", "enum"
-    ])
 }
 
 direct = (tree: Jsons, node: JsonId) bool {

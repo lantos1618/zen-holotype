@@ -2,55 +2,23 @@
 // Which names sema settled, and what it settled them to — the semantic
 // half of `textDocument/semanticTokens/full`.
 //
-// `lsp_colour.zen`'s item 5 is the doctrine, so this file asks the one
-// authority instead of guessing: it reads the memos a finished
-// `check_all` left on the `Checker`, plus what the AST itself kinds.
-// NOTHING IS RESOLVED HERE — no `defs_of`, no scope walk; a name sema did
-// not settle keeps the lexer's `variable`.
+// This reads the memos left by a completed semantic check plus declaration
+// kinds already present in the AST. It performs no new resolution; an
+// unsettled name keeps the lexer's variable classification.
 //
-// FIVE WALKS, one per place the answer is written down:
+// Declaration sites come directly from AST kinds. Written named types use
+// type_memo, resolved callees use call_memo, and parameter uses use
+// param_memo. Match and try nodes are syntax intrinsics and therefore classify
+// as keywords without a declaration lookup.
 //
-//   - DECLARATION SITES, from the AST alone: a `Function`'s name and
-//     its parameters, a `Struct`/`Enum`/`Alias` name, an `Impl`'s
-//     target. The declaration kind IS the answer; no memo is needed.
-//   - WRITTEN TYPES, from `type_memo`: a `Named` type node the checker
-//     resolved to something that is not poison is a type name. TYPES
-//     INSIDE A STRUCT OR IMPL BODY ARE NOT HERE — `type_from_ast` does
-//     not memoize where `@Self` is in scope (`sema_denote.zen`), so a
-//     field's `i32` keeps the lexer's answer. A miss is honest; a
-//     guessed entry would not be.
-//   - CALLEE NAMES, from `call_memo`: a call that resolved to a
-//     declaration classifies the name it was called through — `function`
-//     for a `Function` decl, bare or through a receiver (`add(a, b)`,
-//     `x.f(..)`); `type` for a construction, but only when the type is
-//     named BARE (`Point(x: 1)`). `Shape.Circle(c)` records the enum
-//     too, and the name written there is the variant's — a variant is
-//     not a type.
-//   - THE TWO INTRINSICS, from the AST alone: `.match` and `.try()`
-//     wear the shape of a method call and are not one, so they are
-//     `Match`/`Try` nodes and no memo will ever resolve them —
-//     "there's no `try` field on `Res` and no function of that name"
-//     (`ast_node.zen`). Without this walk they are the only words in a
-//     clean file that stay `variable` while the calls around them go
-//     `function`. `keyword` is what they are: `parse_expr.zen`'s
-//     `dot_target` recognises them once, by name, at a position no
-//     binding can take over — which is exactly what `consume` is, and
-//     `consume` is `keyword` from the lexer.
-//   - PARAMETER USES, from `param_memo`: the one fact neither the AST
-//     nor a type can say, recorded where resolution still had the scope
-//     (`sema_check.zen`'s `Binding.param`).
-//
-// WHAT IS DELIBERATELY NOT CLASSIFIED, each because the honest answer
-// was never written down: a function named but not called; a type
-// named in value position (`Shape` in `Shape.Unit`); an enum variant;
+// Names remain lexical variables when sema recorded no answer: a function
+// named but not called; a type in value position; an enum variant;
 // a constant; an import binding; a local of every kind; a closure's
 // parameter. All stay `variable` — the lexer's answer, and never a
 // wrong one.
 //
-// THE BUILD MUST BE CLEAN. `lsp_built.zen`'s `rebuild` calls `classify`
-// only when the build produced no diagnostics, so nothing here has to say
-// what poison means: a wrong answer is worse than none, and a file that
-// does not compile keeps its lexical colours.
+// `lsp_built.zen` calls classify only for a clean build, so poison and partial
+// results keep their lexical colours.
 
 str = std.text
 Alloc, AllocError = std.mem
@@ -180,7 +148,7 @@ member_sites = (
     Ok(());
 }
 
-// A constant and a field keep the lexer's answer; a member FUNCTION is
+// A constant and a field keep the lexer's answer; a member function is
 // a declaration site like any other.
 member_site = (a: Alloc, m: Member, out :: Classes)
               Res<(), AllocError> {
@@ -194,7 +162,7 @@ member_site = (a: Alloc, m: Member, out :: Classes)
 // --- written types -----------------------------------------------------
 
 // Every `Named` type node the checker memoized a non-poison answer
-// for. THE MEMO, NOT THE NAME, IS THE EVIDENCE: `Point` resolves, and
+// for. The memo, not the spelling, is the evidence: `Point` resolves, and
 // so does the `T` of `<T>` — both are types a reader should see
 // coloured alike.
 written_types = (a: Alloc, c: Checker, out :: Classes)
@@ -237,9 +205,8 @@ named_site = (
 
 // --- call sites and parameter uses -------------------------------------
 
-// One pass over every expression: a CALL asks `call_memo` what it
-// resolved to, a NAME asks `param_memo` whether it is a parameter, and
-// an INTRINSIC asks nothing — the node kind IS the answer.
+// One pass over every expression: calls use call_memo, names use param_memo,
+// and intrinsic nodes carry their classification directly.
 expr_sites = (a: Alloc, c: Checker, out :: Classes)
              Res<(), AllocError> {
     eid ::= ExprId(index: 0);
@@ -266,7 +233,7 @@ expr_site = (
     })
 }
 
-// A bare name's span IS the expression's — `Name` carries no `Ident`,
+// A bare name's span is the expression's — `Name` carries no `Ident`,
 // "the enclosing `Expr` already has the span" (`ast_node.zen`).
 param_site = (
     a    : Alloc,
@@ -315,7 +282,7 @@ callee_site = (
     })
 }
 
-// The name a resolved call was made THROUGH: bare (`add(a, b)`) or the
+// The name a resolved call was made through: bare (`add(a, b)`) or the
 // member of an access (`x.f(..)` — `call_memo` holds the declaration
 // either way, and resolution is one rule, `sema_cand.zen`).
 fn_callee = (
@@ -332,7 +299,7 @@ fn_callee = (
     })
 }
 
-// A CONSTRUCTION names the type only when it names it bare and by its
+// A construction names the type only when it names it bare and by its
 // own name: `Point(x: 1)`. The same memo entry covers `Shape.Circle(c)`,
 // where the name written is the variant's, and a variant is not a type.
 type_callee = (

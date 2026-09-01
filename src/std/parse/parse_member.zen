@@ -1,32 +1,9 @@
 // src/std/parse/parse_member.zen
-// What a declaration is made of: members, parameters, type parameters.
+// Members, parameters, and type parameters.
 //
-// ONE NODE SERVES A STRUCT BODY, AN IMPL BODY AND A RECORD LITERAL,
-// because DESIGN.md has one rule for the three: "a struct whose fields
-// happen to be functions, used as a bound, is what other languages
-// call a trait — nothing marks it special". So `Member` covers a
-// field, a constant and a method, and an impl supplying `width: ..`
-// and one supplying `toString ::= ..` go through the same function.
-//
-// BUT THEY ARE READ DIFFERENTLY, and that is grammar R4:
-//
-//   IN A STRUCT BODY a member writes a TYPE.
-//     x: i32                immutable field
-//     len* :: usize = 0     mutable field with a default
-//     MAX*: i32 = 2147483647   a CONSTANT — one value per type
-//     area* ::= (..) f64 {..}  a method
-//
-//   IN A RECORD a member writes a VALUE, because the field it
-//   satisfies already has the type.
-//     width: self.radius * 2.0
-//     toString ::= (self: @Self, out :: Sink) .. { .. }
-//
-//   `:` with a value is a constant; `::` with a value is a field with
-//   a default. That is the only syntactic difference between them, and
-//   the cost is that AN IMMUTABLE FIELD WITH A DEFAULT IS UNSPELLABLE.
-//   Recorded because it is a hole in the language, not a decision this
-//   parser made — and `Const` therefore never appears in an impl body
-//   or a record, where there is no type to hang it on.
+// Member nodes are shared by struct, impl, and record bodies. Struct bodies
+// write member types; impl and record bodies supply values. The binder and
+// whether the body is typed determine field, constant, or method syntax.
 
 AllocError = std.mem
 Span, Ident = std.ast.ast_span
@@ -42,10 +19,7 @@ fn_value = std.parse.parse_decl
 // bodies
 // -------------------------------------------------------------------
 
-// `{ member (,)? member .. }` — the comma between members is OPTIONAL,
-// which is grammar D6 and not laxity: `Rect` separates its fields with
-// commas, `Alloc` separates its methods with nothing, and `Tester`
-// mixes both. All three are in DESIGN.md.
+// `{ member (,)? member .. }`; commas between members are optional.
 struct_members* = (p :: Parser, out :: Vec<Member>) Res<Span, AllocError> {
     p.member_list(out, true)
 }

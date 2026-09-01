@@ -37,7 +37,7 @@ stays closed.
 | 15 | "Last index of a byte", written four times | READY after 1 add | 20 |
 | 16 | `fmt_break.in_order` → `Cand.impl(Ordered)` | READY | 17 |
 | 17 | `Hasher` is dead; 24 impls take an unread param | READY | 15 |
-| 18 | `Display` — zero impls in `src/`, 380 `add_bytes` | BLOCKED (error sets) | 10 |
+| 18 | `Display` — zero impls in `src/`, 380 `add` | BLOCKED (error sets) | 10 |
 | 19 | Byte classification open-coded 7× | READY | 10 |
 | 20 | `sema_ty.key_before` duplicates `str.before` | READY | 7 |
 | 21 | `is_ascii` / `is_hex_digit` — zero callers anywhere | READY | 7 |
@@ -732,9 +732,9 @@ is one commit, but it is a wide one.
 
 ---
 
-## 18. `Display` — zero impls in `src/`, 380 `add_bytes` calls — BLOCKED — ~10 lines
+## 18. `Display` — zero impls in `src/`, 380 `add` calls — BLOCKED — ~10 lines
 
-WHERE: `src/std/core/display.zen` (the trait); 380 `add_bytes(` calls across
+WHERE: `src/std/core/display.zen` (the trait); 380 `add(` calls across
 **63** files (not ~20 — the spread is wider than the brief assumed). Heaviest:
 `src/lsp/lsp_hover.zen` 30, `src/sema/sema_ty.zen` 23,
 `src/gen/gen_c/gen_c_call.zen` 23, `src/gen/gen_c/gen_c_fat.zen` 19,
@@ -1044,9 +1044,9 @@ lower_literal = (
     l.kind.match({
         Str   => be.lower_str_literal(l, out),
         Int   => lower_int_literal(l.text, out),
-        Float => out.add_bytes(l.text),
-        Char  => out.add_bytes(l.text),
-        Bool  => out.add_bytes(l.text),
+        Float => out.add(l.text),
+        Char  => out.add(l.text),
+        Bool  => out.add(l.text),
     }).try();
     Ok(());
 }
@@ -1222,7 +1222,7 @@ are in `/tmp/mz/` and each is named in its entry. I did not run `make test`,
 `make fixpoint`, or the shared gate.
 
 Counts I corrected from the brief: the set-membership sites are 14 / 79 arms,
-not 10 / 62 (several sites pack multiple arms per line). The `add_bytes` sites
+not 10 / 62 (several sites pack multiple arms per line). The `add` sites
 are 380 across 63 files, not ~378 across ~20.
 
 Not checked, and deliberately left off rather than padded:

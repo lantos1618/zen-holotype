@@ -284,7 +284,7 @@ add_if_reaches = (
 // for the same reason.
 first_named = (w: World, comp: Vec<usize>, mi: usize) bool {
     Range(0, comp.len).find((k) {
-        module_name_of(w, index_at(comp, k, mi)).before(module_name_of(w, mi))
+        module_name_of(w, comp.get(k).value_or(mi)).before(module_name_of(w, mi))
     }).match({
         Ok(_) => false,
         None  => true,
@@ -308,22 +308,22 @@ say_cycle = (
     out  :: String
 ) Res<usize, AllocError> {
     path = shortest_cycle(a, es, mi, comp).try();
-    at   = edge_span(a, tree, w, mi, index_at(path, 1, mi)).try();
+    at   = edge_span(a, tree, w, mi, path.get(1).value_or(mi)).try();
     write_where(out, at).try();
-    out.add_bytes("import cycle: ").try();
+    out.add("import cycle: ").try();
     Range(0, path.len).loop((h, k) {
-        write_hop(out, module_name_of(w, index_at(path, k, mi)), k).try();
+        write_hop(out, module_name_of(w, path.get(k).value_or(mi)), k).try();
     });
-    out.add_bytes(
+    out.add(
         ": a top-level constant needs a value from a module whose own needs it back, and no order computes both"
     ).try();
-    out.add_bytes("\n").try();
+    out.add("\n").try();
     Ok(1);
 }
 
 write_hop = (out :: String, name: str, k: usize) Res<(), AllocError> {
-    (k > 0).then(() { out.add_bytes(" -> ").try(); });
-    out.add_bytes(module_display(name))
+    (k > 0).then(() { out.add(" -> ").try(); });
+    out.add(module_display(name))
 }
 
 // A shortest walk from `start` back to `start`, `start` at both ends.
@@ -345,7 +345,7 @@ shortest_cycle = (a: Alloc, es: Vec<Edge>, start: usize, comp: Vec<usize>)
     prev.add(0).try();
     i ::= 0;
     loop(() { i < order.len && closed.len == 0 }, (h) {
-        from = index_at(order, i, start);
+        from = order.get(i).value_or(start);
         at   = i;
         es.loop((g, e) {
             visit_edge(e, from, at, start, comp, order, prev, closed).try();
@@ -424,15 +424,15 @@ unwind_cycle = (
     start  : usize
 ) Res<Vec<usize>, AllocError> {
     back ::= a.Vec<usize>();
-    at   ::= index_at(closed, 0, 0);
-    back.add(index_at(order, at, start)).try();
+    at   ::= closed.get(0).value_or(0);
+    back.add(order.get(at).value_or(start)).try();
     loop(at > 0, (h) {
-        at = index_at(prev, at, 0);
-        back.add(index_at(order, at, start)).try();
+        at = prev.get(at).value_or(0);
+        back.add(order.get(at).value_or(start)).try();
     });
     path ::= a.Vec<usize>();
     Range(0, back.len).loop((h, k) {
-        path.add(index_at(back, back.len - 1 - k, start)).try();
+        path.add(back.get(back.len - 1 - k).value_or(start)).try();
     });
     path.add(start).try();
     Ok(path);
@@ -448,7 +448,7 @@ reach_from = (a: Alloc, es: Vec<Edge>, start: usize)
     front.add(start).try();
     i ::= 0;
     loop(i < front.len, (h) {
-        from = index_at(front, i, start);
+        from = front.get(i).value_or(start);
         i    = i + 1;
         es.loop((g, e) { step_reach(e, from, seen, front).try(); });
     });
@@ -578,15 +578,6 @@ encloses = (outer: Span, at: Span) bool {
         && outer.file.eq(at.file)
 }
 
-// Line first, then byte column. Written here rather than imported as
-// `ast_find.before` because `before` is ALSO `str`'s byte order and
-// `first_named` calls that one three lines' worth of scrolling away;
-// two functions of one name in one file is a reader's problem whatever
-// the resolver makes of it.
-at_or_after = (a: Pos, b: Pos) bool {
-    a.line > b.line || (a.line == b.line && a.col >= b.col)
-}
-
 // EVERY declaration this name could mean, filtered to the constants that
 // live somewhere else. A name resolving to a constant of this same module
 // is an ordering question inside one file, which is not this rule.
@@ -707,13 +698,6 @@ names_module = (w: World, path: str, mi: usize) bool {
 // one format and not three hand-spelled writes.
 write_where = (out :: String, at: Span) Res<(), AllocError> {
     out.fmt("{}:{}: ", at.file, at.start)
-}
-
-index_at = (v: Vec<usize>, k: usize, fallback: usize) usize {
-    v.get(k).match({
-        Ok(x) => x,
-        None  => fallback,
-    })
 }
 
 holds_index = (v: Vec<usize>, x: usize) bool {

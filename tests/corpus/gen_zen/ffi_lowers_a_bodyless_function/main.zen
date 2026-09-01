@@ -1,7 +1,6 @@
 Alloc, AllocError = std.mem
 FsError = std.env
 str, String = std.text
-Range = std.core
 Vec = std.collections
 Source, scan = std.lex
 Parser = std.parse.parser
@@ -10,22 +9,12 @@ Checker = sema.sema_check
 Emit = gen.gen_emit
 CBackend, emit_program = gen.gen_c
 Cli, cli = zen
-Build, Debug, Job = zen
+Build = zen
+BuildArgs, Emission, Permutation = std.build
 entry_of = zen.zen_path
 
 PROGRAM : str = "getpid = () i32\nmain = (env: i32) i32 { a = getpid(); b = getpid(); a + b }\n"
 PROTO : str = "extern int32_t getpid(void);"
-
-occurrences = (text: str, needle: str) usize {
-    n ::= 0;
-    Range(0, text.len).loop((h, i) {
-        fits = i + needle.len <= text.len;
-        (fits && text.slice(i, i + needle.len).eq(needle)).then(() {
-            n = n + 1;
-        });
-    });
-    n
-}
 
 main = (env: Env) Res<i32, AllocError | FsError> {
     a    ::= env.mem.alloc();
@@ -35,7 +24,7 @@ main = (env: Env) Res<i32, AllocError | FsError> {
     argv.add("src").try();
     argv.add("--emit-c").try();
     argv.add("--ffi").try();
-    cli(env, argv).match({
+    cli(env, argv).try().match({
         Build(job) => println("cli enables ffi: {}", job.ffi),
         _          => println("cli enables ffi: false"),
     });
@@ -52,20 +41,20 @@ main = (env: Env) Res<i32, AllocError | FsError> {
     be.render_diags(faults).try();
     c = out.view();
     println("no lowering fault: {}", faults.is_empty());
-    println("one extern prototype: {}", occurrences(c, PROTO) == 1);
-    println("raw calls: {}", occurrences(c, "getpid()") == 2);
+    println("one extern prototype: {}", c.count(PROTO) == 1);
+    println("raw calls: {}", c.count("getpid()") == 2);
     b ::= a.Build(env, "src");
     b.enable_ffi();
     entry = entry_of(env, a, "src", "probe/probe.zen").try();
     b.walk(entry).try();
-    b.back_end(Job(
+    b.back_end(BuildArgs(
         root: "src",
-        out: "ffi.c",
-        emit_c: true,
+        emission: Emission.CFile("ffi.c"),
         ffi: false,
-        debug: Debug(repeat: 1, permute: "")
+        repeat: 1,
+        permute: Permutation.Natural
     )).try();
     built = env.fs.read(a, "ffi.c").try();
-    println("build api enables ffi: {}", occurrences(built.view(), PROTO) == 1);
+    println("build api enables ffi: {}", built.view().count(PROTO) == 1);
     Ok(0)
 }

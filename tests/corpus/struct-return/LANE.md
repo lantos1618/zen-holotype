@@ -48,7 +48,7 @@ Not encoded as tests (found while probing, kept out of the corpus):
    must-fail is not this lane.
 2. `.fmt` holes that are not `str` are rejected at codegen
    (`a format hole on this door that is not a str`) even where `{}` on an
-   integer works through `println`/`String.add`. Documented floor
+   integer works through `println`/`String.fmt`. Documented floor
    (`string_fmt_answers_the_buffer_floor`), so not a bug -- but it shapes
    how the slice test builds its bytes.
 3. Error-set widening through `.try()` is `GenFault.Unsupported`

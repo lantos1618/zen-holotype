@@ -1,11 +1,5 @@
-// a str literal crossing an actor boundary, with no `consume` in
-// sight. literals are `val` — deeply immutable forever, no writer
-// exists anywhere in the program — so any number of actors may hold
-// one at once and sending does not take it away from the sender.
-//
-// this is the half of sendability that has no move in it, and a
-// checker that demands `consume` on every behavior argument breaks
-// DESIGN.md's own actor example.
+// Immutable str values may be sent repeatedly. The mailbox owns the bytes, so
+// the receiver never borrows storage from the sender.
 
 Foo = {}
 
@@ -15,10 +9,12 @@ Foo.impl(Actor, {
     }
 })
 
-main = (env: Env) Res<i32, IoError> {
+Error = IoError | ActorStartError | ActorError
+
+main = (env: Env) Res<i32, Error> {
     greeting = "hello world!";
-    foo      = env.spawn(Foo());
-    foo.receive_msg(greeting);
-    foo.receive_msg(greeting);
+    foo      = env.spawn(Foo()).try();
+    foo.receive_msg(greeting).try();
+    foo.receive_msg(greeting).try();
     Ok(0);
 }

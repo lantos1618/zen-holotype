@@ -29,12 +29,12 @@ AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
-TyId, TyNamed, TyRes, ResForm = sema.sema_ty
+TyId, TyNamed, TyRes, ResForm, is_failure = sema.sema_ty
 decl_at = sema.sema_def
 Ctx = sema.sema_check
 Inst = sema.sema_inst
 sym_member, sym_variant, sym_local = gen.gen_name
-RES_PATH, is_failure = gen.gen_name
+RES_PATH = gen.gen_name
 sym_union_variant = gen.gen_name
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
@@ -243,19 +243,19 @@ write_mapped_return = (
     ctx    : Ctx
 ) Res<(), AllocError> {
     line ::= be.alloc.String().try();
-    line.add_bytes("return (").try();
+    line.add("return (").try();
     be.ctype(ctx.ret, line).try();
-    line.add_bytes("){ .zg_tag = ").try();
+    line.add("){ .zg_tag = ").try();
     line.sym_variant(RES_PATH, "Err").try();
     unit.match({
         true  => {},
         false => {
-            line.add_bytes(", .zg_data.").try();
+            line.add(", .zg_data.").try();
             line.sym_member("Err").try();
             line.fmt(" = {mapped}").try();
         },
     });
-    line.add_bytes(" };").try();
+    line.add(" };").try();
     be.writeln(line.view())
 }
 
@@ -630,14 +630,14 @@ write_built = (
     into : Carry
 ) Res<(), AllocError> {
     line ::= be.alloc.String().try();
-    line.add_bytes("return (").try();
+    line.add("return (").try();
     be.ctype(ctx.ret, line).try();
-    line.add_bytes("){ .zg_tag = ").try();
+    line.add("){ .zg_tag = ").try();
     be.failure_tag(r, line).try();
     is_failure(r.form).then(() {
         be.carry_error(want, tmp, into, line).try()
     });
-    line.add_bytes(" };").try();
+    line.add(" };").try();
     be.writeln(line.view())
 }
 
@@ -697,13 +697,13 @@ write_payload_copy = (be :: CBackend, w: str, tmp: str) Res<(), AllocError> {
 // collapses to its member before it is ever built.
 read_payload = (v: str, out :: String) Res<(), AllocError> {
     read_error(v, out).try();
-    out.add_bytes(".zg_data").try();
+    out.add(".zg_data").try();
     Ok(());
 }
 
 read_tag = (v: str, out :: String) Res<(), AllocError> {
     read_error(v, out).try();
-    out.add_bytes(".zg_tag").try();
+    out.add(".zg_tag").try();
     Ok(());
 }
 
@@ -830,9 +830,9 @@ write_err_init = (
     into : Carry,
     out  :: String
 ) Res<(), AllocError> {
-    out.add_bytes(", .zg_data.").try();
+    out.add(", .zg_data.").try();
     out.sym_member("Err").try();
-    out.add_bytes(" = ").try();
+    out.add(" = ").try();
     err ::= be.alloc.String().try();
     read_error(tmp, err).try();
     into.match({
@@ -885,7 +885,7 @@ wrap_error* = (
     be.ctype(set, cty).try();
     out.fmt("({}){ .zg_tag = ", cty.view()).try();
     out.sym_variant(qname.view(), variant).try();
-    out.add_bytes(", .zg_data.").try();
+    out.add(", .zg_data.").try();
     out.sym_member(variant).try();
     out.fmt(" = {payload} }")
 }
@@ -971,15 +971,15 @@ write_hoisted_unwrap = (
     cty ::= be.alloc.String().try();
     be.ctype(want, cty).try();
     place ::= be.alloc.String().try();
-    place.add_bytes("(").try();
-    place.add_bytes(cty.view()).try();
-    place.add_bytes("){ .zg_tag = ").try();
+    place.add("(").try();
+    place.add(cty.view()).try();
+    place.add("){ .zg_tag = ").try();
     sym_variant(place, RES_PATH, "Ok").try();
     be.is_unit(payload).match({
         true  => Ok(()),
         false => write_ok_init(tmp, place),
     }).try();
-    place.add_bytes(" }").try();
+    place.add(" }").try();
     be.write_dest(dst, place.view())
 }
 
@@ -987,9 +987,9 @@ write_hoisted_unwrap = (
 // carries when the payload has a member to fill (`write_res_payload`
 // sends its non-unit case to `write_payload_init` for the same reason).
 write_ok_init = (tmp: str, out :: String) Res<(), AllocError> {
-    out.add_bytes(", .zg_data.").try();
+    out.add(", .zg_data.").try();
     out.sym_member("Ok").try();
-    out.add_bytes(" = ").try();
+    out.add(" = ").try();
     read_ok_payload(tmp, out).try();
     Ok(());
 }

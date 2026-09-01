@@ -178,7 +178,7 @@ that arm reverted, the payload position still answers. The fix belongs where
 enum declarations are checked.
 
 **The LSP hand-writes JSON; it should have structs with a derived `to_json`.**
-Measured: ~97 `add_bytes` calls spelling JSON punctuation across 12 files, and
+Measured: ~97 `add` calls spelling JSON punctuation across 12 files, and
 **34 `write_*` functions each spelling one protocol object by hand**, inside
 2,562 lines. The structs already exist (`WirePos`, `Item`, `Classed`,
 `Envelope`, `Spot`) — they sit BESIDE the writers instead of being the source

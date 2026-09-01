@@ -1,38 +1,9 @@
 // src/lsp/lsp_action.zen
 // `textDocument/codeAction` — the auto-import quickfix, the only action.
-//
-// ONE KIND, and it is sema's answer wearing the protocol's clothes: an
-// undefined name squiggles, and the fix is the import line that would
-// have bound it. The QUESTION — which modules export this name — is
-// `World.exported_named`, asked of the same shared `Checker` the
-// diagnostics came from. `context.diagnostics` IS NOT READ: what the
-// client was told and what the checker says cannot disagree when there
-// is one source, so the handler re-walks the checker's own diags and
-// offers one action per (undefined name, exporting module).
-//
-// `[]` IS THE ANSWER TO EVERY REFUSAL — no workspace, no build in the
-// slot, a module the tree cannot place — for `lsp_fmt.zen`'s reason: a
-// client asks on every cursor pause, and an error is a modal.
-//
-// THE EDIT IS TEXT, NOT AST: one line, `Name = dotted.module\n`, spelled
-// UNSTARRED — a star on an import is re-export (`sema_def.zen`), and
-// this fix imports to use. It lands after the file's last import decl,
-// or at the top of a file that has none. Insertion is a zero-length
-// range; the client moves nothing it was not told to.
-//
-// NOT OFFERED, and named so nobody thinks it lost: an enum VARIANT
-// (`Ok`, `None`) is not a `Def` — it rides its enum's star — so an
-// undefined variant name offers nothing yet. That is the `variant_defs`
-// walk, a follow-up, and `docs/design_lsp.md`'s table says so.
-//
-// THE LINE IS THE SPELLING THIS TREE WRITES. A folder root that
-// re-exports the name under its short spelling is offered as that short
-// form — `Name = std.text`, the spelling the layer rule lets a plain
-// consumer write — and never the declaring file's long
-// path, which builds and then fails the style gate on the next run.
-// Identical lines are one offer, however many modules hold the name.
-// The span test below is HALF-OPEN at both edges with one allowance,
-// the empty cursor range — `ast_span.zen` owns the reason.
+// Undefined-name diagnostics are matched to modules exporting that name.
+// Each action inserts an unstarred import after existing imports, using the
+// shortest valid re-exporting module path. Unsupported or unavailable cases
+// return an empty action list. Enum variants are not offered directly.
 
 str, String = std.text
 Vec = std.collections
@@ -40,9 +11,7 @@ Alloc, AllocError = std.mem
 Range = std.core
 Pos, Span = std.ast.ast_span
 module_index_of = std.ast.ast_named
-// `a` earlier than `b`, strictly. `std.ast` owns Pos order (`ast_find.zen`)
-// and this file needs both edges of it; defining a second `before(Pos)` is
-// how `make ufcs` went red on two answers for one name.
+// Strict source-position ordering shared with the AST.
 before = std.ast.ast_find
 Checker = sema.sema_check
 Diag = sema.sema_diag
@@ -51,15 +20,10 @@ ModuleTable = sema.sema_def
 to_pos, to_wire, write_wire, WirePos = lsp.lsp_pos
 written, obj, arr, Nest = std.json
 
-// One offer: the name to bind and the module to bind it from. Kept as
-// DATA until the writer pass, because the comma rule wants an index and
-// the diag walk does not have one.
+// A name and the module an auto-import would bind it from.
 Action = { name: str, module: str }
 
-// The `CodeAction[]` for one range: an action per (undefined name under
-// the range, module exporting it). `text` IS THE EDITOR'S BUFFER — the
-// insertion point is read off the built tree, but the wire position is
-// measured against these bytes, as everywhere in this folder.
+// Write actions for undefined names intersecting the requested range.
 write_actions* = (
     c    : Checker,
     t    : Alloc,
@@ -84,11 +48,7 @@ write_actions* = (
     write_offerings(c, t, file, text, uri, found, out)
 }
 
-// A diag earns offers when it is THIS FILE's, it covers the asked range,
-// and it is the one fault an import line answers. Every other fault is
-// not this server's action to offer — there is no "add the missing
-// field" here, and a kitchen-sink menu is how a quickfix stops being
-// quick.
+// Only undefined-name diagnostics in this file and range produce actions.
 offer = (
     c     : Checker,
     t     : Alloc,
@@ -107,13 +67,7 @@ offer = (
     })
 }
 
-// ONE OFFER PER NAME PER REQUEST: a file that writes `Vec` twice has two
-// diags and one missing import, so the second diag for a name already
-// collected adds nothing. THE WHOLE ACTION IS THE DEDUP KEY, not the
-// name: `exported_named` walks every module table, so one name can come
-// back from N modules (`Diag` is declared in `lex`, `parse` and `sema`;
-// `zen_build.zen` documents the collision) and two of them spelling the
-// same line are one menu row.
+// Repeated diagnostics for one name share the same candidate search.
 offer_name = (c: Checker, t: Alloc, name: str, found :: Vec<Action>)
              Res<(), AllocError> {
     found.find((a) { a.name.eq(name) }).match({
@@ -130,17 +84,8 @@ offer_name = (c: Checker, t: Alloc, name: str, found :: Vec<Action>)
     })
 }
 
-// The import line an offer writes, and the dedup against it.
-//
-// NAMED AS A PERSON WRITES IT, in this tree's own voice: `module_display`
-// collapses only a REPEATED last segment (`std.core.core` -> `std.core`),
-// which is the folder rule applied to the declaring file itself. A root
-// that EXPORTS the name under its short spelling is written by every
-// plain consumer as that short form — `str = std.text`, never
-// `str = std.text.text_str`, which the layer rule refuses. So when the def is
-// visible from the folder's root table under the same dotted tail, the
-// offer spells the root; when it is not (or the module IS its own root,
-// where the two spellings are one table), it keeps the long form.
+// Prefer the folder root when it really re-exports the name; otherwise keep
+// the declaring module's path. Identical import lines are deduplicated.
 offer_def = (
     c     : Checker,
     t     : Alloc,
@@ -168,17 +113,8 @@ offer_at = (
     seen  :: Vec<str>
 ) Res<(), AllocError> {
     spoken = module_display(table.name);
-    // THE FOLDER ROOT, ASKED NOT ASSUMED: the short spelling is offered
-    // only when the root really hands out this name. `exports_of` follows
-    // starred imports too. A def that travels only under the long path
-    // keeps it. `spoken != table.name` is the test for a collapse
-    // having happened at all; when the module IS its own root the two
-    // spellings are one table and there is nothing to ask.
-    //
-    // The refusals are `written()` and the arms end in `.try()` because
-    // a `{}` arm beside an `Ok(())` arm is two different types to this
-    // checker — every arm of an expression match must agree, which is
-    // why `offer` above spells its refusals the same way.
+    // Use the short folder spelling only when its export table contains the
+    // name. `written()` keeps all match arms at the same result type.
     at_root ::= t.Vec<Def>();
     visited ::= t.Vec<usize>();
     offered ::= table.name;
@@ -197,9 +133,9 @@ offer_at = (
         true  => written(),
     });
     line ::= t.String().try();
-    line.add_bytes(name).try();
-    line.add_bytes(" = ").try();
-    line.add_bytes(offered).try();
+    line.add(name).try();
+    line.add(" = ").try();
+    line.add(offered).try();
     seen.find((s) { s.eq(line.view()) }).match({
         Ok(_) => written(),
         None  => {
@@ -210,15 +146,8 @@ offer_at = (
     Ok(())
 }
 
-// A diag's span against the request's range, BOTH HALF-OPEN: `Span` is
-// `[start, end)` (`std/ast/ast_span.zen`) and an LSP `Range.end` is
-// exclusive too, so the test is strict at each edge — a caret sitting ON
-// a boundary selects nothing by itself. THE EMPTY RANGE is the one
-// allowance, and it is spelled: a zero-width cursor range has
-// from == upto, and it selects what the cursor is INSIDE. Inclusive ends
-// here would reach one column out on each side — `x := Foo(Bar)` with
-// both names undefined would offer `Import Foo` for a caret on the `(`,
-// and selecting exactly `Foo(` would offer `Import Bar`.
+// Source spans and non-empty LSP ranges are half-open. A zero-width range
+// selects the diagnostic containing the cursor.
 covers = (span: Span, from: Pos, upto: Pos) bool {
     empty = from.line == upto.line && from.col == upto.col;
     (empty).match({
@@ -231,11 +160,7 @@ after = (a: Pos, b: Pos) bool {
     a.line > b.line || (a.line == b.line && a.col > b.col)
 }
 
-// WHERE THE LINE GOES: after the file's last import decl, read off the
-// BUILT tree — the buffer mid-keystroke may not parse, and the decls
-// that describe it are the settle's. No imports yet: the top of the
-// file. `Pos` is 1-based, so the line AFTER the import's last is
-// `end.line + 1`, which `to_wire` shifts onto the wire's 0-based axis.
+// Insert after the last parsed import, or at the start when none exists.
 insert_at = (c: Checker, file: str, text: str) WirePos {
     line ::= 1;
     module_index_of(c.tree, file).match({
@@ -253,9 +178,7 @@ insert_at = (c: Checker, file: str, text: str) WirePos {
     to_wire(text, Pos(line: line, col: 1))
 }
 
-// The wire shape. The title is plain text a person reads; the URI and the
-// new line go through `write_text` — a module path is dots and letters
-// today, and the day one is not, the escaping is already right.
+// Serialize the action title, URI, and edit text through JSON escaping.
 write_offerings = (
     c     : Checker,
     t     : Alloc,
@@ -271,15 +194,7 @@ write_offerings = (
     list.close(out)
 }
 
-// THE TITLE IS THE LINE, SAID OUT LOUD, and it is built from the line
-// rather than beside it — two spellings of `Name = dotted.module` is two
-// places for the offer and the edit to disagree.
-//
-// AND IT GOES THROUGH `write_text` LIKE EVERY OTHER STRING HERE. It used
-// to be concatenated between hand-written quotes, the one place in this
-// folder where caller data reached the wire unescaped. A Zen identifier
-// holds no quote today, so nothing was wrong on any input the lexer can
-// produce — which is exactly why it would have stayed wrong.
+// Derive the title from the exact edit line so the two spellings stay equal.
 write_action = (
     t    : Alloc,
     a    : Action,
@@ -289,16 +204,16 @@ write_action = (
     out  :: String
 ) Res<(), AllocError> {
     line ::= t.String().try();
-    line.add_bytes(a.name).try();
-    line.add_bytes(" = ").try();
-    line.add_bytes(a.module).try();
-    line.add_bytes("\n").try();
+    line.add(a.name).try();
+    line.add(" = ").try();
+    line.add(a.module).try();
+    line.add("\n").try();
     // The line is finished before its bytes are read, so the view cannot
     // outlive a growth of the buffer behind it.
     said = line.view();
     title ::= t.String().try();
-    title.add_bytes("Import ").try();
-    title.add_bytes(said.slice(0, said.len - 1)).try();
+    title.add("Import ").try();
+    title.add(said.slice(0, said.len - 1)).try();
 
     list.next(out).try();
     fix ::= obj(out).try();

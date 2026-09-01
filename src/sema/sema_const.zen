@@ -26,7 +26,6 @@ Unary, Access, Paren, Name, Const = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
-Range = std.core
 TyId, is_integer = sema.sema_ty
 SemaFault, NameFault = sema.sema_diag
 Def, decl_at = sema.sema_def
@@ -216,7 +215,7 @@ const_node = (c: Checker, node: Expr, left: usize) Res<i64> {
 
 const_literal* = (l: Literal) Res<i64> {
     l.kind.match({
-        Int => parse_i64(l.text),
+        Int => l.text.parse_i64(),
         _   => None,
     })
 }
@@ -340,47 +339,6 @@ mul_i64 = (x: i64, y: i64) Res<i64> {
 }
 
 small = (v: i64) bool { (v <= FOLD_LIMIT) && (v >= 0 - FOLD_LIMIT) }
-
-// ---------------------------------------------------------------------
-// reading a literal
-//
-// `std.core.num` carries no str-to-int conversion, only lossless
-// numeric ones, so the digits are read here. docs/SEMA_BOOTSTRAP_FIXES.md
-// tracks it as a std gap: `write_usize`'s inverse, belongs in
-// `std.text.text_fmt`.
-// ---------------------------------------------------------------------
-
-parse_i64* = (text: str) Res<i64> {
-    (text.len == 0).match({
-        true  => None,
-        false => digits_of(text),
-    })
-}
-
-digits_of = (text: str) Res<i64> {
-    v  ::= 0;
-    ok ::= true;
-    Range(0, text.len).loop((h, i) {
-        d    = digit_value(text[i]);
-        room = (d >= 0) && (v <= (I64_MAX - d) / 10);
-        v    = step(v, d, room);
-        ok   = ok && room;
-    });
-    ok.match({ true => Ok(v), false => None })
-}
-
-// The multiply happens only where it was already proved to fit — the
-// same discipline as the folds above, one level down.
-step = (v: i64, d: i64, room: bool) i64 {
-    room.match({ true => v * 10 + d, false => v })
-}
-
-digit_value = (b: u8) i64 {
-    ((b >= '0') && (b <= '9')).match({
-        true  => (b - '0').to_i64(),
-        false => 0 - 1,
-    })
-}
 
 // ---------------------------------------------------------------------
 // what fits what

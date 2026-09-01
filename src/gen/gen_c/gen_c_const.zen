@@ -12,7 +12,7 @@
 // justification in another.
 
 ExprId, Decl, Const = std.ast
-Literal, Binary, Unary, Access, Call, Name = std.ast
+Literal, Binary, Unary, Access, Call, Name, ArrayLit, FixedArray = std.ast
 AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -183,15 +183,28 @@ lower_const_value* = (
 // whole reason this arm reads as it does.
 is_pure_value* = (be :: CBackend, id: ExprId, ctx: Ctx) bool {
     be.tree.expr_at(id).kind.match({
-        Literal(_) => true,
-        Unit       => true,
-        Unary(u)   => be.is_pure_value(u.operand, ctx),
-        Binary(b)  => be.is_pure_pair(b, ctx),
-        Call(c)    => be.is_pure_call(c, ctx),
-        Access(a)  => be.is_pure_access(a, ctx),
-        Name(n)    => be.is_pure_name(n.text, ctx),
-        _          => false,
+        Literal(_)    => true,
+        Unit          => true,
+        Unary(u)      => be.is_pure_value(u.operand, ctx),
+        Binary(b)     => be.is_pure_pair(b, ctx),
+        Call(c)       => be.is_pure_call(c, ctx),
+        Access(a)     => be.is_pure_access(a, ctx),
+        Name(n)       => be.is_pure_name(n.text, ctx),
+        Array(a)      => be.pure_elems(a.elems, ctx),
+        FixedArray(a) => be.pure_elems(a.elems, ctx),
+        _             => false,
     })
+}
+
+pure_elems = (be :: CBackend, elems: Vec<ExprId>, ctx: Ctx) bool {
+    pure ::= true;
+    elems.loop((h, elem) {
+        (be.is_pure_value(elem, ctx) == false).then(() {
+            pure = false;
+            h.break();
+        });
+    });
+    pure
 }
 
 is_pure_name = (be :: CBackend, text: str, ctx: Ctx) bool {

@@ -1,21 +1,7 @@
 // src/sema/sema_ty.zen
-// What sema computes, not what the source wrote: `ast.Type` is a
-// WRITTEN type; this is what it means, keyed on an id (AST_CONTRACT.md).
-//
-// TYPES ARE INTERNED: two types are equal exactly when their ids are
-// equal, so every comparison (overload resolution, error-set merging,
-// assignability) is a `u32` compare, never a structural walk — the only
-// way to make `A | B` and `B | A` the same type without hand-written
-// set equality everywhere
-// (`tests/corpus/std/res_try_error_set_keeps_the_variant.zen` sends one
-// `IoError.Full` through four spellings and demands `Full`).
-//
-// THE KEY IS THE IDENTITY: a type interns under a string built from its
-// children's keys (one `Map` lookup, never a recursion). Nominal types
-// key on their DECLARATION, not their name, so same-named types in two
-// modules stay distinct; the key is not the display name, though —
-// `write_name` walks the structure to print `Vec<i32>` where the key
-// says `std.collections.Vec<i32>`.
+// Sema's interned type representation. TyId equality is type equality;
+// structural types use canonical keys, while nominal types key on their
+// declaration identity. Display names are derived separately from those keys.
 
 Alloc, AllocError = std.mem
 Vec, Map = std.collections
@@ -23,14 +9,8 @@ str, String = std.text
 Eq, Hash, Hasher = std.core
 Range = std.core
 DeclId = sema.sema_id
-write_usize = sema.sema_diag
 
-// An interned type: the index into `Types`, and nothing else — small
-// enough to compare, hash and copy without thinking about it.
-//
-// u32 for the reason `ast_id.zen` gives: `std.core.num` carries only
-// lossless conversions, and u32 is the widest integer with both
-// `to_usize` (to index the store) and `to_u64` (to hash).
+// Index into Types. u32 supports lossless indexing and hashing conversions.
 TyId* = { index*: u32 }
 
 TyId.impl(Eq, {
@@ -41,18 +21,10 @@ TyId.impl(Hash, {
     hash = (self: @Self, hasher :: Hasher) u64 { self.index.to_u64() }
 })
 
-// The scalars the language builds in: fixed-width numbers, C ABI
-// integers, `bool`, `str`, `()`. A separate kind from `Named`, not a
-// declaration with no body — a primitive has no `DeclId` to be nominal
-// on, and inventing one would put a fictional row in `Ast.modules`.
+// Built-in scalars have no nominal declaration identity.
 Prim* = { name*: str }
 
-// A list rather than a lookup: the set is closed by the language, and a
-// name that is almost one of these is a name, not a near miss.
-//
-// HERE AND NOT IN `sema_check.zen`: `named` below has to ask it, and the
-// store is the one place that can hold this fact without importing the
-// layer above.
+// The primitive set is closed by the language.
 is_prim* = (name: str) bool {
     fixed_integer(name)
         || c_integer(name)
@@ -109,26 +81,14 @@ TyFn* = {
     ret*: TyId,
 }
 
-// A structural error set, not a new kind of type: an anonymous enum of
-// its variants. CANONICAL — FLAT (a member is never itself a union),
-// SORTED (`A | B` and `B | A` intern to one id), DEDUPED (merging a set
-// into itself is a no-op) — and a union of one collapses to its member,
-// so `Res<T, E>` with a single error type is that type, not a set.
+// Error sets are flat, sorted, and deduplicated. A single member collapses to
+// that member rather than creating a union type.
 TyUnion* = {
     members*: Vec<TyId>,
 }
 
-// `[i32, 4]` — a fixed array, on the stack, no length stored beside the
-// bytes. THE COUNT IS PART OF THE TYPE (DESIGN.md:301: `[u8, 64]` and
-// `[u8, 65]` are different types), so a literal index past a known
-// length is a compile error, not a runtime trap; it's a FIELD, not a
-// backend re-derivation, since `sema_trap.zen` compares a literal index
-// against it and this is the only place the length exists.
-//
-// Not a `Named` on an invented declaration: a fixed array has no
-// `DeclId` (it's a type constructor, not a name), and a nominal type
-// keyed on a fiction would have to parse the count back out of its own
-// spelling.
+// Fixed arrays carry their element and count in the type; no runtime length is
+// stored beside the bytes.
 TyArray* = {
     elem*: TyId,
     count*: usize,
@@ -152,6 +112,17 @@ TyVar* = {
 // variant carries the type, so the form is carried rather than guessed
 // — `Open` is what a bare `Ok(..)` produces until an expectation settles.
 ResForm* = Absence | Failure | Open
+
+// The shape questions belong with the shape. Codegen, type joining and
+// diagnostics all need them; keeping them in a name mangler made the semantic
+// type layer depend upward just to ask whether a Res carries an error.
+res_arity* = (form: ResForm) usize {
+    form.match({ Failure => 2, Absence => 1, Open => 1 })
+}
+
+is_failure* = (form: ResForm) bool {
+    form.match({ Failure => true, Absence => false, Open => false })
+}
 
 // `Res<T>` and `Res<T, E>` are one shape — "propagation merging error
 // sets never changes the shape of Res". `error` is meaningful only when
@@ -237,7 +208,7 @@ Types* = {
     fresh = (self :: @Self, key: str, kind: Ty) Res<TyId, AllocError> {
         id = TyId(index: self.count);
         owned ::= self.alloc.String().try();
-        owned.add_bytes(key).try();
+        owned.add(key).try();
         // the map borrows the OWNED copy's bytes, never the caller's:
         // a key built in a scratch String dies with it, and a Map row
         // pointing at dead bytes is the bug that has no symptom
@@ -301,7 +272,7 @@ Types* = {
     declared = (self :: @Self, decl: DeclId, qname: str, name: str,
                 args: Vec<TyId>) Res<TyId, AllocError> {
         key ::= self.alloc.String().try();
-        key.add_bytes(qname).try();
+        key.add(qname).try();
         self.write_args(key, args).try();
         self.intern(
             key.view(),
@@ -364,7 +335,7 @@ Types* = {
     // are not in the type.
     fn_ty* = (self :: @Self, params: Vec<TyId>, ret: TyId) Res<TyId, AllocError> {
         key ::= self.alloc.String().try();
-        key.add_bytes("(").try();
+        key.add("(").try();
         params.loop((h, p) { key.fmt("{},", self.key_at(p)).try() });
         key.fmt(")->{}", self.key_at(ret)).try();
         self.intern(key.view(), Ty.Fn(TyFn(params: params, ret: ret)))
@@ -454,10 +425,10 @@ Types* = {
 
     write_name* = (self: @Self, id: TyId, out :: String) Res<(), AllocError> {
         self.at(id).match({
-            Prim(p)  => out.add_bytes(p.name),
-            Var(v)   => out.add_bytes(v.name),
-            Infer    => out.add_bytes("_"),
-            Unknown  => out.add_bytes("<unknown>"),
+            Prim(p)  => out.add(p.name),
+            Var(v)   => out.add(v.name),
+            Infer    => out.add("_"),
+            Unknown  => out.add("<unknown>"),
             Named(n) => self.write_named(n, out),
             Res(r)   => self.write_res(r, out),
             Fn(f)    => self.write_fn(f, out),
@@ -480,47 +451,47 @@ Types* = {
     // -----------------------------------------------------------------
 
     write_res = (self: @Self, r: TyRes, out :: String) Res<(), AllocError> {
-        out.add_bytes("Res<").try();
+        out.add("Res<").try();
         self.write_name(r.value, out).try();
         r.form.match({
             Failure => self.write_res_error(r, out),
             Absence => Ok(()),
             Open    => Ok(()),
         }).try();
-        out.add_bytes(">").try();
+        out.add(">").try();
         Ok(());
     }
 
     write_res_error = (self: @Self, r: TyRes, out :: String) Res<(), AllocError> {
-        out.add_bytes(", ").try();
+        out.add(", ").try();
         self.write_name(r.error, out).try();
         Ok(());
     }
 
     write_named = (self: @Self, n: TyNamed, out :: String) Res<(), AllocError> {
-        out.add_bytes(n.name).try();
+        out.add(n.name).try();
         (n.args.len > 0).then(() { self.write_arg_names(n.args, out).try() });
         Ok(());
     }
 
     write_arg_names = (self: @Self, args: Vec<TyId>, out :: String)
                       Res<(), AllocError> {
-        out.add_bytes("<").try();
+        out.add("<").try();
         args.loop((h, i, a) {
-            (i > 0).then(() { out.add_bytes(", ").try() });
+            (i > 0).then(() { out.add(", ").try() });
             self.write_name(a, out).try();
         });
-        out.add_bytes(">").try();
+        out.add(">").try();
         Ok(());
     }
 
     write_fn = (self: @Self, f: TyFn, out :: String) Res<(), AllocError> {
-        out.add_bytes("(").try();
+        out.add("(").try();
         f.params.loop((h, i, p) {
-            (i > 0).then(() { out.add_bytes(", ").try() });
+            (i > 0).then(() { out.add(", ").try() });
             self.write_name(p, out).try();
         });
-        out.add_bytes(") ").try();
+        out.add(") ").try();
         self.write_name(f.ret, out).try();
         Ok(());
     }
@@ -529,17 +500,17 @@ Types* = {
     // is what a diagnostic about a fixed array is usually about.
     write_array = (self: @Self, a: TyArray, out :: String)
                   Res<(), AllocError> {
-        out.add_bytes("[").try();
+        out.add("[").try();
         self.write_name(a.elem, out).try();
-        out.add_bytes(", ").try();
+        out.add(", ").try();
         out.write_usize(a.count).try();
-        out.add_bytes("]").try();
+        out.add("]").try();
         Ok(());
     }
 
     write_union = (self: @Self, u: TyUnion, out :: String) Res<(), AllocError> {
         u.members.loop((h, i, m) {
-            (i > 0).then(() { out.add_bytes(" | ").try() });
+            (i > 0).then(() { out.add(" | ").try() });
             self.write_name(m, out).try();
         });
         Ok(());
@@ -553,9 +524,9 @@ Types* = {
 
     write_args_run = (self: @Self, key :: String, args: Vec<TyId>)
                      Res<(), AllocError> {
-        key.add_bytes("<").try();
+        key.add("<").try();
         args.loop((h, a) { key.fmt("{},", self.key_at(a)).try() });
-        key.add_bytes(">").try();
+        key.add(">").try();
         Ok(());
     }
 
@@ -584,9 +555,7 @@ Types* = {
     sort_unique_into = (self: @Self, out :: Vec<TyId>, src: Vec<TyId>)
                        Res<(), AllocError> {
         src.loop((h, id) {
-            // the arm whose type is WRITTEN leads, as in `intern`: a
-            // bare `Ok(())` first would type the match as `Res<()>` and
-            // drop the other arm's error set. docs/SEMA_BOOTSTRAP_FIXES.md.
+            // Keep the fallible arm first so the match retains AllocError.
             self.vec_has(out, id).match({
                 false => self.insert_ordered(out, id),
                 true  => Ok(()),
@@ -603,8 +572,8 @@ Types* = {
         n = out.len;
         Range(1, n).loop((h, k) {
             j    = n - k;
-            prev = out.get(j - 1).match({ Ok(v) => v, None => id });
-            cur  = out.get(j).match({ Ok(v) => v, None => id });
+            prev = out.get(j - 1).value_or(id);
+            cur  = out.get(j).value_or(id);
             self.before(cur, prev).then(() {
                 put(out, j - 1, cur).try();
                 put(out, j, prev).try();
@@ -617,7 +586,7 @@ Types* = {
     // canonical too, but would print a set in whatever order it happened
     // to be interned; ordering by key is stable across runs.
     before = (self: @Self, a: TyId, b: TyId) bool {
-        key_before(self.key_at(a), self.key_at(b))
+        self.key_at(a).before(self.key_at(b))
     }
 
     vec_has = (self: @Self, haystack: Vec<TyId>, needle: TyId) bool {
@@ -659,21 +628,5 @@ put* = (out :: Vec<TyId>, i: usize, v: TyId) Res<(), AllocError> {
     out.set(i, v).match({
         None  => Err(AllocError.OutOfMemory),
         Ok(_) => Ok(()),
-    })
-}
-
-// Lexicographic byte order on two strings.
-//
-// A DUPLICATE OF A CLOSED GAP: `str.before` now exists in
-// `std.text.text_str`, and its own comment names "sema's type-key
-// ordering" as one of the three copies it consolidated. Delete this and
-// the `sema.zen` re-export; import `str.before`.
-// (`docs/SEMA_BOOTSTRAP_FIXES.md` §4 still records the gap as open and
-// is itself stale.)
-key_before* = (a: str, b: str) bool {
-    shorter = (a.len < b.len).match({ true => a.len, false => b.len });
-    Range(0, shorter).find((i) { a[i] != b[i] }).match({
-        Ok(i) => a[i] < b[i],
-        None  => a.len < b.len,
     })
 }

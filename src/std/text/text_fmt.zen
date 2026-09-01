@@ -11,7 +11,7 @@
 //           positional argument, so the two spellings MIX FREELY.
 //   {{      a literal `{`. `}}` is a literal `}`, so `{{}}` writes `{}`.
 //   {       NOT followed by `}`, `{` or an IDENTIFIER CHARACTER is a
-//           LITERAL brace (Display.dump writes `sb.add("{} {", ..)`
+//           LITERAL brace (Display.dump writes `sb.fmt("{} {", ..)`
 //           expecting that trailing `{` to print), and a lone `}` is a
 //           literal byte.
 //
@@ -27,10 +27,10 @@
 // `corpus/std/a_doubled_brace_writes_one` pins it).
 //
 // THE COST A CONVERSION LANE OWES: a byte writer reads no format
-// meaning, so `add_bytes("]}}")` writes two braces and `add("]}}")`
-// writes one — what "expanded at the call site" means, and a silent
-// change of output for anyone turning one into the other. Every doubled
-// brace in `src/lsp/` is under a corpus expectation (§2 holds the
+// meaning, so `String.add("]}}")` writes two braces and
+// `String.fmt("]}}")` writes one — what "expanded at the call site" means,
+// and a silent change of output for anyone turning one into the other.
+// Every doubled brace in `src/lsp/` is under a corpus expectation (§2 holds the
 // mutation table), so a lane reaching bytes that are NOT pinned that way
 // owes the escape at that site.
 //
@@ -54,6 +54,7 @@
 str = std.text.text_str
 Sink, WriteError = std.core.io
 is_ident_start, is_ident_cont = std.core
+digit = std.core.byte
 
 // one step of a format string: the literal run before the next hole, and
 // where to resume. `literal` is a SLICE of the format string — no copy
@@ -191,15 +192,15 @@ rest_step = (f: str, from: usize) FmtStep {
 // repeated here.
 // ---------------------------------------------------------------------------
 
-// the format door on ANY sink; `String.add` is the same door with a
+// the format door on ANY sink; `String.fmt` is the same door with a
 // String already in hand. This is what `toString` writes through, since
 // what it holds is a Sink that may be a console.
 //
-// Declared not defined, like String.add: arguments are type-directed,
+// Declared not defined, like String.fmt: arguments are type-directed,
 // expanded where WRITTEN. A ufcs free function, not a Sink member — a
 // member would cut a slot no impl could fill; the expansion is the
 // compiler's, not any sink's.
-add* = (out :: Sink, fmt: str, args: ...) Res<(), WriteError>
+fmt* = (out :: Sink, fmt: str, args: ...) Res<(), WriteError>
 
 // decimal, no separators — TESTING.md's corpus-wide assumption
 add_u64* = (out :: Sink, v: u64) Res<(), WriteError> {
@@ -247,21 +248,3 @@ add_bool* = (out :: Sink, v: bool) Res<(), WriteError> {
 // second renderer anywhere else would be a second answer to what a
 // float looks like, and the corpus pins exactly one.
 add_f64* = (out :: Sink, v: f64) Res<(), WriteError>
-
-// the digit table, twice — once per integer domain, since a u64 past
-// i64.MAX can't widen into one. `'0' + d` would be shorter, but
-// DESIGN.md specifies no u64-to-u8 conversion and this file won't
-// invent one. `_` is the tenth arm: callers pass `v % 10`, so it's 9
-digit = (d: u64) u8 {
-    d.match({
-        0 => '0', 1 => '1', 2 => '2', 3 => '3', 4 => '4',
-        5 => '5', 6 => '6', 7 => '7', 8 => '8', _ => '9',
-    });
-}
-
-digit = (d: i64) u8 {
-    d.match({
-        0 => '0', 1 => '1', 2 => '2', 3 => '3', 4 => '4',
-        5 => '5', 6 => '6', 7 => '7', 8 => '8', _ => '9',
-    });
-}

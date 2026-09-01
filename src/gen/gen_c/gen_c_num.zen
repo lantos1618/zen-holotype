@@ -1,0 +1,41 @@
+// Checked primitive narrowing. The standard library declares the operation;
+// the C backend owns the range test and cast because C is the only layer that
+// can narrow without rebuilding the value one increment at a time.
+
+ExprId = std.ast
+AllocError = std.mem
+String = std.text
+TyId = sema.sema_ty
+Ctx = sema.sema_check
+CBackend = gen.gen_c.gen_c_state
+expr = gen.gen_c.gen_c_expr
+temp, write_assign_none, write_assign_ok = gen.gen_c.gen_c_flow
+
+lower_checked_narrow* = (
+    be    :: CBackend,
+    id    : ExprId,
+    value : ExprId,
+    src   : TyId,
+    ret   : TyId,
+    ctx   : Ctx,
+    out   :: String
+) Res<(), AllocError> {
+    be.request_type(ret).try();
+    code ::= be.alloc.String().try();
+    expr(be, value, ctx, src, code).try();
+    held = be.temp(src, "n").try();
+    be.set_line(held.view(), code.view()).try();
+    dst = be.temp(ret, "t").try();
+    be.fmt("if ({} <= UINT8_MAX) {{\n", held.view()).try();
+    be.indent();
+    cast ::= be.alloc.String().try();
+    cast.fmt("(uint8_t){}", held.view()).try();
+    be.write_assign_ok(ret, cast.view(), dst.view()).try();
+    be.dedent();
+    be.writeln("} else {").try();
+    be.indent();
+    be.write_assign_none(ret, dst.view()).try();
+    be.dedent();
+    be.writeln("}").try();
+    out.add(dst.view())
+}

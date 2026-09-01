@@ -1,0 +1,1203 @@
+// src/gen/gen_c/gen_c_actor.zen
+// C lowering for std.actor. Each actor owns one worker thread and one
+// bounded mailbox. Senders only enqueue; the worker is the sole caller of
+// lifecycle and behavior methods, so actor state is never entered twice.
+
+AllocError = std.mem
+Vec = std.collections
+Range = std.core
+str, String = std.text
+ExprId, Access, Call, Function, Member = std.ast
+Def = sema.sema_def
+ImplId = sema.sema_id
+TyId, TyNamed = sema.sema_ty
+Ctx = sema.sema_check
+Inst = sema.sema_inst
+Emit = gen.gen_emit
+sym_gen, sym_member = gen.gen_name
+CBackend = gen.gen_c.gen_c_state
+Site, site_of, method_sig, member_symbol = gen.gen_c.gen_c_member
+has_body, decl_name, impl_member = gen.gen_c.gen_c_impl
+impl_bound_type = sema.sema_supply
+ctype, field_of = gen.gen_c.gen_c_type
+expr = gen.gen_c.gen_c_expr
+recv_inst = gen.gen_c.gen_c_mono
+temp, payload_type, write_assign_ok, write_assign_err = gen.gen_c.gen_c_flow
+write_assign_ok_unit = gen.gen_c.gen_c_flow
+by_ref = gen.gen_c.gen_c_call
+fat_value = gen.gen_c.gen_c_fat
+
+BehaviorHit* = {
+    site*: Site,
+    f*: Function,
+    mi*: usize,
+}
+
+// Recognition uses declaration ownership as well as spelling. A user-defined
+// Ref or Actor is an ordinary type.
+ref_of_actor* = (be :: CBackend, ty: TyId) Res<Res<TyId>, AllocError> {
+    be.types().at(ty).match({
+        Named(n) => be.actor_ref(n),
+        _        => Ok(None),
+    })
+}
+
+actor_ref = (be :: CBackend, n: TyNamed) Res<Res<TyId>, AllocError> {
+    (n.name.eq("Ref")
+        && be.world().module_name(n.decl).eq("std.actor.actor_core")).match({
+        false => Ok(None),
+        true  => Ok(n.args.get(0)),
+    })
+}
+
+actor_named_type = (be :: CBackend, name: str) Res<Res<TyId>, AllocError> {
+    be.named_type_at(name, actor_path(name))
+}
+
+named_type_at = (be :: CBackend, name: str, qname: str)
+                Res<Res<TyId>, AllocError> {
+    defs ::= be.alloc.Vec<Def>();
+    be.world().exported_named(name, defs).try();
+    found ::= be.alloc.Vec<TyId>();
+    defs.loop((h, d) {
+        (d.name.eq(name) && d.qname.eq(qname)).then(() {
+            found.add(be.check.def_type(d).try()).try();
+            h.break();
+        });
+    });
+    Ok(found.get(0))
+}
+
+actor_path = (name: str) str {
+    name.match({
+        "Actor"           => "std.actor.actor_core.Actor",
+        "ActorError"      => "std.actor.actor_core.ActorError",
+        "ActorStartError" => "std.actor.actor_core.ActorStartError",
+        "Context"         => "std.actor.actor_context.Context",
+        _                 => "",
+    })
+}
+
+behavior_of* = (be :: CBackend, actor: TyId, name: str)
+               Res<Res<BehaviorHit>, AllocError> {
+    found ::= be.alloc.Vec<BehaviorHit>();
+    site_of(be, actor).try().match({
+        None  => Ok(()),
+        Ok(s) => be.behavior_at(s, name, found),
+    }).try();
+    Ok(found.get(0))
+}
+
+behavior_at = (
+    be    :: CBackend,
+    s     : Site,
+    name  : str,
+    found :: Vec<BehaviorHit>
+) Res<(), AllocError> {
+    ids ::= be.alloc.Vec<ImplId>();
+    be.world().impls_named(be.tree, be.decl_name_at(s), ids).try();
+    ids.loop((h, id) { be.behavior_in(s, name, id, found).try() });
+    Ok(())
+}
+
+decl_name_at = (be: CBackend, s: Site) str {
+    decl_name(be, s.decl)
+}
+
+behavior_in = (
+    be    :: CBackend,
+    s     : Site,
+    name  : str,
+    id    : ImplId,
+    found :: Vec<BehaviorHit>
+) Res<(), AllocError> {
+    ((id.decl.module == s.decl.module) && (found.len == 0)).match({
+        false => Ok(()),
+        true  => be.world().impl_at(be.tree, id).match({
+            None   => Ok(()),
+            Ok(im) => be.behavior_members(s, name, im.members, found),
+        }),
+    })
+}
+
+behavior_members = (
+    be    :: CBackend,
+    s     : Site,
+    name  : str,
+    ms    : Vec<Member>,
+    found :: Vec<BehaviorHit>
+) Res<(), AllocError> {
+    ms.loop((h, m) {
+        m.kind.match({
+            Function(f) => (f.name.text.eq(name) && has_body(f)).then(() {
+                found.add(BehaviorHit(
+                    site: s,
+                    f: f,
+                    mi: s.decl.module.to_usize(),
+                )).try();
+                h.break();
+            }),
+            _           => (),
+        });
+    });
+    Ok(())
+}
+
+// Runtime records are independent of Zen layouts. Concrete actor/message
+// records are emitted later, after the Zen type definitions they contain.
+emit_actor_floor* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    be.uses_actor().match({
+        false => Ok(()),
+        true  => be.write_actor_floor(out),
+    })
+}
+
+write_actor_floor = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    out.say("#undef _POSIX_C_SOURCE").try();
+    out.say("#define _POSIX_C_SOURCE 200809L").try();
+    out.say("#if defined(__GLIBC__)").try();
+    out.say("#undef _FEATURES_H").try();
+    out.say("#include <features.h>").try();
+    out.say("#endif").try();
+    out.say("#include <pthread.h>").try();
+    out.line().try();
+    out.say("#define ZG_ACTOR_CAPACITY 64u").try();
+    out.say("typedef struct zg_actor zg_actor;").try();
+    out.say("typedef struct zg_actor_msg zg_actor_msg;").try();
+    out.say("typedef struct zg_actor_slice zg_actor_slice;").try();
+    out.say("typedef void (*zg_actor_turn)(zg_actor *, void *);").try();
+    out.say("struct zg_actor_msg {").try();
+    out.say("    zg_actor_msg *next;").try();
+    out.say("    zg_actor_turn turn;").try();
+    out.say("    unsigned char data[];").try();
+    out.say("};").try();
+    out.say("struct zg_actor_slice {").try();
+    out.say("    size_t data_offset;").try();
+    out.say("    size_t len_offset;").try();
+    out.say("    const unsigned char *data;").try();
+    out.say("    size_t len;").try();
+    out.say("};").try();
+    out.say("struct zg_actor {").try();
+    out.say("    pthread_t thread;").try();
+    out.say("    pthread_mutex_t lock;").try();
+    out.say("    pthread_cond_t wake;").try();
+    out.say("    zg_actor_msg *head;").try();
+    out.say("    zg_actor_msg *tail;").try();
+    out.say("    size_t count;").try();
+    out.say("    int open;").try();
+    out.say("    void *state;").try();
+    out.say("    void *context;").try();
+    out.say("    void (*started)(zg_actor *);").try();
+    out.say("    void (*stopped)(zg_actor *);").try();
+    out.say("    zg_actor *next;").try();
+    out.say("};").try();
+    out.say("extern pthread_mutex_t zg_actor_registry_lock;").try();
+    out.say("extern pthread_cond_t zg_actor_registry_idle;").try();
+    out.say("extern zg_actor *zg_actor_registry;").try();
+    out.say("extern int zg_actor_shutting_down;").try();
+    out.say("extern size_t zg_actor_pending;").try();
+    out.line().try();
+    be.write_actor_worker(out).try();
+    be.write_actor_send_floor(out).try();
+    be.write_actor_start_floor(out).try();
+    be.write_actor_stop_floor(out).try();
+    Ok(())
+}
+
+write_actor_worker = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    out.say("static void *zg_actor_worker(void *raw) {").try();
+    out.say("    zg_actor *a = (zg_actor *)raw;").try();
+    out.say("    if (a->started) a->started(a);").try();
+    out.say("    pthread_mutex_lock(&zg_actor_registry_lock);").try();
+    out.say("    zg_actor_pending--;").try();
+    out.say(
+        "    if (!zg_actor_pending) pthread_cond_broadcast(&zg_actor_registry_idle);"
+    ).try();
+    out.say("    pthread_mutex_unlock(&zg_actor_registry_lock);").try();
+    out.say("    for (;;) {").try();
+    out.say("        pthread_mutex_lock(&a->lock);").try();
+    out.say(
+        "        while (a->open && !a->head) pthread_cond_wait(&a->wake, &a->lock);"
+    ).try();
+    out.say("        if (!a->head && !a->open) {").try();
+    out.say("            pthread_mutex_unlock(&a->lock);").try();
+    out.say("            break;").try();
+    out.say("        }").try();
+    out.say("        zg_actor_msg *m = a->head;").try();
+    out.say("        a->head = m->next;").try();
+    out.say("        if (!a->head) a->tail = NULL;").try();
+    out.say("        a->count--;").try();
+    out.say("        pthread_mutex_unlock(&a->lock);").try();
+    out.say("        m->turn(a, m->data);").try();
+    out.say("        free(m);").try();
+    out.say("        pthread_mutex_lock(&zg_actor_registry_lock);").try();
+    out.say("        zg_actor_pending--;").try();
+    out.say(
+        "        if (!zg_actor_pending) pthread_cond_broadcast(&zg_actor_registry_idle);"
+    ).try();
+    out.say("        pthread_mutex_unlock(&zg_actor_registry_lock);").try();
+    out.say("    }").try();
+    out.say("    if (a->stopped) a->stopped(a);").try();
+    out.say("    return NULL;").try();
+    out.say("}").try();
+    out.line().try();
+    Ok(())
+}
+
+// 0 accepted, 1 closed, 2 full (including allocation refusal).
+write_actor_send_floor = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    out.say(
+        "static int zg_actor_send(zg_actor *a, zg_actor_turn turn, const void *data, size_t size, const zg_actor_slice *slices, size_t slice_count) {"
+    ).try();
+    out.say("    size_t extra = 0;").try();
+    out.say(
+        "    for (size_t i = 0; i < slice_count; i++) extra += slices[i].len;"
+    ).try();
+    out.say(
+        "    zg_actor_msg *m = (zg_actor_msg *)malloc(sizeof(*m) + size + extra);"
+    ).try();
+    out.say("    if (!m) return 2;").try();
+    out.say("    m->next = NULL;").try();
+    out.say("    m->turn = turn;").try();
+    out.say("    if (size) memcpy(m->data, data, size);").try();
+    out.say("    unsigned char *tail = m->data + size;").try();
+    out.say("    for (size_t i = 0; i < slice_count; i++) {").try();
+    out.say(
+        "        if (slices[i].len) memcpy(tail, slices[i].data, slices[i].len);"
+    ).try();
+    out.say("        unsigned char *bytes = tail;").try();
+    out.say(
+        "        memcpy(m->data + slices[i].data_offset, &bytes, sizeof(bytes));"
+    ).try();
+    out.say(
+        "        memcpy(m->data + slices[i].len_offset, &slices[i].len, sizeof(slices[i].len));"
+    ).try();
+    out.say("        tail += slices[i].len;").try();
+    out.say("    }").try();
+    out.say("    pthread_mutex_lock(&a->lock);").try();
+    out.say(
+        "    if (!a->open) { pthread_mutex_unlock(&a->lock); free(m); return 1; }"
+    ).try();
+    out.say(
+        "    if (a->count >= ZG_ACTOR_CAPACITY) { pthread_mutex_unlock(&a->lock); free(m); return 2; }"
+    ).try();
+    out.say("    if (a->tail) a->tail->next = m; else a->head = m;").try();
+    out.say("    a->tail = m;").try();
+    out.say("    a->count++;").try();
+    out.say("    pthread_mutex_lock(&zg_actor_registry_lock);").try();
+    out.say("    zg_actor_pending++;").try();
+    out.say("    pthread_mutex_unlock(&zg_actor_registry_lock);").try();
+    out.say("    pthread_cond_signal(&a->wake);").try();
+    out.say("    pthread_mutex_unlock(&a->lock);").try();
+    out.say("    return 0;").try();
+    out.say("}").try();
+    out.line().try();
+    Ok(())
+}
+
+// 0 started, 1 allocation/setup failure, 2 worker unavailable.
+write_actor_start_floor = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    out.say("static int zg_actor_start(zg_actor *a) {").try();
+    out.say("    if (pthread_mutex_init(&a->lock, NULL) != 0) return 1;").try();
+    out.say(
+        "    if (pthread_cond_init(&a->wake, NULL) != 0) { pthread_mutex_destroy(&a->lock); return 1; }"
+    ).try();
+    out.say(
+        "    a->head = NULL; a->tail = NULL; a->count = 0; a->open = 1;"
+    ).try();
+    out.say("    pthread_mutex_lock(&zg_actor_registry_lock);").try();
+    out.say(
+        "    if (zg_actor_shutting_down) { pthread_mutex_unlock(&zg_actor_registry_lock); pthread_cond_destroy(&a->wake); pthread_mutex_destroy(&a->lock); return 2; }"
+    ).try();
+    out.say("    zg_actor_pending++;").try();
+    out.say(
+        "    if (pthread_create(&a->thread, NULL, zg_actor_worker, a) != 0) { zg_actor_pending--; pthread_mutex_unlock(&zg_actor_registry_lock); pthread_cond_destroy(&a->wake); pthread_mutex_destroy(&a->lock); return 2; }"
+    ).try();
+    out.say("    a->next = zg_actor_registry;").try();
+    out.say("    zg_actor_registry = a;").try();
+    out.say("    pthread_mutex_unlock(&zg_actor_registry_lock);").try();
+    out.say("    return 0;").try();
+    out.say("}").try();
+    out.line().try();
+    Ok(())
+}
+
+write_actor_stop_floor = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    out.say("static void zg_actor_stop(zg_actor *a) {").try();
+    out.say("    if (!a) return;").try();
+    out.say("    pthread_mutex_lock(&a->lock);").try();
+    out.say("    a->open = 0;").try();
+    out.say("    pthread_cond_signal(&a->wake);").try();
+    out.say("    pthread_mutex_unlock(&a->lock);").try();
+    out.say("}").try();
+    out.say("static void zg_actor_shutdown(void) {").try();
+    out.say("    pthread_mutex_lock(&zg_actor_registry_lock);").try();
+    out.say("    zg_actor_shutting_down = 1;").try();
+    out.say(
+        "    while (zg_actor_pending) pthread_cond_wait(&zg_actor_registry_idle, &zg_actor_registry_lock);"
+    ).try();
+    out.say(
+        "    for (zg_actor *a = zg_actor_registry; a; a = a->next) zg_actor_stop(a);"
+    ).try();
+    out.say("    zg_actor *list = zg_actor_registry;").try();
+    out.say("    pthread_mutex_unlock(&zg_actor_registry_lock);").try();
+    out.say("    while (list) {").try();
+    out.say("        zg_actor *next = list->next;").try();
+    out.say("        pthread_join(list->thread, NULL);").try();
+    out.say("        pthread_cond_destroy(&list->wake);").try();
+    out.say("        pthread_mutex_destroy(&list->lock);").try();
+    out.say("        free(list);").try();
+    out.say("        list = next;").try();
+    out.say("    }").try();
+    out.say("}").try();
+    out.line().try();
+    Ok(())
+}
+
+emit_actor_defs* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    be.actor_defs_loop(out)
+}
+
+actor_defs_loop = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    Range(0, be.actor_def_count()).loop((h, i) {
+        be.actor_def_at(i).match({
+            None    => Ok(()),
+            Ok(def) => out.say(def.view()),
+        }).try();
+    });
+    (be.actor_def_count() > 0).then(() { out.line().try() });
+    Ok(())
+}
+
+emit_actor_globals* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    be.uses_actor().match({
+        false => Ok(()),
+        true  => {
+            out.say(
+                "pthread_mutex_t zg_actor_registry_lock = PTHREAD_MUTEX_INITIALIZER;"
+            ).try();
+            out.say(
+                "pthread_cond_t zg_actor_registry_idle = PTHREAD_COND_INITIALIZER;"
+            ).try();
+            out.say("zg_actor *zg_actor_registry = NULL;").try();
+            out.say("int zg_actor_shutting_down = 0;").try();
+            out.say("size_t zg_actor_pending = 0;").try();
+            out.line()
+        },
+    })
+}
+
+write_actor_shutdown* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
+    be.uses_actor().match({
+        false => Ok(()),
+        true  => out.say("zg_actor_shutdown();"),
+    })
+}
+
+// Ref.stop only closes admission. The worker drains messages already in the
+// mailbox, then runs stopped and exits.
+lower_actor_stop* = (
+    be  :: CBackend,
+    a   : Access,
+    rty : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    be.need_actor();
+    recv ::= be.alloc.String().try();
+    expr(be, a.base, ctx, rty, recv).try();
+    id ::= be.alloc.String().try();
+    id.sym_member("id").try();
+    be.fmt(
+        "zg_actor_stop((zg_actor *)(uintptr_t)({}.{}));\n",
+        recv.view(),
+        id.view()
+    ).try();
+    out.add("0")
+}
+
+// A behavior call on Ref<A> becomes one copied mailbox record and returns as
+// soon as that record is accepted. The generated turn function is the only
+// code that enters A: it reads state/context from the runtime header and calls
+// the statically resolved behavior body on the actor's worker.
+lower_actor_send* = (
+    be       :: CBackend,
+    id       : ExprId,
+    c        : Call,
+    a        : Access,
+    rty      : TyId,
+    actor_ty : TyId,
+    ctx      : Ctx,
+    out      :: String
+) Res<(), AllocError> {
+    be.behavior_of(actor_ty, a.name.text).try().match({
+        None    => be.unsupported(id, "an unresolved actor behavior", out),
+        Ok(hit) => be.write_actor_send(id, c, a, rty, actor_ty, hit, ctx, out),
+    })
+}
+
+write_actor_send = (
+    be       :: CBackend,
+    id       : ExprId,
+    c        : Call,
+    a        : Access,
+    rty      : TyId,
+    actor_ty : TyId,
+    hit      : BehaviorHit,
+    ctx      : Ctx,
+    out      :: String
+) Res<(), AllocError> {
+    be.need_actor();
+    ret = be.check.type_of(id, ctx).try();
+    be.request_type(ret).try();
+    inst = be.recv_inst(actor_ty).try();
+    sig ::= be.alloc.Vec<TyId>();
+    be.method_sig(actor_ty, hit.site.decl, hit.f, hit.mi, inst, sig).try();
+    n       = be.next_actor_site();
+    payload = be.write_message_record(n, sig).try();
+    turn    = be.write_behavior_turn(
+        n,
+        payload.view(),
+        actor_ty,
+        hit,
+        sig
+    ).try();
+    be.write_send_value(
+        c,
+        a,
+        rty,
+        ret,
+        payload.view(),
+        turn.view(),
+        hit.f,
+        sig,
+        ctx,
+        out
+    )
+}
+
+write_message_record = (be :: CBackend, n: usize, sig: Vec<TyId>)
+                       Res<String, AllocError> {
+    name ::= be.alloc.String().try();
+    sym_gen(name, "actor_message", n).try();
+    text ::= be.alloc.String().try();
+    text.fmt("typedef struct {} {{\n", name.view()).try();
+    (sig.len <= 2).then(() {
+        text.add("    unsigned char zg_unit;\n").try();
+    });
+    Range(2, sig.len).loop((h, i) {
+        ty = sig.get(i).match({
+            Ok(t) => t,
+            None  => TyId(index: 0),
+        });
+        be.request_type(ty).try();
+        text.add("    ").try();
+        be.ctype(ty, text).try();
+        text.add(" zg_arg").try();
+        text.write_usize(i - 2).try();
+        text.add(";\n").try();
+    });
+    text.fmt("}} {};", name.view()).try();
+    be.add_actor_def(text).try();
+    Ok(name)
+}
+
+write_behavior_turn = (
+    be       :: CBackend,
+    n        : usize,
+    payload  : str,
+    actor_ty : TyId,
+    hit      : BehaviorHit,
+    sig      : Vec<TyId>
+) Res<String, AllocError> {
+    name ::= be.alloc.String().try();
+    sym_gen(name, "actor_turn", n).try();
+    sym = be.behavior_symbol(actor_ty, hit).try();
+    actor_c ::= be.alloc.String().try();
+    be.ctype(actor_ty, actor_c).try();
+    context_ty = sig.get(1).match({
+        Ok(t) => t,
+        None  => TyId(index: 0),
+    });
+    context_c ::= be.alloc.String().try();
+    be.ctype(context_ty, context_c).try();
+    proto ::= be.alloc.String().try();
+    proto.fmt(
+        "{}void {}(zg_actor *zg_base, void *zg_raw)",
+        be.linkage(),
+        name.view()
+    ).try();
+    body ::= be.alloc.String().try();
+    body.fmt(
+        "    {} *zg_state = ({} *)zg_base->state;\n",
+        actor_c.view(),
+        actor_c.view()
+    ).try();
+    body.fmt(
+        "    {} *zg_ctx = ({} *)zg_base->context;\n",
+        context_c.view(),
+        context_c.view()
+    ).try();
+    body.fmt("    {payload} *zg_msg = ({payload} *)zg_raw;\n").try();
+    body.fmt("    (void)({}(zg_state, *zg_ctx", sym.view()).try();
+    Range(2, sig.len).loop((h, i) {
+        body.add(", ").try();
+        by_ref(hit.f, i).then(() { body.add("&").try() });
+        body.add("zg_msg->zg_arg").try();
+        body.write_usize(i - 2).try();
+    });
+    body.add("));\n").try();
+    be.add_function(name, proto, body).try();
+    Ok(name)
+}
+
+write_send_value = (
+    be      :: CBackend,
+    c       : Call,
+    a       : Access,
+    rty     : TyId,
+    ret     : TyId,
+    payload : str,
+    turn    : str,
+    f       : Function,
+    sig     : Vec<TyId>,
+    ctx     : Ctx,
+    out     :: String
+) Res<(), AllocError> {
+    recv_code ::= be.alloc.String().try();
+    expr(be, a.base, ctx, rty, recv_code).try();
+    recv = be.temp(rty, "actor_ref").try();
+    be.set_line(recv.view(), recv_code.view()).try();
+    message ::= be.fresh_name("actor_payload").try();
+    be.fmt("{payload} {} = ({payload}){{0}};\n", message.view()).try();
+    slices = direct_str_count(be, sig);
+    slice_name ::= be.fresh_name("actor_slices").try();
+    (slices > 0).then(() {
+        count ::= be.alloc.String().try();
+        count.write_usize(slices).try();
+        be.fmt(
+            "zg_actor_slice {}[{}];\n",
+            slice_name.view(),
+            count.view()
+        ).try();
+    });
+    slice ::= 0;
+    c.args.loop((h, i, arg) {
+        ty = sig.get(i + 2).match({
+            Ok(t) => t,
+            None  => TyId(index: 0),
+        });
+        value ::= be.alloc.String().try();
+        expr(be, arg.value, ctx, ty, value).try();
+        line ::= be.alloc.String().try();
+        line.fmt("{}.zg_arg", message.view()).try();
+        line.write_usize(i).try();
+        line.fmt(" = {};\n", value.view()).try();
+        be.write(line.view()).try();
+        is_direct_str(be, ty).then(() {
+            be.write_slice_descriptor(
+                slice_name.view(),
+                slice,
+                message.view(),
+                i
+            ).try();
+            slice = slice + 1;
+        });
+    });
+    id ::= be.alloc.String().try();
+    id.sym_member("id").try();
+    status ::= be.fresh_name("actor_send").try();
+    descriptors = (slices > 0).match({
+        true  => slice_name.view(),
+        false => "NULL",
+    });
+    count ::= be.alloc.String().try();
+    count.write_usize(slices).try();
+    be.fmt(
+        "int {} = zg_actor_send((zg_actor *)(uintptr_t)({}.{}), {}, &{}, sizeof({}), {}, {});\n",
+        status.view(),
+        recv.view(),
+        id.view(),
+        turn,
+        message.view(),
+        message.view(),
+        descriptors,
+        count.view()
+    ).try();
+    dst = be.temp(ret, "actor_result").try();
+    be.fmt("if ({} == 0) {{\n", status.view()).try();
+    be.indent();
+    be.write_assign_ok_unit(ret, dst.view()).try();
+    be.dedent();
+    be.fmt("}} else if ({} == 1) {{\n", status.view()).try();
+    be.indent();
+    be.write_assign_err(ret, "Closed", dst.view()).try();
+    be.dedent();
+    be.writeln("} else {").try();
+    be.indent();
+    be.write_assign_err(ret, "Full", dst.view()).try();
+    be.dedent();
+    be.writeln("}").try();
+    out.add(dst.view())
+}
+
+direct_str_count = (be: CBackend, sig: Vec<TyId>) usize {
+    count ::= 0;
+    Range(2, sig.len).loop((h, i) {
+        sig.get(i).match({
+            None   => (),
+            Ok(ty) => is_direct_str(be, ty).then(() { count = count + 1; }),
+        });
+    });
+    count
+}
+
+is_direct_str = (be: CBackend, ty: TyId) bool {
+    be.types().at(ty).match({
+        Prim(p) => p.name.eq("str"),
+        _       => false,
+    })
+}
+
+write_slice_descriptor = (
+    be      :: CBackend,
+    slices  : str,
+    at      : usize,
+    message : str,
+    arg     : usize
+) Res<(), AllocError> {
+    s_at ::= be.alloc.String().try();
+    s_at.write_usize(at).try();
+    a_at ::= be.alloc.String().try();
+    a_at.write_usize(arg).try();
+    be.fmt(
+        "{}[{}].data_offset = (size_t)((unsigned char *)&{}.zg_arg{}.{} - (unsigned char *)&{});\n",
+        slices,
+        s_at.view(),
+        message,
+        a_at.view(),
+        "data",
+        message
+    ).try();
+    be.fmt(
+        "{}[{}].len_offset = (size_t)((unsigned char *)&{}.zg_arg{}.{} - (unsigned char *)&{});\n",
+        slices,
+        s_at.view(),
+        message,
+        a_at.view(),
+        "len",
+        message
+    ).try();
+    be.fmt(
+        "{}[{}].data = {}.zg_arg{}.{};\n",
+        slices,
+        s_at.view(),
+        message,
+        a_at.view(),
+        "data"
+    ).try();
+    be.fmt(
+        "{}[{}].len = {}.zg_arg{}.{};\n",
+        slices,
+        s_at.view(),
+        message,
+        a_at.view(),
+        "len"
+    )
+}
+
+// Env.spawn creates the concrete actor record, the actor-owned arena and the
+// Context handed to every turn. The worker is started only after all fields
+// are initialized, so started observes a complete actor.
+lower_actor_spawn* = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    a   : Access,
+    rty : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    ret = be.check.type_of(id, ctx).try();
+    be.payload_type(ret, "Ok").match({
+        None       => be.unsupported(id, "Env.spawn without a Ref result", out),
+        Ok(ref_ty) => be.spawn_ref(id, c, a, rty, ret, ref_ty, ctx, out),
+    })
+}
+
+spawn_ref = (
+    be     :: CBackend,
+    id     : ExprId,
+    c      : Call,
+    a      : Access,
+    rty    : TyId,
+    ret    : TyId,
+    ref_ty : TyId,
+    ctx    : Ctx,
+    out    :: String
+) Res<(), AllocError> {
+    be.ref_of_actor(ref_ty).try().match({
+        None         => be.unsupported(
+            id,
+            "Env.spawn returning a non-actor Ref",
+            out
+        ),
+        Ok(actor_ty) => be.spawn_types(
+            id,
+            c,
+            a,
+            rty,
+            ret,
+            ref_ty,
+            actor_ty,
+            ctx,
+            out
+        ),
+    })
+}
+
+spawn_types = (
+    be       :: CBackend,
+    id       : ExprId,
+    c        : Call,
+    a        : Access,
+    rty      : TyId,
+    ret      : TyId,
+    ref_ty   : TyId,
+    actor_ty : TyId,
+    ctx      : Ctx,
+    out      :: String
+) Res<(), AllocError> {
+    be.actor_named_type("Context").try().match({
+        None           => be.unsupported(id, "std.actor.Context", out),
+        Ok(context_ty) => be.named_type_at(
+            "Arena",
+            "std.mem.mem_arena.Arena"
+        ).try().match({
+            None         => be.unsupported(id, "std.mem.Arena", out),
+            Ok(arena_ty) => be.spawn_known(
+                id,
+                c,
+                a,
+                rty,
+                ret,
+                ref_ty,
+                actor_ty,
+                context_ty,
+                arena_ty,
+                ctx,
+                out
+            ),
+        }),
+    })
+}
+
+spawn_known = (
+    be         :: CBackend,
+    id         : ExprId,
+    c          : Call,
+    a          : Access,
+    rty        : TyId,
+    ret        : TyId,
+    ref_ty     : TyId,
+    actor_ty   : TyId,
+    context_ty : TyId,
+    arena_ty   : TyId,
+    ctx        : Ctx,
+    out        :: String
+) Res<(), AllocError> {
+    be.field_of(arena_ty, "state").try().match({
+        None          => be.unsupported(id, "Arena without state", out),
+        Ok(state_ptr) => pointee(be, state_ptr).match({
+            None         => be.unsupported(
+                id,
+                "Arena state that is not a pointer",
+                out
+            ),
+            Ok(state_ty) => be.field_of(context_ty, "alloc").try().match({
+                None         => be.unsupported(
+                    id,
+                    "Context without Alloc",
+                    out
+                ),
+                Ok(alloc_ty) => be.write_actor_spawn(
+                    c,
+                    a,
+                    rty,
+                    ret,
+                    ref_ty,
+                    actor_ty,
+                    context_ty,
+                    arena_ty,
+                    state_ty,
+                    alloc_ty,
+                    ctx,
+                    out
+                ),
+            }),
+        }),
+    })
+}
+
+pointee = (be: CBackend, ty: TyId) Res<TyId> {
+    be.types().at(ty).match({
+        Named(n) => n.args.get(0),
+        _        => None,
+    })
+}
+
+write_actor_spawn = (
+    be         :: CBackend,
+    c          : Call,
+    a          : Access,
+    rty        : TyId,
+    ret        : TyId,
+    ref_ty     : TyId,
+    actor_ty   : TyId,
+    context_ty : TyId,
+    arena_ty   : TyId,
+    state_ty   : TyId,
+    alloc_ty   : TyId,
+    ctx        : Ctx,
+    out        :: String
+) Res<(), AllocError> {
+    be.need_actor();
+    [ret, ref_ty, actor_ty, context_ty, arena_ty, state_ty, alloc_ty].loop((h, ty) { be.request_type(ty).try() });
+    n = be.next_actor_site();
+    rec ::= be.alloc.String().try();
+    sym_gen(rec, "actor", n).try();
+    be.write_actor_record(rec.view(), actor_ty, context_ty, arena_ty).try();
+    started = be.write_started_callback(n, rec.view(), actor_ty).try();
+    stopped = be.write_stopped_callback(
+        n,
+        rec.view(),
+        actor_ty,
+        arena_ty
+    ).try();
+    be.write_spawn_value(
+        c,
+        a,
+        rty,
+        ret,
+        ref_ty,
+        actor_ty,
+        context_ty,
+        arena_ty,
+        state_ty,
+        alloc_ty,
+        rec.view(),
+        started.view(),
+        stopped.view(),
+        ctx,
+        out
+    )
+}
+
+write_actor_record = (
+    be      :: CBackend,
+    name    : str,
+    actor   : TyId,
+    context : TyId,
+    arena   : TyId
+) Res<(), AllocError> {
+    a ::= be.alloc.String().try();
+    be.ctype(actor, a).try();
+    c ::= be.alloc.String().try();
+    be.ctype(context, c).try();
+    ar ::= be.alloc.String().try();
+    be.ctype(arena, ar).try();
+    text ::= be.alloc.String().try();
+    text.fmt(
+        "typedef struct {name} {{ zg_actor zg_base; {} zg_state; {} zg_ctx; {} zg_arena; }} {name};",
+        a.view(),
+        c.view(),
+        ar.view()
+    ).try();
+    be.add_actor_def(text)
+}
+
+write_started_callback = (be :: CBackend, n: usize, rec: str, actor: TyId)
+                         Res<String, AllocError> {
+    name ::= be.alloc.String().try();
+    name.add("NULL").try();
+    hit: Res<BehaviorHit> = be.behavior_of(actor, "started").try();
+    hit.match({
+        None    => (),
+        Ok(hit) => {
+            callback ::= be.alloc.String().try();
+            sym_gen(callback, "actor_started", n).try();
+            be.add_lifecycle_callback(callback, rec, actor, hit, true).try();
+            name = callback;
+            ()
+        },
+    });
+    Ok(name)
+}
+
+add_lifecycle_callback = (
+    be      :: CBackend,
+    name    : String,
+    rec     : str,
+    actor   : TyId,
+    hit     : BehaviorHit,
+    context : bool
+)
+                         Res<(), AllocError> {
+    sym = be.behavior_symbol(actor, hit).try();
+    proto ::= be.alloc.String().try();
+    proto.fmt("{}void {}(zg_actor *zg_base)", be.linkage(), name.view()).try();
+    body ::= be.alloc.String().try();
+    body.fmt("    {rec} *zg_self = ({rec} *)zg_base;\n").try();
+    context.match({
+        true  => body.fmt(
+            "    (void)({}(&zg_self->zg_state, zg_self->zg_ctx));\n",
+            sym.view()
+        ),
+        false => body.fmt("    (void)({}(&zg_self->zg_state));\n", sym.view()),
+    }).try();
+    be.add_function(name, proto, body)
+}
+
+behavior_symbol = (be :: CBackend, actor: TyId, hit: BehaviorHit)
+                  Res<String, AllocError> {
+    inst = be.recv_inst(actor).try();
+    sig ::= be.alloc.Vec<TyId>();
+    be.method_sig(actor, hit.site.decl, hit.f, hit.mi, inst, sig).try();
+    be.member_symbol(actor, hit.site, hit.f.name.text, sig, inst)
+}
+
+write_stopped_callback = (
+    be    :: CBackend,
+    n     : usize,
+    rec   : str,
+    actor : TyId,
+    arena : TyId
+)
+                         Res<String, AllocError> {
+    name ::= be.alloc.String().try();
+    sym_gen(name, "actor_stopped", n).try();
+    proto ::= be.alloc.String().try();
+    proto.fmt("{}void {}(zg_actor *zg_base)", be.linkage(), name.view()).try();
+    body ::= be.alloc.String().try();
+    body.fmt("    {rec} *zg_self = ({rec} *)zg_base;\n").try();
+    be.behavior_of(actor, "stopped").try().match({
+        None    => Ok(()),
+        Ok(hit) => {
+            sym = be.behavior_symbol(actor, hit).try();
+            body.fmt(
+                "    (void)({}(&zg_self->zg_state, zg_self->zg_ctx));\n",
+                sym.view()
+            )
+        },
+    }).try();
+    be.drop_symbol(actor).try().match({
+        None    => Ok(()),
+        Ok(sym) => body.fmt("    (void)({}(&zg_self->zg_state));\n", sym.view()),
+    }).try();
+    be.drop_symbol(arena).try().match({
+        None    => Ok(()),
+        Ok(sym) => body.fmt("    (void)({}(&zg_self->zg_arena));\n", sym.view()),
+    }).try();
+    be.add_function(name, proto, body).try();
+    Ok(name)
+}
+
+drop_symbol = (be :: CBackend, ty: TyId) Res<Res<String>, AllocError> {
+    site_of(be, ty).try().match({
+        None  => Ok(None),
+        Ok(s) => be.impl_member(s.decl, "drop").try().match({
+            None  => Ok(None),
+            Ok(f) => {
+                hit = BehaviorHit(site: s, f: f, mi: s.decl.module.to_usize());
+                Ok(Ok(be.behavior_symbol(ty, hit).try()))
+            },
+        }),
+    })
+}
+
+write_spawn_value = (
+    be         :: CBackend,
+    c          : Call,
+    a          : Access,
+    rty        : TyId,
+    ret        : TyId,
+    ref_ty     : TyId,
+    actor_ty   : TyId,
+    context_ty : TyId,
+    arena_ty   : TyId,
+    state_ty   : TyId,
+    alloc_ty   : TyId,
+    rec        : str,
+    started    : str,
+    stopped    : str,
+    ctx        : Ctx,
+    out        :: String
+) Res<(), AllocError> {
+    env_code ::= be.alloc.String().try();
+    expr(be, a.base, ctx, rty, env_code).try();
+    env = be.temp(rty, "env").try();
+    be.set_line(env.view(), env_code.view()).try();
+    actor_code ::= be.alloc.String().try();
+    c.args.get(0).match({
+        None      => actor_code.add("0"),
+        Ok(value) => expr(be, value.value, ctx, actor_ty, actor_code),
+    }).try();
+    state_c ::= be.alloc.String().try();
+    be.ctype(state_ty, state_c).try();
+    cell        ::= be.fresh_name("actor").try();
+    arena_state ::= be.fresh_name("actor_state").try();
+    status      ::= be.fresh_name("actor_status").try();
+    be.fmt("{rec} *{} = ({rec} *)malloc(sizeof({rec}));\n", cell.view()).try();
+    be.fmt(
+        "{} *{} = ({} *)malloc(sizeof({}));\n",
+        state_c.view(),
+        arena_state.view(),
+        state_c.view(),
+        state_c.view()
+    ).try();
+    dst = be.temp(ret, "t").try();
+    be.fmt("if (!{} || !{}) {{\n", cell.view(), arena_state.view()).try();
+    be.indent();
+    be.fmt("free({});\nfree({});\n", cell.view(), arena_state.view()).try();
+    be.write_assign_err(ret, "OutOfMemory", dst.view()).try();
+    be.dedent();
+    be.writeln("} else {").try();
+    be.indent();
+    be.init_actor_fields(
+        cell.view(),
+        arena_state.view(),
+        env.view(),
+        actor_code.view(),
+        actor_ty,
+        context_ty,
+        arena_ty,
+        state_ty,
+        alloc_ty,
+        started,
+        stopped
+    ).try();
+    be.fmt(
+        "int {} = zg_actor_start(&{}->zg_base);\n",
+        status.view(),
+        cell.view()
+    ).try();
+    be.fmt("if ({} != 0) {{\n", status.view()).try();
+    be.indent();
+    // No worker owns the value when startup fails. Run ordinary Drop for
+    // the actor and let Arena.drop release both its pages and state cell.
+    be.write_failed_spawn_drop(cell.view(), actor_ty, arena_ty).try();
+    be.fmt("free({});\n", cell.view()).try();
+    be.write_assign_err(ret, "Unavailable", dst.view()).try();
+    be.dedent();
+    be.writeln("} else {").try();
+    be.indent();
+    ref_value ::= be.alloc.String().try();
+    be.write_ref_value(ref_ty, cell.view(), ref_value).try();
+    be.write_assign_ok(ret, ref_value.view(), dst.view()).try();
+    be.dedent();
+    be.writeln("}").try();
+    be.dedent();
+    be.writeln("}").try();
+    out.add(dst.view())
+}
+
+write_failed_spawn_drop = (
+    be    :: CBackend,
+    cell  : str,
+    actor : TyId,
+    arena : TyId
+) Res<(), AllocError> {
+    be.drop_symbol(actor).try().match({
+        None       => Ok(()),
+        Ok(symbol) => be.fmt(
+            "(void)({}(&{}->zg_state));\n",
+            symbol.view(),
+            cell
+        ),
+    }).try();
+    be.drop_symbol(arena).try().match({
+        None       => Ok(()),
+        Ok(symbol) => be.fmt(
+            "(void)({}(&{}->zg_arena));\n",
+            symbol.view(),
+            cell
+        ),
+    })
+}
+
+init_actor_fields = (
+    be          :: CBackend,
+    cell        : str,
+    arena_state : str,
+    env         : str,
+    actor       : str,
+    actor_ty    : TyId,
+    context_ty  : TyId,
+    arena_ty    : TyId,
+    state_ty    : TyId,
+    alloc_ty    : TyId,
+    started     : str,
+    stopped     : str
+) Res<(), AllocError> {
+    mem ::= be.alloc.String().try();
+    mem.sym_member("mem").try();
+    head ::= be.alloc.String().try();
+    head.sym_member("head").try();
+    next ::= be.alloc.String().try();
+    next.sym_member("next").try();
+    env_mem ::= be.alloc.String().try();
+    env_mem.sym_member("mem").try();
+    be.fmt("{arena_state}->{} = {env}.{};\n", mem.view(), env_mem.view()).try();
+    be.fmt("{arena_state}->{} = NULL;\n", head.view()).try();
+    be.fmt("{arena_state}->{} = 0;\n", next.view()).try();
+    arena_c ::= be.alloc.String().try();
+    be.ctype(arena_ty, arena_c).try();
+    arena_field ::= be.alloc.String().try();
+    arena_field.sym_member("state").try();
+    be.fmt(
+        "{cell}->zg_arena = (({}){{ .{} = {arena_state} }});\n",
+        arena_c.view(),
+        arena_field.view()
+    ).try();
+    alloc_value ::= be.alloc.String().try();
+    addr        ::= be.alloc.String().try();
+    addr.fmt("&{cell}->zg_arena").try();
+    be.fat_value(addr.view(), arena_ty, alloc_ty, alloc_value).try();
+    context_c ::= be.alloc.String().try();
+    be.ctype(context_ty, context_c).try();
+    context_env ::= be.alloc.String().try();
+    context_env.sym_member("env").try();
+    context_alloc ::= be.alloc.String().try();
+    context_alloc.sym_member("alloc").try();
+    be.fmt(
+        "{cell}->zg_ctx = (({}){{ .{} = {env}, .{} = {} }});\n",
+        context_c.view(),
+        context_env.view(),
+        context_alloc.view(),
+        alloc_value.view()
+    ).try();
+    be.fmt("{cell}->zg_state = {actor};\n").try();
+    be.fmt("{cell}->zg_base.state = &{cell}->zg_state;\n").try();
+    be.fmt("{cell}->zg_base.context = &{cell}->zg_ctx;\n").try();
+    be.fmt("{cell}->zg_base.started = {started};\n").try();
+    be.fmt("{cell}->zg_base.stopped = {stopped};\n").try();
+    Ok(())
+}
+
+write_ref_value = (
+    be     :: CBackend,
+    ref_ty : TyId,
+    cell   : str,
+    out    :: String
+) Res<(), AllocError> {
+    cty ::= be.alloc.String().try();
+    be.ctype(ref_ty, cty).try();
+    id ::= be.alloc.String().try();
+    id.sym_member("id").try();
+    out.fmt(
+        "(({}){{ .{} = (uint64_t)(uintptr_t){} }})",
+        cty.view(),
+        id.view(),
+        cell
+    )
+}

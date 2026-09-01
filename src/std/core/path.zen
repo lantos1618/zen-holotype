@@ -1,32 +1,49 @@
-// std.core.path
-// a filesystem path — bytes, like str. The shell handed them to us
-// as bytes, the kernel wants them back as bytes; validating in
-// between could only lose information.
+// Filesystem paths are byte strings. Construction preserves bytes exactly;
+// validation belongs to the filesystem operation that consumes the path.
 
 Path* = {
     text*: str,
+
+    parent* = (self: @Self) Res<Path> {
+        self.text.rfind('/').match({
+            None      => None,
+            Ok(slash) => Ok(Path(self.text.slice(0, slash))),
+        })
+    }
+
+    name* = (self: @Self) str {
+        self.text.rfind('/').match({
+            None      => self.text,
+            Ok(slash) => self.text.slice(slash + 1, self.text.len),
+        })
+    }
+
+    ext* = (self: @Self) Res<str> {
+        name = self.name();
+        name.rfind('.').match({
+            None       => None,
+            Ok(period) => Ok(name.slice(period + 1, name.len)),
+        })
+    }
 }
 
-// build a path, optionally formatted. THE FORMATTED FORM TAKES THE
-// ALLOCATOR AND FAILS: it builds a string, and this language has no
-// hidden heap, so the two forms differ by more than an argument list.
+// Build a borrowed path directly, or allocate a formatted path explicitly.
+// The formatted form can fail because it owns its resulting String.
 //     Path("src/main.zen")
 //     Path(a, "build/{}-{}/{}", os, arch, name).try()
-Path* = (text: str) Path
+Path* = (text: str) Path { Path(text: text) }
 Path* = (a: Alloc, fmt: str, args: ...) Res<Path, AllocError>
 
 // Join two path fragments with exactly the separator the boundary needs.
 // This is the string form for callers that pass paths directly to Fs;
 // Path.join below is the typed form used by build descriptions.
 join_path* = (a: Alloc, dir: str, file: str) Res<String, AllocError> {
-    out ::= a.String("{}", dir).try();
+    out ::= a.String().try();
+    out.add(dir).try();
     (out.len() > 0 && out.view().index(out.len() - 1) != '/')
-        .then(() { out.add_byte('/').try(); });
-    out.add_bytes(file).try();
+        .then(() { out.add('/').try(); });
+    out.add(file).try();
     Ok(out)
 }
 
 join* = (a: Alloc, base: Path, rest: str) Res<Path, AllocError>
-parent* = (self: Path) Res<Path>
-name* = (self: Path) str
-ext* = (self: Path) Res<str>

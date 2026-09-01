@@ -1,0 +1,45 @@
+H2Error, H2Head, MAX_SEND, h2_chunk = std.net.http2
+
+Error = AllocError | H2Error
+
+main = (env: Env) Res<(), Error> {
+    chunk = h2_chunk("abc").try();
+    first = chunk.get(0).ok_or(H2Error.ProtocolFailed).try();
+    last  = chunk.get(2).ok_or(H2Error.ProtocolFailed).try();
+    chunk.get(3).match({
+        Ok(_) => println("chunk {} {} {} some", chunk.len, first, last),
+        None  => println("chunk {} {} {} none", chunk.len, first, last),
+    });
+    copied = chunk.copy(env.mem.alloc()).try();
+    println("copied {}", copied.view());
+
+    full_text ::= env.mem.alloc().String().try();
+    Range(0, MAX_SEND).loop((h, i) { full_text.add('x').try(); });
+    full = h2_chunk(full_text.view()).try();
+    println(
+        "full {} {}",
+        full.len,
+        full.get(MAX_SEND - 1).ok_or(H2Error.ProtocolFailed).try()
+    );
+    full_text.add('y').try();
+    h2_chunk(full_text.view()).match({
+        Ok(_)  => println("oversize accepted"),
+        Err(e) => e.match({
+            ProtocolFailed => println("oversize refused"),
+            _              => println("oversize wrong error"),
+        }),
+    });
+
+    [
+        H2Head.Informational(103),
+        H2Head.Response(204),
+        H2Head.Trailers,
+    ].loop((h, head) {
+        head.match({
+            Informational(status) => println("informational {}", status),
+            Response(status)      => println("response {}", status),
+            Trailers              => println("trailers"),
+        });
+    });
+    Ok(())
+}

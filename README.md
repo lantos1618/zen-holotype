@@ -8,9 +8,9 @@ Shape = Circle(Circle) | Rect(Rect) | Unit
 Shape.impl(Display, {
     toString ::= (self: @Self, out :: Sink) Res<(), WriteError> {
         self.match({
-            Circle(c) => out.add("circle: {}", c.radius),
-            Rect(r)   => out.add("rect: {} {}", r.width, r.height),
-            Unit      => out.add("unit"),
+            Circle(c) => out.fmt("circle: {}", c.radius),
+            Rect(r)   => out.fmt("rect: {} {}", r.width, r.height),
+            Unit      => out.fmt("unit"),
         })
     }
 })

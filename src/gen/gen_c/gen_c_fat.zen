@@ -18,8 +18,7 @@ Ctx = sema.sema_check
 Inst, has_var = sema.sema_inst
 self_ctx = sema.sema_member
 param_type = sema.sema_denote
-write_usize = sema.sema_diag
-sym_member, sym_fn, sym_gen = gen.gen_name
+sym_member, sym_fn, sym_gen, qualify = gen.gen_name
 USR, GEN = gen.gen_name
 CBackend, MethodRef = gen.gen_c.gen_c_state
 sub_with, intern_var, recv_inst = gen.gen_c.gen_c_mono
@@ -28,7 +27,7 @@ ctype, declarator, is_unit, request_type, declared_ret = gen.gen_c.gen_c_type
 is_ptr_named = gen.gen_c.gen_c_type
 ty_of = gen.gen_c.gen_c_expr
 init_temp = gen.gen_c.gen_c_flow
-Site, site_of, member_at, join = gen.gen_c.gen_c_member
+Site, site_of, member_at = gen.gen_c.gen_c_member
 impl_member, bodied_fn = gen.gen_c.gen_c_impl
 write_cast = gen.gen_c.gen_c_bound
 
@@ -145,7 +144,7 @@ add_slot_at = (
     out :: Vec<Slot>
 ) Res<(), AllocError> {
     owner ::= be.alloc.String().try();
-    join(owner, s.qname, f.name.text).try();
+    qualify(owner, s.qname, f.name.text).try();
     sctx = be.check.self_ctx(s.decl.module.to_usize(), ty).try();
     mark = be.enter_struct_tparams(s.decl).try();
     be.enter_tparams(f.tparams, owner.view()).try();
@@ -270,8 +269,8 @@ slot_sym = (be :: CBackend, f: Function, out: Vec<Slot>)
 }
 
 number_sym = (sym :: String, n: usize) Res<(), AllocError> {
-    sym.add_bytes("_").try();
-    write_usize(sym, n).try();
+    sym.add("_").try();
+    sym.write_usize(n).try();
     Ok(());
 }
 
@@ -292,13 +291,13 @@ slot_field* = (be :: CBackend, s: Slot, out :: String)
     be.ctype(s.ret, out).try();
     out.fmt(" (*{})(void *", s.sym.view()).try();
     s.params.loop((h, p) { be.slot_param(p, out).try() });
-    Range(0, s.elems).loop((h, i) { out.add_bytes(", size_t").try() });
-    out.add_bytes(");").try();
+    Range(0, s.elems).loop((h, i) { out.add(", size_t").try() });
+    out.add(");").try();
     Ok(());
 }
 
 slot_param = (be :: CBackend, p: TyId, out :: String) Res<(), AllocError> {
-    out.add_bytes(", ").try();
+    out.add(", ").try();
     be.ctype(p, out).try();
     Ok(());
 }
@@ -361,7 +360,7 @@ fat_value* = (
     be.ctype(tty, rec).try();
     out.fmt("(({}){ .zg_self = (void *){addr}", rec.view()).try();
     slots.loop((h, s) { be.slot_init(s, cty, out).try() });
-    out.add_bytes(" })").try();
+    out.add(" })").try();
     Ok(());
 }
 
@@ -373,8 +372,8 @@ slot_init = (be :: CBackend, s: Slot, cty: TyId, out :: String)
             Res<(), AllocError> {
     out.fmt(", .{} = ", s.sym.view()).try();
     be.thunk_for(s, cty).try().match({
-        None     => out.add_bytes("NULL"),
-        Ok(name) => out.add_bytes(name.view()),
+        None     => out.add("NULL"),
+        Ok(name) => out.add(name.view()),
     })
 }
 
@@ -413,7 +412,7 @@ supplied_thunk = (be :: CBackend, s: Slot, cty: TyId, cs: Site)
 write_thunk = (be :: CBackend, s: Slot, cty: TyId, cs: Site, f: Function)
               Res<Res<String>, AllocError> {
     qname ::= be.alloc.String().try();
-    join(qname, cs.qname, s.name).try();
+    qualify(qname, cs.qname, s.name).try();
     inst ::= be.alloc.Inst();
     be.erase_tparams(f, qname.view(), inst).try();
     carry_inst(be.recv_inst(cty).try(), inst).try();
@@ -496,7 +495,7 @@ emit_thunk = (
     body ::= be.alloc.String().try();
     be.thunk_body(s, cty, f, sig, sym, body).try();
     owned ::= be.alloc.String().try();
-    owned.add_bytes(name).try();
+    owned.add(name).try();
     be.add_function(owned, head, body)
 }
 
@@ -507,7 +506,7 @@ thunk_head = (be :: CBackend, s: Slot, name: str, out :: String)
     out.fmt("{}{} {name}(void *zg_self", be.linkage(), ret.view()).try();
     s.params.loop((h, i, p) { be.thunk_param(p, "a", i, out).try() });
     Range(0, s.elems).loop((h, i) { be.thunk_param(be.size_ty(), "e", i, out).try() });
-    out.add_bytes(")").try();
+    out.add(")").try();
     Ok(());
 }
 
@@ -517,7 +516,7 @@ size_ty = (be :: CBackend) TyId {
 
 thunk_param* = (be :: CBackend, p: TyId, stem: str, i: usize, out :: String)
               Res<(), AllocError> {
-    out.add_bytes(", ").try();
+    out.add(", ").try();
     nm ::= be.alloc.String().try();
     sym_gen(nm, stem, i).try();
     be.declarator(p, nm.view(), out).try();
@@ -543,11 +542,11 @@ thunk_body = (
     call.fmt("{sym}(").try();
     be.thunk_recv(cty, f, call).try();
     s.params.loop((h, i, p) { be.thunk_arg(s, sig, i, call).try() });
-    call.add_bytes(")").try();
-    out.add_bytes("    ").try();
+    call.add(")").try();
+    out.add("    ").try();
     be.is_unit(s.ret).match({
         true  => Ok(()),
-        false => out.add_bytes("return "),
+        false => out.add("return "),
     }).try();
     out.fmt("{};\n", call.view())
 }
@@ -555,14 +554,14 @@ thunk_body = (
 thunk_recv = (be :: CBackend, cty: TyId, f: Function, out :: String)
              Res<(), AllocError> {
     recv_by_ref(f).match({
-        true  => out.add_bytes("("),
-        false => out.add_bytes("(*("),
+        true  => out.add("("),
+        false => out.add("(*("),
     }).try();
     be.ctype(cty, out).try();
-    out.add_bytes(" *)zg_self").try();
+    out.add(" *)zg_self").try();
     recv_by_ref(f).match({
         true  => Ok(()),
-        false => out.add_bytes(")"),
+        false => out.add(")"),
     }).try();
     Ok(());
 }
@@ -582,7 +581,7 @@ thunk_arg = (
     i   : usize,
     out :: String
 ) Res<(), AllocError> {
-    out.add_bytes(", ").try();
+    out.add(", ").try();
     nm ::= be.alloc.String().try();
     sym_gen(nm, "a", i).try();
     be.scales(s, i).match({
@@ -631,7 +630,7 @@ cast_arg = (
     want = sig.get(i + 1).match({ Ok(t) => t, None => TyId(index: 0) });
     got  = s.params.get(i).match({ Ok(t) => t, None => TyId(index: 0) });
     (want.eq(got) || (be.is_pointer(want) == false)).match({
-        true  => out.add_bytes(nm),
+        true  => out.add(nm),
         false => be.write_cast(nm, want, out),
     })
 }

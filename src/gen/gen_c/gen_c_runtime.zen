@@ -1,23 +1,9 @@
 // src/gen/gen_c/gen_c_runtime.zen
-// The C every emitted program stands on: the floor, same for every program;
-// the only thing that varies is WHICH checked-arithmetic helpers it needs.
-// THE FAILURE MODEL IS ENFORCED HERE. DESIGN.md: "signed overflow is
-// undefined behaviour in C, so `gen_c` may not emit `a + b` and inspect the
-// result afterwards — the optimizer is entitled to delete that check." So
-// nothing below performs the operation first; every helper tests, then
-// operates.
-// A trap prints `file:line:col: trap: <what>` to stderr and exits 134. The
-// three whats are `integer overflow`, `divide by zero` and `index out of
-// bounds`; the position is the OPERATOR token, which is why `Binary` and
-// `Unary` carry an `op_span` at all.
-// `i32.MIN / -1` traps as an OVERFLOW, not a division by zero — it faults
-// identically on x86; TESTING.md records that DESIGN.md names only the zero
-// divisor.
-// THE BUILTINS ARE A FAST PATH, NEVER A REQUIREMENT. Every checked helper is
-// emitted twice: `__builtin_*_overflow` where the compiler has it, a
-// hand-written PRE-operation range test where it does not — PLAN.md's
-// promise that "what a newcomer runs needs only a C compiler". A seed that
-// `#error`s without a GCC extension defeats the reason a seed is committed.
+// Runtime C emitted for every program plus demand-driven helpers.
+//
+// Checked arithmetic tests operands before operations, avoiding signed C
+// undefined behavior. Traps print the source position and exit 134. Compiler
+// builtins are optional fast paths; portable checks preserve C99 behavior.
 
 AllocError = std.mem
 str, String = std.text
@@ -55,16 +41,8 @@ emit_banner* = (out :: Emit) Res<(), AllocError> {
     Ok(());
 }
 
-// The types and the trap, which every program has, and nothing that
-// depends on what the program contains.
-// `str` IS A ZEN DECLARATION AND THIS IS ITS LAYOUT. `text_str.zen`
-// writes `{ data: Ptr<u8>, len*: usize }` and `str.eq` reads both, so
-// the two spellings have to agree — and the one that gives is the
-// MEMBER ACCESS, not this. `gen_c_expr.write_field_access` spells a
-// `str`'s two fields the way this line does, because `str` is the one
-// type whose C representation is the runtime floor's rather than its
-// declaration's, and the floor is what a `str` literal, `zg_print_str`
-// and every C caller already agree on.
+// `str` uses this runtime layout; literals, field access, printing, and C
+// callers must agree on its data pointer and byte length.
 emit_floor* = (out :: Emit) Res<(), AllocError> {
     out.say(
         "typedef struct zg_str { unsigned char *data; size_t len; } zg_str;"
@@ -76,16 +54,8 @@ emit_floor* = (out :: Emit) Res<(), AllocError> {
 }
 
 emit_trap = (out :: Emit) Res<(), AllocError> {
-    // BOTH HELPERS BELOW NEVER RETURN: `zg_trap` exits, `zg_unreachable`
-    // traps. Every `match` chain whose arms all return closes its final
-    // `else` with `zg_unreachable`, so unannotated, that `else` reads to
-    // cc as a path falling off the end of a non-void function -- visible
-    // only as `-Wreturn-type`, which nothing here greps for, and how
-    // #764's bare `return;` walked past the whole corpus printing 0
-    // instead of 11. Annotated, a missing return is a hard cc error.
-    // `_Noreturn` is C11 and this floor is C99 (`C_STANDARD`), so the
-    // spelling is capability-gated like `ZG_HAS_OVERFLOW_BUILTINS`
-    // above it.
+    // Both helpers never return. Select the available annotation without
+    // raising the runtime's C99 language requirement.
     out.say(
         "#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L"
     ).try();
@@ -163,28 +133,8 @@ emit_index = (out :: Emit) Res<(), AllocError> {
     Ok(());
 }
 
-// What the console lowers into, and only for a program that prints.
-// DESIGN.md routes `println(..)` through the `Env` in scope — sugar for
-// `<the Env in scope>.out.println(..)` — and `Console`'s members are
-// DECLARED WITHOUT A BODY for the same reason `Fs`'s are: there is
-// nothing underneath to write them in. So the sugar bottoms out here:
-// decimal with no separators, one newline per `println`.
-// TWO FAMILIES, ONE STREAM EACH (env.zen): `zg_print_*` writes stdout,
-// `zg_eprint_*` writes stderr, and every member of one is the other's
-// with an `e`. A program that never prints to stderr carries none of
-// the second family, on the same rule as the first.
-// `zg_print_str` takes a `zg_str` BY VALUE rather than a pointer and a
-// length, so printing a `str` needs no temporary and therefore no
-// statement of its own — which is what lets an argument be lowered as a
-// pure C expression.
-// `if (n)` AND `if (s.len)` ARE NOT AN OPTIMISATION. An empty `str` has
-// a NULL `data` — that is what `Vec` holds before its first grow — and
-// `fwrite(NULL, 1, 0, stdout)` is undefined by C99 7.1.4 however many
-// bytes it moves. UBSan calls it "null pointer passed as argument 1,
-// which is declared to never be null", and printing an empty string is
-// common enough that it reached the corpus. The `fs_write` floor below
-// already spells the same guard (`if (len && fwrite(...))`); these four
-// are the rest of the family. Same class as #789 in `Arena.realloc`.
+// Demand-driven console helpers. stdout and stderr use parallel families.
+// Length guards keep null data pointers for empty strings away from `fwrite`.
 emit_print* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     be.uses_print().match({
         false => be.uses_fbuf().match({
@@ -199,14 +149,8 @@ emit_print* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     })
 }
 
-// The scratch the buffer door's float writer renders into (#809), kept
-// with the print family because the two spellings of a number belong in
-// one file -- and gated by its own flag, because a program that formats
-// into a buffer never calls any of the helpers above it. File-scope
-// like `zg_print_f64` beside which it sits; safe shared because a
-// render's bytes are copied by the sink write that follows it before
-// any later render starts. 40 bytes is C's own minimum for any %g of a
-// double plus its sign and NUL.
+// Float formatting copies from this scratch buffer before the next render.
+// Forty bytes covers any `%g` double, its sign, and the terminator.
 write_float_scratch = (out :: Emit) Res<(), AllocError> {
     out.say("static char zg_f64_scratch[40];").try();
     out.line().try();
@@ -237,10 +181,7 @@ write_print = (out :: Emit) Res<(), AllocError> {
     Ok(());
 }
 
-// The second family, and only for a program that narrates. Every member
-// is the stdout one with an `e` and FILE: same formats, other stream —
-// which is the whole point, since a caller takes the answer from stdout
-// and throws stderr away with `2>/dev/null`.
+// stderr mirrors the stdout helpers with the same formats.
 emit_stderr* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     be.uses_stderr().match({
         false => Ok(()),
@@ -272,21 +213,9 @@ write_stderr = (out :: Emit) Res<(), AllocError> {
     Ok(());
 }
 
-// `@scope` — the block's own defer stack
-// A `Scope` is a POINTER to the enclosing block's record, which holds
-// the deferred closures AND their captures — `gen_c_scope.zen`'s header
-// argues why that is the one storage certainly still alive.
-// A SLOT'S ENV IS A UNION OVER EVERY CAPTURE RECORD IN THE PROGRAM, so
-// it is exactly as large and as aligned as the largest one: no guessed
-// byte count, and nothing to overflow. HOW MANY closures one block may
-// carry is the one thing whole-program analysis cannot answer — a
-// `defer` in a loop is unbounded — so that bound is a constant, and
-// exceeding it traps at the registration rather than corrupting the
-// frame.
-// EMITTED AFTER THE TYPES because a capture record names them, and
-// before the prototypes because a `Scope` parameter is spelled
-// `zg_scope *`. The forward declaration in the floor is what lets that
-// spelling appear anywhere at all.
+// `@scope` owns a block's LIFO defer stack and copied capture records. The
+// environment union supplies the maximum required size and alignment. The
+// fixed slot bound traps on registration rather than corrupting the frame.
 
 // The name alone, before anything can spell `zg_scope *`. It is its own
 // emission and not part of `emit_floor` because the floor is what EVERY
@@ -411,21 +340,8 @@ write_defer_run = (out :: Emit) Res<(), AllocError> {
     Ok(());
 }
 
-// the filesystem floor
-// `Fs`'s members have no Zen body for the same reason `Console`'s have
-// none, and this is what they bottom out in. `gen_c_cap.zen` lowers the
-// calls; these are the four functions those calls name.
-// EMITTED ONLY FOR A PROGRAM THAT TOUCHES THE DISK, which is why the
-// two headers are here rather than at the top: this is the one place
-// the generated C leaves C99 for POSIX, and a hello-world should not
-// pay for it. C has no way to ask whether a path is a directory, and a
-// compiler walking a source tree has to know. `S_ISDIR` is the part of
-// that a hosted implementation may leave out, so it is defined when the
-// header did not.
-// THE ORDINALS ARE A CONTRACT WITH `gen_c_cap.zen` AND WITH NOTHING
-// ELSE: the number never leaves the generated C, because the lowering
-// turns it back into a variant BY NAME, so `env.zen` may rename or
-// reorder its own error set without either side agreeing to it.
+// POSIX filesystem helpers are emitted only when a program uses `Fs`. Internal
+// error ordinals are consumed by lowering and never escape generated C.
 
 emit_fs* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     be.uses_fs().match({
@@ -635,16 +551,9 @@ write_fs_read = (out :: Emit) Res<(), AllocError> {
     Ok(());
 }
 
-// THE LOCK, AND ITS GIVE-BACK. `open(O_RDWR|O_CREAT|O_EXCL)` makes the
-// path exist for one instant and `flock` does the excluding, so a
-// crashed holder releases with its descriptors and nothing is left on
-// the disk to clean up. LOCK_EX | LOCK_NB: a caller that wanted to wait
-// has `Exists` in hand to retry around — blocking inside a generated
-// expression would be a hang nobody asked for.
-// THE PATH NAMES WHAT IS SERIALISED, not a file that must be there:
-// O_CREAT on the LAST component only means an existing DIRECTORY under
-// that name still opens (flock takes it), which is why `.fixpoint/`
-// locks fine and a directory AT the path is refused as IsDir.
+// The non-blocking advisory lock is released with its descriptor, including
+// after a crash. The path identifies the serialized resource and may not name
+// a directory.
 write_fs_lock = (out :: Emit) Res<(), AllocError> {
     comment(
         out,
@@ -915,11 +824,8 @@ one_sided = (out :: Emit, lead: str, bound: str, tail: str)
     Ok(());
 }
 
-// THE WRAPPING FORM ITSELF: the operands go through the unsigned type
-// of the same width, where wrapping is defined, and come back with an
-// implementation-defined conversion every compiler this targets defines
-// as two's complement. It is both the portable fallback's answer and
-// the whole body of `+%`.
+// Wrapping operations use the same-width unsigned type, where C defines the
+// arithmetic, before converting back to the signed representation.
 wrapped_return = (out :: Emit, ct: str, uct: str, sym: str)
                  Res<(), AllocError> {
     out.bytes("return (").try();

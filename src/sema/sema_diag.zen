@@ -108,6 +108,7 @@ SemaFault* =
     | NotCallable(TypeFault)           // the callee is not a function
     | MethodNotValue(TypeFault)        // the name is a method, and the call is missing
     | LiteralOutOfRange(TypeFault)     // the family fits, the value does not
+    | ActorPayload(NameFault)          // payload storage cannot cross a mailbox
 
     // overloading
     | NoOverload(NameFault)            // no candidate of that arity or those types
@@ -225,6 +226,7 @@ message* = (fault: SemaFault) str {
         NotCallable(_)            => "this is not a function, so it cannot be called",
         MethodNotValue(_)         => "a method is a value only when the call is written: `s.len` names the function, `s.len()` reads it",
         LiteralOutOfRange(_)      => "out of range: a literal's type comes from its context, and the context here cannot hold it",
+        ActorPayload(_)           => "actor message payload is not transferable: owned allocator-backed graphs need receiver-arena transfer",
         NoOverload(_)             => "no overload matches: resolution is on declared parameter types and arity",
         DuplicateSignature(_)     => "duplicate signature: parameter names are documentation, not identity",
         AmbiguousOverload(_)      => "ambiguous overload: a generic parameter swallows a concrete one, so these two can never be told apart at a call site",
@@ -376,6 +378,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         NoErrorConversion(f)      => write_types(out, types, f),
         HoistAmbiguous(f)         => write_types(out, types, f),
         LiteralOutOfRange(f)      => write_literal(out, types, f),
+        ActorPayload(f)           => out.write_name(f),
 
         DuplicateSignature(f)     => write_pair(out, f),
         DuplicateField(f)         => write_pair(out, f),
@@ -400,7 +403,7 @@ write_name = (out :: String, f: NameFault) Res<(), AllocError> {
 // here — a constructor supplies fields, not an impl.
 write_ctor_missing = (out :: String, f: NameFault) Res<(), AllocError> {
     quote(out, f.name).try();
-    out.add_bytes(
+    out.add(
         ": a field with no default and no Res is required, and one left out is a zero nobody wrote"
     )
 }
@@ -435,7 +438,7 @@ write_ctor_constant = (out :: String, types: Types, f: TypeFault)
 
 write_missing = (out :: String, f: NameFault) Res<(), AllocError> {
     quote(out, f.name).try();
-    out.add_bytes(
+    out.add(
         ": an impl supplies a value for every field the bound declares"
     ).try();
     Ok(());
@@ -582,7 +585,7 @@ write_place = (out :: String, f: NameFault, tail: str) Res<(), AllocError> {
 // reader walks from the move to the capture that forbids it.
 write_capture = (out :: String, f: CaptureFault) Res<(), AllocError> {
     out.fmt(" {} was consumed by a closure that captured it", f.place).try();
-    out.add_bytes(" — the capture keeps it alive here: ").try();
+    out.add(" — the capture keeps it alive here: ").try();
     write_at(out, f.at).try();
     Ok(());
 }
@@ -663,7 +666,7 @@ write_types = (out :: String, types: Types, f: TypeFault)
 write_literal = (out :: String, types: Types, f: TypeFault)
                 Res<(), AllocError> {
     text = f.name;
-    out.add_bytes(": literal").try();
+    out.add(": literal").try();
     (text.len > 0).then(() { out.fmt(" {}", text).try() });
     expected ::= types.name_of(f.expected).try();
     out.fmt(" does not fit {}", expected.view()).try();
@@ -684,9 +687,9 @@ write_literal = (out :: String, types: Types, f: TypeFault)
 // points at the wrong file's line.
 write_pair = (out :: String, f: PairFault) Res<(), AllocError> {
     quote(out, f.name).try();
-    out.add_bytes(": ").try();
+    out.add(": ").try();
     write_at(out, f.first).try();
-    out.add_bytes(" and ").try();
+    out.add(" and ").try();
     write_at(out, f.second).try();
     Ok(());
 }
@@ -698,18 +701,4 @@ write_at = (out :: String, span: Span) Res<(), AllocError> {
 quote = (out :: String, name: str) Res<(), AllocError> {
     (name.len > 0).then(() { out.fmt(" `{}`", name).try() });
     Ok(());
-}
-
-// Most significant digit first, by recursion: the remainder is written
-// after the quotient, so no buffer and no reversal is needed.
-write_usize* = (out :: String, v: usize) Res<(), AllocError> {
-    (v >= 10).then(() { out.write_usize(v / 10).try() });
-    out.add_byte(digit_byte(v % 10))
-}
-
-digit_byte = (d: usize) u8 {
-    d.match({
-        0 => '0', 1 => '1', 2 => '2', 3 => '3', 4 => '4',
-        5 => '5', 6 => '6', 7 => '7', 8 => '8', _ => '9',
-    })
 }
