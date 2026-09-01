@@ -119,9 +119,8 @@ after_colon = (
     });
 }
 
-// A struct body's member: a type, and possibly a default. R4 decides
-// which node it becomes, and this is the one place that rule is
-// applied so nothing downstream has to remember it.
+// A typed immutable member with a value is a constant; mutable members and
+// members without values remain fields.
 typed_member = (
     p        :: Parser,
     name     : Ident,
@@ -144,16 +143,19 @@ split_r4 = (
     t        : TypeId,
     value    : Res<ExprId>
 ) Res<MemberKind, AllocError> {
-    constant = !mutable && p.has_value(value);
+    constant: Res<ExprId> = mutable.match({
+        true  => None,
+        false => value,
+    });
     constant.match({
-        true  => Ok(MemberKind.Const(Const(
+        Ok(v) => Ok(MemberKind.Const(Const(
             name: name,
             exported: exported,
             mutable: false,
             type: Ok(t),
-            value: p.the_value(value),
+            value: v,
         ))),
-        false => Ok(MemberKind.Field(Field(
+        None  => Ok(MemberKind.Field(Field(
             name: name,
             exported: exported,
             mutable: mutable,
@@ -243,23 +245,6 @@ fn_member = (
 member_value = (p :: Parser) Res<Res<ExprId>, AllocError> {
     v = p.expr().try();
     Ok(Ok(v));
-}
-
-has_value* = (p: Parser, value: Res<ExprId>) bool {
-    value.match({
-        Ok(_) => true,
-        None  => false,
-    });
-}
-
-// A `Const` must have a value: R4 only reads one when there is one, so
-// this is never reached with a `None`. The fallback keeps the function
-// total rather than trapping on a case the caller has already excluded.
-the_value* = (p: Parser, value: Res<ExprId>) ExprId {
-    value.match({
-        Ok(v) => v,
-        None  => ExprId(index: 0),
-    });
 }
 
 // -------------------------------------------------------------------
