@@ -4,7 +4,7 @@ Alloc = std.mem
 str, String = std.text
 Res = std.core
 Vec = std.collections
-H2Error, FrameType, frame_type, wire, FLAG_PADDED, FLAG_PRIORITY, MAX_RECV = std.net.http2.http2_types
+H2Error, FrameType, FLAG_PADDED, FLAG_PRIORITY, MAX_RECV = std.net.http2.http2_types
 Stream, stream_write, read_n = std.net.http2.http2_transport
 
 H2Range* = { from*: usize, len*: usize }
@@ -67,7 +67,9 @@ read_frame* = (s: Stream, a: Alloc) Res<Frame, H2Error> {
     s.read_n(a, payload, len).try();
 
     Ok(Frame(
-        ftype:   hdr.get(3).ok_or(H2Error.RecvFailed).try().frame_type(),
+        ftype:   FrameType.from_discriminant(
+            hdr.get(3).ok_or(H2Error.RecvFailed).try()
+        ),
         flags:   hdr.get(4).ok_or(H2Error.RecvFailed).try(),
         sid:     sid,
         payload: payload,
@@ -98,7 +100,7 @@ write_frame* = (
     hdr.add_wire_byte(len / 65536).try();
     hdr.add_wire_byte((len / 256) % 256).try();
     hdr.add_wire_byte(len % 256).try();
-    hdr.add(ftype.wire()).try(H2Error.SendFailed);
+    hdr.add(ftype.discriminant()).try(H2Error.SendFailed);
     hdr.add(flags).try(H2Error.SendFailed);
     hdr.add_wire_byte((sid / 16777216).to_usize() % 128).try();
     hdr.add_wire_byte((sid / 65536).to_usize() % 256).try();
