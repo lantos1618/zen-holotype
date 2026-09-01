@@ -80,6 +80,8 @@ Read them in this order. They are the specification, not commentary on it.
 | [docs/TESTING.md](docs/TESTING.md) | the bug classes each phase reliably has, written first |
 
 `DESIGN.md` is binding. Where the others disagree with it, they are the bug — and where it is silent, its "Still open" section says so rather than leaving you to guess.
+Feature notes, generated inventories, and review artifacts are indexed in
+[docs/README.md](docs/README.md).
 
 ## Layout
 
