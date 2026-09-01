@@ -1,50 +1,24 @@
-// src/std/core/loop/loop_iter.zen
-// one construct. The compiler picks the variant by signature — the
-// ordinary overload rule, a closure's type being its full parameter
-// list. No carve-out for closures, which is why Zen needs no `for`
-// keyword and no second control-flow concept.
-//
-// LOOPS NEVER ALLOCATE: no declaration here takes an Alloc, and by
-// law 1 that's the signature, not a promise. The two words that can
-// allocate (loop_find.zen) take an Alloc and are different NAMES, not
-// overloads — a generic `init: A` would swallow `alloc: Alloc`.
-// Mechanically: a body is a non-escaping stack closure inlined at the
-// call site (no closure record to box), index/acc thread BY VALUE (no
-// heap cell across passes), and a fold over a stack array is a plain
-// C for-loop. A benchmark allocation gate for that final property is
-// still owed.
-//
-// EVERY DECLARATION HERE IS A SIGNATURE, not a definition — deliberate:
-// a loop can't be written in terms of `.match`/`.loop`/recursion
-// (circular, or riding an ungated tail-call optimisation). The
-// compiler lowers each overload to a C loop directly. Everything
-// ABOVE the primitive — find, filter, map — is ordinary Zen on top of
-// it, proof h.break is a general feature.
+// Primitive loop forms. The body signature selects the overload, and the
+// compiler lowers it directly. These operations do not allocate.
 
 LoopHandle = std.core.loop.loop_handle
 Range      = std.core.range
 Res        = std.core.result
 
-// while true. h.break is the only way out.
+// Repeat until the body calls h.break().
 loop*<T> = (body: (h: LoopHandle) ()) Res<T>
 
-// while true, with iteration counter — one more parameter; counter
-// starts at 0 and threads by value.
+// Repeat with a zero-based pass index.
 loop*<T> = (body: (h: LoopHandle, index: usize) ()) Res<T>
 
-// while cond, tested BEFORE each pass — a cond false to begin with
-// runs the body zero times.
+// Test the condition before each pass.
 loop*<T> = (cond: () bool, body: (h: LoopHandle) ()) Res<T>
 
-// The same pre-test for a boolean expression. As a loop intrinsic, `cond`
-// is re-read before every pass rather than copied once like an ordinary
-// by-value argument. UFCS makes a mutable flag read as `waiting.loop(body)`;
-// use the closure overload when computing the condition needs a block.
+// Re-read a boolean place before each pass. Use the closure overload when
+// computing the condition needs more than one expression.
 loop*<T> = (cond: bool, body: (h: LoopHandle) ()) Res<T>
 
-// ranged/collection iteration, with and without index. index is the
-// pass count, value is the element — over Range(10, 13) these differ,
-// and a body that confuses them prints the same one twice.
+// Iterate values, optionally with a zero-based pass index.
 loop*<R: Range<T>, T> = (range: R, body: (
     h     : LoopHandle,
     index : usize,
@@ -52,32 +26,11 @@ loop*<R: Range<T>, T> = (range: R, body: (
 ) ()) Res<T>
 loop*<R: Range<T>, T> = (range: R, body: (h: LoopHandle, value: T) ()) Res<T>
 
-// fold: init seeds acc, acc threads through iterations, the loop
-// evaluates to the final acc — or to h.break(value), one form not two.
-// init is the answer when there is nothing to fold.
+// Fold from init. Natural completion returns the final accumulator;
+// h.break(value) returns that value instead.
 loop*<R: Range<T>, T, A> = (range: R, init: A, body: (
     h     : LoopHandle,
     index : usize,
     value : T,
     acc   : A
 ) A) Res<A>
-
-// key/value containers — A DIFFERENT NAME, not a seventh overload.
-// DESIGN.md writes this as
-//
-//     loop*<K, V> = (map: Map<K, V>, body: (h, key: K, value: V) ())
-//
-// which can't resolve against the ranged-with-index form above: same
-// arg count, same three-param body, first param generic in one,
-// concrete in the other — exactly what DESIGN.md's overloading
-// section rules out ("a generic parameter swallows a concrete one").
-// Reported as a doc bug against DESIGN.md rather than resolved
-// quietly here. Same trade `map` took: a Map hands out two things per
-// pass, a Range one — never one word, so the name says which you get.
-//
-// The walk is Map.pairs (collections_map.zen), a MEMBER rather than a
-// signature here: its body walks entries, which is module-private to
-// collections_map on purpose — what a Map is made of is not part of
-// what a Map is. This file only holds what the compiler is the body
-// of; a walk with an ordinary Zen body belongs with the storage it
-// reads.
