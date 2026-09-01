@@ -14,8 +14,8 @@ The whole repository, with the stage each piece appears at. Nothing here is opti
 zen/
 ├── README.md                        # what Zen is; how to build from seed
 ├── Makefile                         # the only entry point a newcomer needs
-├── build.zen                        # this project's own build file — NOT WRITTEN,
-│                                    #   and it is what `make bench` would stand on
+├── build.zen                        # this project's own build graph; benchmark
+│                                    #   budget execution is still owed
 │
 ├── docs/
 │   ├── DESIGN.md                    # the language, and why. binding.
@@ -33,7 +33,8 @@ zen/
 │                                    #     regenerate, THEN commit. never the reverse.
 │
 ├── src/                             # the real compiler + stdlib, in zen
-│   ├── zen/zen.zen                  # (1) thin cli: build / fmt / test / lsp
+│   ├── zen/zen.zen                  # (1) thin cli: build / fmt / lsp;
+│   │                                #     `zen test` is reserved but still owed
 │   ├── zen/zen_cli.zen              # (1) argv -> Cli. touches no capability.
 │   ├── zen/zen_build.zen            # (1) the build driver behind `zen build`
 │   ├── sema/sema.zen                # (1)
@@ -51,21 +52,16 @@ zen/
 │   ├── sema/sema_drop.zen           # (3) a `Drop` value cannot be copied
 │   ├── gen/gen.zen                  # (1) backend-shared plumbing
 │   ├── gen/gen_name.zen             # (1) the C symbol for everything
-│   ├── gen/gen_c/gen_c.zen          # (1) the c backend: a folder, ~35 files
+│   ├── gen/gen_c/gen_c.zen          # (1) the C backend and its phase modules
 │   ├── fmt/fmt.zen                  # (2) parse |> print, plus the guard
 │   ├── fmt/fmt_src.zen              # (2) a span, back to the bytes it names
 │   ├── fmt/fmt_out.zen              # (2) where the formatted bytes go
 │   ├── zen/zen_fmt.zen              # (2) `zen fmt`: read, compare, write —
 │   │                                #     models the FILE, not yet the DECLARATION
-│   ├── lsp/lsp.zen                  # (4) thin server over sema queries — PARTLY:
-│   │                                #     transport, lifecycle, Full sync, hover,
-│   │                                #     diagnostics, lexical semanticTokens.
-│   │                                #     Everything else refused by name; the stdio
-│   │                                #     transport, over std.env.Stdin
-│   ├── sema/sema_meta.zen           # (5) @meta over ast nodes — THE REFUSAL ONLY.
-│   │                                #     docs/design_meta.md is the decomposition;
-│   │                                #     M0 (named, one diagnostic, both toolchains)
-│   │                                #     is landed and nothing else is
+│   ├── lsp/lsp.zen                  # (4) stdio server over compiler queries;
+│   │                                #     the advertised surface is gated in corpus/lsp
+│   ├── sema/sema_meta.zen           # (5) supported @meta reads and field walks;
+│   │                                #     unsupported forms meet one named wall
 │   ├── comptime/comptime.zen        # (5) the step-budgeted evaluator — NOT WRITTEN.
 │   │                                #     design_meta.md §5 argues it belongs beside
 │   │                                #     sema rather than here: its output is AST,
@@ -95,14 +91,12 @@ zen/
 │       ├── collections/collections.zen   #  collections_vec, collections_map
 │       ├── test/test.zen            #       Tester, Bencher, BenchStats
 │       ├── build/build.zen          #       Builder, Package, Budget
-│       ├── actor/actor.zen          #       Actor, Context, Ref, ActorError —
-│       │                            #       the SURFACE only. Env.spawn has no
-│       │                            #       floor and a Ref enqueues nothing;
-│       │                            #       the runtime behind them is (5)
+│       ├── actor/actor.zen          #       Actor, Context, Ref and errors;
+│       │                            #       pthread worker + bounded mailbox floor
 │       └── thread/thread.zen        #       Threads, Thread, ThreadError live in
 │                                    #       env.zen — a thread is authority, so
 │                                    #       it hangs off Env. No file here, and
-│                                    #       none owed; the runtime under it is (5)
+│                                    #       none owed; the pthread floor is gen_c_threads
 │
 └── tests/
     ├── parse/                       # (0.1) every DESIGN.md construct, transcribed
@@ -113,11 +107,12 @@ zen/
     │   ├── hello/
     │   ├── traps/                   #       one per trap: overflow, div0, index
     │   └── ...
-    ├── must-fail/                   # compiles today, must STOP compiling.
+    ├── must-fail/                   # must be rejected with exact diagnostics
     │   ├── lex/  parse/  sema/      #       by the phase that owes the diagnostic,
     │   ├── modules/  traps/         #       not one flat directory
     │   └── own/                     # (3) use_after_consume, immutable_receiver, send_ref
-    └── bench/                       # (1) Bencher functions; budgets in build.zen
+    └── bench/                       # sanitizer/leak harnesses; Zen benchmark
+                                     # budget execution is NOT WRITTEN
 ```
 
 **A path marked NOT WRITTEN is a promise, not a description.** The paragraph above says nothing here is a placeholder — that is a statement about intent, and this sketch had drifted far enough from the tree to read as a statement about fact. Eight of its paths named files that do not exist and nine more named files under the wrong name, which is worse than listing nothing: a reader checking whether the ownership checker exists found a path for it and stopped looking. Where a stage has not arrived, the marker says so.
@@ -126,7 +121,10 @@ Three things about this tree that are decisions, not layout:
 
 - **`src/std/core/` is written before `src/std/lex/`.** The compiler is a Zen program; it needs `Vec`, `Map`, `String`, `Res`, and `Alloc` to exist before its first line. This is stage 0.6 below, and it is the piece most likely to be underestimated.
 - **`bootstrap/` and `src/` never shared code.** The bootstrapper was deleted after self-hosting; its remaining Python parser was later deleted with the script cleanup.
-- **Two generated files, both with a gate.** `seed/zen.c` is proven fresh by the fixpoint; `grammar/src/parser.c` by `tree-sitter test`. If a third ever appears, ask what proves it fresh — an ungated generated file is a fork nobody is reading.
+- **Two generated files.** `grammar/src/parser.c` is gated by `tree-sitter
+  test`. `seed/zen.c` has an atomic regeneration target, corpus coverage, and a
+  determinism gate, but its full freshness fixpoint is still owed. If a third
+  generated file appears, ask what proves it fresh.
 
 File naming and the 500/800-line review prompts are in `STYLE.md`. The short version, visible above: a folder's root file is its public surface and is nothing but starred re-exports; siblings repeat the folder as a prefix (`std/parse/parse_expr.zen`), so every filename is unique tree-wide and every editor tab says something.
 
@@ -136,7 +134,9 @@ File naming and the 500/800-line review prompts are in `STYLE.md`. The short ver
 
 **1. Every stage ends at a gate that can fail.** Not "the code is written" — a command that exits non-zero when the stage is wrong. A stage without a red-capable gate is not done, it is unmeasured. Before trusting a new gate, break the thing it guards on purpose and watch it go red.
 
-**2. The compiler is a library from commit one.** `zen build`, `zen fmt`, `zen lsp`, `zen test` are thin entry points into one artifact. Never a second parser, never a second AST, never a "just for the formatter" path. Two grammars is the failure this plan exists to avoid.
+**2. The compiler is a library from commit one.** `zen build`, `zen fmt`, and
+`zen lsp` are thin entry points into one artifact; `zen test` is the same target
+shape but remains owed. Never a second parser, AST, or formatter-only path.
 
 ---
 
@@ -203,56 +203,27 @@ Checks required at stage 0:
 
 Emit traps for the failure model: overflow on `+ - *`, zero divisor on `/ %`, out-of-range fixed-array index. `+% -% *%` compile to wrapping. A trap prints `file:line:col` and aborts.
 
-**Name mangling is unspecified and has to be decided here.** C has one flat namespace; Zen lets two modules define the same top-level name. Joining path components with `_` is *provably* ambiguous, and `STYLE.md`'s own sibling-prefix convention (`std/parse/parse_expr`) triggers it in the compiler's own tree. Decide, in this order:
-
-1. **The scheme** — length-prefixed (Itanium-style), a separator no Zen identifier can contain, or escaping (`_` doubles). Not naive joining.
-2. **A reserved prefix** for compiler-generated names (temporaries, trap helpers, monomorphised instances, closure records, the comptime-derived actor message enums), unreachable by any mangled user name. The trap: `__zen_` and `_Zen_` are themselves reserved to the C implementation by C11 §7.1.3, and bare `zen_` collides with a user writing `zen_trap`.
-3. **Which sites mangle** — locals, parameters, **struct members**, enum constants, function names, struct tags, labels, instantiation names. Members are the one always missed, and the one standard-header macros break (`x.errno`).
-4. **Which reserved list** — handle the reserved *identifier class* (`_Uppercase`, leading `__`) rather than a hand-maintained keyword list, which subsumes every future `_Atomic` for free. State which C standard `gen_c` targets.
-5. **How type arguments render** in an instantiation name, including nesting, as a pure function of the type rather than of instantiation order — otherwise determinism dies here.
+**Name mangling is settled in `src/gen/gen_name.zen`.** User and generated
+symbols have separate prefixes; module/name components are length-prefixed;
+site kinds are explicit; and structural type arguments have canonical codes.
+The result is a pure function of declarations and types, never traversal order.
 
 **Gate:** a corpus of Zen programs with expected stdout, each compiled and run. Include one program per trap, asserting non-zero exit and the right message.
 
 ### 0.5 The seed subset
 
-The bootstrapper must implement every feature the compiler itself uses — so the compiler is written in a deliberately smaller language than the one it implements.
-
-**In the seed subset** (the compiler may use these):
-
-structs, enums with payloads, generics, functions, lambdas, non-escaping closures, `.match`, `bool.then`, `Res` + `.try()`, the `loop` family, `str`, `Vec`, `Map`, `String`, modules + `*` + re-export, `A.impl(B, ..)`, `@Self`, overloading, `Alloc` threading, traps.
-
-**Not in the seed subset** (user code gets these; the compiler adopts them only after self-hosting):
-
-`@meta` in any form, comptime type-returning functions, actors, threads, `@scope` / `defer`, `iso` and sendability, error *unions* (the seed uses one nominal error enum per function — `Res<T, CompileError>`).
-
-Every item on the second list is a feature the Python bootstrapper would otherwise have to implement. `@meta` alone would roughly double it.
+The compiler remains written in a conservative subset that the committed C
+seed can compile. New language features may enter `src/` only after the
+compiler that implements them has regenerated `seed/zen.c`; this is the same
+landing-order rule `design_meta.md` states for `@meta`.
 
 ### 0.6 The standard library floor
 
-**The most underestimated stage.** The compiler is a Zen program: before its first line runs it needs `Res`, `.try()`, `Vec`, `Map`, `String`, `str`, `Alloc`, `Drop`, and the `loop` family. All of it written in the seed subset, all of it compiled by Python, all of it debugged with no debugger and no LSP.
-
-Order matters, because each layer needs the one below:
-
-1. `core/result.zen`, `core/bool.zen` — `Res`, `.try()`, `then`. No allocation, no dependencies.
-2. `core/num.zen` — the extremes and width of every primitive numeric type, and the checked arithmetic floor. Depends on nothing but the trap.
-3. `mem/mem.zen` — `Alloc`, `AllocError`, the arena. Everything above allocates through this.
-4. `collections/vec.zen` — `Vec<T>`. The first real generic, and the first `Drop` user.
-5. `text/string.zen` — `str` (bytes, borrowed), `String` (`Vec<u8>`, owned).
-6. `core/loop.zen` — the `loop` family, `find`, `filter`, `map`. Inlined at the call site; only `map`/`filter` take an `Alloc`.
-7. `collections/map.zen` — needs `Eq` + `Hash`, so those come with it.
-8. `core/io.zen` — `Sink`, `WriteError`. Below `display`, whose signatures name both.
-9. `core/display.zen` — `toString` only, writing into the caller's `Sink`. `dump` is `@meta` and waits for stage 5.
-
-**Gate:** each of these has tests in `tests/corpus/` that the bootstrapper compiles and runs. `Vec` growing across a realloc, `Map` colliding on hash, a `String` outliving the loop that built it, an arena freeing everything at once.
-
-Two traps to expect here, both consequences of laws in `DESIGN.md`:
-
-- **The `Alloc` receiver.** `Vec.alloc` is a `:` field and `grow` calls `realloc` through it, which only compiles because a handle's methods are `:`. If the stdlib is written with `Alloc.raw` as `:: @Self`, every collection needs a mutable allocator field and the shallowness buys nothing. Get this right in `mem/mem.zen` first, or fix it everywhere later.
-- **`Drop` before the checker exists.** Stage 3 is where use-after-consume becomes an error. Until then the arena's exactly-once guarantee is a convention the stdlib must honour by hand — which is precisely why the `consume` *syntax* ships at stage 0 even unchecked.
-
-**The `Sink` migration has landed, and it moved as one change.** `DESIGN.md` types `Display.toString` on a `Sink` so that printing allocates nothing; `src/std/core/display.zen`, the sink dispatch in `gen_c` (`gen_c_sink.zen`), and the `display_*` corpus signatures moved together — migrating the corpus first would have turned three green tests red against a compiler with no `Sink`, and migrating `std` first the same. The one mistake that migration ordering cannot see is pinned instead: `tests/must-fail/sema/display_sink_overload_is_not_the_allocating_one` rejects a resolver that stops at arity and hands back the sealed allocating form's `Res<String, WriteError>` where the call meant the sink.
-
-**Gate for stage 0:** the bootstrapper compiles and runs hello-world, the std corpus, and the trap corpus. Nothing about the real compiler yet.
+The compiler depends on the standard library in layers: core values and
+control flow, memory, collections, text, I/O, then higher-level facilities.
+Those dependency directions remain live even though the bootstrapper is gone.
+The corpus holds allocation, collection growth/collision, text lifetime,
+display-through-`Sink`, and arena cleanup behavior.
 
 ---
 
@@ -284,11 +255,11 @@ Rules from `DESIGN.md`: align `=>` in match arms, short arms on one line, wrap l
 
 **Gate:** `zen fmt --check` over the whole tree, in CI, failing the build. Plus idempotence — `fmt(fmt(x)) == fmt(x)` on the corpus.
 
-**What landed, and what it deliberately does not do.** `src/fmt/` prints the FILE: declarations in source order, each comment at the column it was written in, a run of blank lines collapsed to one, the whitespace behind a declaration gone, exactly one newline at the end. Every declaration's own text is then copied byte for byte with ONE exception, and the exception is the first of the match-arm rules above: `fmt_decl.zen` sets the width of the run of spaces in front of an arm's `=>`, so a list of arms lines up on its arrows. It went first because it is the only one of the four that moves no token — the other three move one or add one, and each of those needs an argument the guard below does not already supply. It refuses an arm that shares its line with another, one whose pattern and `=>` are not on one line, and one with a comment where the pad would go; `tests/corpus/fmt/arms_line_up_on_their_arrows` is those refusals, plus a `=>` inside a string literal and a commented-out arm. Applied to the tree it moved 371 lines in 39 files, because 92% of the arms were already written this way.
-
-**A formatting rule cannot leave the emitted C byte-identical, and should not.** The obvious gate for "changes no semantics" is: format the tree, rebuild, `cmp` the C. Run against arrow alignment it reports 8 differing lines, and all 8 are the column in a `"file.zen", line, col` trap triple whose expression moved sideways. That is the gate passing, not failing: the C embeds source positions, so a rule that moved a token and left those columns alone would be a rule that made every trap message point at the wrong place. The gate to run is `cmp` **after erasing the `file:line:col` triples from both**, plus the reading that every surviving difference is a column that moved exactly as far as its token did. Line numbers must not move at all, and under a rule that only changes the width of a gap they cannot.
-
-**The guard is what makes shipping a subset safe.** Whitespace is not a token and a comment is one, so formatting must leave the token stream identical — same count, same kind, same bytes. `render` re-lexes its own output and checks exactly that before returning it; a file that fails is left untouched and the build goes red. Every rule added to the printer later is checked by the same three lines, which is why the next form can be added one at a time instead of all at once. It caught its first bug within a minute of existing: a trailing comment belongs to the outermost node whose span ends before it, which for a multi-line enum is the last VARIANT and not the declaration, so a slice cut to `Decl.span` dropped the sentence in eight files.
+`src/fmt/` owns the current whitespace-only rules: aligned match arrows and
+binding operators, multiline parameters, and width-based breaks for calls,
+declarations, unions, enums, and arrays. Token-moving match-arm rules remain
+owed. `render` re-lexes its output and refuses any token-stream change; corpus
+tests hold faithful output and idempotence.
 
 ---
 
@@ -326,7 +297,10 @@ If this stage turns out to be expensive, the cause is stage 0.3 — a batch comp
 
 That last one was the only primitive an LSP needs that nothing else does, and that is exactly why it was the one absent: every other consumer walks the tree downward from a root, while an editor arrives holding a byte offset and nothing else. It has since landed, and with it **every precondition above holds** — so "mostly falls out" has been tested rather than assumed.
 
-**What has been built against them: `src/lsp/`, and it is L1 of `docs/design_lsp.md` plus one query.** `initialize`, `shutdown`, Full document sync and `textDocument/hover` — the last one being `expr_node_at` into `expr_memo` into `Types.name_of`, with no new sema — and every other method refused by name with `-32601`. Gated by `corpus/lsp/`, three tests: the UTF-16/byte position conversion driven both ways, a JSON round trip with its rejections, and a recorded frame-by-frame session.
+**What has been built against them: `src/lsp/`.** It advertises hover,
+definition, document symbols, formatting, completion, code actions, and full
+semantic tokens. `tests/corpus/lsp/` is the current executable capability map;
+`docs/design_lsp.md` records the ownership and protocol decisions.
 
 **And one precondition that was NOT on this list turned out to gate the whole stage: there was no stdin.** It has since landed — `Env` carries `in: Stdin`, a byte-counted `read` with no line discipline, floored in `src/gen/gen_c/gen_c_stdin.zen` — so **`zen lsp` with no arguments is a real stdio server an editor can launch.** `zen lsp <requests> <replies>` stays because it is what the corpus drives: a test cannot hold a pipe open. `design_lsp.md` §4 records what the capability cost and the one thing it required that nobody had written down — a reader over a blocking `fread` must ask for exactly what the envelope says is missing, or it deadlocks against the client it is answering.
 
@@ -338,11 +312,16 @@ One correctness note that is now load-bearing for this stage as well: `type_of`'
 
 Orthogonal to everything above; it constrains nothing in the compiler.
 
-- **`@meta` and the comptime evaluator: `docs/design_meta.md`.** The decomposition, its milestones in dependency order, and the two decisions that have to be taken before code can be written live there and are not repeated here. Started: the refusal is landed (`src/sema/sema_meta.zen`, M0), so a program using `@meta` is told so by name, once, by both toolchains.
-- actors: per-actor arena rooted in the runtime (not `main`'s), one message at a time, causal ordering, quiescence exit
-- `main` returning is not the program exiting
+- **`@meta` and the comptime evaluator: `docs/design_meta.md`.** Type-name and
+  field-count reads plus field walks have landed; unsupported forms still meet
+  the M0 diagnostic wall. The remaining evaluator milestones live there.
+- actor and thread runtime slices have landed: one worker and bounded mailbox
+  per actor, enqueue-only sends, stop/join, per-actor arenas, and thread
+  sleep/spawn/join. Deep sendability, scheduler policy, and full quiescence
+  semantics remain stage-5 work.
 
-Only after this does the compiler start using `@meta` on itself — and until then it may not, which is what keeps the bill `0.5` prices off the bootstrapper (`design_meta.md` §1).
+Compiler use of a new `@meta` form must follow support in the compiler used to
+regenerate `seed/zen.c`; otherwise the next clean build cannot compile `src/`.
 
 ---
 
@@ -351,7 +330,7 @@ Only after this does the compiler start using `@meta` on itself — and until th
 | gate | fails when |
 |---|---|
 | corpus | any program's stdout or exit code changes |
-| fixpoint | `stage2.c != stage3.c` |
+| fixpoint | **owed**: `stage2.c != stage3.c` (there is no Make target yet) |
 | `zen fmt --check` | any file is unformatted |
 | `must-fail/` | anything that should be rejected compiles |
 

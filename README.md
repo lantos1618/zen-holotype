@@ -27,10 +27,14 @@ main = (env: Env) Res<i32, Error> {
 
 - **Control flow is `.match`, a method.** No `if`, no ternary, no `?`. Match is always exhaustive, in every position, so a missing case is never ambiguous between deliberate and forgotten. `bool.then` covers the one-sided case out loud.
 - **There are no traits, only structs.** A struct whose fields happen to be functions, used as a bound, is what other languages call a trait. `A.impl(B, {..})` supplies a value for every field `B` declares. One rule, no second mechanism.
-- **The signature answers the question.** Does it allocate, does it mutate, can it fail, does it escape — read the first line. No `Alloc` parameter means no allocation, anywhere, including the standard library.
+- **The signature answers the question.** Does ordinary library code allocate,
+  mutate, fail, or escape—read the first line. Storage is supplied by `Alloc`;
+  runtime capabilities such as actors own the storage their contract names.
 - **All authority flows from one `Env`.** No ambient io, net, threads, or page allocation.
 - **`Res` is for failure a caller can act on; a trap is for a bug.** Overflow and out-of-bounds abort with a position rather than becoming values nobody checks.
-- **Data races are compile errors**, not deep copies. Only deeply-immutable or uniquely-owned values cross an actor boundary, and the handoff is spelled `consume`.
+- **Actor messages are explicit sends.** A behavior call on `Ref<A>` enqueues a
+  copied message. The current checker refuses allocator-backed payloads; deep
+  sendability and unique `consume` handoff remain stage-5 work.
 
 ## Streaming JSON
 
@@ -62,7 +66,7 @@ owned chunk directly to its decoder without copying it through a `String`.
 ```sh
 make build      # needs only a C compiler: the seed is checked-in C
 make test       # the corpus and must-fail suites
-make fixpoint   # zen compiles itself to byte-identical C
+make determinism # repeated builds emit byte-identical C
 ```
 
 `make help` lists the rest.
@@ -95,4 +99,10 @@ tests/       corpus, must-fail cases, and Zen gate programs
 
 ## Status
 
-Stage 4. The standard library, the self-hosted compiler, the formatter, and the ownership checker exist, and `make fixpoint` proves the compiler compiles itself to byte-identical C. The stage in progress is the LSP — hover, lexical semantic tokens, and diagnostics answer; everything else is refused by name. 4 is the grade the tree is measured against, not a claim that stages 1–4 are finished; `STAGE` at the repo root says what is still open. `docs/PLAN.md` is the map, and every stage in it ends at a command that exits non-zero when the stage is wrong.
+Stage 4. The standard library, self-hosted compiler, formatter, ownership checker,
+project build runner, and language server are in the tree. `make determinism`
+guards stable code generation; a full stage-2/stage-3 fixpoint gate is still
+owed. The corpus defines the LSP
+requests currently supported. Stage 4 is the grade the tree is measured against,
+not a claim that stages 1–4 are complete. `docs/PLAN.md` is the map, and every
+stage in it ends at a command that exits non-zero when the stage is wrong.

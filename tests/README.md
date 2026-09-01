@@ -21,12 +21,12 @@ tests/
 ├── must-fail/     programs that must be rejected, with the diagnostic
 │   ├── lex/  parse/  modules/  sema/  own/  traps/               run.py
 ├── parse/         tree-sitter corpus (stage 0.1)              tree-sitter test
-├── bench/         Bencher functions; budgets in build.zen        zen test
+├── bench/         sanitizer and leak harnesses                    make asan/leak
 └── determinism/   gen_c emits the same bytes twice               check.sh
 ```
 
-`run.py` covers `corpus/` and `must-fail/` only. The other three have their own
-runners, listed above; `tests/determinism/README.md` documents its own.
+`run.py` covers `corpus/` and `must-fail/` only. The other directories use the
+runners listed above; `tests/determinism/README.md` documents its own.
 
 ---
 

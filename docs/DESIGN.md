@@ -1,13 +1,13 @@
 # Zen
 
-**Performance is locked down, not hoped for.** Benches live next to tests (take a `Bencher` like tests take a `Tester`), budgets are code in build.zen, and a regression fails the build. That includes the build itself: a 20 minute build is a bug, and bugs fail CI. **Not implemented:** `Bencher` and `BenchStats` are declared in `std.test`, `Budget` in `std.build`, and the benches are written in `tests/bench/` — but the root `build.zen` that would run one against the other is stage 1 in `PLAN.md` and is not in the tree, so no budget gates anything.
+**Performance is locked down, not hoped for.** Benches live next to tests (take a `Bencher` like tests take a `Tester`), budgets are project build policy, and a regression fails the build. That includes the build itself: a 20 minute build is a bug, and bugs fail CI. **Not implemented:** `BenchStats` and `Budget` exist, but the root `build.zen` currently describes build targets only; no benchmark runner enforces budgets yet.
 
 **Pipeline:** `mod_resolver -> lexer -> parser -> sema -> codegen`
 
 One stage per module, and modules are `<folder>/<folder>.zen` — a folder carries its root beside its children, so `src/gen/gen.zen` is module `gen` and `src/std/ast/ast.zen` is module `std.ast`.
 
 ```
-build.zen              // this project's own build file. stage 1; not in the tree
+build.zen              // this project's own build graph
 src/zen/zen.zen        // thin cli: build / fmt / test / lsp
 src/std/ast/ast.zen    // THE ast. the compiler, @meta and gen_c all consume these nodes
 src/std/lex/lex.zen
@@ -62,7 +62,15 @@ So four decisions, all made in week one, all brutal to retrofit:
 
 **Ship the ownership *syntax* at stage 0** even though nothing checks it. `self :: @Self` and `consume` cost nothing to parse and ignore. Defer the syntax and every line of stdlib written before stage 3 has to be revised; defer only the enforcement and nothing is lost.
 
-**So read the Ownership section below as law, and check the tree before reading it as behaviour.** Stage 2 is there in part: `zen fmt` is `parse |> print` over this parser and this trivia, and it prints the FILE — declarations in source order, comments where they were written, a run of blank lines collapsed to one, exactly one final newline — while every declaration's own text passes through verbatim but for whitespace: the spaces in front of a match arm's `=>`, set so that a list of arms lines up on its arrows, and the gaps inside an argument list or a union of variants whose packed line runs past 80 columns, set so each item or variant gets its own line at +4. Those rules went first because they move no token, which is what the guard below can already check. The three this document states about arms — short ones on a line, long ones wrapped, a trailing comma on the last — each move a token or add one, so each is still owed and a formatter that guessed at them would have reflowed the tree on its first run. What keeps that split honest is a guard rather than care: the output is re-lexed and its token stream compared to the input's, so a printing rule that changed the program cannot leave `src/fmt/`. Stage 3 is there in part — `sema_own.zen`, `sema_recv.zen`, `sema_drop.zen` and `sema_scope.zen` enforce the receiver rule, `consume` and use-after-move, the copy of a `Drop` value, the partial move that reaches a drop, and all three of `@scope`'s ways out. "Which closures escape" is read off the callee's signature and nothing else: a closure argument to a call that also takes an `Alloc` may be kept past the call, and every other one may not — so the reading is narrow where the signature is silent, and a free function taking an `Alloc` is not asked. One thing below is still law and not behaviour: `iso` at a behavior parameter is stage 5, along with actors. What is checked, refuses; what is not, still compiles.
+**So read the Ownership section below as law, and check the tree before reading
+it as behaviour.** The formatter's current whitespace-only rules live in
+`src/fmt/` and are held by `tests/corpus/fmt/`; token-moving match-arm rules
+remain owed. Its `faithful` guard re-lexes the result and refuses any token
+change. Ownership checks cover receiver mutation, consume/use-after-move,
+copies and partial moves of `Drop` values, and `@scope` exits. Actor lowering
+and a bounded-mailbox runtime have landed, but deep `iso` sendability remains
+law rather than implemented behaviour. What is checked refuses; what is not
+still compiles.
 
 **Not needed, and traps if attempted early:** an optimizer (C is the backend), a second backend, a package manager, incremental codegen.
 
@@ -74,7 +82,8 @@ So four decisions, all made in week one, all brutal to retrofit:
 
 Everything below follows from these. When two rules seem to conflict, the law wins.
 
-1. **No ambient allocator.** Anything that needs memory takes an `Alloc`. No `Alloc` parameter, no allocation.
+1. **No ambient allocator.** Ordinary library allocation takes an `Alloc`.
+   Runtime capabilities may own the storage their contract names.
 2. **No ambient authority.** All authority flows from the `Env` `main` receives — io, net, page allocation, threads, spawning.
 3. **Satisfy requirements, never impl storage.** Layout is fixed at declaration and never depends on which impls are linked.
 4. **Failure stays visible.** Only success lifts into `Res`. `Err` and `None` are always written. A reason is never invented.
@@ -153,7 +162,7 @@ The rule stays, because the alternative is a second syntax for a distinction nob
 
 **An alias is the type, not a name that forwards to it.** `Alias = Shape` binds `Alias` to `Shape` itself, so `Alias.Circle` is `Shape.Circle` and a value of one is a value of the other — there is no conversion, because there are not two types. This is what makes the pair above observably different: under the alias reading `Alias.Circle` exists, and under the one-variant-enum reading it does not.
 
-**Which of the two readings applies is not local to the file, and that is the sharp edge.** `A | B` is a union of existing types when *every* variant names a type in scope, and a nominal enum otherwise — so `DefKind = Struct | Enum | Alias` is nominal until someone imports types with those six names into the same module, at which point the declaration silently becomes a union of them. An import in one place changes what a declaration means in another. Two implementations have now been bitten by it and both worked around it by renaming variants.
+**Which of the two readings applies is not local to the file, and that is the sharp edge.** `A | B` is a union of existing types when *every* variant names a type in scope, and a nominal enum otherwise — so `DefKind = Struct | Enum | Alias` is nominal until someone imports types with those names into the same module, at which point the declaration silently becomes a union of them. An import in one place changes what a declaration means in another; the compiler has previously worked around the ambiguity by renaming variants.
 
 The rule, so the surprise is a diagnostic rather than a silent reinterpretation: **when every variant of an enum names a type in scope, the declaration IS a union of those types.** If that is not what was meant, the variant names collide with types and one of them must be renamed — and the compiler must say so, naming the variant and the type it collided with, rather than quietly picking the other reading. The alternative — two spellings, one per reading — was rejected because a nominal enum and an error union really are the same construct, and paying for a second syntax to disambiguate a case this rare is the worse trade.
 
@@ -177,7 +186,7 @@ p = &c.width;     // ERROR: computed field, no address exists
 c.width = 5.0;    // ERROR: nothing to assign to
 ```
 
-The residue worth knowing: an impl may supply something expensive, and reading it in a loop hides real work behind a dot. The *simple* case is provable by a pair of budgets — if these two ever stop matching, uniform access is not free and we want to know. Both benches are written, in `tests/bench/bench_field.zen`; what fails the build on a divergence is the `build.zen` above, which is stage 1 and not in the tree:
+The residue worth knowing: an impl may supply something expensive, and reading it in a loop hides real work behind a dot. The *simple* case should be held by a pair of budgets — if these two ever stop matching, uniform access is not free and we want to know. The benchmark runner is not implemented yet; these are the intended project-policy entries:
 
 ```groovy fragment
 budgets: [
@@ -361,7 +370,7 @@ So `::` on a receiver means the method mutates it, and it is not a receiver rule
 
 This is **shallow**: `::` means the method writes the receiver's *own bytes*, and nothing more. So **a handle's methods are `:`, even when they change the world.** `Alloc.raw` is `self: @Self` — allocating changes the arena behind the handle, not the two words of the handle. Same for `@scope.defer` (the closure stack lives in the block), `Ref` behavior calls (the mailbox is behind the address), and `Env.spawn`.
 
-That is not a nicety, it is what makes the system consistent. `Vec.alloc` is a `:` field, and `Vec.grow` calls `self.alloc.realloc(..)` through it. If `realloc` demanded `:: Alloc`, that call would be illegal and every collection would need a mutable allocator field — the shallowness would buy nothing. It compiles precisely because `realloc` writes the arena, not the handle. Same reason `foo.receive_msg(..)` is legal on a `foo = env.spawn(..)`.
+That is not a nicety, it is what makes the system consistent. `Vec.alloc` is a `:` field, and `Vec.grow` calls `self.alloc.realloc(..)` through it. If `realloc` demanded `:: Alloc`, that call would be illegal and every collection would need a mutable allocator field — the shallowness would buy nothing. It compiles precisely because `realloc` writes the arena, not the handle. Same reason `foo.receive_msg(..)` is legal on a `foo = env.spawn(..).try()`.
 
 The test, when a signature is unclear: **would a bitwise copy of the receiver see the change?** If yes, the change was to its own bytes and the method is `::`. If the copy sees it too — because both point at the same thing — the method is `:`.
 
@@ -424,17 +433,22 @@ The two halves fit together because they answer different questions. A bare name
 
 *There is no operator overloading.* `==` through `Eq` is the only operator that dispatches to an impl, so `a + b` on a `Duration` is not writable and a module that wants it writes `add`. Whether arithmetic operators should dispatch is a real question — it is the difference between a `Duration` reading like a number and reading like a record — but it is a language decision, and until it is made, a comment promising `+ - * /` on a struct is describing a language this is not.
 
-*And this document does not say what `a + b` MEANS when `a` and `b` have different types.* That silence is not harmless, because both implementations have an answer and nobody chose it. **Measured 2026-08-08, both toolchains:**
+*And this document does not say what `a + b` means when `a` and `b` have
+different types.* The current compiler accepts this program:
 
 ```groovy
-f = (a: i32, b: str) i32 { a + b }        // ACCEPTED by ./zen (and by bootstrap/, then)
+f = (a: i32, b: str) i32 { a + b }
 ```
 
 The emitted C then fails to compile — `incompatible type for argument 2 of 'zg_add_i32'` — so the user's first news of a type error in the most common expression in any language is a C diagnostic naming a mangled internal function.
 
-**The rule both implementations actually follow is: a binary operator takes its LEFT operand's type, and the right operand is never checked against it.** Everything else observed follows from that one sentence: `(a: f64, b: bool) f64 { a * b }` is accepted and prints `2.5`; `(a: i32, b: bool) i32 { a + b }` prints `8`; and `(a: u8, b: i64) i64 { a + b }` *is* refused — not because the operands disagree, but because the expression types as `u8` and the declared return is `i64`. The check that appears to exist is the return check doing its job.
+**The implemented rule is: a binary operator takes its left operand's type,
+and the right operand is not checked against it.** The return check can hide the
+gap when the left operand already matches the declared result.
 
-Because both implementations agree, **the differential oracle is blind to this**, and it survived every suite. It is recorded here rather than in a bug ledger because the root cause is this document: a language that has `+` must say what `+` requires of its operands, and this one never did. The decision is upstream of the fix — implicit numeric widening, explicit `.to_f64()` conversions only (which is what the tree's no-`as`-cast rule implies), or something between — and it belongs to whoever owns the language, not to whoever next edits `sema_type.zen`.
+This remains a language decision, not a C-backend workaround: choose implicit
+numeric widening, explicit conversions only, or a rule between them, then add
+a sema refusal and focused regression before changing lowering.
 
 *There is no `Ord`.* `std.core` has `Eq` and `Hash` and nothing that orders. Adding one is not a fifth trait beside them: **`Ord` and `Eq` must agree**, exactly as `Eq` and `Hash` must, and a type where `eq` says equal while `compare` says less is a sorted container that loses rows. Whichever is sealed in terms of the other, the relationship is the design.
 
@@ -737,7 +751,7 @@ Env* = {
     // else is required and errors by name. this IS the cli story
     args* = <T>(self: @Self) Res<T, ArgError>
 
-    spawn* = <A: Actor>(self: @Self, actor: A) Ref<A>
+    spawn* = <A: Actor>(self: @Self, actor: A) Res<Ref<A>, ActorStartError>
 }
 
 // equality and hashing, same shape as Display: one overridable
@@ -758,9 +772,9 @@ Hash* = {
 
 
 // std.mem.zen
-// the law: there is NO ambient allocator. anything that needs
-// memory takes an Alloc, so "does this allocate?" is answered
-// by reading the signature. no Alloc parameter, no allocation
+// the law: there is NO ambient allocator. ordinary library allocation
+// takes an Alloc. runtime capabilities may own the storage named by
+// their contract (actor mailboxes and arenas are the current example)
 
 AllocError* = | OutOfMemory
 
@@ -896,7 +910,8 @@ Map*<K: Eq + Hash, V> = {
 // no test keyword, and no discovery baked into the compiler:
 // build.zen walks the module tree itself (b.module) and
 // registers Tester-taking functions as the test target. the
-// function name IS the test name. `zen test` just runs it
+// function name IS the test name. `zen test` is the intended runner,
+// but that CLI entry is still owed
 
 TestError* = | Failed(str)
 
@@ -1045,64 +1060,57 @@ loop*<K, V> = (map: Map<K, V>, body: (h: LoopHandle, key: K, value: V) ()) Res<(
 
 ```groovy
 // ~/zen/src/std/actor.zen
-// the pony model: actors are the ONLY concurrency primitive.
-// no async/await, no locks, no user-facing threads.
+// actors are the primary shared-concurrency model. Threads is an
+// explicit Env escape hatch for FFI and batch work.
 //
 // a behavior is any method in an Actor impl (lifecycle hooks
 // aside). calling a behavior on a Ref enqueues a message and
 // returns immediately: calling IS sending. the message enum
-// behind the behaviors is derived from their signatures at
-// comptime (@meta), the same way AddFoo manufactures a field.
+// behind the behaviors is emitted from their signatures by gen_c_actor.
 //
 // three guarantees replace every lock:
 //   one message at a time per actor -> actor state is single-threaded
 //   causal ordering                 -> A's messages to B arrive in send order
-//   only val / iso cross actors     -> data races are compile errors
+//   payload checking                -> allocator-backed values are refused
 //
-// sendability is checked, not bought with deep copies: an iso
-// is handed over with `consume`, and using it afterward is an
-// error. same checker as `self :: @Self` and Drop-moves
+// Deep val/iso sendability and unique `consume` handoff are still owed.
 //
-// the program exits by quiescence: when every mailbox is empty
-// and no io is pending. main RETURNING is not the program
-// exiting — main's drops run when main's scope ends, and the
-// runtime outlives it. nothing to join, nothing to wait on
+// Callers may stop and join a Ref. Runtime shutdown drains and stops
+// known actors; automatic full quiescence remains stage-5 work.
 
 ActorError* = Closed | Full
 
 // the address of an actor. freely sendable. behavior calls on
 // a Ref are messages. every Ref also carries:
 //   stop* ::= (self: @Self) ()  // delivers stopped after the mailbox drains
+//   join* ::= (self: @Self) ()  // waits until draining and stopped complete
 Ref*<A> = {
     id: u64,
 }
 
 Context* = {
-    env: Env,      // authority flows from Env, no ambient globals
+    env*: Env,      // authority flows from Env, no ambient globals
 
     // per-actor arena (pony's per-actor heap, minus the GC),
     // rooted in the RUNTIME, not in main's arena: an actor
     // draining its mailbox after main returns still has memory.
     // drops when the actor stops, freeing everything it made
-    alloc: Alloc,
+    alloc*: Alloc,
 }
 
-Actor* = {
-    // optional lifecycle hooks (::= with no body = optional):
-    // started runs on spawn, stopped after stop() drains the box
-    started* ::= (self :: @Self, ctx: Context) ()
-    stopped* ::= (self :: @Self, ctx: Context) ()
-}
+// Marker bound. gen_c recognizes optional `started` and `stopped`
+// methods by name in an Actor impl.
+Actor* = {}
 
 // on Env, the capability root:
-// spawn* = <A: Actor>(self: @Self, actor: A) Ref<A>
+// spawn* = <A: Actor>(self: @Self, actor: A) Res<Ref<A>, ActorStartError>
 ```
 
 ```groovy
 // ~/zen/src/std/thread.zen
-// what the scheduler runs actors on. an escape hatch for ffi
-// and batch work only; NEVER block inside a behavior, it parks
-// a scheduler thread and starves every actor queued on it.
+// an explicit escape hatch for ffi and batch work. Actors currently
+// own one worker each, so blocking a behavior stalls that actor;
+// scheduler policy and enforcement remain owed.
 //
 // a thread is authority — the one kind that can outlive its
 // creator — so it hangs off Env like io and pages do. there is
@@ -1211,7 +1219,7 @@ build = (b :: Builder) Res<(), BuildError> {
 
     // test discovery is just code, not compiler magic: walk the
     // PARSED module tree, keep every function whose single
-    // parameter is a Tester. `zen test` merely runs the target
+    // parameter is a Tester. The future `zen test` runs the target
     // this registers. change the filter, change what a test is
     tests ::= b.alloc.Vec<Function>();
     b.module(Path("src")).functions.loop((h, f) {
@@ -1400,8 +1408,8 @@ Foo.impl(Actor, {
     }
 
     // behaviors: calling one on a Ref<Foo> enqueues a message
-    // and returns immediately. params must be sendable (val or
-    // iso). the message enum is derived at comptime via @meta
+    // and returns immediately. allocator-backed payloads are refused;
+    // gen_c_actor emits the message record from this signature
     receive_msg = (self :: @Self, ctx: Context, data: str) () {
         println("actor has received {}", data)
     }
@@ -1481,26 +1489,23 @@ main = (env: Env) Res<i32, Error> {
     // behavior IS sending a message. async is visible right
     // here: each call below returns IMMEDIATELY, the prints
     // happen later, on foo's turn, in send order (causal)
-    foo = env.spawn(Foo());
+    foo = env.spawn(Foo()).try();
     Range(0, 5).loop((h, v) {
-        foo.receive_msg("hello world!");
+        foo.receive_msg("hello world!").try();
     });
     println("sent all five");   // may print BEFORE any receive
 
     // request/response without promises: send our collector's
     // address, the reply lands in its mailbox as a message
-    bar = env.spawn(Collector());
-    foo.compute(41, bar);       // returns immediately
+    bar = env.spawn(Collector()).try();
+    foo.compute(41, bar).try(); // returns immediately
                                 // "got 42" prints when bar runs
 
     foo.stop();   // stopped runs after foo's mailbox drains
-    // nothing to join or wait on: the program exits by
-    // quiescence once every mailbox is empty. main returning
-    // is NOT the program exiting
+    foo.join();   // wait until draining and stopped complete
 
     // threads, the escape hatch: authority from Env, never
-    // ambient. legal in plain code like main, banned inside
-    // behaviors (blocking parks a scheduler thread). the body
+    // ambient. blocking in a behavior stalls that actor today. the body
     // escapes, so it takes an Alloc — the law does not bend
     t = env.threads.spawn(alloc, () Res<i32, ThreadError> {
         Ok(21 * 2);   // imagine ffi or heavy batch work here
@@ -1564,7 +1569,7 @@ main = (env: Env) Res<i32, Error> {
 
 
     some_static_string = "hello";                        // str: borrowed bytes
-    some_dynamic_string = alloc.String("{}!", "hello");  // String: owned, arena-backed
+    some_dynamic_string = alloc.String("{}!", "hello").try(); // owned, arena-backed
 
     Ok(0);
     // scope ends: defers run first, then drops in reverse order,

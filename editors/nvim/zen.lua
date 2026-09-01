@@ -33,8 +33,8 @@ M.root = vim.env.ZEN_ROOT or vim.fn.expand("~/src/zen")
 -- because a corpus test cannot hold a pipe open, and both reach the same
 -- serve loop — but an editor wants this one.
 --
--- WHAT YOU GET: hover, and diagnostics. Everything else comes back
--- `-32601 no handler`.
+-- WHAT YOU GET: hover, definition, document symbols, completion, formatting,
+-- code actions, diagnostics, and full semantic tokens.
 --
 -- COLOUR DOES NOT COME FROM HERE, and this is the one place that is
 -- worth restating rather than assuming. The server now answers
@@ -191,18 +191,14 @@ return M
 -- ---------------------------------------------------------------------
 -- WHAT THE SERVER ANSWERS, so nothing above promises more than it has
 --
---   textDocument/hover     the type under the cursor, a declared name's
---                          own type, or a function's signature. `K`.
---   semanticTokens/full    colour, from the lexer — DECLINED HERE, see
---                          `M.lsp()`; tree-sitter's is better
+--   textDocument/hover, definition, documentSymbol, completion, formatting
+--   textDocument/codeAction and semanticTokens/full
 --   publishDiagnostics     lex, parse and sema, grouped per file
 --   initialize / shutdown  lifecycle
 --   didOpen/didChange/didClose   Full sync, no incremental
 --
--- Everything else — definition, documentSymbol, completion, references,
--- formatting, rename — is refused BY NAME with JSON-RPC `-32601`. Neovim
--- surfaces that as "method not supported", which is the honest answer and
--- not a bug in this config.
+-- References, rename, signature help, range formatting and semantic-token
+-- deltas are not advertised.
 --
 -- WHY DIAGNOSTICS LAG YOUR TYPING, and why there is no setting for it.
 -- The server marks a document changed and builds at the next point where

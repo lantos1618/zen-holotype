@@ -183,11 +183,9 @@ driver; repository testing is still run by Make and the corpus runner.
 
 `make test` builds the self-hosted compiler, runs lint/tree-sitter parsing,
 line-cap, duplicate-comment, reachable-fault and lexer-position gates, then
-the corpus, must-fail and example suites. `make determinism` and
-`make fixpoint` separately prove stable code generation and seed freshness.
+the corpus, must-fail and example suites. `make determinism` proves repeated
+emission is stable. The stage-2/stage-3 fixpoint gate remains owed.
 
-Known committed boundaries include actor sendability/runtime, thread spawn,
-network/process floors, a general comptime evaluator, nested `@meta` execution,
-generic methods, first-class escaping closures, and the executable Zen build
-driver. External std roots and expanded runtime/meta work present in a dirty
-checkout are WIP until validated and committed.
+Known boundaries include deep actor sendability and scheduler policy, a general
+comptime evaluator, nested `@meta` execution, generic methods, first-class
+escaping closures, the `zen test` driver, and the full compiler fixpoint gate.

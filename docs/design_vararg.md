@@ -1,8 +1,7 @@
 # `vararg<T>` — a variadic that is a real type
 
-Written 2026-08-17, and landed the same day. `docs/design_fmt.md` §5 records the
-question this answers; that section stays as the record of what was believed
-before the code existed, and this document supersedes its pricing.
+`vararg<T>` is a homogeneous variadic parameter represented as an ordinary Zen
+value.
 
 A separate file rather than a section of `design_fmt.md`, because the format
 language is no longer the subject. `...` was born inside the format doors and
@@ -41,7 +40,7 @@ That is the whole design, and everything cheap about this lane follows from it:
 
 No new `TypeKind`, no new `Ty` variant, no tuple, no boxing, no vtable, no
 comptime evaluator. **Nothing structural is introduced**: `vararg<T>` is
-declared, so `PLAN.md:371`'s "declared types stay nominal" is untouched, and the
+declared, so the language's "declared types stay nominal" rule is untouched, and the
 one structural exception (a union) is not involved.
 
 Only two things are special, and both are about the **call**.
@@ -52,19 +51,21 @@ Only two things are special, and both are about the **call**.
 
 At the call site, `sum(1, 2, 3)` emits (`gen_c_call.write_run`):
 
-    zu_f_sum((zu_t_varargI1_b3i32){ .zu_m4data = (int32_t[]){ 1, 2, 3 },
-                                    .zu_m3len  = 3u })
+    sum_fn((vararg_i32){ .data = (int32_t[]){ 1, 2, 3 }, .len = 3u })
+
+The real identifiers are mangled; the schematic spelling above shows only the
+layout.
 
 A **C compound literal inside a C compound literal**: the run, and the two words
-that describe it. Both have automatic storage in the *calling* block, which is
-exactly as long as the call and no longer. `sum()` emits `{ 0 }` — a null run of
+that describe it. Both live through the caller's block; the type-position rule
+prevents the borrowed pack escaping the call. `sum()` emits `{ 0 }` — a null run of
 length zero, because a zero-length array initialiser is a GNU extension and this
 backend is C99.
 
 Consequences worth stating plainly:
 
-- **Nothing is allocated.** `make bench-allocs` is unaffected by a vararg call;
-  a pack costs one stack run and two words.
+- **Nothing is allocated.** Emitted C holds one stack run and a two-word view;
+  the corpus checks the call behavior.
 - **The pack borrows.** It does not own the run and it has no allocator field, so
   there is nothing to free and no way to grow.
 - **There is no constructor.** `data` carries no `*`, and `collections_vararg.zen`
@@ -139,29 +140,21 @@ parameter's type. Both sentences are true of it and both halves have to go.
 ### How the rule is reached
 
 The rule is about a written type's **position**, and a type node carries its span
-but not its parent. So the two halves name themselves separately:
+but not its parent. The checker therefore gathers the permitted positions before
+it reports the difference:
 
 - `src/sema/sema_vararg.check_varargs` gathers every `vararg` mention in the
   compilation (`Ast.types_where`, one match per type node — it finds nothing in a
   tree with no varargs), then collects every function's last-parameter type id
   and reports the difference. Whole-program, beside `check_layout` and
   `check_depth` in `check_all`.
-- `bootstrap/sema.py` reaches the same rule from the other end: the check sits in
-  `resolve_named`, where every type node the compilation resolves passes, keyed on
-  `id(node)` against the same collected set (`_pack_positions`).
-
-Both are whole-program and both report the same two sentences at the same
-positions. The wordings are shared deliberately, because a `must-fail`
-expectation is read by both compilers.
 
 ### A consequence worth naming
 
 Because a `vararg<T>` may not be a field, a return type, or a type argument, **a
 value of pack type can only ever be a parameter binding.** That is what lets
-`bootstrap`'s forwarding recognition be "one swallowed argument that is a NAME
-bound to this pack type" — complete, and needing no typing pass. The self-hosted
-backend asks the more general question (`ty_of` equals the pack type), which is a
-superset that in practice can only match a name.
+the backend's forwarding recognition be `ty_of` equals the pack type, which in
+practice can only match a parameter name.
 
 ---
 
@@ -178,27 +171,26 @@ superset that in practice can only match a name.
 | forwardable | no | **yes** |
 | declared with a body | no — bodyless by necessity | yes, ordinarily |
 
-The two format forms — `alloc.String(fmt, ..)` and `<receiver>.fmt(fmt, ..)`
-(`DESIGN.md:536`, `:749`) — are **heterogeneous**:
+The allocating and sink format doors are **heterogeneous**:
 `fmt("{} {}", "str", 42)` mixes types in one argument list, which a homogeneous
 pack cannot type. Tier 1 therefore cannot replace them and does not try. They stay
 bodyless and compiler-expanded for exactly the reason `gen_c_sink.zen`'s header
 gives.
 
 That coexistence has a sharp edge, and it is handled rather than hoped:
-`last_is_variadic` (`gen_c_sink.zen`) and `_is_variadic` (`bootstrap/gen_c.py`)
-are the **format door's shape** and still mean exactly `...`. Widening them would
+`last_is_variadic` (`gen_c_sink.zen`) is the **format door's shape** and still
+means exactly `...`. Widening it would
 let a bodyless three-parameter `add` ending in a typed pack be lowered as that
 door. The **arity** question — which both spellings answer identically — is asked
-separately: `tail_is_pack` / `_written_pack` beside them, and `tail_swallows` for
-the resolved-signature form.
+separately by `tail_is_pack` and `tail_swallows`.
 
 ---
 
 ## 6. What works, measured
 
-All of the following run identically under both toolchains
-(`tests/corpus/sema/vararg_pack_forwards.zen`, `..._is_a_range.zen`):
+All of the following are held by the vararg corpus, including
+`vararg_pack_forwards`, `vararg_element_type_is_inferred`, and
+`vararg_pack_of_structs`:
 
 - a free function: `sum(1, 2, 3)`, `sum()`
 - a fixed prefix then a pack: `label("ab", "cde", "f")`, `label("ab")`
@@ -208,17 +200,12 @@ All of the following run identically under both toolchains
 - a **generic struct's** method, `Bag<T>.take(vs: vararg<T>)` — `T` from the
   receiver
 - a **generic function**, `count = <T>(v: vararg<T>)` — `T` inferred from the
-  swallowed arguments (`gen_c_infer.unify_swallowed`,
-  `bootstrap/gen_c.infer_fn_targs`)
+  swallowed arguments (`gen_c_infer.unify_swallowed`)
 
 ### Known limits, stated rather than discovered later
 
-- **A wrong element type is rejected by both compilers with different words.**
-  `sum(1, "two")` is `no overload matches` from `src` and `expected i32, found
-  str` from `bootstrap`. That is the pre-existing single-candidate diagnostic
-  asymmetry (`src` has exactly one `NoOverload` site and no
-  one-candidate-wrong-argument path), not something this lane introduced, and it
-  is why no `must-fail` test asserts that message.
+- **A wrong element type is rejected as `no overload matches`.** The compiler
+  has no more specific single-candidate wrong-argument diagnostic yet.
 - **A pack is not indexable by `v[i]`** through the trap form unless the receiver
   is a place; `v.get(i)` and `v.loop(..)` are the walked forms and are what the
   corpus exercises.
@@ -229,83 +216,7 @@ All of the following run identically under both toolchains
 
 ---
 
-## 7. The first `src/` use, verified and held for a staged seed
-
-The feature landed without `src/` using it, **deliberately**, and the reason is
-mechanical rather than cautious: `make build` compiles the committed
-`seed/zen.c`, and that compiler predates the pack's call convention. Measured,
-not assumed — with the use applied and the committed seed in place:
-
-    gen/gen_c/gen_c_runtime.zen:536:5: codegen cannot resolve `bytes`
-    gen/gen_c/gen_c_runtime.zen:537:5: codegen cannot resolve `bytes`
-
-So the first `src/` use needs a **staged seed**: land the feature (done),
-regenerate the seed, then land the use. (It was called a staged *bootstrap*
-when the Python implementation still existed; the constraint was always the
-committed seed, and now it is only that.) Nothing about the use itself is
-uncertain — the whole of it was built and gated against a locally staged seed:
-`zen` from the feature commit compiled the modified tree, that binary compiled
-it again **byte-identically** (the fixpoint property), and both suites came back
-**517 passed / 0 failed / 4 deferred**, `fmt` and `style` clean.
-
-### The use
-
-`Emit.bytes` and `Emit.say` (`src/gen/gen_emit.zen`) take a `vararg<str>`
-instead of one `str`. Two signature lines, and **no call site in the tree
-changes**, because a pack's arity is a minimum — every existing one-piece call
-still means exactly what it meant.
-
-    bytes* = (self :: @Self, pieces: vararg<str>) Res<(), AllocError> {
-        pieces.loop((h, s) { self.piece(s).try() });
-        Ok(());
-    }
-
-    say* = (self :: @Self, pieces: vararg<str>) Res<(), AllocError> {
-        self.bytes(pieces).try();       // FORWARDED — a struct copy
-        self.line()
-    }
-
-`say` forwards its own pack to `bytes` rather than looping again, which is the
-feature's acceptance test appearing in the compiler's own code.
-
-### Before / after
-
-`gen_c_runtime.open_helper`, which emits one C function header:
-
-    // before — eleven calls, one token each
-    out.bytes("static ").try();
-    out.bytes(ct).try();
-    out.bytes(" zg_").try();
-    out.bytes(op).try();
-    out.bytes("_").try();
-    out.bytes(prim).try();
-    out.bytes("(").try();
-    out.bytes(ct).try();
-    out.bytes(" a, ").try();
-    out.bytes(ct).try();
-    out.bytes(" b").try();
-
-    // after — two
-    out.bytes("static ", ct, " zg_", op, "_", prim, "(").try();
-    out.bytes(ct, " a, ", ct, " b").try();
-
-### Why this one, and what it unblocks
-
-Measured over `src/gen` and `src/lsp`: **257 runs of consecutive one-piece emit
-calls, 798 source lines**, plus about fourteen places that allocate a whole
-throwaway `String` purely to join two to four known pieces and hand the view to
-`writeln`. Both shapes exist because the sink took exactly one `str`. This
-change removes the reason, without a heap allocation and without touching a
-single caller — which is the strongest available evidence that `vararg<T>`
-carries weight rather than only compiling.
-
-It is also the honest scope for one lane. Converting the 257 runs is a
-mechanical campaign over files two agents must not share, and it should follow
-the seed regeneration, not ride it.
-
----
-
-## 8. What tier 2 will need
+## 7. What tier 2 will need
 
 `f = (v: vararg<A | B | C>)` — a heterogeneous pack — is now "the same thing where
 `T` happens to be a union", and that is the point of doing tier 1 first.

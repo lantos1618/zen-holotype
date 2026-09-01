@@ -472,17 +472,12 @@ and therefore sema's.
 | `initialize` / `shutdown` | **works** |
 | `initialized` / `exit` / `$/cancelRequest` | notifications, no reply |
 | `textDocument/didOpen` / `didChange` / `didClose` | **works**, Full sync only |
-| `textDocument/hover` | **works** — a type, a declared name's type, or a function's signature |
-| `textDocument/semanticTokens/full` | **works** — lexical always; `type`/`function`/`parameter` when the diagnostics' build is clean |
+| `textDocument/hover` / `definition` | **works**; local definitions remain a gap |
+| `textDocument/documentSymbol` / `completion` | **works** |
+| `textDocument/formatting` / `codeAction` | **works** |
+| `textDocument/semanticTokens/full` | **works** — lexical always; semantic refinement when the build is clean |
 | `textDocument/publishDiagnostics` | **works** — lex, parse and sema, grouped per file, cleared when fixed |
-| everything else | **refused by name** with JSON-RPC `-32601` |
-
-"Everything else" is `textDocument/definition`, `documentSymbol`,
-`completion`, `references`, `formatting`, `signatureHelp`, `rename`, and
-`semanticTokens` in its `range` and `full/delta` shapes. The refusal names
-the method and points at `docs/design_lsp.md`. An editor showing "method
-not supported" for those is the server being honest, not this
-configuration being wrong.
+| references, rename, signature help | **refused by name** with JSON-RPC `-32601` |
 
 **`range` and `full/delta` are refused ON PURPOSE and are not advertised.**
 A client asks for either only when the server said it had it, so the
@@ -514,9 +509,9 @@ declares and answers `null` for what it imports. Diagnostics get nothing at
 all in that state, because the same lone-module check that makes hover go
 quiet would make diagnostics go loud and wrong.
 
-`zen fmt` exists as a command but wiring `textDocument/formatting` to it is
-a separate change and `docs/design_lsp.md` does not ask for it yet. Neither
-client configures a formatter.
+`textDocument/formatting` is implemented as one whole-document edit over the
+same formatter as `zen fmt`. Both clients may use it for format on save; range
+and on-type formatting are not advertised.
 
 ---
 
