@@ -34,7 +34,7 @@ Parser, module = std.parse
 Ast = std.ast.ast_arena
 TriviaRun = std.ast.ast_span
 ExprId, TypeId, PatternId, BlockId = std.ast.ast_id
-Decl, Struct, Enum, Alias, Function, Impl, Import, Const = std.ast.ast_node
+Decl, Struct, Enum, EnumDiscriminant, Alias, Function, Impl, Import, Const = std.ast.ast_node
 Module, Block, Stmt, Bind, ExprStmt = std.ast.ast_node
 Expr, Name, Literal, Paren, ArrayLit, FixedArray = std.ast.ast_node
 Lambda, Call, Match, Try, Record, Access, Index = std.ast.ast_node
@@ -105,10 +105,18 @@ walk_decl = (w :: Walk, d: Decl) Res<(), AllocError> {
         },
         Enum(e)     => {
             e.tparams.loop((h, tp) { walk_tparam(w, tp) });
+            e.repr.match({ Ok(t) => walk_type(w, t), None => () });
             e.variants.loop((h, v) {
                 add(w, v.leading, "variant.leading");
                 v.payload.match({
                     Ok(t) => walk_type(w, t),
+                    None  => (),
+                });
+                v.discriminant.match({
+                    Ok(d) => d.match({
+                        Exact(x)    => walk_expr(w, x),
+                        CatchAll(_) => (),
+                    }),
                     None  => (),
                 });
                 add(w, v.trailing, "variant.trailing");

@@ -193,7 +193,43 @@ variant_ahead = (p :: Parser) bool {
     (p.token_kind_at(j) == TokenKind.ParenOpen).then(() {
         j = p.live_at(p.group_end_at(j));
     });
-    p.token_kind_at(j) == TokenKind.Bar;
+    p.variant_bar_at(j)
+}
+
+// A plain enum places `|` after the payload. A represented enum places an
+// integer expression between `=` and that bar; `|` is not an expression
+// operator, so the first top-level bar closes the classification fork.
+variant_bar_at = (p :: Parser, from: usize) bool {
+    (p.token_kind_at(from) == TokenKind.Bar).match({
+        true  => true,
+        false => (p.token_kind_at(from) == TokenKind.Eq).match({
+            true  => p.discriminant_bar_after(p.live_at(from + 1)),
+            false => false,
+        }),
+    })
+}
+
+discriminant_bar_after = (p :: Parser, from: usize) bool {
+    depth   ::= 0;
+    found   ::= false;
+    running ::= from < p.tokens_len();
+    Range(from, p.tokens_len()).loop((h, k) {
+        running.then(() {
+            kind = p.token_kind_at(k);
+            (depth == 0 && kind == TokenKind.Bar).match({
+                true  => { found = true; running = false; h.break(); },
+                false => kind.is_in([
+                    TokenKind.Semicolon,
+                    TokenKind.BraceClose,
+                    TokenKind.Eof,
+                ]).match({
+                    true  => { running = false; h.break(); },
+                    false => { depth = kind.delim_step(depth); },
+                }),
+            });
+        });
+    });
+    found;
 }
 
 path_or_alias = (p :: Parser) ValueShape {
@@ -261,8 +297,40 @@ head_shape_ahead = (p :: Parser) bool {
     after = p.token_kind_at(j);
     (after == TokenKind.Lt).match({
         true  => p.generic_head_ahead(j),
-        false => p.assign_head_ahead(after, j),
+        false => (after == TokenKind.Colon).match({
+            true  => p.typed_enum_head_ahead(j),
+            false => p.assign_head_ahead(after, j),
+        }),
     });
+}
+
+// A typed binding remains a statement. The exception is a represented enum,
+// whose RHS still has the enum's top-level bar and therefore declares a type.
+typed_enum_head_ahead = (p :: Parser, colon: usize) bool {
+    binder  ::= p.tokens_len();
+    running ::= true;
+    Range(p.live_at(colon + 1), p.tokens_len()).loop((h, k) {
+        running.then(() {
+            kind = p.token_kind_at(k);
+            kind.match({
+                Eq           => { binder = k; running = false; h.break(); },
+                ColonColonEq => { running = false; h.break(); },
+                Semicolon    => { running = false; h.break(); },
+                BraceOpen    => { running = false; h.break(); },
+                BraceClose   => { running = false; h.break(); },
+                Eof          => { running = false; h.break(); },
+                _            => (),
+            });
+        });
+    });
+    (binder < p.tokens_len()).match({
+        false => false,
+        true  => {
+            value = p.live_at(binder + 1);
+            kind  = p.token_kind_at(value);
+            kind == TokenKind.Bar || p.declares_enum(value, kind)
+        },
+    })
 }
 
 generic_head_ahead = (p :: Parser, j: usize) bool {
@@ -304,7 +372,7 @@ bar_after = (p :: Parser, j: usize) bool {
     (p.token_kind_at(k) == TokenKind.ParenOpen).then(() {
         k = p.live_at(p.group_end_at(k));
     });
-    p.token_kind_at(k) == TokenKind.Bar;
+    p.variant_bar_at(k)
 }
 
 // Whether a return type begins here rather than the next member head.

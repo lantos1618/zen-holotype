@@ -1,0 +1,85 @@
+// Represented enums retain their written integer type and each variant's
+// external discriminant. The leading bar still distinguishes a one-variant
+// enum from an alias.
+
+scan, Source = std.lex
+Parser, module = std.parse
+Ast, Decl, EnumDiscriminant = std.ast
+TypeId, ExprId = std.ast
+
+GrammarProbe: u8 = Zero = 0 | Other = 7 | Raw(u8) = _
+
+SOURCE: str = "FrameType*: u8 = Data = 0 | Headers = (1 + 1) | Unknown(u8) = _\nSolo: u16 = | Only = 7\nholder = () () { Local: u8 = Low = 3 | High = 4 }\n"
+
+repr_name = (tree: Ast, id: TypeId) str {
+    tree.type_at(id).kind.match({
+        Named(n) => n.name.text,
+        _        => "not-named",
+    })
+}
+
+exact_text = (tree: Ast, id: ExprId) str {
+    tree.expr_at(id).kind.match({
+        Literal(l) => l.text,
+        Paren(_)   => "parenthesized",
+        _          => "other",
+    })
+}
+
+discriminant = (tree: Ast, d: EnumDiscriminant) str {
+    d.match({
+        Exact(id)   => exact_text(tree, id),
+        CatchAll(_) => "_",
+    })
+}
+
+show = (tree: Ast, d: Decl) () {
+    d.kind.match({
+        Enum(e)     => {
+            repr = e.repr.match({
+                Ok(t) => repr_name(tree, t),
+                None  => "none",
+            });
+            println(
+                "enum {} repr {} variants {} leading {}",
+                e.name.text,
+                repr,
+                e.variants.len,
+                e.leading_bar.match({ Ok(_) => true, None => false })
+            );
+            e.variants.loop((h, v) {
+                value = v.discriminant.match({
+                    Ok(x) => discriminant(tree, x),
+                    None  => "none",
+                });
+                println(
+                    "  {} payload {} discriminant {}",
+                    v.name.text,
+                    v.payload.match({ Ok(_) => true, None => false }),
+                    value
+                );
+            });
+        },
+        Function(f) => f.body.match({
+            None    => println("function has no body"),
+            Ok(bid) => tree.block_at(bid).stmts.get(0).match({
+                None     => println("function body is empty"),
+                Ok(stmt) => stmt.kind.match({
+                    Decl(inner) => show(tree, inner),
+                    _           => println("nested item is not a declaration"),
+                }),
+            }),
+        }),
+        _           => println("not an enum"),
+    });
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    lexed = scan(a, Source(file: "represented.zen", text: SOURCE)).try();
+    p ::= a.Parser(lexed);
+    m = p.module("represented").try();
+    println("lex {} parse {}", lexed.diags.len, p.diags.len);
+    m.decls.loop((h, d) { show(p.tree, d) });
+    Ok(0);
+}

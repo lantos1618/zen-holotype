@@ -358,11 +358,9 @@ module.exports = grammar({
         seq($.enum_variant, repeat1(seq('|', $.enum_variant))),
       ),
 
-    // payloads are TYPES: `Circle(Circle)`, `Failed(str)`, `Missing(str)`.
-    // "a default payload and a discriminant are different things and are
-    // written apart" — so a payload never contains `name: value`, which is
-    // what keeps `Package(url: "..", ..)` a call and not a variant. D15: one
-    // payload type, never a list.
+    // Payloads are types. A represented enum writes its external integer
+    // discriminant separately: `FrameType: u8 = Data = 0 | Unknown(u8) = _`.
+    // D15 still permits one payload type, never a list.
     // prec.right: a `(` after a variant name is that variant's payload, never
     // the start of the next statement. This is the ONE residue of R2 — a
     // declaration takes no `;`, so a statement beginning `(` on the next line
@@ -372,6 +370,7 @@ module.exports = grammar({
         seq(
           field('name', $.identifier),
           optional(field('payload', $.variant_payload)),
+          optional(seq('=', field('discriminant', $._expression))),
         ),
       ),
 
