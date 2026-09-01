@@ -101,9 +101,40 @@ escape* = (lx :: Lexer) Res<bool, AllocError> {
     });
 }
 
-// Numbers are decimal, with no exponent, separators, or type suffix.
+// Integers are decimal or `0x` hexadecimal. Floats are decimal. Neither form
+// accepts separators or type suffixes.
 number* = (lx :: Lexer) Res<(), AllocError> {
     from = lx.cur.pos();
+    is_hex_prefix(lx).match({
+        true  => lx.hex_number(from),
+        false => lx.decimal_number(from),
+    })
+}
+
+is_hex_prefix = (lx: Lexer) bool {
+    lx.cur.at_byte('0')
+        && (lx.cur.at_byte(1, 'x') || lx.cur.at_byte(1, 'X'))
+}
+
+hex_number = (lx :: Lexer, from: Pos) Res<(), AllocError> {
+    lx.cur.bump();
+    lx.cur.bump();
+    digits_at = lx.cur.pos();
+    lx.cur.bump_while((b) { b.is_hex_digit() });
+    digits = lx.since(digits_at);
+    (digits.len > 0).match({
+        false => {
+            lx.cur.bump_while((b) { b.is_ident_cont() });
+            lx.report(LexFault.HexNeedsDigit, from)
+        },
+        true  => {
+            lx.suffix().try();
+            lx.emit_int(hex_digits_of(digits), from)
+        },
+    })
+}
+
+decimal_number = (lx :: Lexer, from: Pos) Res<(), AllocError> {
     lx.cur.bump_while((b) { b.is_digit() });
     whole = lx.since(from);
 
@@ -119,7 +150,7 @@ number* = (lx :: Lexer) Res<(), AllocError> {
 
     is_float.match({
         true  => lx.emit(TokenKind.Float, from),
-        false => lx.emit_int(whole, from),
+        false => lx.emit_int(digits_of(whole), from),
     });
 }
 
@@ -156,8 +187,7 @@ suffix = (lx :: Lexer) Res<(), AllocError> {
 }
 
 // Values beyond u64 produce a fault and no token.
-emit_int = (lx :: Lexer, whole: str, from: Pos) Res<(), AllocError> {
-    digits = digits_of(whole);
+emit_int = (lx :: Lexer, digits: Digits, from: Pos) Res<(), AllocError> {
     digits.overflow.match({
         true  => lx.report(LexFault.IntegerOutOfRange, from),
         false => lx.emit(TokenKind.Int(digits.value), from),
@@ -174,18 +204,31 @@ Digits* = {
 // Detect source overflow before arithmetic can trap.
 digits_of* = (s: str) Digits {
     Range(0, s.len).loop(Digits(value: 0, overflow: false), (h, i, at, acc: Digits) {
-        add_digit(acc, s[at])
+        add_digit(acc, (s[at] - '0').to_u64(), 10)
     }).match({
         Ok(digits) => digits,
         None       => Digits(value: 0, overflow: false),
     });
 }
 
-// `acc * 10 + d` overflows when `acc > (u64.MAX - d) / 10`.
-add_digit = (acc: Digits, b: u8) Digits {
-    d = (b - '0').to_u64();
-    (acc.overflow || (acc.value > (u64.MAX - d) / 10)).match({
+hex_digits_of = (s: str) Digits {
+    Range(0, s.len).loop(Digits(value: 0, overflow: false), (h, i, at, acc: Digits) {
+        add_digit(acc, hex_digit_value(s[at]), 16)
+    }).match({
+        Ok(digits) => digits,
+        None       => Digits(value: 0, overflow: false),
+    });
+}
+
+hex_digit_value = (b: u8) u64 {
+    digit: Res<u8> = b.hex_value();
+    digit.match({ Ok(value) => value.to_u64(), None => 0 })
+}
+
+// `acc * base + d` overflows when `acc > (u64.MAX - d) / base`.
+add_digit = (acc: Digits, d: u64, base: u64) Digits {
+    (acc.overflow || (acc.value > (u64.MAX - d) / base)).match({
         true  => Digits(value: 0, overflow: true),
-        false => Digits(value: acc.value * 10 + d, overflow: false),
+        false => Digits(value: acc.value * base + d, overflow: false),
     });
 }

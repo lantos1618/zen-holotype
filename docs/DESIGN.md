@@ -105,11 +105,11 @@ The shape of every rule below is the same: **reject rather than reinterpret.** A
 
 **A character literal holds exactly one byte.** `str` is bytes, so `''` and `'ab'` are both errors. `'é'` is two bytes and therefore not a character literal.
 
-**Numbers are decimal, and a digit may not be followed by an identifier character.** `1abc` is an error, not a number beside a name. There are no type suffixes — a literal's type comes from its context, which is the same rule the rest of the language runs on.
+**Integers are decimal or hexadecimal (`0x`/`0X`); floats are decimal.** A digit may not be followed by an identifier character: `1abc` is an error, not a number beside a name. There are no type suffixes — a literal's type comes from its context, which is the same rule the rest of the language runs on.
 
 - **A leading zero is rejected.** Zen has no octal, so `010` cannot quietly mean 8. Python 3 made this exact call for this exact reason.
 - **`12.` is an error**; a float has digits on both sides of the point. The gain is that a number literal is never the base of a member access, so `1.max` needs no lookahead to disambiguate from a malformed float.
-- Hex is therefore not in v1. `0xFF` is not "a number followed by an identifier character" but its own token shape, and adding a token shape later is compatible in a way that removing one is not. Cost to accept knowingly: bit masks are written in decimal until someone adds it.
+- **A hexadecimal literal needs at least one hexadecimal digit.** `0x` and `0xG` are errors. Hexadecimal literals are integers; signs remain prefix operators rather than part of the token.
 
 **Identifiers are ASCII** — `[A-Za-z_][A-Za-z0-9_]*`. Widening a character set later is compatible; narrowing it is not, so v1 takes the narrow end.
 

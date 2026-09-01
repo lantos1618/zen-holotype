@@ -58,12 +58,14 @@ ArgError* =
 `DESIGN.md:455-457`. Comment interposed between variants of a brace-less enum; the
 enum must still terminate correctly.
 
-### C005 — decimal integer literal
+### C005 — integer literals
 ```groovy
 const_val_implicit = 1;
+byte_mask = 0xFF;
 ```
-`DESIGN.md:1245`. Also `8` (`562`), `40` (`951`), `64` (`951`), `36` (`1223`),
-`255` (`1251`), `2147483648`-class values are never written.
+Decimal and hexadecimal forms. `DESIGN.md:1245`. Also `8` (`562`), `40` (`951`),
+`64` (`951`), `36` (`1223`), `255` (`1251`), `2147483648`-class values are
+never written.
 
 ### C006 — float literal
 ```groovy

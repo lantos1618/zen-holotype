@@ -120,9 +120,8 @@
 //     except an impl call. Zen has no pointer sigil (raw pointers are
 //     `Ptr<T>`), so `*` has exactly two jobs. (A-STAR)
 //
-// D8. Numeric literals: decimal integers and `d.d` floats ONLY. DESIGN.md
-//     shows no hex, no binary, no exponent, no digit separators, no type
-//     suffixes. Implementing more would be inventing.
+// D8. Numeric literals: decimal integers, `0x` hexadecimal integers, and
+//     `d.d` decimal floats. No binary, exponent, separators, or suffixes.
 //
 // D9. Block comments do not nest. TESTING.md explicitly says "decide, then
 //     test"; DESIGN.md does not decide, so this is the minimum.
@@ -848,9 +847,14 @@ module.exports = grammar({
 
     identifier: (_) => /[A-Za-z_][A-Za-z0-9_]*/,
 
-    // D8: decimal only. No hex, no exponent, no separators, no suffixes —
-    // DESIGN.md shows none of them.
-    number_literal: (_) => token(seq(/[0-9]+/, optional(seq('.', /[0-9]+/)))),
+    // D8: hexadecimal integers or decimal integers/floats.
+    number_literal: (_) =>
+      token(
+        choice(
+          /0[xX][0-9a-fA-F]+/,
+          seq(/[0-9]+/, optional(seq('.', /[0-9]+/))),
+        ),
+      ),
 
     boolean_literal: (_) => choice('true', 'false'),
 
