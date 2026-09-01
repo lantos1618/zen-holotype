@@ -17,20 +17,20 @@ The corresponding decisions are in
 | Item | Count |
 | --- | ---: |
 | Zen files | 227 |
-| Top-level declarations | 7188 |
-| Types | 366 |
+| Top-level declarations | 7174 |
+| Types | 369 |
 | Enums | 94 |
 | Aliases | 0 |
 | Implementations | 76 |
-| Functions | 4008 |
+| Functions | 3996 |
 | Constants | 175 |
-| Imports and re-exports | 2469 |
+| Imports and re-exports | 2464 |
 
 ## Files
 
 ### `src/fmt/fmt.zen`
 
-27 declarations (types: 1, functions: 12, imports and re-exports: 14).
+28 declarations (types: 1, functions: 13, imports and re-exports: 14).
 
 #### Types
 
@@ -46,6 +46,8 @@ Render* = {
 
 ```zen
 render* = (a: Alloc, lexed: Lexed) Res<Render, AllocError>
+
+parsed = (a: Alloc, lexed: Lexed) Res<Render, AllocError>
 
 rejected = (a: Alloc, diags: Vec<Diag>) Res<Render, AllocError>
 
@@ -1641,7 +1643,47 @@ by_arity, has_body = gen.gen_c.gen_c_impl
 
 ### `src/gen/gen_c/gen_c_bound.zen`
 
-77 declarations (functions: 49, imports and re-exports: 28).
+62 declarations (types: 2, functions: 33, imports and re-exports: 27).
+
+#### Types
+
+```zen
+BoundDispatch = {
+    call: Call,
+    receiver: TyId,
+    site: Site,
+    slot: Slot,
+    ctx: Ctx,
+    settle = (self: @Self, be :: CBackend) Res<BoundCall, AllocError>
+    lower = (self: @Self, be :: CBackend, id: ExprId, a: Access,
+             out :: String) Res<(), AllocError>
+    result_type = (self: @Self, be :: CBackend)
+                  Res<Res<TyId>, AllocError>
+}
+
+BoundCall = {
+    dispatch: BoundDispatch,
+    declared: Vec<TyId>,
+    ret: TyId,
+    targs: Inst,
+    settled = (self: @Self, be: CBackend) bool
+    real_ret = (self: @Self, be :: CBackend) Res<TyId, AllocError>
+    emit = (self: @Self, be :: CBackend, a: Access, out :: String)
+           Res<(), AllocError>
+    args = (self: @Self, be :: CBackend, out :: String)
+           Res<(), AllocError>
+    arg = (self: @Self, be :: CBackend, arg: Arg, i: usize, hold: bool,
+           out :: String) Res<(), AllocError>
+    sizes = (self: @Self, be :: CBackend, out :: String)
+            Res<(), AllocError>
+    size = (self: @Self, be :: CBackend, i: usize, out :: String)
+           Res<(), AllocError>
+    result = (self: @Self, be :: CBackend, call: str, out :: String)
+             Res<(), AllocError>
+    value_back = (self: @Self, be :: CBackend, call: str, out :: String)
+                 Res<(), AllocError>
+}
+```
 
 #### Functions
 
@@ -1744,35 +1786,18 @@ lower_fat_call* = (
     out :: String
 ) Res<(), AllocError>
 
-lower_answered_call = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    rty : TyId,
-    s   : Site,
-    ctx : Ctx,
-    out :: String
-) Res<(), AllocError>
+member_answered = (be :: CBackend, f: Function, rty: TyId, name: str)
+                  Res<bool, AllocError>
 
-member_answered = (be :: CBackend, f: Function, rty: TyId, name: str) bool
+bound_answered = (be :: CBackend, rty: TyId, name: str)
+                 Res<bool, AllocError>
 
-bound_answered = (be :: CBackend, rty: TyId, name: str) bool
+impl_bound_matches = (be :: CBackend, impl: Impl, mi: usize, rty: TyId)
+                     Res<bool, AllocError>
 
-table_answered = (be :: CBackend, mi: usize, bound: str, name: str) bool
-
-impls_answered = (be :: CBackend, ids: Vec<ImplId>, bound: str, name: str)
-                 bool
-
-one_impl = (be :: CBackend, id: ImplId, bound: str, name: str) bool
-
-impl_supplies = (tree: Ast, im: Impl, bound: str, name: str) bool
-
-bound_of = (tree: Ast, tid: TypeId) str
+same_bound_decl = (be: CBackend, a: TyId, b: TyId) bool
 
 supplies_body = (members: Vec<Member>, name: str) bool
-
-owner_name = (be :: CBackend, rty: TyId) str
 
 slot_call* = (
     be   :: CBackend,
@@ -1794,45 +1819,8 @@ write_named_slot = (
 
 pick_slot = (slots: Vec<Slot>, name: str, args: usize) Res<Slot>
 
-settle_call = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    a    : Access,
-    rty  : TyId,
-    s    : Site,
-    slot : Slot,
-    ctx  : Ctx,
-    out  :: String
-)
-              Res<(), AllocError>
-
-read_slot = (
-    be       :: CBackend,
-    c        : Call,
-    rty      : TyId,
-    s        : Site,
-    slot     : Slot,
-    ctx      : Ctx,
-    declared :: Vec<TyId>,
-    targs    :: Inst
-)
-            Res<TyId, AllocError>
-
 fat_ret_type* = (be :: CBackend, c: Call, a: Access, ctx: Ctx)
                 Res<Res<TyId>, AllocError>
-
-slot_ret_type = (be :: CBackend, c: Call, rty: TyId, slot: Slot, ctx: Ctx)
-                Res<Res<TyId>, AllocError>
-
-settled_ret_type = (
-    be   :: CBackend,
-    c    : Call,
-    rty  : TyId,
-    s    : Site,
-    slot : Slot,
-    ctx  : Ctx
-) Res<Res<TyId>, AllocError>
 
 declared_params = (
     be   :: CBackend,
@@ -1876,70 +1864,11 @@ targs_settled = (be: CBackend, slot: Slot, targs: Inst) bool
 
 all_closed = (be: CBackend, targs: Inst) bool
 
-emit_fat_call = (
-    be       :: CBackend,
-    c        : Call,
-    a        : Access,
-    rty      : TyId,
-    slot     : Slot,
-    declared : Vec<TyId>,
-    ret      : TyId,
-    targs    : Inst,
-    ctx      : Ctx,
-    out      :: String
-) Res<(), AllocError>
-
-fat_args = (
-    be       :: CBackend,
-    c        : Call,
-    slot     : Slot,
-    declared : Vec<TyId>,
-    targs    : Inst,
-    ctx      : Ctx,
-    out      :: String
-) Res<(), AllocError>
-
-fat_arg = (
-    be       :: CBackend,
-    arg      : Arg,
-    i        : usize,
-    hold     : bool,
-    slot     : Slot,
-    declared : Vec<TyId>,
-    targs    : Inst,
-    ctx      : Ctx,
-    out      :: String
-)
-          Res<(), AllocError>
-
-fat_sizes = (be :: CBackend, targs: Inst, out :: String)
-            Res<(), AllocError>
-
-fat_size = (be :: CBackend, targs: Inst, i: usize, out :: String)
-           Res<(), AllocError>
-
 write_sizeof* = (be :: CBackend, t: TyId, out :: String)
                Res<(), AllocError>
 
-fat_result = (
-    be    :: CBackend,
-    slot  : Slot,
-    ret   : TyId,
-    targs : Inst,
-    call  : str,
-    out   :: String
-) Res<(), AllocError>
-
 fat_effect = (be :: CBackend, call: str, out :: String)
              Res<(), AllocError>
-
-fat_value_back = (
-    be   :: CBackend,
-    slot : Slot,
-    real : TyId,
-    call : str,
-    out  :: String
-) Res<(), AllocError>
 ```
 
 #### Imports and re-exports
@@ -1947,17 +1876,13 @@ fat_value_back = (
 ```zen
 ExprId = std.ast
 
-Function, Param, Access, Call, Arg, Impl, Member, TypeId = std.ast
+Function, Param, Access, Call, Arg, Impl, Member = std.ast
 
 AllocError = std.mem
 
 Vec = std.collections
 
 str, String = std.text
-
-Ast = std.ast
-
-ImplId = sema.sema_id
 
 Range = std.core
 
@@ -1970,6 +1895,8 @@ Inst, has_var = sema.sema_inst
 self_ctx = sema.sema_member
 
 param_type = sema.sema_denote
+
+impl_bound_type = sema.sema_supply
 
 sym_member, sym_variant = gen.gen_name
 
@@ -4003,21 +3930,13 @@ lower_paren = (
     out  :: String
 ) Res<(), AllocError>
 
-lower_literal = (
-    be   :: CBackend,
-    id   : ExprId,
-    l    : Literal,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError>
+lower_literal = (l: Literal, out :: String) Res<(), AllocError>
 
 lower_int_literal = (text: str, out :: String) Res<(), AllocError>
 
 over_i64 = (text: str) bool
 
-lower_str_literal = (be :: CBackend, l: Literal, out :: String)
-                    Res<(), AllocError>
+lower_str_literal = (l: Literal, out :: String) Res<(), AllocError>
 
 decoded_len* = (raw: str) usize
 
@@ -6982,7 +6901,17 @@ write_array_def = gen.gen_c.gen_c_array
 
 ### `src/gen/gen_c/gen_c_loop.zen`
 
-66 declarations (functions: 40, imports and re-exports: 26).
+72 declarations (types: 1, functions: 44, imports and re-exports: 27).
+
+#### Types
+
+```zen
+RangeWalk = {
+    counter: str,
+    base: str,
+    limit: str,
+}
+```
 
 #### Functions
 
@@ -7143,6 +7072,34 @@ lower_bounded = (
     out  :: String
 ) Res<(), AllocError>
 
+range_walk = (be :: CBackend) Res<RangeWalk, AllocError>
+
+start_range_walk = (be :: CBackend, walk: RangeWalk) Res<(), AllocError>
+
+run_range_body = (
+    be    :: CBackend,
+    walk  : RangeWalk,
+    sh    : Shape,
+    lam   : Lambda,
+    value : str,
+    ety   : TyId,
+    fold  : Fold,
+    ctx   : Ctx
+) Res<(), AllocError>
+
+lower_supplied_walk = (
+    be   :: CBackend,
+    sh   : Shape,
+    one  : ExprId,
+    rty  : TyId,
+    ri   : RangeImpl,
+    pass : TyId,
+    lam  : Lambda,
+    ctx  : Ctx,
+    want : TyId,
+    out  :: String
+) Res<(), AllocError>
+
 walk_temp* = (be :: CBackend, one: ExprId, rty: TyId, ctx: Ctx)
              Res<String, AllocError>
 
@@ -7295,13 +7252,15 @@ expr, ty_of = gen.gen_c.gen_c_expr
 
 Dest, block = gen.gen_c.gen_c_stmt
 
-supplies_bounds = gen.gen_c.gen_c_range
+uses_stored_bounds = gen.gen_c.gen_c_range
 
 bind_text = gen.gen_c.gen_c_range
 
 is_res = gen.gen_c.gen_c_type
 
-lower_supplied = gen.gen_c.gen_c_range
+RangeImpl, range_impl, range_pass_type = gen.gen_c.gen_c_range
+
+supplied_bound, take_pass = gen.gen_c.gen_c_range
 
 array_of, lower_array_walk = gen.gen_c.gen_c_array
 ```
@@ -9145,7 +9104,7 @@ Dest, deliver = gen.gen_c.gen_c_stmt
 
 ### `src/gen/gen_c/gen_c_range.zen`
 
-67 declarations (types: 1, functions: 40, imports and re-exports: 26).
+60 declarations (types: 1, functions: 38, imports and re-exports: 21).
 
 #### Types
 
@@ -9169,6 +9128,9 @@ has_field = (be :: CBackend, rty: TyId, name: str) bool
 decl_has_field = (be :: CBackend, decl: DeclId, name: str) bool
 
 struct_has_field = (s: Struct, name: str) bool
+
+uses_stored_bounds* = (be :: CBackend, rty: TyId)
+                      Res<bool, AllocError>
 
 range_impl* = (be :: CBackend, rty: TyId) Res<Res<RangeImpl>, AllocError>
 
@@ -9248,46 +9210,6 @@ keep_res = (be :: CBackend, got: TyId) Res<TyId>
 range_element_type* = (be :: CBackend, rty: TyId)
                       Res<Res<TyId>, AllocError>
 
-lower_supplied* = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    one  : ExprId,
-    rty  : TyId,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError>
-
-lower_impl_range = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    one  : ExprId,
-    rty  : TyId,
-    ri   : RangeImpl,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError>
-
-lower_impl_walk = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    one  : ExprId,
-    rty  : TyId,
-    ri   : RangeImpl,
-    pass : TyId,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-)
-                  Res<(), AllocError>
-
 bind_self = (be :: CBackend, ri: RangeImpl, rty: TyId, rng: str)
             Res<(), AllocError>
 
@@ -9363,7 +9285,7 @@ write_pass_guard = (be :: CBackend, tmp: str, brk: usize)
 #### Imports and re-exports
 
 ```zen
-ExprId, Lambda = std.ast
+ExprId = std.ast
 
 Function = std.ast
 
@@ -9393,8 +9315,6 @@ RES_PATH = gen.gen_name
 
 CBackend = gen.gen_c.gen_c_state
 
-unsupported = gen.gen_c.gen_c_report
-
 declarator, declared_ret, struct_decl, res_value, is_res = gen.gen_c.gen_c_type
 
 intern_res_open, recv_inst, sub_with = gen.gen_c.gen_c_mono
@@ -9402,14 +9322,6 @@ intern_res_open, recv_inst, sub_with = gen.gen_c.gen_c_mono
 enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 
 Dest, block, deliver = gen.gen_c.gen_c_stmt
-
-write_label, open_result, close_pass = gen.gen_c.gen_c_loop
-
-Shape = gen.gen_c.gen_c_shape
-
-run_body, declare_usize, settle_res, walk_temp = gen.gen_c.gen_c_loop
-
-no_fold = gen.gen_c.gen_c_fold
 
 array_of = gen.gen_c.gen_c_array
 
@@ -12965,7 +12877,7 @@ written, obj, arr, Nest, to_json = std.json
 
 ### `src/lsp/lsp_built.zen`
 
-25 declarations (types: 3, implementations: 1, functions: 5, imports and re-exports: 16).
+24 declarations (types: 3, implementations: 1, functions: 5, imports and re-exports: 15).
 
 #### Types
 
@@ -13062,7 +12974,7 @@ Checker = sema.sema_check
 
 SemaFault, message, write_detail = sema.sema_diag
 
-Build = zen.zen_build
+Build, check_workspace = zen.zen_build
 
 Classed = lsp.lsp_colour
 
@@ -13075,8 +12987,6 @@ own_str = lsp.lsp_reply
 written = std.json
 
 relative_to = zen.zen_path
-
-check_workspace = lsp.lsp_query
 ```
 
 ### `src/lsp/lsp_colour.zen`
@@ -13188,7 +13098,7 @@ step_at, units_of = lsp.lsp_pos
 
 ### `src/lsp/lsp_compl.zen`
 
-50 declarations (types: 7, implementations: 2, functions: 13, constants: 10, imports and re-exports: 18).
+51 declarations (types: 7, implementations: 2, functions: 13, constants: 10, imports and re-exports: 19).
 
 #### Types
 
@@ -13426,7 +13336,9 @@ ImplId = sema.sema_id
 
 to_pos, run_of = lsp.lsp_pos
 
-check_standalone, check_build = lsp.lsp_query
+check_standalone = lsp.lsp_query
+
+check_build = zen.zen_build
 
 obj, arr, Nest, written, to_json = std.json
 
@@ -13437,7 +13349,7 @@ KEYWORD_COUNT, keyword_at = std.lex
 
 ### `src/lsp/lsp_def.zen`
 
-48 declarations (types: 3, functions: 28, imports and re-exports: 17).
+49 declarations (types: 3, functions: 28, imports and re-exports: 18).
 
 #### Types
 
@@ -13617,14 +13529,16 @@ path_of, uri_at = lsp.lsp_uri
 
 told_at, module_index_of = std.ast.ast_named
 
-check_standalone, check_build = lsp.lsp_query
+check_standalone = lsp.lsp_query
+
+check_build = zen.zen_build
 
 to_json = std.json
 ```
 
 ### `src/lsp/lsp_diag.zen`
 
-32 declarations (types: 3, implementations: 1, functions: 14, constants: 1, imports and re-exports: 13).
+33 declarations (types: 3, implementations: 1, functions: 15, constants: 1, imports and re-exports: 13).
 
 #### Types
 
@@ -13648,6 +13562,7 @@ Diagnostics* = {
     closing :: Vec<str>,
     built :: Built,
     fresh :: bool = false,
+    said_arena :: Arena,
     said :: Map<str, str>,
     owes* = (self :: @Self, uri: str) ()
     stales* = (self :: @Self, uri: str) ()
@@ -13677,7 +13592,7 @@ Diagnostics* = {
     say_one = (self :: @Self, env: Env, t: Alloc, uri: str, uris: Vec<str>,
                docs: Map<str, str>, spots: Vec<Spot>, out :: String)
               Res<(), AllocError>
-    send = (self :: @Self, uri: str, body: String, out :: String)
+    send = (self :: @Self, env: Env, uri: str, body: String, out :: String)
            Res<(), AllocError>
     take_back = (self :: @Self, env: Env, t: Alloc, uri: str, now: Vec<str>,
                  uris: Vec<str>, docs: Map<str, str>, spots: Vec<Spot>,
@@ -13697,6 +13612,9 @@ Diagnostics.impl(Drop, {
 
 ```zen
 Diagnostics* = (a: Alloc, env: Env) Diagnostics
+
+diagnostics_with_said = (a: Alloc, env: Env, said_arena :: Arena)
+                        Diagnostics
 
 gone = (u: str, uri: str, now: Vec<str>) bool
 
@@ -13764,7 +13682,7 @@ str, String = std.text
 
 Vec, Map = std.collections
 
-Alloc, AllocError = std.mem
+Alloc, AllocError, Arena = std.mem
 
 Note = std.parse.parse_diag
 
@@ -13905,7 +13823,7 @@ to_lower = std.core.byte
 
 ### `src/lsp/lsp_hover.zen`
 
-57 declarations (types: 2, functions: 40, constants: 3, imports and re-exports: 12).
+58 declarations (types: 2, functions: 40, constants: 3, imports and re-exports: 13).
 
 #### Types
 
@@ -14094,7 +14012,9 @@ to_pos, to_wire, WirePos = lsp.lsp_pos
 
 Tell, told_at = std.ast.ast_named
 
-check_standalone, check_build = lsp.lsp_query
+check_standalone = lsp.lsp_query
+
+check_build = zen.zen_build
 ```
 
 ### `src/lsp/lsp_names.zen`
@@ -14324,22 +14244,7 @@ to_json = std.json
 
 ### `src/lsp/lsp_query.zen`
 
-16 declarations (types: 2, functions: 4, imports and re-exports: 10).
-
-#### Types
-
-```zen
-CheckedBuild* = {
-    root*: str,
-    rel*: str,
-    c*: Checker,
-}
-
-WorkspaceCheck* = {
-    b*: Build,
-    c*: Checker,
-}
-```
+9 declarations (functions: 2, imports and re-exports: 7).
 
 #### Functions
 
@@ -14348,25 +14253,12 @@ parse_standalone = (a: Alloc, name: str, text: str) Res<Parser, AllocError>
 
 check_standalone* = (a: Alloc, name: str, text: str)
                     Res<Checker, AllocError>
-
-check_workspace* = (
-    env   : Env,
-    a     : Alloc,
-    root  : str,
-    entry : str,
-    docs  : Map<str, str>
-) Res<WorkspaceCheck, AllocError>
-
-check_build* = (env: Env, a: Alloc, workspace: str, path: str, text: str)
-               Res<CheckedBuild, AllocError>
 ```
 
 #### Imports and re-exports
 
 ```zen
 str = std.text
-
-Map = std.collections
 
 Alloc, AllocError = std.mem
 
@@ -14379,10 +14271,6 @@ Ast = std.ast
 Checker = sema.sema_check
 
 check_all = sema.sema_decl
-
-Build = zen.zen_build
-
-root_for, relative_to, std_root_for = zen.zen_path
 ```
 
 ### `src/lsp/lsp_reply.zen`
@@ -26730,7 +26618,7 @@ generic_head_ahead = (p :: Parser, j: usize) bool
 
 assign_head_ahead = (p :: Parser, after: TokenKind, j: usize) bool
 
-assigns = (p: Parser, kind: TokenKind) bool
+assigns = (kind: TokenKind) bool
 
 declares_value = (p :: Parser, j: usize) bool
 
@@ -27987,7 +27875,7 @@ Server, serve, serve_stdio = lsp
 
 ### `src/zen/zen_build.zen`
 
-25 declarations (types: 1, functions: 1, imports and re-exports: 23).
+30 declarations (types: 3, functions: 3, imports and re-exports: 24).
 
 #### Types
 
@@ -28074,12 +27962,34 @@ Build* = {
     diag_at* = (self: @Self, i: usize) Res<Diag>
     code* = (self: @Self) i32
 }
+
+WorkspaceCheck* = {
+    b*: Build,
+    c*: Checker,
+}
+
+CheckedBuild* = {
+    root*: str,
+    rel*: str,
+    c*: Checker,
+}
 ```
 
 #### Functions
 
 ```zen
 Build* = (a: Alloc, env: Env, root: str) Build
+
+check_workspace* = (
+    env   : Env,
+    a     : Alloc,
+    root  : str,
+    entry : str,
+    docs  : Map<str, str>
+) Res<WorkspaceCheck, AllocError>
+
+check_build* = (env: Env, a: Alloc, workspace: str, path: str, text: str)
+               Res<CheckedBuild, AllocError>
 ```
 
 #### Imports and re-exports
@@ -28124,6 +28034,8 @@ BuildArgs, Emission, Permutation = std.build
 slash_for = zen.zen_path
 
 unit_at, candidate, joined, relative_to = zen.zen_path
+
+root_for, std_root_for = zen.zen_path
 
 ENTRY, entry_of = zen.zen_path
 

@@ -11,26 +11,27 @@ ownership, behavior, and dependency direction also improve.
 | round-00 | `93647b922` | 227 | 73163 | 6417 | 18103 | 117 | 1048 | 376 | 2469 | 142 | 12353 | 126 | 4 | 108 |
 | round-01 | `5958c4527` | 227 | 73157 | 6415 | 18022 | 111 | 994 | 368 | 2465 | 142 | 12364 | 126 | 4 | 110 |
 | round-02 | `933bd55ed` | 227 | 73070 | 6418 | 17925 | 102 | 951 | 365 | 2466 | 142 | 12324 | 125 | 4 | 111 |
+| round-03 | `8a662a2adb2f6149d2e5b802e240a81cfe6f07f8` | 227 | 72662 | 6441 | 17871 | 96 | 921 | 366 | 2458 | 138 | 12026 | 117 | 4 | 99 |
 
 ## Latest delta
 
 | Metric | Change |
 | --- | ---: |
 | Files | — |
-| Lines | -87 |
-| Functions | +3 |
-| Parameter slots | -97 |
-| Functions with 8+ parameters | -9 |
-| Relay excess above five parameters | -43 |
-| Repeated 4+-parameter signature shapes | -3 |
-| Same-folder imported aliases | +1 |
-| Mutual sibling import edges | — |
-| Comment lines | -40 |
-| History-marker comment blocks | -1 |
+| Lines | -408 |
+| Functions | +23 |
+| Parameter slots | -54 |
+| Functions with 8+ parameters | -6 |
+| Relay excess above five parameters | -30 |
+| Repeated 4+-parameter signature shapes | +1 |
+| Same-folder imported aliases | -8 |
+| Mutual sibling import edges | -4 |
+| Comment lines | -298 |
+| History-marker comment blocks | -8 |
 | Single-arm match blocks | — |
-| Boolean/unit match candidates | +1 |
+| Boolean/unit match candidates | -12 |
 
-## Current review ranking — round-02
+## Current review ranking — round-03
 
 The priority score weights high arity, parameter relay, repeated
 signature shapes, sibling coupling, history-marked comments, and only
@@ -39,44 +40,44 @@ authorize a mechanical rewrite.
 
 | Rank | File | Score | 8+ args | Slots | Repeated shapes | Sibling imports | Mutual | Then candidates | Comment lines | History markers |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | `src/gen/gen_c/gen_c_call.zen` | 337 | 5 | 441 | 20 | 18 | 3 | 1 | 71 | 1 |
-| 2 | `src/gen/gen_c/gen_c_loop.zen` | 321 | 12 | 212 | 7 | 11 | 4 | 0 | 67 | 4 |
-| 3 | `src/gen/gen_c/gen_c_expr.zen` | 263 | 0 | 282 | 18 | 23 | 15 | 0 | 273 | 12 |
+| 1 | `src/gen/gen_c/gen_c_loop.zen` | 351 | 14 | 233 | 7 | 11 | 3 | 0 | 71 | 4 |
+| 2 | `src/gen/gen_c/gen_c_call.zen` | 337 | 5 | 441 | 20 | 18 | 3 | 1 | 71 | 1 |
+| 3 | `src/gen/gen_c/gen_c_expr.zen` | 261 | 0 | 277 | 18 | 23 | 15 | 0 | 273 | 12 |
 | 4 | `src/gen/gen_c/gen_c_member.zen` | 255 | 3 | 287 | 11 | 20 | 7 | 5 | 181 | 1 |
-| 5 | `src/gen/gen_c/gen_c_bound.zen` | 207 | 6 | 261 | 5 | 10 | 3 | 0 | 89 | 4 |
-| 6 | `src/gen/gen_c/gen_c_try.zen` | 182 | 3 | 288 | 11 | 10 | 2 | 0 | 142 | 2 |
-| 7 | `src/gen/gen_c/gen_c_assoc.zen` | 169 | 6 | 136 | 3 | 9 | 1 | 0 | 38 | 1 |
-| 8 | `src/gen/gen_c/gen_c_range.zen` | 158 | 6 | 163 | 1 | 10 | 2 | 1 | 79 | 3 |
-| 9 | `src/sema/sema_match.zen` | 149 | 1 | 380 | 9 | 9 | 1 | 0 | 128 | 1 |
-| 10 | `src/gen/gen_c/gen_c_inline.zen` | 145 | 4 | 165 | 3 | 12 | 2 | 2 | 48 | 0 |
-| 11 | `src/gen/gen_c/gen_c_json.zen` | 142 | 6 | 109 | 1 | 7 | 0 | 3 | 3 | 0 |
-| 12 | `src/gen/gen_c/gen_c_op.zen` | 135 | 0 | 207 | 11 | 10 | 2 | 0 | 211 | 11 |
-| 13 | `src/lsp/lsp_diag.zen` | 132 | 4 | 154 | 6 | 6 | 0 | 0 | 4 | 2 |
-| 14 | `src/sema/sema_call.zen` | 122 | 0 | 356 | 10 | 20 | 4 | 0 | 103 | 1 |
-| 15 | `src/sema/sema_member.zen` | 120 | 1 | 261 | 7 | 11 | 4 | 0 | 181 | 0 |
-| 16 | `src/gen/gen_c/gen_c_alloc.zen` | 118 | 4 | 111 | 2 | 11 | 1 | 0 | 16 | 0 |
-| 17 | `src/sema/sema_meta.zen` | 118 | 0 | 246 | 10 | 7 | 2 | 2 | 159 | 1 |
-| 18 | `src/sema/sema_type.zen` | 112 | 0 | 123 | 2 | 20 | 10 | 0 | 139 | 1 |
-| 19 | `src/gen/gen_c/gen_c_stmt.zen` | 111 | 0 | 174 | 13 | 6 | 3 | 0 | 63 | 2 |
-| 20 | `src/gen/gen_c/gen_c_flow.zen` | 103 | 0 | 275 | 13 | 8 | 2 | 0 | 51 | 1 |
-| 21 | `src/gen/gen_c/gen_c_build.zen` | 99 | 3 | 178 | 2 | 6 | 0 | 1 | 22 | 0 |
-| 22 | `src/sema/sema_def.zen` | 98 | 1 | 309 | 8 | 1 | 0 | 2 | 215 | 0 |
-| 23 | `src/gen/gen_c/gen_c_actor.zen` | 96 | 3 | 169 | 0 | 9 | 1 | 3 | 31 | 0 |
-| 24 | `src/gen/gen_c/gen_c_floor.zen` | 95 | 3 | 75 | 1 | 7 | 1 | 0 | 25 | 1 |
-| 25 | `src/gen/gen_c/gen_c_decl.zen` | 94 | 2 | 260 | 1 | 18 | 2 | 0 | 164 | 2 |
-| 26 | `src/gen/gen_c/gen_c_sink.zen` | 92 | 2 | 275 | 4 | 11 | 0 | 0 | 58 | 1 |
-| 27 | `src/sema/sema_hoist.zen` | 92 | 0 | 193 | 10 | 8 | 1 | 0 | 196 | 1 |
-| 28 | `src/lsp/lsp_serve.zen` | 91 | 2 | 153 | 3 | 11 | 0 | 2 | 2 | 0 |
-| 29 | `src/lsp/lsp_def.zen` | 90 | 4 | 119 | 2 | 3 | 0 | 4 | 2 | 0 |
-| 30 | `src/gen/gen_c/gen_c_cap.zen` | 88 | 2 | 103 | 2 | 16 | 0 | 0 | 30 | 0 |
-| 31 | `src/sema/sema_apply.zen` | 86 | 0 | 226 | 7 | 15 | 1 | 1 | 163 | 0 |
-| 32 | `src/gen/gen_c/gen_c_fold.zen` | 84 | 3 | 63 | 0 | 8 | 2 | 0 | 17 | 1 |
-| 33 | `src/gen/gen_c/gen_c_fat.zen` | 83 | 0 | 256 | 5 | 8 | 4 | 0 | 86 | 1 |
-| 34 | `src/gen/gen_c/gen_c_read.zen` | 83 | 0 | 189 | 5 | 9 | 2 | 0 | 117 | 1 |
-| 35 | `src/sema/sema_own.zen` | 83 | 0 | 287 | 5 | 9 | 4 | 1 | 184 | 1 |
-| 36 | `src/gen/gen_c/gen_c_settle.zen` | 81 | 0 | 220 | 3 | 9 | 2 | 0 | 54 | 2 |
-| 37 | `src/gen/gen_c/gen_c_index.zen` | 80 | 2 | 78 | 2 | 9 | 1 | 0 | 27 | 0 |
-| 38 | `src/gen/gen_c/gen_c_fs.zen` | 78 | 1 | 155 | 6 | 8 | 0 | 0 | 42 | 0 |
+| 5 | `src/gen/gen_c/gen_c_try.zen` | 182 | 3 | 288 | 11 | 10 | 2 | 0 | 142 | 2 |
+| 6 | `src/gen/gen_c/gen_c_assoc.zen` | 169 | 6 | 136 | 3 | 9 | 1 | 0 | 38 | 1 |
+| 7 | `src/sema/sema_match.zen` | 149 | 1 | 380 | 9 | 9 | 1 | 0 | 128 | 1 |
+| 8 | `src/gen/gen_c/gen_c_inline.zen` | 145 | 4 | 165 | 3 | 12 | 2 | 2 | 48 | 0 |
+| 9 | `src/gen/gen_c/gen_c_json.zen` | 142 | 6 | 109 | 1 | 7 | 0 | 3 | 3 | 0 |
+| 10 | `src/lsp/lsp_diag.zen` | 132 | 4 | 161 | 6 | 6 | 0 | 0 | 6 | 2 |
+| 11 | `src/gen/gen_c/gen_c_op.zen` | 123 | 0 | 207 | 11 | 10 | 2 | 0 | 128 | 5 |
+| 12 | `src/sema/sema_call.zen` | 122 | 0 | 356 | 10 | 20 | 4 | 0 | 103 | 1 |
+| 13 | `src/sema/sema_member.zen` | 120 | 1 | 261 | 7 | 11 | 4 | 0 | 181 | 0 |
+| 14 | `src/gen/gen_c/gen_c_alloc.zen` | 118 | 4 | 111 | 2 | 11 | 1 | 0 | 16 | 0 |
+| 15 | `src/sema/sema_meta.zen` | 118 | 0 | 246 | 10 | 7 | 2 | 2 | 159 | 1 |
+| 16 | `src/gen/gen_c/gen_c_bound.zen` | 116 | 1 | 211 | 6 | 10 | 3 | 2 | 61 | 2 |
+| 17 | `src/sema/sema_type.zen` | 112 | 0 | 123 | 2 | 20 | 10 | 0 | 139 | 1 |
+| 18 | `src/gen/gen_c/gen_c_stmt.zen` | 111 | 0 | 174 | 13 | 6 | 3 | 0 | 63 | 2 |
+| 19 | `src/gen/gen_c/gen_c_flow.zen` | 103 | 0 | 275 | 13 | 8 | 2 | 0 | 51 | 1 |
+| 20 | `src/gen/gen_c/gen_c_build.zen` | 99 | 3 | 178 | 2 | 6 | 0 | 1 | 22 | 0 |
+| 21 | `src/sema/sema_def.zen` | 98 | 1 | 309 | 8 | 1 | 0 | 2 | 215 | 0 |
+| 22 | `src/gen/gen_c/gen_c_actor.zen` | 96 | 3 | 169 | 0 | 9 | 1 | 3 | 31 | 0 |
+| 23 | `src/gen/gen_c/gen_c_floor.zen` | 95 | 3 | 75 | 1 | 7 | 1 | 0 | 25 | 1 |
+| 24 | `src/gen/gen_c/gen_c_decl.zen` | 94 | 2 | 260 | 1 | 18 | 2 | 0 | 164 | 2 |
+| 25 | `src/gen/gen_c/gen_c_sink.zen` | 92 | 2 | 275 | 4 | 11 | 0 | 0 | 58 | 1 |
+| 26 | `src/sema/sema_hoist.zen` | 92 | 0 | 193 | 10 | 8 | 1 | 0 | 196 | 1 |
+| 27 | `src/lsp/lsp_serve.zen` | 91 | 2 | 153 | 3 | 11 | 0 | 2 | 2 | 0 |
+| 28 | `src/lsp/lsp_def.zen` | 90 | 4 | 119 | 2 | 3 | 0 | 4 | 2 | 0 |
+| 29 | `src/gen/gen_c/gen_c_cap.zen` | 88 | 2 | 103 | 2 | 16 | 0 | 0 | 30 | 0 |
+| 30 | `src/sema/sema_apply.zen` | 86 | 0 | 226 | 7 | 15 | 1 | 1 | 163 | 0 |
+| 31 | `src/gen/gen_c/gen_c_fold.zen` | 84 | 3 | 63 | 0 | 8 | 2 | 0 | 17 | 1 |
+| 32 | `src/gen/gen_c/gen_c_fat.zen` | 83 | 0 | 256 | 5 | 8 | 4 | 0 | 86 | 1 |
+| 33 | `src/gen/gen_c/gen_c_read.zen` | 83 | 0 | 189 | 5 | 9 | 2 | 0 | 117 | 1 |
+| 34 | `src/sema/sema_own.zen` | 83 | 0 | 287 | 5 | 9 | 4 | 1 | 184 | 1 |
+| 35 | `src/gen/gen_c/gen_c_settle.zen` | 81 | 0 | 220 | 3 | 9 | 2 | 0 | 54 | 2 |
+| 36 | `src/gen/gen_c/gen_c_index.zen` | 80 | 2 | 78 | 2 | 9 | 1 | 0 | 27 | 0 |
+| 37 | `src/gen/gen_c/gen_c_fs.zen` | 78 | 1 | 155 | 6 | 8 | 0 | 0 | 42 | 0 |
+| 38 | `src/gen/gen_c/gen_c_range.zen` | 76 | 3 | 135 | 1 | 6 | 0 | 1 | 70 | 2 |
 | 39 | `src/sema/sema_bound.zen` | 76 | 0 | 235 | 8 | 10 | 2 | 2 | 202 | 1 |
 | 40 | `src/gen/gen_c/gen_c_threads.zen` | 65 | 1 | 142 | 1 | 12 | 0 | 0 | 103 | 0 |
 
