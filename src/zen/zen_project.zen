@@ -152,6 +152,8 @@ build_exe = (
                     job,
                     planned,
                     exe.spec.deps,
+                    exe.spec.optimize,
+                    exe.spec.strip,
                     generated.view(),
                     output.view()
                 ).try().match({
@@ -199,14 +201,33 @@ link_exe = (
     job       : ProjectArgs,
     planned   : BuildPlan,
     deps      : Vec<Dep>,
+    optimize  : str,
+    strip     : bool,
     generated : str,
     output    : str
 )
             Res<bool, AllocError> {
     argv ::= a.Vec<str>();
     argv.add("cc").try();
-    argv.add("-O2").try();
+    argv.add(optimize.match({
+        "size"  => "-Oz",
+        "debug" => "-O0",
+        _       => "-O2",
+    })).try();
     argv.add("-std=c99").try();
+    optimize.eq("size").then(() {
+        argv.add("-ffunction-sections").try();
+        argv.add("-fdata-sections").try();
+        // Zen faults are values, not C++ stack unwinding. These tables add
+        // roughly ten percent to small release binaries without serving the
+        // language runtime.
+        argv.add("-fno-asynchronous-unwind-tables").try();
+        argv.add("-fno-unwind-tables").try();
+        // Resolve external calls through the GOT without per-symbol PLT code.
+        argv.add("-fno-plt").try();
+        argv.add("-Wl,--gc-sections").try();
+    });
+    strip.then(() { argv.add("-s").try(); });
     argv.add(generated).try();
     deps.loop((h, dep) {
         add_dep(a, job.root, planned, dep.name, argv).try();

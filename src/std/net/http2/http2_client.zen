@@ -2,12 +2,13 @@
 // Stateful HTTP/2 client built from transport, frame, and HPACK layers.
 
 Alloc = std.mem
-str, String, str_at = std.text
+str, String = std.text
 Res = std.core
+Sink = std.core
 Vec = std.collections
 ParsedUrl = std.net.url
-Actor, ActorError, Ref = std.actor
-H2Error, H2StreamError, H2FailureDelivery, H2Response, H2Head, H2Chunk, H2Receiver, h2_chunk, FrameType, FLAG_END_STREAM, FLAG_ACK, FLAG_END_HEADERS, SET_HEADER_TABLE, SET_INITIAL_WINDOW, MAX_SEND, WINDOW, DEFAULT_WINDOW, MAX_WINDOW, PREFACE = std.net.http2.http2_types
+Actor, ActorError, Receive, Ref = std.actor
+H2Error, H2StreamError, H2Response, H2Head, H2Chunk, h2_chunk, FrameType, FLAG_END_STREAM, FLAG_ACK, FLAG_END_HEADERS, SET_HEADER_TABLE, SET_INITIAL_WINDOW, MAX_SEND, WINDOW, DEFAULT_WINDOW, MAX_WINDOW, PREFACE = std.net.http2.http2_types
 Stream, http_url, stream_write, stream_close, dial, alpn_check = std.net.http2.http2_transport
 Frame, read_frame, write_frame, settings_add, u32_add, u31_of = std.net.http2.http2_frame
 hpack_response_headers, hpack_trailer_headers, block_add_header, block_add_user_header = std.net.http2.http2_hpack
@@ -167,24 +168,25 @@ H2Client* = {
         Ok(sid);
     }
 
-    // Deliver one response to a receiver actor. The client keeps the socket
-    // and parser; the receiver owns only accepted event values. HTTP status,
-    // including 4xx/5xx, is a head event; failed reports transport or protocol
-    // failure.
-    post_stream* = <R: Actor + H2Receiver>(
+    // Post JSON and deliver each response-body chunk to an actor. Completion
+    // is the successful return; connection, status, and mailbox failures are
+    // returned to the caller.
+    post_stream* = <R: Actor + Receive<H2Chunk>>(
         self     :: @Self,
         a        : Alloc,
-        headers  : Vec<str>,
         body     : str,
         receiver : Ref<R>
     ) Res<(), H2StreamError> {
+        headers ::= a.Vec<str>();
+        headers.add("content-type: application/json")
+            .try(H2StreamError.Http(H2Error.SendFailed));
         self.send_post(a, headers, body).match({
-            Err(error) => self.stream_failed(receiver, error),
+            Err(error) => self.stream_failed(error),
             Ok(sid)    => self.stream_response(a, sid, receiver),
         })
     }
 
-    stream_response = <R: Actor + H2Receiver>(
+    stream_response = <R: Actor + Receive<H2Chunk>>(
         self     :: @Self,
         a        : Alloc,
         sid      : u32,
@@ -195,58 +197,43 @@ H2Client* = {
         loop((h) {
             state.done.then(() { h.break(); });
             self.next_response_event(a, sid, state).match({
-                Err(error) => self.stream_failed(receiver, error).try(),
+                Err(error) => self.stream_failed(error).try(),
                 Ok(event)  => event.match({
-                    Headers(head) => receiver.headers(head).match({
-                        Ok(_)      => (),
+                    Headers(_) => (),
+                    Data(data) => receiver.receive(data.bytes).match({
                         Err(error) => self.receiver_refused(
                             !state.done,
                             error
                         ).try(),
-                    }),
-                    Data(data)    => receiver.data(data.bytes).match({
-                        Err(error) => self.receiver_refused(
-                            !state.done,
-                            error
-                        ).try(),
-                        Ok(_)      => self.restore_recv_window(
-                            a,
-                            sid,
-                            data.credit,
-                            data.stream_open
-                        ).match({
-                            Ok(_)      => (),
-                            Err(error) => self.stream_failed(
-                                receiver,
-                                error
-                            ).try(),
-                        }),
+                        Ok(_)      => {
+                            self.restore_recv_window(
+                                a,
+                                sid,
+                                data.credit,
+                                data.stream_open
+                            ).match({
+                                Ok(_)      => (),
+                                Err(error) => self.stream_failed(error).try(),
+                            });
+                        },
                     }),
                 }),
             });
         });
 
         self.active = 0;
-        receiver.completed().match({
-            Ok(_)      => Ok(()),
-            Err(error) => Err(H2StreamError.Receiver(error)),
+        (state.status != 0)
+            .ensure(H2StreamError.Http(H2Error.DecodeFailed)).try();
+        (state.status >= 400).match({
+            true  => Err(H2StreamError.Http(H2Error.Status(state.status))),
+            false => Ok(()),
         })
     }
 
-    stream_failed = <R: Actor + H2Receiver>(
-        self     :: @Self,
-        receiver : Ref<R>,
-        error    : H2Error
-    ) Res<(), H2StreamError> {
+    stream_failed = (self :: @Self, error: H2Error) Res<(), H2StreamError> {
         self.active = 0;
         self.open   = false;
-        receiver.failed(error).match({
-            Ok(_)            => Err(H2StreamError.Http(error)),
-            Err(actor_error) => Err(H2StreamError.FailureDelivery(H2FailureDelivery(
-                http: error,
-                receiver: actor_error
-            ))),
-        })
+        Err(H2StreamError.Http(error))
     }
 
     receiver_refused = (
@@ -261,8 +248,8 @@ H2Client* = {
 
     // The buffered API and actor API both consume this event stream. Frame
     // parsing and flow-control decisions therefore have one implementation.
-    read_response = (self :: @Self, a: Alloc, sid: u32, out :: String)
-                    Res<i32, H2Error> {
+    read_response_into = (self :: @Self, a: Alloc, sid: u32, out :: Sink)
+                         Res<i32, H2Error> {
         state ::= H2ReadState(status: 0, got_final: false, done: false);
 
         loop((h) {
@@ -270,7 +257,7 @@ H2Client* = {
             self.next_response_event(a, sid, state).try().match({
                 Headers(_) => (),
                 Data(data) => {
-                    data.bytes.append_to(out).try(H2Error.RecvFailed);
+                    data.bytes.write_to(out).try(H2Error.RecvFailed);
                     self.restore_recv_window(
                         a,
                         sid,
@@ -329,6 +316,15 @@ H2Client* = {
         f     : Frame,
         state :: H2ReadState
     ) Res<H2Event, H2Error> {
+        Ok(H2Event.Headers(self.decode_headers(a, f, state).try()))
+    }
+
+    decode_headers = (
+        self  : @Self,
+        a     : Alloc,
+        f     : Frame,
+        state :: H2ReadState
+    ) Res<H2Head, H2Error> {
         // CONTINUATION is deliberately unsupported, so every block ends here.
         f.has_flag(FLAG_END_HEADERS)
             .ensure(H2Error.ProtocolFailed).try();
@@ -360,7 +356,7 @@ H2Client* = {
                 .ensure(H2Error.ProtocolFailed).try(),
         });
         f.has_flag(FLAG_END_STREAM).then(() { state.done = true; });
-        Ok(H2Event.Headers(headers));
+        Ok(headers);
     }
 
     data_event = (
@@ -420,16 +416,25 @@ H2Client* = {
         });
     }
 
-    // Buffered request API. HTTP status failures retain their status payload.
+    // Stream one response body into a caller-owned sink. HTTP status is data,
+    // not a transport failure, so callers can inspect non-2xx response bodies.
+    post_into* = (
+        self    :: @Self,
+        a       : Alloc,
+        headers : Vec<str>,
+        body    : str,
+        out     :: Sink
+    ) Res<i32, H2Error> {
+        sid = self.send_post(a, headers, body).try();
+        self.read_response_into(a, sid, out)
+    }
+
+    // Buffered compatibility API over the streaming door.
     post* = (self :: @Self, a: Alloc, headers: Vec<str>, body: str)
             Res<H2Response, H2Error> {
         resp_body ::= a.String().try(H2Error.RecvFailed);
-        sid    = self.send_post(a, headers, body).try();
-        status = self.read_response(a, sid, resp_body).try();
-        (status >= 400).match({
-            true  => Err(H2Error.Status(status)),
-            false => Ok(H2Response(status: status, body: resp_body)),
-        });
+        status = self.post_into(a, headers, body, resp_body).try();
+        Ok(H2Response(status: status, body: resp_body));
     }
 
     // GOAWAY is best-effort; the transport always closes.

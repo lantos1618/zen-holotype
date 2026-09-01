@@ -56,6 +56,7 @@ BuildPlan* = {
 
 Value = UnitValue
     | TextValue(str)
+    | BoolValue(bool)
     | PathValue(Path)
     | TargetValue(Target)
     | DepValue(Dep)
@@ -122,8 +123,11 @@ Executor = {
             Unit       => Ok(Value.UnitValue),
             Name(n)    => self.local(n.text, node.span),
             Literal(l) => l.kind.match({
-                Str => self.text(l.text, node.span),
-                _   => Err(PlanError.Refused(PlanFault.Unsupported(node.span))),
+                Str  => self.text(l.text, node.span),
+                Bool => Ok(Value.BoolValue(l.text.eq("true"))),
+                _    => Err(PlanError.Refused(PlanFault.Unsupported(
+                    node.span
+                ))),
             }),
             Paren(p)   => self.eval(p.inner),
             Array(a)   => self.array(a.elems, node.span),
@@ -412,6 +416,8 @@ Executor = {
         spec = Exe(
             src: self.path_field(r, "src").try(),
             deps: self.deps_field(r, "deps").try(),
+            optimize: self.optional_text_field(r, "optimize", "speed"),
+            strip: self.optional_bool_field(r, "strip", false),
             out: self.optional_path_field(r, "out")
         );
         self.plan.exes.add(ExeNode(
@@ -555,6 +561,48 @@ Executor = {
                     }),
                 }),
                 _        => None,
+            }),
+        })
+    }
+
+    optional_text_field = (
+        self    :: @Self,
+        r       : Record,
+        name    : str,
+        fallback: str
+    ) str {
+        r.entries.find((m) { m.named(name) }).match({
+            None       => fallback,
+            Ok(member) => member.kind.match({
+                Field(field) => field.value.match({
+                    Ok(id) => self.eval(id).match({
+                        Ok(TextValue(value)) => value,
+                        _                    => fallback,
+                    }),
+                    None   => fallback,
+                }),
+                _            => fallback,
+            }),
+        })
+    }
+
+    optional_bool_field = (
+        self    :: @Self,
+        r       : Record,
+        name    : str,
+        fallback: bool
+    ) bool {
+        r.entries.find((m) { m.named(name) }).match({
+            None       => fallback,
+            Ok(member) => member.kind.match({
+                Field(field) => field.value.match({
+                    Ok(id) => self.eval(id).match({
+                        Ok(BoolValue(value)) => value,
+                        _                    => fallback,
+                    }),
+                    None   => fallback,
+                }),
+                _            => fallback,
             }),
         })
     }

@@ -3,14 +3,22 @@
 
 str, String = std.text
 Range = std.core
-AllocError = std.mem
+Alloc, AllocError = std.mem
 Pos, Span = std.ast.ast_span
 codepoint_at, UTF8_MIN_4 = std.text.text_utf8
-obj = std.json
+to_json = std.json
 
 WirePos* = {
     line*: usize,
     character*: usize,
+}
+
+// JSON-owned protocol shape shared by every response that carries a range.
+// Keeping this distinct from the parser's byte-oriented Span prevents wire
+// encoding details from leaking into each response writer.
+WireRange* = {
+    start*: WirePos,
+    end*: WirePos,
 }
 
 LineRun* = {
@@ -95,6 +103,17 @@ wire_at* = (text: str, line: usize, col: usize) WirePos {
     to_wire(text, Pos(line: line, col: col))
 }
 
+wire_range* = (text: str, span: Span) WireRange {
+    WireRange(start: to_wire(text, span.start), end: to_wire(text, span.end))
+}
+
+whole_range* = (text: str) WireRange {
+    WireRange(
+        start: WirePos(line: 0, character: 0),
+        end: WirePos(line: past_last_line(text), character: 0)
+    )
+}
+
 units_of* = (text: str, from: usize, upto: usize) usize {
     at    ::= from;
     units ::= 0;
@@ -111,22 +130,14 @@ target_of = (run: LineRun, col: usize) usize {
     (at > run.end).match({ true => run.end, false => at })
 }
 
-write_wire* = (p: WirePos, out :: String) Res<(), AllocError> {
-    at ::= obj(out).try();
-    at.key("line", out).try();
-    out.write_usize(p.line).try();
-    at.key("character", out).try();
-    out.write_usize(p.character).try();
-    at.close(out)
+write_wire* = (a: Alloc, p: WirePos, out :: String) Res<(), AllocError> {
+    encoded ::= p.to_json(a).try();
+    out.add(encoded.view())
 }
 
-write_whole* = (text: str, out :: String) Res<(), AllocError> {
-    span ::= obj(out).try();
-    span.key("start", out).try();
-    write_wire(WirePos(line: 0, character: 0), out).try();
-    span.key("end", out).try();
-    write_wire(WirePos(line: past_last_line(text), character: 0), out).try();
-    span.close(out)
+write_whole* = (a: Alloc, text: str, out :: String) Res<(), AllocError> {
+    encoded ::= whole_range(text).to_json(a).try();
+    out.add(encoded.view())
 }
 
 past_last_line = (text: str) usize {
@@ -137,11 +148,8 @@ past_last_line = (text: str) usize {
     n;
 }
 
-write_range* = (text: str, span: Span, out :: String) Res<(), AllocError> {
-    range ::= obj(out).try();
-    range.key("start", out).try();
-    write_wire(to_wire(text, span.start), out).try();
-    range.key("end", out).try();
-    write_wire(to_wire(text, span.end), out).try();
-    range.close(out)
+write_range* = (a: Alloc, text: str, span: Span, out :: String)
+              Res<(), AllocError> {
+    encoded ::= wire_range(text, span).to_json(a).try();
+    out.add(encoded.view())
 }

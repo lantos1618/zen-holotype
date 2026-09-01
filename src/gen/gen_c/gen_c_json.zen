@@ -1,0 +1,432 @@
+// Type-directed lowering for `value.to_json(alloc)`. The record is concrete at
+// the call site, so field walking happens here while escaping and primitive
+// spelling remain ordinary functions in std.json.
+
+Decl, Struct, Member, Function, ExprId, Call = std.ast
+AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+TyId, TyNamed = sema.sema_ty
+Def, decl_at = sema.sema_def
+Ctx = sema.sema_check
+Inst = sema.sema_inst
+param_type = sema.sema_denote
+GenFault = gen.gen_diag
+CBackend = gen.gen_c.gen_c_state
+expr, ty_of = gen.gen_c.gen_c_expr
+declare_temp, write_assign_err = gen.gen_c.gen_c_flow
+field_type, request_type = gen.gen_c.gen_c_type
+decl_ctx, decl_inst = gen.gen_c.gen_c_type
+enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
+call_symbol, bodyless, write_done, write_goto = gen.gen_c.gen_c_sink
+sym_member = gen.gen_name
+unsupported = gen.gen_c.gen_c_report
+
+JSON_MODULE: str = "std.json.json_meta"
+
+is_json_door* = (d: Def, f: Function) bool {
+    d.name.eq("to_json") && d.qname.eq("std.json.json_meta.to_json")
+        && bodyless(f) && f.params.len == 2
+}
+
+lower_json_door* = (
+    be   :: CBackend,
+    id   : ExprId,
+    c    : Call,
+    d    : Def,
+    recv : Res<ExprId>,
+    ctx  : Ctx,
+    out  :: String
+) Res<(), AllocError> {
+    recv.match({
+        None         => be.unsupported(id, "to_json without a receiver", out),
+        Ok(receiver) => be.json_receiver(id, c, d, receiver, ctx, out),
+    })
+}
+
+json_receiver = (
+    be       :: CBackend,
+    id       : ExprId,
+    c        : Call,
+    door     : Def,
+    receiver : ExprId,
+    ctx      : Ctx,
+    out      :: String
+) Res<(), AllocError> {
+    unknown  = be.check.types.unknown().try();
+    value_ty = be.ty_of(receiver, ctx, unknown).try();
+    value ::= be.fresh_name("json_value").try();
+    be.request_type(value_ty).try();
+    be.declare_temp(value_ty, value.view()).try();
+    rendered ::= be.alloc.String().try();
+    expr(be, receiver, ctx, value_ty, rendered).try();
+    be.fmt("{} = {};\n", value.view(), rendered.view()).try();
+    be.json_result(id, c, door, value_ty, value.view(), ctx, out)
+}
+
+json_result = (
+    be       :: CBackend,
+    id       : ExprId,
+    c        : Call,
+    door     : Def,
+    value_ty : TyId,
+    value    : str,
+    ctx      : Ctx,
+    out      :: String
+) Res<(), AllocError> {
+    ret = be.check.type_of(id, ctx).try();
+    tmp ::= be.fresh_name("json_result").try();
+    be.declare_temp(ret, tmp.view()).try();
+    done = be.next_tmp();
+    be.json_empty(c, door, tmp.view(), ctx).try().match({
+        false => be.unsupported(id, "to_json without String storage", out),
+        true  => {
+            be.json_guard_result(tmp.view(), done).try();
+            buffer ::= be.alloc.String("&({}.zg_data.", tmp.view()).try();
+            buffer.sym_member("Ok").try();
+            buffer.add(")").try();
+            be.json_value(
+                id,
+                value_ty,
+                value,
+                buffer.view(),
+                ret,
+                tmp.view(),
+                done
+            ).try();
+            be.write_done(done).try();
+            out.add(tmp.view())
+        },
+    })
+}
+
+json_empty = (
+    be   :: CBackend,
+    c    : Call,
+    door : Def,
+    dst  : str,
+    ctx  : Ctx
+) Res<bool, AllocError> {
+    be.json_empty_def().try().match({
+        None      => Ok(false),
+        Ok(empty) => c.args.get(0).match({
+            None         => Ok(false),
+            Ok(argument) => {
+                call ::= be.alloc.String().try();
+                be.call_symbol(empty, call).try();
+                call.add("(").try();
+                want = be.json_empty_param(empty).try();
+                expr(be, argument.value, ctx, want, call).try();
+                call.add(")").try();
+                be.fmt("{dst} = {};\n", call.view()).try();
+                Ok(true)
+            },
+        }),
+    })
+}
+
+json_empty_param = (be :: CBackend, empty: Def) Res<TyId, AllocError> {
+    unknown = be.check.types.unknown().try();
+    dctx    = Ctx(empty.id.module.to_usize(), unknown);
+    decl_at(be.tree, empty.id).match({
+        None     => Ok(unknown),
+        Ok(decl) => decl.kind.match({
+            Function(f) => f.params.get(0).match({
+                None      => Ok(unknown),
+                Ok(param) => param_type(be.check, param, dctx),
+            }),
+            _           => Ok(unknown),
+        }),
+    })
+}
+
+json_empty_def = (be :: CBackend) Res<Res<Def>, AllocError> {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.exported_named("String", found).try();
+    kept ::= be.alloc.Vec<Def>();
+    found.loop((h, d) {
+        decl_at(be.tree, d.id).match({
+            None     => (),
+            Ok(decl) => decl.kind.match({
+                Function(f) => ((f.params.len == 1) && !bodyless(f))
+                    .then(() { kept.add(d).try(); }),
+                _           => (),
+            }),
+        });
+    });
+    Ok(kept.get(0))
+}
+
+json_guard_result = (be :: CBackend, result: str, done: usize)
+                    Res<(), AllocError> {
+    ok ::= be.alloc.String().try();
+    ok.sym_variant("std.core.result.Res", "Ok").try();
+    be.fmt("if ({result}.zg_tag != {}) {{\n", ok.view()).try();
+    be.indent();
+    be.write_goto(done).try();
+    be.dedent();
+    be.writeln("}").try();
+    Ok(())
+}
+
+json_value = (
+    be     :: CBackend,
+    id     : ExprId,
+    ty     : TyId,
+    value  : str,
+    buffer : str,
+    ret    : TyId,
+    result : str,
+    done   : usize
+) Res<(), AllocError> {
+    be.check.types.at(ty).match({
+        Prim(p)  => be.json_primitive(
+            id,
+            p.name,
+            value,
+            buffer,
+            ret,
+            result,
+            done
+        ),
+        Named(n) => be.json_named(id, ty, n, value, buffer, ret, result, done),
+        _        => be.json_unsupported(id, buffer, ret, result, done),
+    })
+}
+
+json_primitive = (
+    be     :: CBackend,
+    id     : ExprId,
+    name   : str,
+    value  : str,
+    buffer : str,
+    ret    : TyId,
+    result : str,
+    done   : usize
+) Res<(), AllocError> {
+    helper = name.match({
+        "str"   => "write_str",
+        "bool"  => "write_bool",
+        "i8"    => "write_i8",
+        "i16"   => "write_i16",
+        "i32"   => "write_i32",
+        "i64"   => "write_i64",
+        "u8"    => "write_u8",
+        "u16"   => "write_u16",
+        "u32"   => "write_u32",
+        "u64"   => "write_u64",
+        "usize" => "write_usize",
+        "f32"   => "write_f32",
+        "f64"   => "write_f64",
+        _       => "",
+    });
+    helper.is_empty().match({
+        true  => be.json_unsupported(id, buffer, ret, result, done),
+        false => be.json_write(helper, buffer, value, ret, result, done),
+    })
+}
+
+json_named = (
+    be     :: CBackend,
+    id     : ExprId,
+    ty     : TyId,
+    named  : TyNamed,
+    value  : str,
+    buffer : str,
+    ret    : TyId,
+    result : str,
+    done   : usize
+) Res<(), AllocError> {
+    (named.name.eq("String")
+        && be.check.world.module_name(named.decl).eq("std.text.text_string"))
+        .match({
+            true  => be.json_write(
+                "write_string",
+                buffer,
+                value,
+                ret,
+                result,
+                done
+            ),
+            false => be.json_record(
+                id,
+                ty,
+                named,
+                value,
+                buffer,
+                ret,
+                result,
+                done
+            ),
+        })
+}
+
+json_record = (
+    be     :: CBackend,
+    id     : ExprId,
+    ty     : TyId,
+    named  : TyNamed,
+    value  : str,
+    buffer : str,
+    ret    : TyId,
+    result : str,
+    done   : usize
+) Res<(), AllocError> {
+    decl_at(be.tree, named.decl).match({
+        None     => be.json_unsupported(id, buffer, ret, result, done),
+        Ok(decl) => decl.kind.match({
+            Struct(record) => be.json_fields(
+                id,
+                ty,
+                named,
+                record,
+                value,
+                buffer,
+                ret,
+                result,
+                done
+            ),
+            _              => be.json_unsupported(
+                id,
+                buffer,
+                ret,
+                result,
+                done
+            ),
+        }),
+    })
+}
+
+json_fields = (
+    be     :: CBackend,
+    id     : ExprId,
+    ty     : TyId,
+    named  : TyNamed,
+    record : Struct,
+    value  : str,
+    buffer : str,
+    ret    : TyId,
+    result : str,
+    done   : usize
+) Res<(), AllocError> {
+    be.json_raw("{", buffer, ret, result, done).try();
+    inst = be.decl_inst(named).try();
+    dctx = be.decl_ctx(named);
+    mark = be.enter_struct_tparams(named.decl).try();
+    seen ::= 0;
+    record.members.loop((h, member) {
+        be.field_type(member, dctx, inst).match({
+            None         => (),
+            Ok(field_ty) => {
+                prefix ::= be.alloc.String().try();
+                (seen > 0).then(() { prefix.add(',').try(); });
+                prefix.add('"').try();
+                prefix.add(member.name().text).try();
+                prefix.add("\":").try();
+                be.json_raw(prefix.view(), buffer, ret, result, done).try();
+                field ::= be.alloc.String("{}.", value).try();
+                field.sym_member(member.name().text).try();
+                be.json_value(
+                    id,
+                    field_ty,
+                    field.view(),
+                    buffer,
+                    ret,
+                    result,
+                    done
+                ).try();
+                seen = seen + 1;
+            },
+        });
+    });
+    be.leave_tparams(mark).try();
+    be.json_raw("}", buffer, ret, result, done)
+}
+
+json_raw = (
+    be     :: CBackend,
+    raw    : str,
+    buffer : str,
+    ret    : TyId,
+    result : str,
+    done   : usize
+) Res<(), AllocError> {
+    literal ::= be.alloc.String("(zg_str){{ (unsigned char *)\"").try();
+    Range(0, raw.len).loop((h, i) {
+        b = raw.index(i);
+        (b == '"' || b == '\\').then(() { literal.add('\\').try(); });
+        literal.add(b).try();
+    });
+    literal.fmt("\", {}u }}", raw.len).try();
+    be.json_write("write_raw", buffer, literal.view(), ret, result, done)
+}
+
+json_write = (
+    be     :: CBackend,
+    helper : str,
+    buffer : str,
+    value  : str,
+    ret    : TyId,
+    result : str,
+    done   : usize
+) Res<(), AllocError> {
+    be.json_helper(helper).try().match({
+        None       => Ok(()),
+        Ok(writer) => {
+            call ::= be.alloc.String().try();
+            be.call_symbol(writer, call).try();
+            call.fmt("({buffer}, {value})").try();
+            write_ret = be.json_helper_ret(writer).try();
+            wrote ::= be.fresh_name("json_write").try();
+            be.declare_temp(write_ret, wrote.view()).try();
+            be.fmt("{} = {};\n", wrote.view(), call.view()).try();
+            ok ::= be.alloc.String().try();
+            ok.sym_variant("std.core.result.Res", "Ok").try();
+            be.fmt("if ({}.zg_tag != {}) {{\n", wrote.view(), ok.view()).try();
+            be.indent();
+            be.write_assign_err(ret, "OutOfMemory", result).try();
+            be.write_goto(done).try();
+            be.dedent();
+            be.writeln("}").try();
+            Ok(())
+        },
+    })
+}
+
+json_helper = (be :: CBackend, name: str) Res<Res<Def>, AllocError> {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.exported_named(name, found).try();
+    Ok(found.find((d) {
+        d.name.eq(name)
+            && be.check.world.module_name(d.id).eq(JSON_MODULE)
+    }))
+}
+
+json_helper_ret = (be :: CBackend, d: Def) Res<TyId, AllocError> {
+    decl_at(be.tree, d.id).match({
+        None     => be.check.types.unknown(),
+        Ok(decl) => decl.kind.match({
+            Function(f) => be.check.type_from_ast(
+                f.ret.ok_or(AllocError.OutOfMemory).try(),
+                Ctx(d.id.module.to_usize(), TyId(index: 0))
+            ),
+            _           => be.check.types.unknown(),
+        }),
+    })
+}
+
+json_unsupported = (
+    be     :: CBackend,
+    id     : ExprId,
+    buffer : str,
+    ret    : TyId,
+    result : str,
+    done   : usize
+) Res<(), AllocError> {
+    be.report_expr(
+        id,
+        GenFault.Unsupported("a value that cannot be encoded as JSON")
+    ).try();
+    be.json_raw("null", buffer, ret, result, done)
+}

@@ -5,8 +5,13 @@ str, String = std.text
 Alloc, AllocError = std.mem
 scan, Source, Lexed = std.lex
 render = fmt.fmt
-write_whole = lsp.lsp_pos
-obj, arr = std.json
+WireRange, whole_range = lsp.lsp_pos
+arr, to_json = std.json
+
+TextEdit = {
+    range: WireRange,
+    newText: str,
+}
 
 write_edits* = (a: Alloc, text: str, out :: String) Res<(), AllocError> {
     lexed = scan(a, Source(file: "doc", text: text)).try();
@@ -23,7 +28,7 @@ rendered = (a: Alloc, text: str, lexed: Lexed, out :: String)
         && shaped.faithful
         && !text.eq(shaped.text.view())).match({
         false => no_edits(out),
-        true  => whole_edit(text, shaped.text.view(), out),
+        true  => whole_edit(a, text, shaped.text.view(), out),
     })
 }
 
@@ -31,13 +36,11 @@ no_edits = (out :: String) Res<(), AllocError> {
     out.add("[]")
 }
 
-whole_edit = (text: str, shaped: str, out :: String) Res<(), AllocError> {
+whole_edit = (a: Alloc, text: str, shaped: str, out :: String)
+             Res<(), AllocError> {
     edits ::= arr(out).try();
     edits.next(out).try();
-    edit ::= obj(out).try();
-    edit.key("range", out).try();
-    write_whole(text, out).try();
-    edit.text("newText", shaped, out).try();
-    edit.close(out).try();
+    encoded ::= TextEdit(range: whole_range(text), newText: shaped).to_json(a).try();
+    out.add(encoded.view()).try();
     edits.close(out)
 }

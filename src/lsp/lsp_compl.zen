@@ -18,7 +18,7 @@ def_type = sema.sema_type
 ImplId = sema.sema_id
 to_pos, run_of = lsp.lsp_pos
 check_standalone, check_build = lsp.lsp_query
-obj, arr, Nest, written = std.json
+obj, arr, Nest, written, to_json = std.json
 own_str = lsp.lsp_reply
 KEYWORD_COUNT, keyword_at = std.lex
 
@@ -573,22 +573,27 @@ sort_items* = (items :: Vec<Item>) Res<(), AllocError> {
     items.sort()
 }
 
-write_items* = (items: Vec<Item>, out :: String) Res<(), AllocError> {
+CompletionItem = {
+    label: str,
+    kind: usize,
+}
+
+write_items* = (a: Alloc, items: Vec<Item>, out :: String)
+               Res<(), AllocError> {
     list ::= obj(out).try();
     list.key("isIncomplete", out).try();
     out.add("false").try();
     list.key("items", out).try();
     offers ::= arr(out).try();
-    items.loop((h, it) { write_item(it, offers, out).try(); });
+    items.loop((h, it) { write_item(a, it, offers, out).try(); });
     offers.close(out).try();
     list.close(out)
 }
 
-write_item = (it: Item, offers :: Nest, out :: String) Res<(), AllocError> {
+write_item = (a: Alloc, it: Item, offers :: Nest, out :: String)
+             Res<(), AllocError> {
     offers.next(out).try();
-    item ::= obj(out).try();
-    item.text("label", it.label, out).try();
-    item.key("kind", out).try();
-    out.write_usize(it.kind).try();
-    item.close(out)
+    encoded ::= CompletionItem(label: it.label, kind: it.kind)
+        .to_json(a).try();
+    out.add(encoded.view())
 }

@@ -3,7 +3,8 @@
 
 str, String = std.text
 Range, Res = std.core
-ActorError, Context = std.actor
+Sink, WriteError = std.core
+ActorError = std.actor
 Alloc, AllocError = std.mem
 
 H2Error* = ConnectFailed
@@ -26,25 +27,7 @@ H2Response* = {
 H2Head* = Informational(i32) | Response(i32) | Trailers
 
 // A streaming request can fail in the connection or at the receiver mailbox.
-// FailureDelivery retains both causes when the receiver could not accept the
-// HTTP failure notification.
-H2StreamError* = Http(H2Error)
-    | Receiver(ActorError)
-    | FailureDelivery(H2FailureDelivery)
-
-H2FailureDelivery* = {
-    http*:     H2Error,
-    receiver*: ActorError,
-}
-
-// Implement this protocol on an Actor. Each method is a behavior: calls made
-// through Ref enqueue a message and return Res<(), ActorError> immediately.
-H2Receiver* = {
-    headers* = (self :: @Self, ctx: Context, head: H2Head) ()
-    data* = (self :: @Self, ctx: Context, bytes: H2Chunk) ()
-    completed* = (self :: @Self, ctx: Context) ()
-    failed* = (self :: @Self, ctx: Context, error: H2Error) ()
-}
+H2StreamError* = Http(H2Error) | Receiver(ActorError)
 
 // The frame size every peer must accept; this client never advertises more.
 MAX_SEND*: usize = 16384
@@ -64,6 +47,11 @@ H2Chunk* = {
 
     append_to* = (self: @Self, out :: String) Res<(), AllocError> {
         Range(0, self.len).loop((h, i) { out.add(self.bytes[i]).try(); });
+        Ok(())
+    }
+
+    write_to* = (self: @Self, out :: Sink) Res<(), WriteError> {
+        Range(0, self.len).loop((h, i) { out.write_byte(self.bytes[i]).try(); });
         Ok(())
     }
 

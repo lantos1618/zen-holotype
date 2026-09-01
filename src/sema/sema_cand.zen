@@ -70,13 +70,17 @@ keep_travelled = (c :: Checker, k: Cand, rty: TyId, out :: Vec<Cand>)
     })
 }
 
-// A receiver fits either the declared type itself or an implemented bound.
-// General assignability is too permissive here because an unconstrained type
-// parameter would make every function a receiver candidate.
+// A receiver fits the declared type, an implemented bound, or the function's
+// own type parameter. The last form is a universal extension such as
+// `<T>(self: T)`: it travels only under its declared name, and ordinary
+// overload matching still checks every argument after collecting it.
 takes_receiver = (c :: Checker, k: Cand, rty: TyId) Res<bool, AllocError> {
     k.params.get(0).match({
         None  => Ok(false),
-        Ok(t) => c.satisfies_bound(rty, t),
+        Ok(t) => c.is_tvar(t).match({
+            true  => Ok(true),
+            false => c.satisfies_bound(rty, t),
+        }),
     })
 }
 

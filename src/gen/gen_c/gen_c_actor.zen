@@ -274,21 +274,24 @@ write_actor_send_floor = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     ).try();
     out.say("        tail += slices[i].len;").try();
     out.say("    }").try();
+    // Registry before mailbox is the one lock order. Shutdown holds the
+    // registry while closing mailboxes, so taking them in the opposite order
+    // here could deadlock a final send against process teardown.
+    out.say("    pthread_mutex_lock(&zg_actor_registry_lock);").try();
     out.say("    pthread_mutex_lock(&a->lock);").try();
     out.say(
-        "    if (!a->open) { pthread_mutex_unlock(&a->lock); free(m); return 1; }"
+        "    if (!a->open) { pthread_mutex_unlock(&a->lock); pthread_mutex_unlock(&zg_actor_registry_lock); free(m); return 1; }"
     ).try();
     out.say(
-        "    if (a->count >= ZG_ACTOR_CAPACITY) { pthread_mutex_unlock(&a->lock); free(m); return 2; }"
+        "    if (a->count >= ZG_ACTOR_CAPACITY) { pthread_mutex_unlock(&a->lock); pthread_mutex_unlock(&zg_actor_registry_lock); free(m); return 2; }"
     ).try();
     out.say("    if (a->tail) a->tail->next = m; else a->head = m;").try();
     out.say("    a->tail = m;").try();
     out.say("    a->count++;").try();
-    out.say("    pthread_mutex_lock(&zg_actor_registry_lock);").try();
     out.say("    zg_actor_pending++;").try();
-    out.say("    pthread_mutex_unlock(&zg_actor_registry_lock);").try();
     out.say("    pthread_cond_signal(&a->wake);").try();
     out.say("    pthread_mutex_unlock(&a->lock);").try();
+    out.say("    pthread_mutex_unlock(&zg_actor_registry_lock);").try();
     out.say("    return 0;").try();
     out.say("}").try();
     out.line().try();

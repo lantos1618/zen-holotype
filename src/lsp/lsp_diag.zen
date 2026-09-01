@@ -7,13 +7,20 @@ Alloc, AllocError = std.mem
 Note = std.parse.parse_diag
 Checker = sema.sema_check
 root_for, relative_to = zen.zen_path
-write_range = lsp.lsp_pos
-obj, arr, Nest, written = std.json
+WireRange, wire_range, write_range = lsp.lsp_pos
+obj, arr, Nest, written, to_json = std.json
 write_frame = lsp.lsp_frame
 path_of = lsp.lsp_uri
 own_str = lsp.lsp_reply
 Built, Spot* = lsp.lsp_built
 Classed = lsp.lsp_colour
+
+Diagnostic = {
+    range: WireRange,
+    severity: usize,
+    source: str,
+    message: str,
+}
 
 Shared* = {
     c*: Res<Checker>,
@@ -272,39 +279,57 @@ write_notification = (
     params.text("uri", uri, body).try();
     params.key("diagnostics", body).try();
     items ::= arr(body).try();
-    spots.loop((h, s) { one_of(s, uri, text, items, body).try(); });
+    spots.loop((h, s) { one_of(a, s, uri, text, items, body).try(); });
     items.close(body).try();
     params.close(body).try();
     top.close(body)
 }
 
-one_of = (s: Spot, uri: str, text: str, items :: Nest, out :: String)
+one_of = (a: Alloc, s: Spot, uri: str, text: str, items :: Nest, out :: String)
          Res<(), AllocError> {
     s.uri.eq(uri).match({
         false => written(),
-        true  => written_at(s, text, items, out),
+        true  => written_at(a, s, text, items, out),
     })
 }
 
-written_at = (s: Spot, text: str, items :: Nest, out :: String)
+written_at = (a: Alloc, s: Spot, text: str, items :: Nest, out :: String)
              Res<(), AllocError> {
     items.next(out).try();
-    write_spot(s, text, out)
+    write_spot(a, s, text, out)
 }
 
-write_spot = (s: Spot, text: str, out :: String) Res<(), AllocError> {
+write_spot = (a: Alloc, s: Spot, text: str, out :: String)
+             Res<(), AllocError> {
+    s.note.match({
+        None  => write_plain_spot(a, s, text, out),
+        Ok(_) => write_noted_spot(a, s, text, out),
+    })
+}
+
+write_plain_spot = (a: Alloc, s: Spot, text: str, out :: String)
+                   Res<(), AllocError> {
+    encoded ::= Diagnostic(range: wire_range(text, s.span), severity: ERROR, source: "zen", message: s.message).to_json(a).try();
+    out.add(encoded.view())
+}
+
+// relatedInformation is conditionally omitted, so the noted shape remains a
+// streaming object until typed JSON gains an explicit omission policy.
+write_noted_spot = (a: Alloc, s: Spot, text: str, out :: String)
+                   Res<(), AllocError> {
     spot ::= obj(out).try();
     spot.key("range", out).try();
-    write_range(text, s.span, out).try();
+    write_range(a, text, s.span, out).try();
     spot.key("severity", out).try();
     out.write_usize(ERROR).try();
     spot.text("source", "zen", out).try();
     spot.text("message", s.message, out).try();
-    write_note(s, text, spot, out).try();
+    write_note(a, s, text, spot, out).try();
     spot.close(out)
 }
 
 write_note = (
+    a    : Alloc,
     s    : Spot,
     text : str,
     spot :: Nest,
@@ -312,11 +337,18 @@ write_note = (
 ) Res<(), AllocError> {
     s.note.match({
         None  => written(),
-        Ok(n) => write_related(s.uri, n, text, spot, out),
+        Ok(n) => write_related(a, s.uri, n, text, spot, out),
     })
 }
 
-write_related = (uri: str, n: Note, text: str, spot :: Nest, out :: String)
+write_related = (
+    a    : Alloc,
+    uri  : str,
+    n    : Note,
+    text : str,
+    spot :: Nest,
+    out  :: String
+)
                 Res<(), AllocError> {
     spot.key("relatedInformation", out).try();
     notes ::= arr(out).try();
@@ -326,7 +358,7 @@ write_related = (uri: str, n: Note, text: str, spot :: Nest, out :: String)
     at ::= obj(out).try();
     at.text("uri", uri, out).try();
     at.key("range", out).try();
-    write_range(text, n.span, out).try();
+    write_range(a, text, n.span, out).try();
     at.close(out).try();
     note.text("message", n.message, out).try();
     note.close(out).try();

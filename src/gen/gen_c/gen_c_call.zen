@@ -41,6 +41,7 @@ is_null_ptr, lower_null_ptr = gen.gen_c.gen_c_ptr
 lower_closure_call = gen.gen_c.gen_c_inline
 construct = gen.gen_c.gen_c_build
 is_format_door, lower_format_door = gen.gen_c.gen_c_fmt
+is_json_door, lower_json_door = gen.gen_c.gen_c_json
 recv_arg, arg_value, write_arg_at = gen.gen_c.gen_c_arg
 call_callee = sema.sema_call
 
@@ -179,6 +180,22 @@ CallSite = {
             true  => be.lower_null_ptr(
                 self.id,
                 be.want_of(self.id, self.ctx).try(),
+                out
+            ),
+            false => self.json_or_format(be, d, f, out),
+        })
+    }
+
+    json_or_format = (self: @Self, be :: CBackend, d: Def, f: Function,
+                      out :: String) Res<(), AllocError> {
+        is_json_door(d, f).match({
+            true  => lower_json_door(
+                be,
+                self.id,
+                self.c,
+                d,
+                self.recv,
+                self.ctx,
                 out
             ),
             false => self.format_or_call(be, d, f, out),
@@ -734,10 +751,10 @@ add_receiving = (be :: CBackend, d: Def, rty: TyId, found :: Vec<Def>)
     })
 }
 
-// Whether the receiver is this declaration's first parameter, read off
-// the DECLARED type, uninstantiated — so `(self: u32)` answers and
-// `<T>(self: T)` does not, which is right: a bare parameter would
-// swallow every receiver in the program.
+// Whether the receiver is this declaration's first parameter, read off the
+// declared type. A declaration-owned type variable is a universal extension;
+// it travels only under the requested function name and ordinary overload
+// matching settles it to the concrete receiver.
 receives = (be :: CBackend, d: Def, rty: TyId) Res<bool, AllocError> {
     inst ::= be.alloc.Inst();
     sig  ::= be.alloc.Vec<TyId>();
@@ -750,7 +767,10 @@ first_is = (be :: CBackend, sig: Vec<TyId>, rty: TyId)
            Res<bool, AllocError> {
     sig.get(0).match({
         None  => Ok(false),
-        Ok(t) => satisfies_bound(be.check, rty, t),
+        Ok(t) => be.check.is_var(t).match({
+            true  => Ok(true),
+            false => satisfies_bound(be.check, rty, t),
+        }),
     })
 }
 

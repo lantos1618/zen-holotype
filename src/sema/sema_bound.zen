@@ -23,8 +23,8 @@ TyId, TyNamed, Prim, is_prim = sema.sema_ty
 Def, decl_at = sema.sema_def
 SemaFault, NameFault, TypeFault, ExportFault = sema.sema_diag
 Checker = sema.sema_check
-opaque, Found, members_of = sema.sema_member
-bound_members, has_member, impl_span, impl_bound_type = sema.sema_supply
+opaque, Found, members_of, member_type = sema.sema_member
+bound_members, bound_member_type, has_member, impl_span, impl_bound_type = sema.sema_supply
 storage_seat_name = sema.sema_supply
 Cand, TBound, Actual = sema.sema_call
 ty_at, is_tvar = sema.sema_cand
@@ -410,7 +410,103 @@ satisfies_bound* = (c :: Checker, ty: TyId, bound: TyId)
                    Res<bool, AllocError> {
     c.same_type(ty, bound).match({
         true  => Ok(true),
-        false => c.impls_bound(ty, bound),
+        false => c.impls_bound(ty, bound).try().match({
+            true  => Ok(true),
+            false => c.actor_receives(ty, bound),
+        }),
+    })
+}
+
+// `Receive<T>` describes one message accepted by an actor. The behavior is
+// written once, in the actor's Actor impl, so generic senders do not require a
+// second forwarding impl merely to name that capability.
+actor_receives = (c :: Checker, ty: TyId, bound: TyId)
+                 Res<bool, AllocError> {
+    c.receive_bound(bound).match({
+        false => Ok(false),
+        true  => c.types.at(ty).match({
+            Named(n) => c.actor_impl_receives(n, ty, bound),
+            _        => Ok(false),
+        }),
+    })
+}
+
+receive_bound = (c: Checker, bound: TyId) bool {
+    c.types.at(bound).match({
+        Named(n) => n.name.eq("Receive")
+            && c.world.module_name(n.decl).eq("std.actor.actor_context"),
+        _        => false,
+    })
+}
+
+actor_impl_receives = (
+    c     :: Checker,
+    n     : TyNamed,
+    ty    : TyId,
+    bound : TyId
+) Res<bool, AllocError> {
+    ids ::= c.alloc.Vec<ImplId>();
+    c.world.impls_named(c.tree, n.name, ids).try();
+    expected = c.bound_member_type(bound, "receive", ty).try();
+    hit ::= false;
+    ids.loop((h, id) {
+        (n.decl.module == id.decl.module).then(() {
+            c.world.impl_at(c.tree, id).match({
+                None   => (),
+                Ok(im) => c.actor_impl_has_receive(im, n, ty, expected)
+                    .try()
+                    .then(() { hit = true; }),
+            });
+        });
+    });
+    Ok(hit)
+}
+
+actor_impl_has_receive = (
+    c        :: Checker,
+    im       : Impl,
+    n        : TyNamed,
+    ty       : TyId,
+    expected : TyId
+) Res<bool, AllocError> {
+    actual_bound = c.impl_bound_type(im, n.decl.module.to_usize()).try();
+    c.actor_bound(actual_bound).match({
+        false => Ok(false),
+        true  => {
+            hit ::= false;
+            im.members.loop((h, m) {
+                (m.named("receive") && c.member_is(expected, m, n, ty).try())
+                    .then(() { hit = true; });
+            });
+            Ok(hit)
+        },
+    })
+}
+
+actor_bound = (c: Checker, ty: TyId) bool {
+    c.types.at(ty).match({
+        Named(n) => n.name.eq("Actor")
+            && c.world.module_name(n.decl).eq("std.actor.actor_core"),
+        _        => false,
+    })
+}
+
+member_is = (
+    c        :: Checker,
+    expected : TyId,
+    m        : Member,
+    n        : TyNamed,
+    ty       : TyId
+) Res<bool, AllocError> {
+    m.kind.match({
+        Function(f) => f.body.match({
+            None  => Ok(false),
+            Ok(_) => {
+                actual = c.member_type(m, n.decl.module.to_usize(), ty).try();
+                Ok(c.same_type(actual, expected))
+            },
+        }),
+        _           => Ok(false),
     })
 }
 

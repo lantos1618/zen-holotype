@@ -3,10 +3,10 @@
 str, String = std.text
 Alloc, AllocError = std.mem
 Jsons, JsonId, write_text, written, obj, Nest,
-    JsonFault = std.json
+    JsonFault, to_json = std.json
 Hover = lsp.lsp_hover
 Target, write_location = lsp.lsp_def
-write_wire = lsp.lsp_pos
+WireRange = lsp.lsp_pos
 write_legend = lsp.lsp_colour
 
 method_of* = (tree: Jsons, req: JsonId) str {
@@ -118,28 +118,25 @@ fault_text = (f: JsonFault) FaultText {
     })
 }
 
-write_hover* = (h: Hover, out :: String) Res<(), AllocError> {
-    answer ::= obj(out).try();
-    answer.key("contents", out).try();
-    contents ::= obj(out).try();
-    contents.text("kind", "plaintext", out).try();
-    contents.key("value", out).try();
-    write_text(h.shown, out).try();
-    contents.close(out).try();
-    answer.key("range", out).try();
-    range ::= obj(out).try();
-    range.key("start", out).try();
-    write_wire(h.start, out).try();
-    range.key("end", out).try();
-    write_wire(h.end, out).try();
-    range.close(out).try();
-    answer.close(out)
+MarkupContent = {
+    kind: str,
+    value: str,
 }
 
-write_target* = (t: Target, body :: String) Res<(), AllocError> {
+HoverResult = {
+    contents: MarkupContent,
+    range: WireRange,
+}
+
+write_hover* = (a: Alloc, h: Hover, out :: String) Res<(), AllocError> {
+    encoded ::= HoverResult(contents: MarkupContent(kind: "plaintext", value: h.shown), range: WireRange(start: h.start, end: h.end)).to_json(a).try();
+    out.add(encoded.view())
+}
+
+write_target* = (a: Alloc, t: Target, body :: String) Res<(), AllocError> {
     t.found.match({
         false => body.add("null"),
-        true  => write_location(t, body),
+        true  => write_location(a, t, body),
     })
 }
 
