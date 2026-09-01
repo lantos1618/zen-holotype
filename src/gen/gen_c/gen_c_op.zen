@@ -79,16 +79,10 @@ lower_negate = (
     })
 }
 
-// A MINUS SIGN ON A LITERAL IS PART OF THE CONSTANT, not a subtraction
-// from zero — folding it here is a correctness fix, not an
-// optimisation. `0 - x` evaluates the positive first, and `iN.MIN`'s
-// magnitude is one past `iN.MAX`, so the checked subtract traps on the
-// way to a value the type holds exactly.
-// Concretely: `std/core/num.zen:54:17: trap: integer overflow` —
-// `i64.MIN - 1` never reached the subtraction the author wrote, because
-// the CONSTANT's own initialiser aborted first, carrying num.zen's
-// position. A trap must name where the program went wrong, so a
-// declaration merely read may not be where it points.
+// Fold a minus directly over an integer literal. Lowering it as checked
+// `0 - x` would trap while first evaluating the magnitude of `iN.MIN`, which
+// is one greater than `iN.MAX`, and would report the literal rather than the
+// operation that actually failed.
 negate_kind = (be: CBackend, u: Unary, prim: str) NegKind {
     is_c_integer(prim).match({
         false => NegKind.Float,
@@ -209,57 +203,16 @@ is_comparison* = (op: BinOp) bool {
     })
 }
 
-// EVERY WAY A BINARY OPERATOR IS WRITTEN. The order `op_kind` asks
-// these in is the language's rule and not an implementation detail, so
-// it is one list here rather than the shape of a five-link call chain.
+// The lowering forms for binary operators. `op_kind` tests them in language
+// precedence order.
 OpKind = ShortCircuit | Infix | Helper(str) | Dispatched | Refused
 
-// `&&` and `||` short-circuit, so a right operand needing statements of
-// its own cannot be lowered as an infix operand: the statements would
-// run whether or not the left side held.
-// THE SECOND CONDITION IS #737's GATE MEETING THIS ONE, and it took a
-// parity run to see why it must. Holding an operand HOISTS STATEMENTS
-// (`value_held` -> `spill_valued`); an `&&`/`||` written as plain C
-// infix runs its RIGHT side under C's own guard -- so a hoisted LEFT
-// lands BESIDE the guard, executing what Zen only promised conditionally.
-// `matched = matched && self.text.index(from + i) == ..` in a loop
-// trapped on out-of-range once the left `index` was hoisted above the
-// `&&` (three `corpus/lsp/*` red). When EITHER side holds, the pair is
-// written through the if-form instead: the left fills its temporary
-// ahead of the branch, the right's statements stay INSIDE it.
-// THE QUESTION IS `spills_anywhere`, NOT `spills` — a wrong answer, not
-// just a refusal, hinges on it. `spills` asks whether the operand IS a
-// spilling form; `expr` now spills a nested one into a temporary, so
-// `a && (half(n).try() > 1)` (rhs is a comparison, not a `.try()`)
-// would have its `.try()` hoisted beside the left and fire when `a` was
-// false. The bootstrapper and this backend once disagreed by exactly
-// that — caught by a differential run.
-// SO IT IS WRITTEN OUT: a temporary the left fills, and the right
-// fills AGAIN under an `if` — C's own `&&`, with statements where they
-// belong. The right operand's statements land inside the branch, so a
-// `.try()` there returns only on the pass that reached it — the
-// guarantee the hoist broke.
-// The infix form stays for the common case: `a && b` on two pure
-// operands is `a && b`, not three statements and a temporary in front
-// of the C compiler on every comparison in the tree.
-// Comparison is C's on a scalar, an IMPL'S otherwise — the header's
-// second rule. `s == "impl"` on a `str` is `str`'s `Eq`, impl'd by
-// `std.text`.
-// ORDERING IS NOT COVERED, refused by name: "there is no `Ord`.
-// `std.core` has `Eq` and `Hash` and nothing that orders" — inventing
-// one here would be this backend deciding a language question.
-// A type that impls no `Eq`, and every ORDERING, are refused for the
-// same reason: there is nothing to dispatch to.
-// `corpus/gen_zen/reports_what_it_cannot_lower` gates it on a struct
-// with no impl.
-// EARLY RETURN OVER A CHAIN — `lsp_reply.zen:request_of`'s idiom: the
-// one-shot loop is a breakable block, each rung one guard answering the
-// one kind it names, the last break the answer to everything else. A
-// rung is asked only after every rung above it said no, which is what
-// holds the boundaries where the nested matches had them — and `&&`
-// asks the right-hand question only when the left held, so
-// `spills_anywhere`, `scalar`, and `prim_name` are asked exactly when
-// they were before.
+// Short-circuit operators use an explicit branch whenever either operand must
+// be held or the right subtree emits statements. `spills_anywhere` is required:
+// a nested `.try()` or `consume` must remain inside the branch that evaluates
+// it. Pure operands stay as C infix expressions. Scalar comparisons use C;
+// equality on other types dispatches through `Eq`. Ordering without a language
+// operation is refused.
 op_kind = (be: CBackend, b: Binary, operand: TyId) OpKind {
     found: Res<OpKind> = loop<OpKind>((h) {
         (is_logical(b.op)
@@ -413,19 +366,9 @@ write_infix = (
     be.close_infix(b, op, ctx, operand, out)
 }
 
-// The left operand, walked as a spine only when there IS one.
-// THE TEST IS HERE, NOT INSIDE `spine_lhs` — not a micro-optimisation:
-// the walk holds a `Vec` and a cursor, a far fatter frame than the one
-// recursive call it replaces. Under every `+` and `==` in the tree that
-// costs depth other constructs need — measured, nested `.match` lost a
-// third of its headroom to exactly that. A non-operator operand takes
-// the path it always took.
-// `held` IS THE OPERAND-ORDER GATE (#737): true lowers the left operand
-// into a temporary ahead of the operator's text — the transform an
-// argument takes through `value_held` — so it RUNS before the right one,
-// where C's own order for two operands of one expression is the C
-// compiler's to pick and gcc picks right to left. The right operand may
-// stay inline: nothing follows it.
+// Walk a binary left spine only when one exists. A held operand instead uses a
+// temporary so its effects occur before the right operand despite C's
+// unspecified operand evaluation order.
 lower_lhs = (
     be   :: CBackend,
     id   : ExprId,
@@ -440,12 +383,8 @@ lower_lhs = (
     })
 }
 
-// A level folds only when its own left operand stays inline: the spine
-// writes the operator text first (`open_rung`) and the base last, which
-// would put a temporary AFTER the operator it must precede. Such a left
-// is handed back to `expr`, which spills it in place, and the levels
-// above still fold — recursion is bounded by the held operands, not the
-// chain's length.
+// A held left operand ends spine folding because its temporary must be emitted
+// before the operator text.
 spine_ahead = (be: CBackend, id: ExprId, held: bool) bool {
     held.match({
         true  => false,
@@ -460,9 +399,7 @@ binary_ahead = (be: CBackend, id: ExprId) bool {
     })
 }
 
-// Everything after the left operand. Split out because the spine walk
-// below writes the two halves of a level at opposite ends of its two
-// passes, and the bytes may only be written down once.
+// Write the half of an infix expression following its left operand.
 close_infix = (
     be      :: CBackend,
     b       : Binary,
@@ -554,34 +491,14 @@ write_trap_args = (be :: CBackend, node: Expr, b: Binary, out :: String)
     Ok(());
 }
 
-// the spine
-// `a + b + c + ..` is `((a + b) + c) ..`, and `parse_expr.zen` builds
-// it with a LOOP (`binary_from` folds each operator onto the left in
-// place), so nothing bounds a chain's length. Recursing into `b.lhs`
-// is three C frames per term; `tests/corpus/lex/long_single_line.zen`
-// is ten thousand terms — eight megabytes of stack, then a
-// segmentation fault with no diagnostic. "A crash is not a diagnostic"
-// (docs/TESTING.md); `bootstrap/gen_c.py`'s `ex_Binary` handles this
-// the same way, in a loop.
-// THE BYTES OF A LEFT SPINE ARE ALREADY IN TWO HALVES:
+// A left-associated chain has no grammar length bound, so lower it iteratively
+// rather than consuming the C stack. Its output naturally has two halves:
 //     zg_add_i32(zg_add_i32(0, 1, "f", 1, 9), 1, "f", 1, 13)
 //     ^^^^^^^^^^^^^^^^^^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 //       opens, outermost in    base   closes, innermost out
-// so levels are collected with a cursor and written in two passes
-// instead of n nested calls. Operand type still travels DOWN the
-// spine, operands are still written left to right, and each one's
-// spilled statements land in the same order — so this emits the same
-// bytes the recursion did, which `make determinism` proves. One
-// addition since: a level whose left operand is HELD (#737) does not
-// fold (`spine_ahead`), so the temporary lands ahead of the operator's
-// text rather than after it.
-// A LEVEL THAT DOES NOT FOLD ENDS THE WALK and is handed back to
-// `expr`: every door out of `expr` that isn't a plain value (a union
-// tag, a hoist, a fat record), plus the two operators not written as
-// open-operand-operand-close (a dispatching `==`, a `&&` whose right
-// side spills), plus now a held left operand. Those nest only as deep
-// as the parser let them or the gate holds, so recursion is bounded
-// there.
+// Collecting rungs and writing them in two passes preserves left-to-right
+// effects and operand types. A non-folding form or held operand ends the walk
+// and returns that base to normal expression lowering.
 
 // One level of the spine. `id` is the operator node and `operand` the
 // type its operands lower at; the node is re-read rather than stored
