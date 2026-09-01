@@ -17,6 +17,8 @@ consume_in_every_arm_joins_alive/ -- in sema_join.zen/sema_own.zen arm-join: tre
 
 consume_of_handle_still_works/ -- in gen_c_own.zen note_drop: treat Alloc as Drop (register h): arena freed while v's data lives inside it. Sema half: exempt non-Drop targets from use-after-move and `alloc` stays usable after the move, which contradicts must-fail/own/use_after_send.zen's premise.
 
+short_circuit_keeps_an_unmoved_value/ -- a skipped `consume` must not clear the source binding's live flag before the short-circuit branch runs.
+
 // ---------------------------------------------------------------
 // FINDINGS -- things I believe are COMPILER BUGS, each with the
 // program that shows it. None is encoded as an expectation above;
