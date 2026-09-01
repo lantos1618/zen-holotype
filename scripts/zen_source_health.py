@@ -74,6 +74,29 @@ def comment_measure(root, source: bytes) -> tuple[int, int, int]:
     return len(lines), blocks, history
 
 
+def control_measure(root, source: bytes) -> tuple[int, int, int, int]:
+    match_blocks = 0
+    single_arm_matches = 0
+    unit_branch_matches = 0
+    then_calls = 0
+    for node in walk(root):
+        if node.type == "match_block":
+            match_blocks += 1
+            arms = [child for child in node.named_children if child.type == "match_arm"]
+            single_arm_matches += len(arms) == 1
+            values = [arm.child_by_field_name("value") for arm in arms]
+            unit_branch_matches += len(arms) == 2 and sum(
+                value is not None and text_of(value, source).strip() == "()"
+                for value in values
+            ) == 1
+        if node.type != "call_expression":
+            continue
+        function = node.child_by_field_name("function")
+        if function is not None and text_of(function, source).rstrip().endswith(".then"):
+            then_calls += 1
+    return match_blocks, single_arm_matches, unit_branch_matches, then_calls
+
+
 def measure(source_root: Path, grammar: Path, label: str, revision: str) -> dict:
     parser = parser_for(grammar)
     paths = sorted(source_root.rglob("*.zen"))
@@ -97,6 +120,9 @@ def measure(source_root: Path, grammar: Path, label: str, revision: str) -> dict
         )
         repeated_shapes = sum(count - 1 for count in shapes.values() if count > 1)
         comment_lines, comment_blocks, history_blocks = comment_measure(root, source)
+        match_blocks, single_arm_matches, unit_branch_matches, then_calls = (
+            control_measure(root, source)
+        )
 
         imports = []
         same_folder_aliases = 0
@@ -132,6 +158,10 @@ def measure(source_root: Path, grammar: Path, label: str, revision: str) -> dict
             "comment_lines": comment_lines,
             "comment_blocks": comment_blocks,
             "history_marker_blocks": history_blocks,
+            "match_blocks": match_blocks,
+            "single_arm_matches": single_arm_matches,
+            "unit_branch_matches": unit_branch_matches,
+            "then_calls": then_calls,
             "same_folder_aliases": same_folder_aliases,
             "sibling_modules": len(
                 {item for item in imports if Path(item).parent == Path(relative).parent}
@@ -156,6 +186,8 @@ def measure(source_root: Path, grammar: Path, label: str, revision: str) -> dict
             + item["mutual_siblings"] * 6
             + item["sibling_modules"] * 2
             + item["history_marker_blocks"] * 2
+            + item["single_arm_matches"] * 2
+            + item["unit_branch_matches"]
             + max(0, item["lines"] - 800) // 100
         )
 
@@ -176,6 +208,14 @@ def measure(source_root: Path, grammar: Path, label: str, revision: str) -> dict
         "history_marker_blocks": sum(
             item["history_marker_blocks"] for item in files.values()
         ),
+        "match_blocks": sum(item["match_blocks"] for item in files.values()),
+        "single_arm_matches": sum(
+            item["single_arm_matches"] for item in files.values()
+        ),
+        "unit_branch_matches": sum(
+            item["unit_branch_matches"] for item in files.values()
+        ),
+        "then_calls": sum(item["then_calls"] for item in files.values()),
         "same_folder_aliases": sum(
             item["same_folder_aliases"] for item in files.values()
         ),
@@ -192,7 +232,7 @@ def measure(source_root: Path, grammar: Path, label: str, revision: str) -> dict
         ),
     )
     return {
-        "schema": 1,
+        "schema": 3,
         "label": label,
         "revision": revision,
         "totals": totals,
@@ -220,6 +260,8 @@ def report_of(snapshots: list[dict]) -> str:
         ("Mutual sibling import edges", "mutual_sibling_edges"),
         ("Comment lines", "comment_lines"),
         ("History-marker comment blocks", "history_marker_blocks"),
+        ("Single-arm match blocks", "single_arm_matches"),
+        ("Boolean/unit match candidates", "unit_branch_matches"),
     )
     out = [
         "# Zen source health",
@@ -267,8 +309,8 @@ def report_of(snapshots: list[dict]) -> str:
             "then line count. It selects the next files to inspect; it does not",
             "authorize a mechanical rewrite.",
             "",
-            "| Rank | File | Score | 8+ args | Slots | Repeated shapes | Sibling imports | Mutual | Comment lines | History markers |",
-            "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Rank | File | Score | 8+ args | Slots | Repeated shapes | Sibling imports | Mutual | Then candidates | Comment lines | History markers |",
+            "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for rank, path in enumerate(latest["ranking"][:40], 1):
@@ -277,7 +319,9 @@ def report_of(snapshots: list[dict]) -> str:
             f"| {rank} | `{path}` | {item['review_priority']} | "
             f"{item['high_arity_functions']} | {item['parameter_slots']} | "
             f"{item['repeated_signature_shapes']} | {item['sibling_modules']} | "
-            f"{item['mutual_siblings']} | {item['comment_lines']} | "
+            f"{item['mutual_siblings']} | "
+            f"{item['single_arm_matches'] + item['unit_branch_matches']} | "
+            f"{item['comment_lines']} | "
             f"{item['history_marker_blocks']} |"
         )
     out.extend(
@@ -297,7 +341,10 @@ def report_of(snapshots: list[dict]) -> str:
 
 
 def load_snapshots(directory: Path) -> list[dict]:
-    return [json.loads(path.read_text()) for path in sorted(directory.glob("*.json"))]
+    snapshots = [
+        json.loads(path.read_text()) for path in sorted(directory.glob("*.json"))
+    ]
+    return [snapshot for snapshot in snapshots if snapshot.get("schema") == 3]
 
 
 def main() -> int:

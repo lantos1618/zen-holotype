@@ -32,6 +32,9 @@ def main() -> int:
     options = args.parse_args()
 
     contexts = [INVENTORY, HEALTH, STYLE, AUDIT]
+    body_pack = SNAPSHOTS / f"{options.label}-context.md"
+    if body_pack.is_file():
+        contexts.append(body_pack)
     previous = previous_review(options.label)
     if previous is not None:
         contexts.append(previous)

@@ -8,7 +8,9 @@ default.
 Read the current exhaustive signature inventory, deterministic health report,
 ownership/style rules, current implementation audit, and previous external
 review when supplied. Rank the next bounded implementation lanes by examining
-the concrete signatures and dependency direction.
+the concrete signatures and dependency direction. A bounded source-body pack
+is also supplied: inspect its actual bodies and comments for complexity and
+bugs instead of inferring them from signatures.
 
 For every proposed lane, ask:
 
