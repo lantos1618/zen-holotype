@@ -83,24 +83,6 @@ Pats* = {
         })
     }
 
-    complete = (self: @Self, has: bool, m: PatMatrix, cases: Vec<Case>) bool {
-        has && self.all_roots_present(m, cases)
-    }
-
-    all_roots_present = (self: @Self, m: PatMatrix, cases: Vec<Case>) bool {
-        Range(0, cases.len).find((i) {
-            cases.get(i).match({
-                Ok(cs) => self.root_present(m, cs.name) == false,
-                None   => false,
-            })
-        }).match({ Ok(_) => false, None => true })
-    }
-
-    root_present = (self: @Self, m: PatMatrix, name: str) bool {
-        Range(0, m.n).find((r) {
-            head_is_ctor(self.at(m.at(r, 0)), name)
-        }).match({ Ok(_) => true, None => false })
-    }
 }
 
 Pats* = (a: Alloc) Pats { Pats(rows: a.Vec<Pat>(), alloc: a) }
@@ -373,10 +355,12 @@ check_coverage = (
     sty  : TyId,
     rows : Vec<usize>
 ) Res<(), AllocError> {
-    c.checkable(sty).match({
-        true  => c.run_coverage(ps, node, sty, rows),
-        false => Ok(()),
-    })
+    coverage ::= MatchCoverage(ps, sty);
+    coverage.check(c, node, rows).try();
+    // Coverage synthesises wildcard patterns. Publish a possibly-grown arena
+    // before arm binding reads it again.
+    ps = coverage.pats;
+    Ok(())
 }
 
 // Poison, holes, and unsubstituted parameters have no reliable case list.
@@ -384,130 +368,8 @@ checkable* = (c: Checker, sty: TyId) bool {
     (c.is_unknown(sty) || c.is_infer(sty) || c.is_var(sty)) == false
 }
 
-run_coverage = (
-    c    :: Checker,
-    ps   :: Pats,
-    node : Expr,
-    sty  : TyId,
-    rows : Vec<usize>
-) Res<(), AllocError> {
-    c.check_reachable(ps, sty, rows).try();
-    c.check_exhaustive(ps, node, sty, rows).try();
-    Ok(());
-}
-
-// An arm that matches nothing the arms above it already match can never
-// run — asked once per arm against its own prefix, the arm as the query.
-check_reachable = (c :: Checker, ps :: Pats, sty: TyId, rows: Vec<usize>)
-                  Res<(), AllocError> {
-    Range(0, rows.len).loop((h, i) {
-        c.arm_reachable(ps, sty, rows, i).try();
-    });
-    Ok(());
-}
-
-arm_reachable = (
-    c    :: Checker,
-    ps   :: Pats,
-    sty  : TyId,
-    rows : Vec<usize>,
-    i    : usize
-) Res<(), AllocError> {
-    m   = c.prefix_matrix(rows, i).try();
-    q   = c.one_row(rows, i).try();
-    tys = c.one_ty(sty).try();
-    c.useful(ps, m, q, tys).try().match({
-        false => c.report_unreachable(ps, rows, i),
-        true  => Ok(()),
-    })
-}
-
-report_unreachable = (c :: Checker, ps :: Pats, rows: Vec<usize>, i: usize)
-                     Res<(), AllocError> {
-    p = ps.at(row_at(rows, i));
-    c.report(
-        p.span.file,
-        p.span,
-        SemaFault.UnreachableArm(NameFault(name: p.name))
-    )
-}
-
-// `_` against every arm — if still useful, some value reaches no arm.
-check_exhaustive = (
-    c    :: Checker,
-    ps   :: Pats,
-    node : Expr,
-    sty  : TyId,
-    rows : Vec<usize>
-) Res<(), AllocError> {
-    m    = c.prefix_matrix(rows, rows.len).try();
-    hole = ps.wild(node.span).try();
-    q ::= c.alloc.Vec<usize>();
-    q.add(hole).try();
-    tys = c.one_ty(sty).try();
-    c.useful(ps, m, q, tys).try().match({
-        true  => c.report_not_exhaustive(ps, node, sty, m),
-        false => Ok(()),
-    })
-}
-
-// The diagnostic names the case using the same engine: a case is
-// uncovered exactly when a pattern for it is still useful, so there's no
-// second notion of "what is missing" to keep in agreement with the first.
-report_not_exhaustive = (
-    c    :: Checker,
-    ps   :: Pats,
-    node : Expr,
-    sty  : TyId,
-    m    : PatMatrix
-) Res<(), AllocError> {
-    cases ::= c.alloc.Vec<Case>();
-    c.cases_of(sty, cases).try();
-    name = c.first_uncovered(ps, m, sty, cases).try();
-    c.report(
-        node.span.file,
-        node.span,
-        SemaFault.NotExhaustive(NameFault(name: name))
-    )
-}
-
-first_uncovered = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    sty   : TyId,
-    cases : Vec<Case>
-) Res<str, AllocError> {
-    found ::= "_";
-    hit   ::= false;
-    cases.loop((h, cs) {
-        open  = c.case_open(ps, m, sty, cs).try();
-        take  = open && (hit == false);
-        found = pick_name(take, cs.name, found);
-        hit   = hit || open;
-    });
-    Ok(found);
-}
-
 pick_name = (take: bool, name: str, so_far: str) str {
     take.match({ true => name, false => so_far })
-}
-
-case_open = (c :: Checker, ps :: Pats, m: PatMatrix, sty: TyId, cs: Case)
-            Res<bool, AllocError> {
-    root = c.case_pattern(ps, cs).try();
-    q ::= c.alloc.Vec<usize>();
-    q.add(root).try();
-    tys = c.one_ty(sty).try();
-    c.useful(ps, m, q, tys)
-}
-
-case_pattern = (c :: Checker, ps :: Pats, cs: Case) Res<usize, AllocError> {
-    hole = ps.wild(nowhere()).try();
-    cs.has_payload.match({
-        false => ps.add(ctor_pat(cs.name, nowhere())),
-        true  => ps.add(sub_pat(cs.name, hole, nowhere())),
-    })
 }
 
 // ---------------------------------------------------------------------
@@ -517,258 +379,12 @@ case_pattern = (c :: Checker, ps :: Pats, cs: Case) Res<usize, AllocError> {
 // `q`; the algorithm is which matrix each recurses on.
 // ---------------------------------------------------------------------
 
-useful* = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    q     : Vec<usize>,
-    types : Vec<TyId>
-) Res<bool, AllocError> {
-    // no columns left: useful exactly when nothing reached this far
-    (types.len == 0).match({
-        false => c.useful_head(ps, m, q, types),
-        true  => Ok(m.n == 0),
-    })
-}
-
-useful_head = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    q     : Vec<usize>,
-    types : Vec<TyId>
-) Res<bool, AllocError> {
-    head = ps.at(row_at(q, 0));
-    head.kind.match({
-        CtorPat => c.useful_ctor(ps, m, q, types, head),
-        LitPat  => c.useful_lit(ps, m, q, types, head),
-        WildPat => c.useful_wild(ps, m, q, types),
-    })
-}
-
-// A known case: specialise, which drops every row that cannot be this
-// case and replaces the column with the payload's.
-useful_ctor = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    q     : Vec<usize>,
-    types : Vec<TyId>,
-    head  : Pat
-) Res<bool, AllocError> {
-    ty0     = head_ty(types);
-    arity   = c.case_arity(ty0, head.name, head.has_sub).try();
-    payload = c.case_payload(ty0, head.name).try();
-    sub     = ps.sub_index(head).try();
-    sm      = c.specialise(ps, m, head.name, arity).try();
-    q2 ::= c.alloc.Vec<usize>();
-    (arity > 0).then(() { q2.add(sub).try() });
-    append_tail(q2, q).try();
-    t2 ::= c.alloc.Vec<TyId>();
-    (arity > 0).then(() { t2.add(payload).try() });
-    append_tys(t2, types).try();
-    c.useful(ps, sm, q2, t2)
-}
-
-// A literal has no case list — an `i32` cannot be enumerated — so a
-// literal column keeps only the rows that could still match it.
-useful_lit = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    q     : Vec<usize>,
-    types : Vec<TyId>,
-    head  : Pat
-) Res<bool, AllocError> {
-    sm = c.specialise_lit(ps, m, head.name).try();
-    q2 ::= c.alloc.Vec<usize>();
-    append_tail(q2, q).try();
-    t2 ::= c.alloc.Vec<TyId>();
-    append_tys(t2, types).try();
-    c.useful(ps, sm, q2, t2)
-}
-
-// A wildcard splits on whether the rows above it already name every
-// case. If they do, each case is asked separately — how `Left(Full(n))`,
-// `Left(Blank)`, `Right(_)`, `Gone` is proved complete without a `_`. If
-// not, only the rows that are themselves wildcards can stand in the way.
-useful_wild = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    q     : Vec<usize>,
-    types : Vec<TyId>
-) Res<bool, AllocError> {
-    ty0 = head_ty(types);
-    cases ::= c.alloc.Vec<Case>();
-    has = c.cases_of(ty0, cases).try();
-    ps.complete(has, m, cases).match({
-        false => c.useful_default(ps, m, q, types),
-        true  => c.useful_split(ps, m, q, types, cases),
-    })
-}
-
 head_is_ctor = (p: Pat, name: str) bool {
     p.kind.match({ CtorPat => p.name.eq(name), _ => false })
 }
 
-useful_split = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    q     : Vec<usize>,
-    types : Vec<TyId>,
-    cases : Vec<Case>
-) Res<bool, AllocError> {
-    hit ::= false;
-    cases.loop((h, cs) {
-        got = c.useful_one_case(ps, m, q, types, cs).try();
-        hit = hit || got;
-    });
-    Ok(hit);
-}
-
-useful_one_case = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    q     : Vec<usize>,
-    types : Vec<TyId>,
-    cs    : Case
-) Res<bool, AllocError> {
-    arity = payload_arity(cs);
-    hole  = ps.wild(nowhere()).try();
-    sm    = c.specialise(ps, m, cs.name, arity).try();
-    q2 ::= c.alloc.Vec<usize>();
-    (arity > 0).then(() { q2.add(hole).try() });
-    append_tail(q2, q).try();
-    t2 ::= c.alloc.Vec<TyId>();
-    (arity > 0).then(() { t2.add(cs.payload).try() });
-    append_tys(t2, types).try();
-    c.useful(ps, sm, q2, t2)
-}
-
-useful_default = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    q     : Vec<usize>,
-    types : Vec<TyId>
-) Res<bool, AllocError> {
-    sm = c.default_matrix(ps, m).try();
-    q2 ::= c.alloc.Vec<usize>();
-    append_tail(q2, q).try();
-    t2 ::= c.alloc.Vec<TyId>();
-    append_tys(t2, types).try();
-    c.useful(ps, sm, q2, t2)
-}
-
 payload_arity = (cs: Case) usize {
     cs.has_payload.match({ true => 1, false => 0 })
-}
-
-// ---------------------------------------------------------------------
-// the three matrix transforms
-// ---------------------------------------------------------------------
-
-specialise = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    name  : str,
-    arity : usize
-) Res<PatMatrix, AllocError> {
-    out ::= c.alloc.PatMatrix(arity + m.width - 1);
-    Range(0, m.n).loop((h, r) {
-        c.spec_row(ps, out, m, r, name, arity).try();
-    });
-    Ok(out);
-}
-
-spec_row = (
-    c     :: Checker,
-    ps    :: Pats,
-    out   :: PatMatrix,
-    m     : PatMatrix,
-    r     : usize,
-    name  : str,
-    arity : usize
-) Res<(), AllocError> {
-    head = ps.at(m.at(r, 0));
-    head.kind.match({
-        WildPat => c.spec_wild(ps, out, m, r, arity, head),
-        CtorPat => c.spec_ctor(ps, out, m, r, name, arity, head),
-        LitPat  => Ok(()),
-    }).try();
-    Ok(());
-}
-
-// A wildcard row could have been this case, so it survives with its
-// column expanded into wildcards.
-spec_wild = (
-    c     :: Checker,
-    ps    :: Pats,
-    out   :: PatMatrix,
-    m     : PatMatrix,
-    r     : usize,
-    arity : usize,
-    head  : Pat
-) Res<(), AllocError> {
-    hole = ps.wild(head.span).try();
-    c.emit_row(out, m, r, arity, hole)
-}
-
-spec_ctor = (
-    c     :: Checker,
-    ps    :: Pats,
-    out   :: PatMatrix,
-    m     : PatMatrix,
-    r     : usize,
-    name  : str,
-    arity : usize,
-    head  : Pat
-)
-            Res<(), AllocError> {
-    head.name.eq(name).match({
-        true  => c.spec_keep(ps, out, m, r, arity, head),
-        false => Ok(()),
-    })
-}
-
-spec_keep = (
-    c     :: Checker,
-    ps    :: Pats,
-    out   :: PatMatrix,
-    m     : PatMatrix,
-    r     : usize,
-    arity : usize,
-    head  : Pat
-) Res<(), AllocError> {
-    filler = ps.sub_index(head).try();
-    c.emit_row(out, m, r, arity, filler)
-}
-
-specialise_lit = (c :: Checker, ps :: Pats, m: PatMatrix, text: str)
-                 Res<PatMatrix, AllocError> {
-    out ::= c.alloc.PatMatrix(m.width - 1);
-    Range(0, m.n).loop((h, r) {
-        c.lit_row(ps, out, m, r, text).try();
-    });
-    Ok(out);
-}
-
-lit_row = (
-    c    :: Checker,
-    ps   :: Pats,
-    out  :: PatMatrix,
-    m    : PatMatrix,
-    r    : usize,
-    text : str
-) Res<(), AllocError> {
-    keeps_lit(ps.at(m.at(r, 0)), text).match({
-        true  => c.emit_row(out, m, r, 0, 0),
-        false => Ok(()),
-    })
 }
 
 keeps_lit = (p: Pat, text: str) bool {
@@ -779,46 +395,469 @@ keeps_lit = (p: Pat, text: str) bool {
     })
 }
 
-// The rows that say nothing about this column: only a wildcard can
-// stand in the way of a case nobody named.
-default_matrix = (c :: Checker, ps :: Pats, m: PatMatrix)
-                 Res<PatMatrix, AllocError> {
-    out ::= c.alloc.PatMatrix(m.width - 1);
-    Range(0, m.n).loop((h, r) {
-        c.default_row(ps, out, m, r).try();
-    });
-    Ok(out);
-}
-
-default_row = (
-    c   :: Checker,
-    ps  :: Pats,
-    out :: PatMatrix,
-    m   : PatMatrix,
-    r   : usize
-) Res<(), AllocError> {
-    is_wild(ps.at(m.at(r, 0))).match({
-        true  => c.emit_row(out, m, r, 0, 0),
-        false => Ok(()),
-    })
-}
-
 is_wild = (p: Pat) bool {
     p.kind.match({ WildPat => true, _ => false })
 }
 
-emit_row = (
-    c      :: Checker,
-    out    :: PatMatrix,
-    m      : PatMatrix,
-    r      : usize,
-    arity  : usize,
-    filler : usize
-) Res<(), AllocError> {
-    row ::= c.alloc.Vec<usize>();
-    Range(0, arity).loop((h, k) { row.add(filler).try() });
-    Range(1, m.width).loop((h, k) { row.add(m.at(r, k)).try() });
-    out.add_row(row)
+// Stable facts for one match coverage walk. `Checker` remains a method
+// argument because records are values: copying it would make reports and type
+// interning land on a copy. Matrix, query, and type columns remain explicit
+// because each recursion specialises them independently.
+MatchCoverage = {
+    pats :: Pats,
+    sty  : TyId,
+
+    check = (self :: @Self, c :: Checker, node: Expr, rows: Vec<usize>)
+            Res<(), AllocError> {
+        c.checkable(self.sty).match({
+            false => Ok(()),
+            true  => self.run(c, node, rows),
+        })
+    }
+
+    run = (self :: @Self, c :: Checker, node: Expr, rows: Vec<usize>)
+          Res<(), AllocError> {
+        self.check_reachable(c, rows).try();
+        self.check_exhaustive(c, node, rows).try();
+        Ok(())
+    }
+
+    // Reachability is checked in source order against each arm's prefix.
+    check_reachable = (self :: @Self, c :: Checker, rows: Vec<usize>)
+                      Res<(), AllocError> {
+        Range(0, rows.len).loop((h, i) {
+            self.arm_reachable(c, rows, i).try();
+        });
+        Ok(())
+    }
+
+    arm_reachable = (self :: @Self, c :: Checker, rows: Vec<usize>, i: usize)
+                    Res<(), AllocError> {
+        m   = self.prefix_matrix(rows, i).try();
+        q   = self.one_row(rows, i).try();
+        tys = self.one_ty().try();
+        self.useful(c, m, q, tys).try().match({
+            false => self.report_unreachable(c, rows, i),
+            true  => Ok(()),
+        })
+    }
+
+    report_unreachable = (
+        self :: @Self,
+        c    :: Checker,
+        rows : Vec<usize>,
+        i    : usize
+    ) Res<(), AllocError> {
+        p = self.pats.at(row_at(rows, i));
+        c.report(
+            p.span.file,
+            p.span,
+            SemaFault.UnreachableArm(NameFault(name: p.name))
+        )
+    }
+
+    // `_` against every arm — if still useful, some value reaches no arm.
+    check_exhaustive = (
+        self :: @Self,
+        c    :: Checker,
+        node : Expr,
+        rows : Vec<usize>
+    ) Res<(), AllocError> {
+        m    = self.prefix_matrix(rows, rows.len).try();
+        hole = self.pats.wild(node.span).try();
+        q ::= c.alloc.Vec<usize>();
+        q.add(hole).try();
+        tys = self.one_ty().try();
+        self.useful(c, m, q, tys).try().match({
+            true  => self.report_not_exhaustive(c, node, m),
+            false => Ok(()),
+        })
+    }
+
+    // Missing-case synthesis asks the same usefulness engine as exhaustion.
+    report_not_exhaustive = (
+        self :: @Self,
+        c    :: Checker,
+        node : Expr,
+        m    : PatMatrix
+    ) Res<(), AllocError> {
+        cases ::= c.alloc.Vec<Case>();
+        c.cases_of(self.sty, cases).try();
+        name = self.first_uncovered(c, m, cases).try();
+        c.report(
+            node.span.file,
+            node.span,
+            SemaFault.NotExhaustive(NameFault(name: name))
+        )
+    }
+
+    first_uncovered = (
+        self  :: @Self,
+        c     :: Checker,
+        m     : PatMatrix,
+        cases : Vec<Case>
+    ) Res<str, AllocError> {
+        found ::= "_";
+        hit   ::= false;
+        cases.loop((h, cs) {
+            open  = self.case_open(c, m, cs).try();
+            take  = open && (hit == false);
+            found = pick_name(take, cs.name, found);
+            hit   = hit || open;
+        });
+        Ok(found)
+    }
+
+    case_open = (self :: @Self, c :: Checker, m: PatMatrix, cs: Case)
+                Res<bool, AllocError> {
+        root = self.case_pattern(cs).try();
+        q ::= c.alloc.Vec<usize>();
+        q.add(root).try();
+        tys = self.one_ty().try();
+        self.useful(c, m, q, tys)
+    }
+
+    case_pattern = (self :: @Self, cs: Case) Res<usize, AllocError> {
+        hole = self.pats.wild(nowhere()).try();
+        cs.has_payload.match({
+            false => self.pats.add(ctor_pat(cs.name, nowhere())),
+            true  => self.pats.add(sub_pat(cs.name, hole, nowhere())),
+        })
+    }
+
+    useful = (
+        self  :: @Self,
+        c     :: Checker,
+        m     : PatMatrix,
+        q     : Vec<usize>,
+        types : Vec<TyId>
+    ) Res<bool, AllocError> {
+        // no columns left: useful exactly when nothing reached this far
+        (types.len == 0).match({
+            false => self.useful_head(c, m, q, types),
+            true  => Ok(m.n == 0),
+        })
+    }
+
+    useful_head = (
+        self  :: @Self,
+        c     :: Checker,
+        m     : PatMatrix,
+        q     : Vec<usize>,
+        types : Vec<TyId>
+    ) Res<bool, AllocError> {
+        head = self.pats.at(row_at(q, 0));
+        head.kind.match({
+            CtorPat => self.useful_ctor(c, m, q, types, head),
+            LitPat  => self.useful_lit(c, m, q, types, head),
+            WildPat => self.useful_wild(c, m, q, types),
+        })
+    }
+
+    // A known case: specialise, which drops every row that cannot be this
+    // case and replaces the column with the payload's.
+    useful_ctor = (
+        self  :: @Self,
+        c     :: Checker,
+        m     : PatMatrix,
+        q     : Vec<usize>,
+        types : Vec<TyId>,
+        head  : Pat
+    ) Res<bool, AllocError> {
+        ty0     = head_ty(types);
+        arity   = c.case_arity(ty0, head.name, head.has_sub).try();
+        payload = c.case_payload(ty0, head.name).try();
+        sub     = self.pats.sub_index(head).try();
+        sm      = self.specialise(m, head.name, arity).try();
+        q2 ::= c.alloc.Vec<usize>();
+        (arity > 0).then(() { q2.add(sub).try() });
+        append_tail(q2, q).try();
+        t2 ::= c.alloc.Vec<TyId>();
+        (arity > 0).then(() { t2.add(payload).try() });
+        append_tys(t2, types).try();
+        self.useful(c, sm, q2, t2)
+    }
+
+    // A literal has no case list — an `i32` cannot be enumerated — so a
+    // literal column keeps only the rows that could still match it.
+    useful_lit = (
+        self  :: @Self,
+        c     :: Checker,
+        m     : PatMatrix,
+        q     : Vec<usize>,
+        types : Vec<TyId>,
+        head  : Pat
+    ) Res<bool, AllocError> {
+        sm = self.specialise_lit(m, head.name).try();
+        q2 ::= c.alloc.Vec<usize>();
+        append_tail(q2, q).try();
+        t2 ::= c.alloc.Vec<TyId>();
+        append_tys(t2, types).try();
+        self.useful(c, sm, q2, t2)
+    }
+
+    // A wildcard splits on whether the rows above it already name every
+    // case. If they do, each case is asked separately — how `Left(Full(n))`,
+    // `Left(Blank)`, `Right(_)`, `Gone` is proved complete without a `_`. If
+    // not, only the rows that are themselves wildcards can stand in the way.
+    useful_wild = (
+        self  :: @Self,
+        c     :: Checker,
+        m     : PatMatrix,
+        q     : Vec<usize>,
+        types : Vec<TyId>
+    ) Res<bool, AllocError> {
+        ty0 = head_ty(types);
+        cases ::= c.alloc.Vec<Case>();
+        has = c.cases_of(ty0, cases).try();
+        self.complete(has, m, cases).match({
+            false => self.useful_default(c, m, q, types),
+            true  => self.useful_split(c, m, q, types, cases),
+        })
+    }
+
+    complete = (self: @Self, has: bool, m: PatMatrix, cases: Vec<Case>) bool {
+        has && self.all_roots_present(m, cases)
+    }
+
+    all_roots_present = (self: @Self, m: PatMatrix, cases: Vec<Case>) bool {
+        Range(0, cases.len).find((i) {
+            cases.get(i).match({
+                Ok(cs) => self.root_present(m, cs.name) == false,
+                None   => false,
+            })
+        }).match({ Ok(_) => false, None => true })
+    }
+
+    root_present = (self: @Self, m: PatMatrix, name: str) bool {
+        Range(0, m.n).find((r) {
+            head_is_ctor(self.pats.at(m.at(r, 0)), name)
+        }).match({ Ok(_) => true, None => false })
+    }
+
+    useful_split = (
+        self  :: @Self,
+        c     :: Checker,
+        m     : PatMatrix,
+        q     : Vec<usize>,
+        types : Vec<TyId>,
+        cases : Vec<Case>
+    ) Res<bool, AllocError> {
+        hit ::= false;
+        cases.loop((h, cs) {
+            got = self.useful_one_case(c, m, q, types, cs).try();
+            hit = hit || got;
+        });
+        Ok(hit)
+    }
+
+    useful_one_case = (
+        self  :: @Self,
+        c     :: Checker,
+        m     : PatMatrix,
+        q     : Vec<usize>,
+        types : Vec<TyId>,
+        cs    : Case
+    ) Res<bool, AllocError> {
+        arity = payload_arity(cs);
+        hole  = self.pats.wild(nowhere()).try();
+        sm    = self.specialise(m, cs.name, arity).try();
+        q2 ::= c.alloc.Vec<usize>();
+        (arity > 0).then(() { q2.add(hole).try() });
+        append_tail(q2, q).try();
+        t2 ::= c.alloc.Vec<TyId>();
+        (arity > 0).then(() { t2.add(cs.payload).try() });
+        append_tys(t2, types).try();
+        self.useful(c, sm, q2, t2)
+    }
+
+    useful_default = (
+        self  :: @Self,
+        c     :: Checker,
+        m     : PatMatrix,
+        q     : Vec<usize>,
+        types : Vec<TyId>
+    ) Res<bool, AllocError> {
+        sm = self.default_matrix(m).try();
+        q2 ::= c.alloc.Vec<usize>();
+        append_tail(q2, q).try();
+        t2 ::= c.alloc.Vec<TyId>();
+        append_tys(t2, types).try();
+        self.useful(c, sm, q2, t2)
+    }
+
+    // The three matrix transforms.
+
+    specialise = (
+        self  :: @Self,
+        m     : PatMatrix,
+        name  : str,
+        arity : usize
+    ) Res<PatMatrix, AllocError> {
+        out ::= self.pats.alloc.PatMatrix(arity + m.width - 1);
+        Range(0, m.n).loop((h, r) {
+            self.spec_row(out, m, r, name, arity).try();
+        });
+        Ok(out)
+    }
+
+    spec_row = (
+        self  :: @Self,
+        out   :: PatMatrix,
+        m     : PatMatrix,
+        r     : usize,
+        name  : str,
+        arity : usize
+    ) Res<(), AllocError> {
+        head = self.pats.at(m.at(r, 0));
+        head.kind.match({
+            WildPat => self.spec_wild(out, m, r, arity, head),
+            CtorPat => self.spec_ctor(out, m, r, name, arity, head),
+            LitPat  => Ok(()),
+        }).try();
+        Ok(())
+    }
+
+    // A wildcard row could have been this case, so it survives with its
+    // column expanded into wildcards.
+    spec_wild = (
+        self  :: @Self,
+        out   :: PatMatrix,
+        m     : PatMatrix,
+        r     : usize,
+        arity : usize,
+        head  : Pat
+    ) Res<(), AllocError> {
+        hole = self.pats.wild(head.span).try();
+        self.emit_row(out, m, r, arity, hole)
+    }
+
+    spec_ctor = (
+        self  :: @Self,
+        out   :: PatMatrix,
+        m     : PatMatrix,
+        r     : usize,
+        name  : str,
+        arity : usize,
+        head  : Pat
+    ) Res<(), AllocError> {
+        head.name.eq(name).match({
+            true  => self.spec_keep(out, m, r, arity, head),
+            false => Ok(()),
+        })
+    }
+
+    spec_keep = (
+        self  :: @Self,
+        out   :: PatMatrix,
+        m     : PatMatrix,
+        r     : usize,
+        arity : usize,
+        head  : Pat
+    ) Res<(), AllocError> {
+        filler = self.pats.sub_index(head).try();
+        self.emit_row(out, m, r, arity, filler)
+    }
+
+    specialise_lit = (self :: @Self, m: PatMatrix, text: str)
+                     Res<PatMatrix, AllocError> {
+        out ::= self.pats.alloc.PatMatrix(m.width - 1);
+        Range(0, m.n).loop((h, r) {
+            self.lit_row(out, m, r, text).try();
+        });
+        Ok(out)
+    }
+
+    lit_row = (
+        self :: @Self,
+        out  :: PatMatrix,
+        m    : PatMatrix,
+        r    : usize,
+        text : str
+    ) Res<(), AllocError> {
+        keeps_lit(self.pats.at(m.at(r, 0)), text).match({
+            true  => self.emit_row(out, m, r, 0, 0),
+            false => Ok(()),
+        })
+    }
+
+    // The rows that say nothing about this column: only a wildcard can
+    // stand in the way of a case nobody named.
+    default_matrix = (self :: @Self, m: PatMatrix)
+                     Res<PatMatrix, AllocError> {
+        out ::= self.pats.alloc.PatMatrix(m.width - 1);
+        Range(0, m.n).loop((h, r) {
+            self.default_row(out, m, r).try();
+        });
+        Ok(out)
+    }
+
+    default_row = (
+        self :: @Self,
+        out  :: PatMatrix,
+        m    : PatMatrix,
+        r    : usize
+    ) Res<(), AllocError> {
+        is_wild(self.pats.at(m.at(r, 0))).match({
+            true  => self.emit_row(out, m, r, 0, 0),
+            false => Ok(()),
+        })
+    }
+
+    emit_row = (
+        self   :: @Self,
+        out    :: PatMatrix,
+        m      : PatMatrix,
+        r      : usize,
+        arity  : usize,
+        filler : usize
+    ) Res<(), AllocError> {
+        row ::= self.pats.alloc.Vec<usize>();
+        Range(0, arity).loop((h, k) { row.add(filler).try() });
+        Range(1, m.width).loop((h, k) { row.add(m.at(r, k)).try() });
+        out.add_row(row)
+    }
+
+    prefix_matrix = (self :: @Self, rows: Vec<usize>, k: usize)
+                    Res<PatMatrix, AllocError> {
+        out ::= self.pats.alloc.PatMatrix(1);
+        Range(0, k).loop((h, i) {
+            row ::= self.pats.alloc.Vec<usize>();
+            row.add(row_at(rows, i)).try();
+            out.add_row(row).try();
+        });
+        Ok(out)
+    }
+
+    one_row = (self :: @Self, rows: Vec<usize>, i: usize)
+              Res<Vec<usize>, AllocError> {
+        out ::= self.pats.alloc.Vec<usize>();
+        out.add(row_at(rows, i)).try();
+        Ok(out)
+    }
+
+    one_ty = (self :: @Self) Res<Vec<TyId>, AllocError> {
+        out ::= self.pats.alloc.Vec<TyId>();
+        out.add(self.sty).try();
+        Ok(out)
+    }
+}
+
+MatchCoverage = (pats :: Pats, sty: TyId) MatchCoverage {
+    MatchCoverage(pats: pats, sty: sty)
+}
+
+useful* = (
+    c     :: Checker,
+    ps    :: Pats,
+    m     : PatMatrix,
+    q     : Vec<usize>,
+    types : Vec<TyId>
+) Res<bool, AllocError> {
+    coverage ::= MatchCoverage(ps, head_ty(types));
+    got = coverage.useful(c, m, q, types).try();
+    ps  = coverage.pats;
+    Ok(got)
 }
 
 // ---------------------------------------------------------------------
@@ -1036,30 +1075,6 @@ row_at = (v: Vec<usize>, i: usize) usize {
 
 head_ty = (types: Vec<TyId>) TyId {
     types.get(0).match({ Ok(t) => t, None => UNRESOLVED })
-}
-
-prefix_matrix = (c :: Checker, rows: Vec<usize>, k: usize)
-                Res<PatMatrix, AllocError> {
-    out ::= c.alloc.PatMatrix(1);
-    Range(0, k).loop((h, i) {
-        row ::= c.alloc.Vec<usize>();
-        row.add(row_at(rows, i)).try();
-        out.add_row(row).try();
-    });
-    Ok(out);
-}
-
-one_row = (c :: Checker, rows: Vec<usize>, i: usize)
-          Res<Vec<usize>, AllocError> {
-    out ::= c.alloc.Vec<usize>();
-    out.add(row_at(rows, i)).try();
-    Ok(out);
-}
-
-one_ty = (c :: Checker, sty: TyId) Res<Vec<TyId>, AllocError> {
-    out ::= c.alloc.Vec<TyId>();
-    out.add(sty).try();
-    Ok(out);
 }
 
 append_tail = (out :: Vec<usize>, src: Vec<usize>) Res<(), AllocError> {
