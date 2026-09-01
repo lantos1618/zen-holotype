@@ -37,6 +37,7 @@ BuildArgs, Emission, Permutation = std.build
 // Module path construction and lookup.
 slash_for = zen.zen_path
 unit_at, candidate, joined, relative_to = zen.zen_path
+root_for, std_root_for = zen.zen_path
 
 // Entry module naming and lookup.
 ENTRY, entry_of = zen.zen_path
@@ -635,4 +636,38 @@ Build* = (a: Alloc, env: Env, root: str) Build {
         diags: a.Vec<Diag>(),
         overlay: a.Map<str, str>()
     )
+}
+
+WorkspaceCheck* = {
+    b*: Build,
+    c*: Checker,
+}
+
+check_workspace* = (
+    env   : Env,
+    a     : Alloc,
+    root  : str,
+    entry : str,
+    docs  : Map<str, str>
+) Res<WorkspaceCheck, AllocError> {
+    b ::= a.Build(env, root);
+    b.set_std_root(std_root_for(env, a));
+    c = b.whole(entry, docs).try();
+    Ok(WorkspaceCheck(b: b, c: c))
+}
+
+CheckedBuild* = {
+    root*: str,
+    rel*: str,
+    c*: Checker,
+}
+
+check_build* = (env: Env, a: Alloc, workspace: str, path: str, text: str)
+               Res<CheckedBuild, AllocError> {
+    root = root_for(env, a, workspace, path);
+    rel  = relative_to(root, path);
+    docs ::= a.Map<str, str>();
+    docs.set(path, text).try();
+    checked = check_workspace(env, a, root, rel, docs).try();
+    Ok(CheckedBuild(root: root, rel: rel, c: checked.c));
 }

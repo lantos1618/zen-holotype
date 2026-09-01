@@ -18,6 +18,7 @@ SHAPE*: str = "Point* = {\n    x*: i32,\n    y*: i32,\n}\n"
 APP*: str = "Point = app.shape\n\nnear = (q: Point, n: i32) i32 {\n    s = q.x + n;\n    s\n}\n"
 APP_EDITED*: str = "Point = app.shape\n\nnear = (q: Point, n: i32) i32 {\n    s = q.x + n;\n    s\n}\n// a comment changes the bytes, not the program\n"
 APP_BROKEN*: str = "Point = app.shape\n\nnear = (q: Point, n: i32) i32 {\n    absent\n}\n"
+APP_BROKEN_EDITED*: str = "Point = app.shape\n\nnear = (q: Point, n: i32) i32 {\n    absent\n}\n// no diagnostic change\n"
 
 // `tests/run.py` stages a directory test into `<work>/src` and runs the
 // program from `<work>`, so these are the paths the server will open.
@@ -52,7 +53,34 @@ main = (env: Env) Res<i32, AllocError> {
     change_doc(a, URI, APP_BROKEN, fourth).try();
     batch(s, a, "the clean file broken", fourth.view()).try();
 
+    repeated_changes(s, a).try();
+
+    fifth ::= a.String().try();
+    change_doc(a, URI, APP_BROKEN_EDITED, fifth).try();
+    batch(s, a, "the last overwrite stays deduplicated", fifth.view()).try();
+
     Ok(0);
+}
+
+repeated_changes = (s :: Server, a: Alloc) Res<(), AllocError> {
+    long ::= a.String(
+        "Point = app.shape\n\nnear = (q: Point, n: i32) i32 {\n    "
+    ).try();
+    Range(0, 8192).loop((h, i) { long.add("x").try(); });
+    long.add("\n}\n").try();
+    out ::= a.String().try();
+    Range(0, 24).loop((h, i) {
+        input ::= a.String().try();
+        text = (i % 2 == 0).match({
+            true  => long.view(),
+            false => APP_BROKEN,
+        });
+        change_doc(a, URI, text, input).try();
+        serve(s, input.view(), out).try();
+    });
+    println("--- repeated changed diagnostics");
+    println("    {} frames", frame_count(out.view()));
+    Ok(())
 }
 
 // Requests.
@@ -122,4 +150,17 @@ walk = (out: str) () {
         });
     });
     (seen == 0).then(() { println("    (no frames)"); });
+}
+
+frame_count = (out: str) usize {
+    from  ::= 0;
+    seen  ::= 0;
+    going ::= true;
+    loop(() { going && from < out.len }, (h) {
+        frame_at(out, from).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { seen = seen + 1; from = fr.next; },
+        });
+    });
+    seen
 }

@@ -3,7 +3,7 @@
 
 str, String = std.text
 Vec, Map = std.collections
-Alloc, AllocError = std.mem
+Alloc, AllocError, Arena = std.mem
 Note = std.parse.parse_diag
 Checker = sema.sema_check
 root_for, relative_to = zen.zen_path
@@ -39,6 +39,8 @@ Diagnostics* = {
     built :: Built,
 
     fresh :: bool = false,
+
+    said_arena :: Arena,
 
     said :: Map<str, str>,
 
@@ -181,20 +183,35 @@ Diagnostics* = {
             body
         ).try();
         self.said.get(uri).match({
-            None     => self.send(uri, body, out),
+            None     => self.send(env, uri, body, out),
             Ok(prev) => prev.eq(body.view()).match({
                 true  => written(),
-                false => self.send(uri, body, out),
+                false => self.send(env, uri, body, out),
             }),
         })
     }
 
-    send = (self :: @Self, uri: str, body: String, out :: String)
+    send = (self :: @Self, env: Env, uri: str, body: String, out :: String)
            Res<(), AllocError> {
-        kept_uri  = own_str(self.a, uri).try();
-        kept_body = own_str(self.a, body.view()).try();
-        self.said.set(kept_uri, kept_body).try();
-        write_frame(body.view(), out)
+        fresh_arena ::= env.mem.alloc();
+        fresh       ::= fresh_arena.Map<str, str>();
+        self.said.pairs((h, key, value) {
+            (!key.eq(uri)).then(() {
+                fresh.set(
+                    own_str(fresh_arena, key).try(),
+                    own_str(fresh_arena, value).try()
+                ).try();
+            });
+        });
+        fresh.set(
+            own_str(fresh_arena, uri).try(),
+            own_str(fresh_arena, body.view()).try()
+        ).try();
+        write_frame(body.view(), out).try();
+        self.said_arena.drop();
+        self.said_arena = consume fresh_arena;
+        self.said       = fresh;
+        Ok(())
     }
 
     take_back = (self :: @Self, env: Env, t: Alloc, uri: str, now: Vec<str>,
@@ -211,16 +228,27 @@ Diagnostics* = {
 }
 
 Diagnostics.impl(Drop, {
-    drop = (self :: @Self) () { self.built.drop(); }
+    drop = (self :: @Self) () {
+        self.built.drop();
+        self.said_arena.drop();
+    }
 })
 
 Diagnostics* = (a: Alloc, env: Env) Diagnostics {
+    said_arena ::= env.mem.alloc();
+    diagnostics_with_said(a, env, consume said_arena)
+}
+
+diagnostics_with_said = (a: Alloc, env: Env, said_arena :: Arena)
+                        Diagnostics {
+    said = said_arena.Map<str, str>();
     Diagnostics(
         a: a,
         showing: a.Vec<str>(),
         closing: a.Vec<str>(),
         built: env.Built(),
-        said: a.Map<str, str>()
+        said_arena: consume said_arena,
+        said: said
     )
 }
 
@@ -287,10 +315,8 @@ write_notification = (
 
 one_of = (a: Alloc, s: Spot, uri: str, text: str, items :: Nest, out :: String)
          Res<(), AllocError> {
-    s.uri.eq(uri).match({
-        false => written(),
-        true  => written_at(a, s, text, items, out),
-    })
+    s.uri.eq(uri).then(() { written_at(a, s, text, items, out).try(); });
+    Ok(())
 }
 
 written_at = (a: Alloc, s: Spot, text: str, items :: Nest, out :: String)
@@ -365,4 +391,6 @@ write_related = (
     notes.close(out)
 }
 
+// Parser and sema diagnostics are rejections; neither model has warning or
+// informational variants to map onto another LSP severity.
 ERROR*: usize = 1
