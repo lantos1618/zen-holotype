@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 import subprocess
 
 
@@ -17,6 +18,19 @@ PROMPT = ROOT / "docs" / "SOURCE_HEALTH_JUDGE.md"
 SNAPSHOTS = ROOT / "docs" / "source_health"
 PACKS = ROOT / "build" / "source_health"
 MODEL = "gemini-3.7-flash"
+
+
+def validate(review: str) -> None:
+    missing = [
+        number
+        for number in range(1, 6)
+        if re.search(rf"(?m)^#{{1,4}}\s+{number}\.\s+", review) is None
+    ]
+    if missing:
+        joined = ", ".join(map(str, missing))
+        raise SystemExit(f"Gemini review is incomplete; missing sections: {joined}")
+    if len(review.split()) > 1800:
+        raise SystemExit("Gemini review exceeds the 1,800-word contract")
 
 
 def previous_review(label: str) -> Path | None:
@@ -68,6 +82,7 @@ def main() -> int:
     review = result.stdout.strip()
     if not review:
         raise SystemExit("Gemini returned an empty review")
+    validate(review)
 
     SNAPSHOTS.mkdir(parents=True, exist_ok=True)
     output = SNAPSHOTS / f"{options.label}-{MODEL}.md"

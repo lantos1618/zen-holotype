@@ -17,12 +17,12 @@ The corresponding decisions are in
 | Item | Count |
 | --- | ---: |
 | Zen files | 227 |
-| Top-level declarations | 7174 |
-| Types | 369 |
-| Enums | 94 |
+| Top-level declarations | 7138 |
+| Types | 371 |
+| Enums | 95 |
 | Aliases | 0 |
 | Implementations | 76 |
-| Functions | 3996 |
+| Functions | 3957 |
 | Constants | 175 |
 | Imports and re-exports | 2464 |
 
@@ -1402,7 +1402,37 @@ declare_usize, settle_res, walk_temp = gen.gen_c.gen_c_loop
 
 ### `src/gen/gen_c/gen_c_assoc.zen`
 
-44 declarations (functions: 20, imports and re-exports: 24).
+34 declarations (types: 1, functions: 9, imports and re-exports: 24).
+
+#### Types
+
+```zen
+AssocSite = {
+    id: ExprId,
+    call: Call,
+    access: Access,
+    site: Site,
+    ctx: Ctx,
+    lower = (self: @Self, be :: CBackend, out :: String)
+            Res<bool, AllocError>
+    keep = (self: @Self, be :: CBackend, member: Member,
+            out :: Vec<Member>) Res<(), AllocError>
+    keep_function = (self: @Self, be :: CBackend, member: Member,
+                     f: Function, out :: Vec<Member>) Res<(), AllocError>
+    takes_receiver = (self: @Self, be :: CBackend, f: Function)
+                     Res<bool, AllocError>
+    first_is_receiver = (self: @Self, be :: CBackend, param: Param)
+                        Res<bool, AllocError>
+    lower_member = (self: @Self, be :: CBackend, member: Member,
+                    out :: String) Res<bool, AllocError>
+    write = (self: @Self, be :: CBackend, f: Function, out :: String)
+            Res<bool, AllocError>
+    refuse_open = (self: @Self, be :: CBackend, out :: String)
+                  Res<bool, AllocError>
+    emit = (self: @Self, be :: CBackend, f: Function, sig: Vec<TyId>,
+            inst: Inst, out :: String) Res<bool, AllocError>
+}
+```
 
 #### Functions
 
@@ -1491,102 +1521,6 @@ write_module_call = (
     out  :: String
 )
                     Res<bool, AllocError>
-
-assoc_at_site = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    ty  : TyId,
-    s   : Site,
-    ctx : Ctx,
-    out :: String
-) Res<bool, AllocError>
-
-assoc_member = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    ty  : TyId,
-    s   : Site,
-    m   : Member,
-    ctx : Ctx,
-    out :: String
-)
-               Res<bool, AllocError>
-
-keep_assoc = (
-    be    :: CBackend,
-    found : Vec<Member>,
-    ty    : TyId,
-    s     : Site,
-    out   :: Vec<Member>
-) Res<(), AllocError>
-
-keep_if_assoc = (
-    be  :: CBackend,
-    m   : Member,
-    ty  : TyId,
-    s   : Site,
-    out :: Vec<Member>
-) Res<(), AllocError>
-
-keep_receiverless = (
-    be  :: CBackend,
-    m   : Member,
-    f   : Function,
-    ty  : TyId,
-    s   : Site,
-    out :: Vec<Member>
-) Res<(), AllocError>
-
-takes_receiver = (be :: CBackend, f: Function, ty: TyId, s: Site)
-                 Res<bool, AllocError>
-
-first_is_self = (be :: CBackend, p: Param, ty: TyId, s: Site)
-                Res<bool, AllocError>
-
-write_assoc_call = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    ty  : TyId,
-    s   : Site,
-    f   : Function,
-    ctx : Ctx,
-    out :: String
-)
-                   Res<bool, AllocError>
-
-refuse_open = (be :: CBackend, id: ExprId, out :: String)
-              Res<bool, AllocError>
-
-emit_assoc_call = (
-    be   :: CBackend,
-    c    : Call,
-    a    : Access,
-    ty   : TyId,
-    s    : Site,
-    f    : Function,
-    sig  : Vec<TyId>,
-    inst : Inst,
-    ctx  : Ctx,
-    out  :: String
-) Res<bool, AllocError>
-
-write_assoc_arg = (
-    be   :: CBackend,
-    arg  : Arg,
-    i    : usize,
-    hold : bool,
-    f    : Function,
-    sig  : Vec<TyId>,
-    ctx  : Ctx,
-    out  :: String
-)
-                   Res<(), AllocError>
 ```
 
 #### Imports and re-exports
@@ -1594,7 +1528,7 @@ write_assoc_arg = (
 ```zen
 ExprId, Member = std.ast
 
-Function, Param, Access, Call, Arg = std.ast
+Function, Param, Access, Call = std.ast
 
 AllocError = std.mem
 
@@ -2131,7 +2065,7 @@ Call = std.ast
 
 ### `src/gen/gen_c/gen_c_call.zen`
 
-104 declarations (types: 2, functions: 60, imports and re-exports: 42).
+93 declarations (types: 3, functions: 48, imports and re-exports: 42).
 
 #### Types
 
@@ -2184,8 +2118,41 @@ CallSite = {
     reachable = (self: @Self, be :: CBackend, d: Def, f: Function,
                  sig: Vec<TyId>, inst: Inst, out :: String)
                 Res<(), AllocError>
+    write_receiver = (self: @Self, be :: CBackend, f: Function,
+                      sig: Vec<TyId>, out :: String)
+                     Res<usize, AllocError>
     emit = (self: @Self, be :: CBackend, f: Function, sig: Vec<TyId>,
             sym: str, out :: String) Res<(), AllocError>
+}
+
+CallArgs = {
+    c: Call,
+    f: Function,
+    sig: Vec<TyId>,
+    first: usize,
+    ctx: Ctx,
+    write = (self: @Self, be :: CBackend, out :: String)
+            Res<(), AllocError>
+    write_written = (self: @Self, be :: CBackend, out :: String)
+                    Res<(), AllocError>
+    write_to_pack = (self: @Self, be :: CBackend, slot: usize,
+                     out :: String) Res<(), AllocError>
+    write_pack = (self: @Self, be :: CBackend, slot: usize, pack: TyId,
+                  out :: String) Res<(), AllocError>
+    is_forwarded = (self: @Self, be :: CBackend, slot: usize, pack: TyId)
+                   Res<bool, AllocError>
+    pack_typed_arg = (self: @Self, be :: CBackend, slot: usize, pack: TyId)
+                     Res<bool, AllocError>
+    same_as_pack = (self: @Self, be :: CBackend, v: ExprId, pack: TyId)
+                   Res<bool, AllocError>
+    write_forwarded = (self: @Self, be :: CBackend, slot: usize,
+                       pack: TyId, out :: String) Res<(), AllocError>
+    write_spread = (self: @Self, be :: CBackend, slot: usize, pack: TyId,
+                    out :: String) Res<(), AllocError>
+    write_run = (self: @Self, be :: CBackend, slot: usize, pack: TyId,
+                 out :: String) Res<(), AllocError>
+    write_pack_elems = (self: @Self, be :: CBackend, slot: usize,
+                        elem: TyId, out :: String) Res<(), AllocError>
 }
 
 ForeignCall = {
@@ -2482,120 +2449,6 @@ write_call_args* = (
     ctx   : Ctx,
     out   :: String
 ) Res<(), AllocError>
-
-write_written_args = (
-    be    :: CBackend,
-    c     : Call,
-    first : usize,
-    f     : Function,
-    sig   : Vec<TyId>,
-    ctx   : Ctx,
-    out   :: String
-) Res<(), AllocError>
-
-write_to_pack = (
-    be    :: CBackend,
-    c     : Call,
-    first : usize,
-    slot  : usize,
-    f     : Function,
-    sig   : Vec<TyId>,
-    ctx   : Ctx,
-    out   :: String
-) Res<(), AllocError>
-
-write_pack = (
-    be    :: CBackend,
-    c     : Call,
-    first : usize,
-    slot  : usize,
-    pack  : TyId,
-    ctx   : Ctx,
-    out   :: String
-) Res<(), AllocError>
-
-is_forwarded_pack = (
-    be    :: CBackend,
-    c     : Call,
-    first : usize,
-    slot  : usize,
-    pack  : TyId,
-    ctx   : Ctx
-) Res<bool, AllocError>
-
-pack_typed_arg = (
-    be    :: CBackend,
-    c     : Call,
-    first : usize,
-    slot  : usize,
-    pack  : TyId,
-    ctx   : Ctx
-) Res<bool, AllocError>
-
-same_as_pack = (be :: CBackend, v: ExprId, pack: TyId, ctx: Ctx)
-               Res<bool, AllocError>
-
-write_forwarded = (
-    be    :: CBackend,
-    c     : Call,
-    first : usize,
-    slot  : usize,
-    pack  : TyId,
-    ctx   : Ctx,
-    out   :: String
-) Res<(), AllocError>
-
-write_spread = (
-    be    :: CBackend,
-    c     : Call,
-    first : usize,
-    slot  : usize,
-    pack  : TyId,
-    ctx   : Ctx,
-    out   :: String
-) Res<(), AllocError>
-
-write_run = (
-    be    :: CBackend,
-    c     : Call,
-    first : usize,
-    slot  : usize,
-    pack  : TyId,
-    ctx   : Ctx,
-    out   :: String
-) Res<(), AllocError>
-
-write_pack_elems = (
-    be    :: CBackend,
-    c     : Call,
-    first : usize,
-    slot  : usize,
-    elem  : TyId,
-    ctx   : Ctx,
-    out   :: String
-) Res<(), AllocError>
-
-write_receiver = (
-    be   :: CBackend,
-    recv : Res<ExprId>,
-    c    : Call,
-    f    : Function,
-    sig  : Vec<TyId>,
-    ctx  : Ctx,
-    out  :: String
-)
-                 Res<usize, AllocError>
-
-write_recv_expr = (
-    be   :: CBackend,
-    base : ExprId,
-    c    : Call,
-    f    : Function,
-    sig  : Vec<TyId>,
-    ctx  : Ctx,
-    out  :: String
-)
-                  Res<usize, AllocError>
 ```
 
 #### Imports and re-exports
@@ -6901,7 +6754,7 @@ write_array_def = gen.gen_c.gen_c_array
 
 ### `src/gen/gen_c/gen_c_loop.zen`
 
-72 declarations (types: 1, functions: 44, imports and re-exports: 27).
+61 declarations (types: 2, functions: 32, imports and re-exports: 27).
 
 #### Types
 
@@ -6910,6 +6763,42 @@ RangeWalk = {
     counter: str,
     base: str,
     limit: str,
+    elem: TyId,
+    start = (self: @Self, be :: CBackend) Res<(), AllocError>
+    body = (self: @Self, be :: CBackend, site: LoopSite, value: str)
+           Res<(), AllocError>
+}
+
+LoopSite = {
+    id: ExprId,
+    shape: Shape,
+    lam: Lambda,
+    ctx: Ctx,
+    want: TyId,
+    fold: Fold,
+    walk = (self: @Self, be :: CBackend, args: Vec<ExprId>, out :: String)
+           Res<(), AllocError>
+    led = (self: @Self, be :: CBackend, first: ExprId, out :: String)
+          Res<(), AllocError>
+    is_condition = (self: @Self, be :: CBackend, first: ExprId)
+                   Res<bool, AllocError>
+    forever = (self: @Self, be :: CBackend, cond: Res<ExprId>, out :: String)
+              Res<(), AllocError>
+    range = (self: @Self, be :: CBackend, first: ExprId, out :: String)
+            Res<(), AllocError>
+    range_impl = (self: @Self, be :: CBackend, first: ExprId, rty: TyId,
+                  out :: String) Res<(), AllocError>
+    impl_walk = (self: @Self, be :: CBackend, first: ExprId, rty: TyId,
+                 out :: String) Res<(), AllocError>
+    settled = (self: @Self, be :: CBackend, first: ExprId, rty: TyId,
+               out :: String) Res<(), AllocError>
+    bounded = (self: @Self, be :: CBackend, first: ExprId, rty: TyId,
+               want: TyId, out :: String) Res<(), AllocError>
+    supplied = (self: @Self, be :: CBackend, first: ExprId, rty: TyId,
+                impl: RangeImpl, pass: TyId, out :: String)
+               Res<(), AllocError>
+    run_body = (self: @Self, be :: CBackend, counter: str, base: str,
+                value: str, elem: TyId) Res<(), AllocError>
 }
 ```
 
@@ -6966,49 +6855,6 @@ lower_walk* = (
 )
              Res<(), AllocError>
 
-first_lead = (be :: CBackend, args: Vec<ExprId>) Res<ExprId>
-
-lower_led = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    one  : ExprId,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    fold : Fold,
-    out  :: String
-)
-            Res<(), AllocError>
-
-lower_impl_walk = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    one  : ExprId,
-    rty  : TyId,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    fold : Fold,
-    out  :: String
-) Res<(), AllocError>
-
-is_cond = (be :: CBackend, one: ExprId, ctx: Ctx)
-          Res<bool, AllocError>
-
-lower_forever = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    cond : Res<ExprId>,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    fold : Fold,
-    out  :: String
-) Res<(), AllocError>
-
 write_cond_guard = (be :: CBackend, one: ExprId, brk: usize, ctx: Ctx)
                    Res<(), AllocError>
 
@@ -7018,87 +6864,10 @@ write_cond_value = (be :: CBackend, one: ExprId, brk: usize, ctx: Ctx)
 write_cond_body = (be :: CBackend, lam: Lambda, brk: usize, ctx: Ctx)
                   Res<(), AllocError>
 
-lower_range = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    one  : ExprId,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    fold : Fold,
-    out  :: String
-) Res<(), AllocError>
-
-lower_range_impl = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    one  : ExprId,
-    rty  : TyId,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    fold : Fold,
-    out  :: String
-) Res<(), AllocError>
-
-lower_settled = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    one  : ExprId,
-    rty  : TyId,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    fold : Fold,
-    out  :: String
-) Res<(), AllocError>
-
 settle_res* = (be :: CBackend, want: TyId, elem: TyId)
              Res<TyId, AllocError>
 
-lower_bounded = (
-    be   :: CBackend,
-    id   : ExprId,
-    sh   : Shape,
-    one  : ExprId,
-    rty  : TyId,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    fold : Fold,
-    out  :: String
-) Res<(), AllocError>
-
-range_walk = (be :: CBackend) Res<RangeWalk, AllocError>
-
-start_range_walk = (be :: CBackend, walk: RangeWalk) Res<(), AllocError>
-
-run_range_body = (
-    be    :: CBackend,
-    walk  : RangeWalk,
-    sh    : Shape,
-    lam   : Lambda,
-    value : str,
-    ety   : TyId,
-    fold  : Fold,
-    ctx   : Ctx
-) Res<(), AllocError>
-
-lower_supplied_walk = (
-    be   :: CBackend,
-    sh   : Shape,
-    one  : ExprId,
-    rty  : TyId,
-    ri   : RangeImpl,
-    pass : TyId,
-    lam  : Lambda,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError>
+range_walk = (be :: CBackend, elem: TyId) Res<RangeWalk, AllocError>
 
 walk_temp* = (be :: CBackend, one: ExprId, rty: TyId, ctx: Ctx)
              Res<String, AllocError>
@@ -23890,8 +23659,7 @@ ProcError, ProcOutput, Process = std.proc
 JsonId*, Run*, Pair*, Json*, Jsons*,
     write_text*, written*, Nest*, obj*, arr* = std.json.json_write
 
-JsonFault*, MAX_NESTING*, Reader*, read*,
-    fine* = std.json.json_read
+JsonFault*, MAX_NESTING*, Reader*, read* = std.json.json_read
 
 JsonEvent*, Decoder* = std.json.json_stream
 
@@ -23950,7 +23718,7 @@ write_text = std.json.json_write
 
 ### `src/std/json/json_read.zen`
 
-23 declarations (types: 1, enums: 1, functions: 5, constants: 11, imports and re-exports: 5).
+25 declarations (types: 1, enums: 2, functions: 6, constants: 11, imports and re-exports: 5).
 
 #### Types
 
@@ -23980,7 +23748,6 @@ Reader* = {
     text_at = (self :: @Self) Res<str, JsonFault>
     raw_or_decoded = (self :: @Self) Res<str, JsonFault>
     decoded = (self :: @Self, from: usize) Res<str, JsonFault>
-    copy_one = (self :: @Self, b: u8, out :: String) Res<(), JsonFault>
     escape = (self :: @Self, out :: String) Res<(), JsonFault>
     unicode = (self :: @Self, out :: String) Res<(), JsonFault>
     low_half = (self :: @Self, hi: u32, out :: String) Res<(), JsonFault>
@@ -24005,6 +23772,8 @@ JsonFault* = Unexpected(usize)
            | TooDeep(usize)
            | Trailing(usize)
            | NoMemory
+
+TextByte* = TextEnd | TextEscape | TextPlain
 ```
 
 #### Functions
@@ -24016,9 +23785,11 @@ decode_text_token* = (a: Alloc, raw: str) Res<String, JsonFault>
 
 number_token* = (a: Alloc, raw: str) Res<String, JsonFault>
 
-simple = (b: u8) Res<u8>
+simple* = (b: u8) Res<u8>
 
-fine* = () Res<(), JsonFault>
+text_byte* = (b: u8, at: usize) Res<TextByte, JsonFault>
+
+shifted* = (self: JsonFault, base: usize) JsonFault
 ```
 
 #### Constants
@@ -24054,7 +23825,7 @@ str, String, push_utf8 = std.text
 
 Vec = std.collections
 
-Alloc, AllocError = std.mem
+Alloc = std.mem
 
 Range = std.core
 
@@ -24063,16 +23834,14 @@ Jsons, Json, JsonId, Pair = std.json.json_write
 
 ### `src/std/json/json_stream.zen`
 
-20 declarations (types: 2, enums: 3, functions: 10, imports and re-exports: 5).
+14 declarations (types: 1, enums: 3, functions: 5, imports and re-exports: 5).
 
 #### Types
 
 ```zen
-Frame = { phase: Phase }
-
 Decoder* = {
     a: Alloc,
-    frames :: Vec<Frame>,
+    frames :: Vec<Phase>,
     token :: String,
     mode :: Mode,
     key :: bool,
@@ -24131,13 +23900,10 @@ Decoder* = {
         self   :: @Self,
         events :: Vec<JsonEvent>
     ) Res<bool, JsonFault>
-    open = (self :: @Self, frame: Frame) Res<(), JsonFault>
-    close_object = (
+    open = (self :: @Self, phase: Phase) Res<(), JsonFault>
+    close = (
         self   :: @Self,
-        events :: Vec<JsonEvent>
-    ) Res<bool, JsonFault>
-    close_array = (
-        self   :: @Self,
+        event  : JsonEvent,
         events :: Vec<JsonEvent>
     ) Res<bool, JsonFault>
     begin_quoted = (self :: @Self, key: bool) Res<bool, JsonFault>
@@ -24165,6 +23931,8 @@ Decoder* = {
         self   :: @Self,
         events :: Vec<JsonEvent>
     ) Res<(), JsonFault>
+    decoded_text = (self: @Self) Res<String, JsonFault>
+    atom_event = (self: @Self) Res<JsonEvent, JsonFault>
     value_done = (self :: @Self) ()
     phase = (self: @Self) Phase
     set_phase = (self :: @Self, phase: Phase) ()
@@ -24211,17 +23979,7 @@ atom_start = (b: u8) bool
 
 atom_end = (b: u8) bool
 
-simple_escape = (b: u8) bool
-
-atom_event = (a: Alloc, raw: str, base: usize) Res<JsonEvent, JsonFault>
-
 keyword_start = (raw: str) bool
-
-decoded_text = (a: Alloc, raw: str, base: usize) Res<String, JsonFault>
-
-checked_number = (a: Alloc, raw: str, base: usize) Res<String, JsonFault>
-
-shift = (f: JsonFault, base: usize) JsonFault
 ```
 
 #### Imports and re-exports
@@ -24235,7 +23993,7 @@ Alloc = std.mem
 
 Range = std.core
 
-JsonFault, decode_text_token, number_token,
+JsonFault, TextByte, text_byte, simple, decode_text_token, number_token, shifted,
     MAX_NESTING = std.json.json_read
 ```
 
@@ -26610,7 +26368,7 @@ closes_value = (p :: Parser, j: usize) bool
 
 continues_expr = (kind: TokenKind) bool
 
-decl_head_ahead* = (p :: Parser, module_level: bool) bool
+decl_head_ahead* = (p :: Parser) bool
 
 head_shape_ahead = (p :: Parser) bool
 
@@ -27321,8 +27079,7 @@ Spec*, Item*, Options*, Args*, options*, is_flag*, is_word*, arg_at*, OPTIONS_EN
 
 JsonId*, Run*, Pair*, Json*, Jsons*,
     write_text*, written*, Nest*, obj*, arr*,
-    JsonFault*, MAX_NESTING*, Reader*, read*,
-    fine*, to_json* = std.json
+    JsonFault*, MAX_NESTING*, Reader*, read*, to_json* = std.json
 
 Env*, Console*, Stdin*, Fs*, FsError*, fs_message*, Lock*,
     Net*, ArgError* = std.env
