@@ -193,6 +193,37 @@ are asking different questions.
 Method chains read left to right. Prefer `value.convert().write(out)` to nested
 calls when the operations have natural receivers.
 
+### Control flow
+
+Use `.then` when a boolean has work on its true side and deliberately does
+nothing on its false side:
+
+```zen
+(width > limit).then(() { line.break_at(at).try() });
+```
+
+Keep `.match` when both outcomes produce values or perform distinct work. Do
+not add an empty arm merely to satisfy exhaustiveness, and do not turn a real
+two-way decision into `.then(...).match(...)`.
+
+Put refusal and failure at the edge of a function. Use `.try()` to propagate a
+failure, `ensure` for a boolean precondition, and a breakable one-shot `loop`
+when several guards choose an early value. Name the loop result when inference
+needs its type. The successful path should not be buried under nested matches
+whose other arms only stop the operation.
+
+### Actors and streams
+
+An actor owns asynchronous state behind a typed mailbox. Introduce one when a
+component needs an independent lifetime, serialized turns, delivery refusal,
+or backpressure. The message type is the public boundary; behavior belongs on
+the actor and receives its turn through `Context`.
+
+Do not use an actor as a wrapper around synchronous computation. `Sink` is a
+synchronous byte destination, not an actor: use it when the producer and
+consumer share one call. Use an actor receiver when chunks must cross an
+asynchronous ownership boundary, as in a streamed HTTP response.
+
 Use the strongest loop operation that states the question: `find`, `all`,
 `filter`, or `map` instead of a `.loop` with a manual accumulator or break.
 
@@ -258,6 +289,9 @@ For every new or moved function, ask:
 4. Does another module already implement the same workaround?
 5. Is the dependency direction still downward?
 6. Does an export serve another subject, or only convenience?
+7. Is a one-sided boolean still written as a two-arm match?
+8. Can failure or refusal leave before the successful path is nested?
+9. Does an actor own a real mailbox and lifecycle, or only add indirection?
 7. Would a proposed file split remove coupling or merely relocate it?
 8. Does each comment help a new maintainer understand the current contract?
 
