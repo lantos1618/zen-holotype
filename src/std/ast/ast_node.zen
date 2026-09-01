@@ -67,7 +67,6 @@ TypeKind* = Named(Named)
     | Infer
     | Variadic
 
-// Named types such as `i32`, `Vec<T>`, and `Res<(), AllocError>`.
 Named* = {
     name*: Ident,
     args*: Vec<TypeId>,
@@ -87,16 +86,11 @@ FnType* = {
     ret*: TypeId,
 }
 
-// `[u8, 64]`, `[u8, i32.BITS]`. The count is an expression because it
-// is comptime, not because it is a literal.
+// Fixed-array count is a comptime expression.
 ArrayType* = {
     elem*: TypeId,
     count*: ExprId,
 }
-
-// ---------------------------------------------------------------------
-// patterns
-// ---------------------------------------------------------------------
 
 Pattern* = {
     kind*: PatternKind,
@@ -105,10 +99,7 @@ Pattern* = {
     trailing*: TriviaRun,
 }
 
-// `Name` covers BOTH a nullary variant (`None`, `Macos`, `Shape.Unit`)
-// and a binder (`n` in `Ok(n)`) — same tokens, and which one it is
-// depends on what's in scope, so it's sema's question, not the
-// parser's (the parser answering would be guessing).
+// Sema resolves whether a pattern name is a value or binder.
 PatternKind* = Name(PatName)
     | Destructure(Destructure)
     | Wild
@@ -118,17 +109,11 @@ PatName* = {
     name*: QualifiedName,
 }
 
-// `Ok(n)`, `Circle(circle)`, `Ok(_)`, nested: `Left(Full(n))`. The
-// binder is a full pattern, which is why `Unit` and `Unit(_)` must be
-// different nodes — else the formatter invents or deletes parens.
+// A destructure binder is itself a pattern, preserving `Unit` versus `Unit(_)`.
 Destructure* = {
     name*: QualifiedName,
     binder*: PatternId,
 }
-
-// ---------------------------------------------------------------------
-// expressions
-// ---------------------------------------------------------------------
 
 Expr* = {
     kind*: ExprKind,
@@ -159,9 +144,7 @@ ExprKind* = Name(Name)
     | Consume(Consume)
     | Block(BlockId)
 
-// A bare identifier. Carries text, not an `Ident` — the enclosing
-// `Expr` already has the span, and two spans for one token is two
-// things to keep in agreement.
+// Bare identifier text; the enclosing Expr carries its span.
 Name* = {
     text*: str,
 }
@@ -185,10 +168,7 @@ FixedArray* = {
     args_span*: Span,
 }
 
-// `(a: i32, b: i32) i32 { a + b }`, `(h, v) { .. }`, `() { .. }`.
-// Parameter types are optional here and only here: a closure passed to
-// a function whose signature is known infers its param types from it.
-// A declaration is not a lambda and must write them.
+// Lambda parameter types may be inferred from the expected function type.
 Lambda* = {
     tparams*: Vec<TParam>,
     params*: Vec<Param>,
@@ -205,8 +185,7 @@ Call* = {
     args_span*: Span,
 }
 
-// One argument. `name` is the `x` of `x: 3` — construction and an
-// impl's supplied field share this form and this node.
+// `name` is present for named arguments such as `x: 3`.
 Arg* = {
     name*: Res<Ident>,
     value*: ExprId,
@@ -238,13 +217,7 @@ Arm* = {
     trailing*: TriviaRun,
 }
 
-// `.try()` — the non-local-exit intrinsic, NOT a call. There's no
-// `try` field on `Res` and no function of that name, so parsing it as
-// a call would create a name to special-case everywhere it's shadowed.
-// `name_span` is the `try` token, here for the same reason as
-// `Match.name_span`: the node's own span starts at the OPERAND
-// (`checked(n).try()` begins at `checked`), which would point a
-// diagnostic at code that is perfectly well formed.
+// `.try()` intrinsic. name_span identifies `try` rather than its operand.
 Try* = {
     operand*: ExprId,
     name_span*: Span,
@@ -252,16 +225,12 @@ Try* = {
     error*: Res<ExprId>,
 }
 
-// `{ src: Path("src/main.zen"), deps: [json] }` — the brace literal, as
-// a call argument or an impl body. Entries are `Member`s not `Arg`s:
-// an impl supplies methods as well as values, one rule and one node.
+// Brace record literal or impl body.
 Record* = {
     entries*: Vec<Member>,
 }
 
-// `p.x`, `Shape.Unit`, `i32.MAX`, `alloc.Vec`. Field access, a type
-// constant, a variant, and a ufcs method are all this one node — a new
-// spelling of an existing access form, not a new concept.
+// Member access such as `p.x`, `Shape.Unit`, or `alloc.Vec`.
 Access* = {
     base*: ExprId,
     name*: Ident,
@@ -275,7 +244,7 @@ Index* = {
     op_span*: Span,
 }
 
-// `op_span` is the operator token, load-bearing not cosmetic (see Index).
+// `op_span` identifies the operator token for diagnostics.
 Unary* = {
     op*: UnOp,
     op_span*: Span,
@@ -289,29 +258,19 @@ Binary* = {
     rhs*: ExprId,
 }
 
-// `consume f` — a move, stated at the use site. The only thing the
-// capability system ever writes down.
+// Explicit move checked by the capability system.
 Consume* = {
     operand*: ExprId,
 }
 
-// `@meta(n)` and `@meta(self: @Self)`. Stage 5. The second form is the
-// only place an argument carries a type annotation, so it gets its own
-// fields rather than being bent into an `Arg`. Exactly one of `value`
-// and `name`+`type` is present.
+// `@meta(n)` or `@meta(self: @Self)`. Exactly one payload form is present.
 Meta* = {
     value*: Res<ExprId>,
     name*: Res<Ident>,
     type*: Res<TypeId>,
 }
 
-// ---------------------------------------------------------------------
-// statements and blocks
-// ---------------------------------------------------------------------
-
-// A statement ends with `;`; a declaration does not. A Stmt's span
-// INCLUDES its `;` (else deleting a statement leaves it behind); the
-// expression inside does not.
+// A statement span includes its terminating `;`; its expression span does not.
 Stmt* = {
     kind*: StmtKind,
     span*: Span,
@@ -319,8 +278,7 @@ Stmt* = {
     trailing*: TriviaRun,
 }
 
-// `Decl` is here because a struct/enum/impl/function may be declared
-// anywhere, not only at module level, and takes no `;` wherever it stands.
+// Declarations may be nested and do not take a semicolon.
 StmtKind* = Bind(Bind) | Expr(ExprStmt) | Decl(Decl) | Block(BlockId)
 
 // `x = e;`, `x ::= e;`, `x: T = e;`, `self.len = self.len + 1;`. The
@@ -359,9 +317,7 @@ Decl* = {
     trailing*: TriviaRun,
 }
 
-// `Import` is a DeclKind, not a separate list on `Module`, so
-// `Module.decls` is the file in source order — a formatter merging two
-// lists back into one order will eventually get it wrong.
+// Imports remain interleaved with declarations in source order.
 DeclKind* = Struct(Struct)
     | Enum(Enum)
     | Alias(Alias)
@@ -370,9 +326,7 @@ DeclKind* = Struct(Struct)
     | Import(Import)
     | Const(Const)
 
-// `Vec*<T> = { .. }`. `body_span` is the `{ .. }`: a struct body is not
-// a `Block` (it holds members not statements), but the formatter still
-// needs to know where its braces are.
+// `body_span` includes a struct's braces for faithful formatting.
 Struct* = {
     name*: Ident,
     exported*: bool,
@@ -381,11 +335,7 @@ Struct* = {
     body_span*: Span,
 }
 
-// `Shape = Circle(Circle) | Rect(Rect) | Unit`, `AllocError* = | OutOfMemory`.
-// `leading_bar` is the bar of the one-variant form, stored rather than
-// derived from `variants.len == 1` because the formatter reprints what
-// was written. It's also why an enum needs no lookahead: without it,
-// `AllocError = OutOfMemory` and `Alias = Shape` are the same tokens.
+// leading_bar preserves one-variant enum syntax for formatting.
 Enum* = {
     name*: Ident,
     exported*: bool,
@@ -394,9 +344,7 @@ Enum* = {
     leading_bar*: Res<Span>,
 }
 
-// One payload type, never a list. A payload is a TYPE: `Circle(Circle)`,
-// `Failed(str)`, never `name: value` — which keeps `Package(url: "..")`
-// a call, not a variant.
+// A variant accepts at most one type payload.
 Variant* = {
     name*: Ident,
     payload*: Res<TypeId>,
@@ -405,8 +353,6 @@ Variant* = {
     trailing*: TriviaRun,
 }
 
-// `Alias = Shape`. An alias IS the type, not a name forwarding to it —
-// sema resolves it away, nothing downstream sees a second type.
 Alias* = {
     name*: Ident,
     exported*: bool,
@@ -429,8 +375,6 @@ Function* = {
     body*: Res<BlockId>,
 }
 
-// `Circle.impl(Rect, { width: .., height: .. })`. The target is local to its
-// declaring module and therefore stored as an Ident.
 Impl* = {
     target*: Ident,
     bound*: TypeId,
@@ -438,8 +382,7 @@ Impl* = {
     body_span*: Span,
 }
 
-// `Res*, Ok*, None* = std.core.result`. Re-export is just an import
-// whose bindings are starred — the star is the whole mechanism.
+// Starred import bindings are re-exported.
 Import* = {
     names*: Vec<ImportName>,
     module*: QualifiedName,
@@ -453,10 +396,6 @@ ImportName* = {
     trailing*: TriviaRun,
 }
 
-// A module-level value binding: `json_pkg = Package(url: "..", ..)`,
-// `STR_HASH_SEED*: u64 = 14695981039346656037`. Also used as a
-// struct-body constant (`MAX*: i32 = 2147483647`): one value per type,
-// not storage per instance.
 Const* = {
     name*: Ident,
     exported*: bool,
@@ -465,19 +404,12 @@ Const* = {
     value*: ExprId,
 }
 
-// ---------------------------------------------------------------------
-// members
-//
-// Shared member shape for struct bodies, impl bodies, and record literals.
-// ---------------------------------------------------------------------
-
 Member* = {
     kind*: MemberKind,
     span*: Span,
     leading*: TriviaRun,
     trailing*: TriviaRun,
 
-    // Name shared by all member variants.
     name* = (self: @Self) Ident {
         self.kind.match({
             Field(f)    => f.name,
@@ -498,9 +430,6 @@ Member* = {
         })
     }
 
-    // Storage talk: a Function member answers false. (Ownership asks a
-    // different question — `sema_recv.zen`'s `member_is_mutable`, where
-    // a Function answers true — and keeps its own function for it.)
     mutable* = (self: @Self) bool {
         self.kind.match({
             Field(f)    => f.mutable,
@@ -510,13 +439,12 @@ Member* = {
     }
 }
 
-// The Field/Const split is SYNTACTIC (grammar's R4): in a struct body,
+// The Field/Const split is syntactic: in a struct body,
 // `name: T = value` (immutable) is a constant, `name :: T = value`
 // (mutable) is a field with a default. Const never appears in an impl
 // body or record literal, where `name: value` supplies a field.
 //
-// Known hole, not a decision: an IMMUTABLE field with a default is
-// unspellable.
+// Immutable fields with defaults are not currently expressible.
 MemberKind* = Field(Field) | Const(Const) | Function(Function)
 
 // `width: f64`, `len* :: usize = 0`, and — in an impl or record —
@@ -530,13 +458,8 @@ Field* = {
     value*: Res<ExprId>,
 }
 
-// ---------------------------------------------------------------------
-// parameters
-// ---------------------------------------------------------------------
-
-// `self :: @Self` is not a receiver rule: `mutable` is the ordinary
-// binding marker on the ordinary first parameter. `type` is absent
-// only in a closure.
+// `mutable` is the ordinary binding marker, including on `self`.
+// `type` is absent only in a closure.
 Param* = {
     name*: Ident,
     mutable*: bool,
@@ -551,9 +474,7 @@ Param* = {
     }
 }
 
-// `<T>`, `<T: Rect>`, `<K: Eq + Hash, V>`. Bounds are a LIST because
-// `+` joins them: `Eq + Hash` is two requirements on one type, where
-// `A | B` is one type that is either.
+// Generic type parameter and its conjunctive bounds.
 TParam* = {
     name*: Ident,
     bounds*: Vec<TypeId>,
@@ -561,10 +482,6 @@ TParam* = {
     leading*: TriviaRun,
     trailing*: TriviaRun,
 }
-
-// ---------------------------------------------------------------------
-// modules
-// ---------------------------------------------------------------------
 
 // The raw headers behind a loader-created C binding module. `system`
 // selects `<path>` over `"path"`; the path itself never carries C syntax.
@@ -599,7 +516,6 @@ Module* = {
     trailing*: TriviaRun,
 }
 
-// Gather module functions in source order.
 functions* = (self: Module, a: Alloc) Res<Vec<Function>, AllocError> {
     found ::= a.Vec<Function>();
     self.decls.loop((h, d) {

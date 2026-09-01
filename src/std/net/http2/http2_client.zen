@@ -71,12 +71,12 @@ H2Client* = {
         settings.settings_add(SET_INITIAL_WINDOW, WINDOW).try();
         stream.write_frame(a, FrameType.Settings, 0, 0, settings.view()).try();
 
-        // one connection-level bump to match
+        // Match the advertised receive window on stream 0.
         bump ::= a.String().try(H2Error.SendFailed);
         bump.u32_add(WINDOW).try();
         stream.write_frame(a, FrameType.WindowUpdate, 0, 0, bump.view()).try();
 
-        // read until the peer's SETTINGS lands (control() ACKs it)
+        // Complete the peer SETTINGS handshake before opening a stream.
         loop((h) {
             c.got_peer_settings.then(() { h.break(); });
             f = c.stream.read_frame(a).try();
@@ -132,7 +132,7 @@ H2Client* = {
         loop((h) {
             (off >= body.len).then(() { h.break(); });
 
-            // wait for send credit
+            // Wait for both connection and stream send credit.
             loop((h2) {
                 avail = self.send_win;
                 (self.conn_win < avail).then(() { avail = self.conn_win; });
@@ -242,8 +242,7 @@ H2Client* = {
         Err(H2StreamError.Receiver(error))
     }
 
-    // The buffered API and actor API both consume this event stream. Frame
-    // parsing and flow-control decisions therefore have one implementation.
+    // Shared response event stream for buffered and actor consumers.
     read_response_into = (self :: @Self, a: Alloc, sid: u32, out :: Sink)
                          Res<i32, H2Error> {
         state ::= H2ReadState(status: 0, got_final: false, done: false);
@@ -476,8 +475,7 @@ H2Client* = {
         });
     }
 
-    // Handle a control frame (SETTINGS, PING, WINDOW_UPDATE, GOAWAY).
-    // Answers true when the frame was control and is consumed here.
+    // Returns true when a control frame was consumed.
     control = (self :: @Self, a: Alloc, f: Frame) Res<bool, H2Error> {
         f.ftype.match({
             Settings     => {
@@ -533,7 +531,7 @@ H2Client* = {
         });
     }
 
-    // apply the peer's SETTINGS: only INITIAL_WINDOW_SIZE moves us
+    // INITIAL_WINDOW_SIZE changes existing stream send credit.
     apply_settings = (self :: @Self, f: Frame) Res<(), H2Error> {
         (f.payload.len % 6 == 0).match({
             true  => Ok(()),
@@ -576,7 +574,7 @@ H2Client* = {
     }
 }
 
-// connect + one post + close, the whole single-request door
+// Single-request convenience API.
 post_once* = (
     a       : Alloc,
     url     : str,

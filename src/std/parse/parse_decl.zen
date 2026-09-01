@@ -169,9 +169,6 @@ one_decl_name = (
     ));
 }
 
-// The fork. Everything above this point is the same for all seven
-// forms; everything below is the shape of the value deciding which one
-// was written.
 decl_value = (
     p            :: Parser,
     m            : Mark,
@@ -208,10 +205,6 @@ head_name = (p: Parser, names: Vec<ImportName>) ImportName {
     });
 }
 
-// -------------------------------------------------------------------
-// the seven forms
-// -------------------------------------------------------------------
-
 struct_decl = (
     p       :: Parser,
     m       : Mark,
@@ -230,10 +223,7 @@ struct_decl = (
     )), m);
 }
 
-// `Shape = Circle(Circle) | Rect(Rect) | Unit`, `AllocError* = | OutOfMemory`.
-// The bar is stored rather than derived from `variants.len == 1`: the
-// formatter reprints what was written, and a one-variant enum written
-// with the bar must come back with it.
+// The leading bar is retained so one-variant enums round-trip faithfully.
 enum_decl = (
     p       :: Parser,
     m       : Mark,
@@ -246,12 +236,7 @@ enum_decl = (
     }).try();
     variants ::= p.alloc.Vec<Variant>();
     variants.add(p.one_variant().try()).try();
-    // A `|` PROMISES ANOTHER VARIANT, and when none arrives the mistake
-    // is the BAR. Nothing here is newline-sensitive and a declaration
-    // does not terminate, so the token after a trailing bar is the next
-    // declaration's name a line below — or the end of the file. Either
-    // way it is a position the author did not type the mistake at, and
-    // the bar is one they did.
+    // Diagnose a trailing `|` at the bar rather than at the next declaration.
     running ::= p.at_kind(TokenKind.Bar);
     running.loop((h) {
         at_bar = p.here_span();
@@ -281,8 +266,7 @@ bar_span = (p :: Parser) Res<Res<Span>, AllocError> {
     Ok(Ok(span));
 }
 
-// One payload, never a list, and always a TYPE — never `name: value`,
-// which keeps `Package(url: "..")` a call and not a variant.
+// Variants accept at most one type payload.
 one_variant = (p :: Parser) Res<Variant, AllocError> {
     m       = p.open();
     name    = p.ident("expected a variant name").try();
@@ -323,8 +307,7 @@ fn_decl = (
     p.add_decl(DeclKind.Function(f), m);
 }
 
-// Parse a function value shared by declarations and method members. `form`
-// records `=` versus `::=`; `body` records whether `{ .. }` followed.
+// `form` records `=` versus `::=`; `body` records whether a body was written.
 fn_value* = (
     p          :: Parser,
     name       : Ident,
@@ -360,10 +343,7 @@ fn_value* = (
     ));
 }
 
-// A declaration names every parameter type; only a closure infers them. This
-// check is therefore called
-// from `fn_value` and not from `params_list`, which both forms share.
-// Function types enforce the sibling rule in parse_type.named_params.
+// Declaration parameters require written types; closures may infer them.
 typed_params = (p :: Parser, ps: Vec<Param>) Res<(), AllocError> {
     ps.loop((h, param) {
         param.type.match({
@@ -389,7 +369,6 @@ has_body = (p: Parser, body: Res<BlockId>) bool {
     });
 }
 
-// Select the method form from rebindability and body presence.
 form_of = (rebindable: bool, body: bool) Form {
     rebindable.match({
         true  => body.match({
@@ -403,7 +382,6 @@ form_of = (rebindable: bool, body: bool) Form {
     });
 }
 
-// Type parameters may appear before or after `=`; prefer the non-empty list.
 merge_tparams = (p: Parser, head: Vec<TParam>, own: Vec<TParam>) Vec<TParam> {
     (head.len == 0).match({
         true  => own,
@@ -411,8 +389,6 @@ merge_tparams = (p: Parser, head: Vec<TParam>, own: Vec<TParam>) Vec<TParam> {
     });
 }
 
-// "An alias is the type, not a name that forwards to it." Sema
-// resolves it away, so nothing downstream ever sees a second type.
 alias_decl = (
     p       :: Parser,
     m       : Mark,
@@ -437,8 +413,6 @@ import_decl = (
     p.add_decl(DeclKind.Import(Import(names: names, module: module_name)), m);
 }
 
-// A module-level value binding, and — through `parse_member.zen` — a
-// struct-body constant: one value per type, not storage per value.
 const_decl = (
     p       :: Parser,
     m       : Mark,
@@ -455,10 +429,6 @@ const_decl = (
         value: value,
     )), m);
 }
-
-// -------------------------------------------------------------------
-// nodes
-// -------------------------------------------------------------------
 
 add_decl* = (p :: Parser, kind: DeclKind, m: Mark) Res<Decl, AllocError> {
     end = p.prev_end;

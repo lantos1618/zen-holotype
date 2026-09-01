@@ -71,11 +71,7 @@ block_here = (p :: Parser) Res<BlockId, AllocError> {
     ));
 }
 
-// The body of a function, a member or a lambda — the one block that is
-// not a level inside anything. A too-deep run is anchored at its
-// outermost bracket, and `main = () { {{{{ .. }}}} }` nests at the
-// first `{` on the statement and not at `main`'s own brace, which
-// names the declaration rather than the mistake.
+// A body starts the nesting-depth check at its first inner expression.
 body_block* = (p :: Parser) Res<BlockId, AllocError> {
     was = p.run_from();
     id  = p.block().try();
@@ -83,19 +79,13 @@ body_block* = (p :: Parser) Res<BlockId, AllocError> {
     Ok(id);
 }
 
-// A block in value position — a match arm's body, a nested block used
-// as an expression.
 block_expr* = (p :: Parser) Res<ExprId, AllocError> {
     m  = p.open();
     id = p.block().try();
     p.add_expr(ExprKind.Block(id), m);
 }
 
-// One statement, or the block's trailing value.
-//
-// `Ok(v)` means "that was the value, the block is over"; `None` means
-// a statement was appended. The two cannot both happen, which is why
-// this is one function and not a flag.
+// `Ok(v)` is the block's trailing value; `None` means a statement was added.
 one_item = (p :: Parser, stmts :: Vec<Stmt>) Res<Res<ExprId>, AllocError> {
     m = p.open();
     p.peek().kind.match({
@@ -110,10 +100,7 @@ nested_block = (p :: Parser, stmts :: Vec<Stmt>, m: Mark) Res<(), AllocError> {
     p.push(stmts, StmtKind.Block(id), m);
 }
 
-// A statement beginning with a name is the one place a declaration and
-// a binding are the same two tokens. `parse_decl.zen` answers which,
-// because the answer is a fact about the value's SHAPE (grammar R1a)
-// and that knowledge belongs in one place.
+// Declaration lookahead disambiguates a leading name from a binding target.
 ident_item = (
     p     :: Parser,
     stmts :: Vec<Stmt>,
@@ -150,9 +137,6 @@ decl_item = (p :: Parser, stmts :: Vec<Stmt>, m: Mark) Res<(), AllocError> {
     p.push(stmts, StmtKind.Decl(d), m);
 }
 
-// `x = e;`, `x: T ::= e;`, `self.len = self.len + 1;`, `println(..);`
-// — and the trailing expression, which is all of the above without the
-// `;` and with a `}` behind it.
 expr_item = (
     p     :: Parser,
     stmts :: Vec<Stmt>,
@@ -168,10 +152,8 @@ expr_item = (
     });
 }
 
-// The block's value: an expression with no `;`. Anything other than a
-// `}` after it is a missing semicolon, and saying so here is what
-// keeps the diagnostic on the statement rather than on whatever the
-// next line turned out to be.
+// A trailing expression must be followed by `}`; otherwise diagnose the
+// missing semicolon at the expression.
 tail_value = (p :: Parser, value: ExprId) Res<Res<ExprId>, AllocError> {
     p.at_kind(TokenKind.BraceClose).match({
         true  => Ok(Ok(value)),
@@ -255,10 +237,7 @@ push* = (
     ));
 }
 
-// Recovery: one token, so that a statement the parser could not read
-// at all still advances the cursor. Without it a malformed token at
-// the head of a block is an infinite loop, which is the one failure
-// worse than a bad diagnostic.
+// Recovery consumes one token to guarantee forward progress.
 skip_one = (p :: Parser) Res<(), AllocError> {
     p.at_eof().match({
         true  => p.nothing(),
@@ -268,21 +247,8 @@ skip_one = (p :: Parser) Res<(), AllocError> {
 
 no_value = (p: Parser) Res<ExprId> { None }
 
-// An empty block, for when the nesting limit was reached. It has the
-// cursor's position and no contents, so a walk over the tree
-// terminates and the diagnostic already said why it is empty.
-//
-// `trailing` stays `no_trivia()` here — deliberately. This block
-// consumes no closing brace of its own (`expect_close` was never
-// reached), so there is nothing standing before ITS brace to claim:
-// claiming here would take the pending run standing before whatever
-// token comes next, stealing another node's trivia. Only a block that
-// actually closes itself claims its close.
-//
-// A block has no `add_` half — statements land in a caller's `Vec` via
-// `push` above and only the finished block enters the arena — so this
-// is half of the fourth poison_/add_ pair; parse_expr.zen's, above
-// `poison_expr`, says why the four are not one shared helper.
+// Depth-limit recovery consumes no closer, so it must not claim trailing
+// trivia that belongs to the following node.
 poison_block* = (p :: Parser) Res<BlockId, AllocError> {
     p.tree.add_block(Block(
         stmts: p.alloc.Vec<Stmt>(),

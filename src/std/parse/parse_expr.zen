@@ -171,23 +171,8 @@ unary_operand = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     Ok(id);
 }
 
-// -------------------------------------------------------------------
-// the postfix chain
-//
-// `.name`, `.match({..})`, `.try()`, `[i]`, `(args)`, `<T>(args)` —
-// all left-associative, all a loop, so `env.args<Opts>().try()` costs
-// one frame rather than four.
-// -------------------------------------------------------------------
-
-// EVERY LINK IS CHARGED A LEVEL, and that is not bookkeeping for its
-// own sake. The loop costs ONE frame however long the chain, so this
-// parser survives `x` followed by a thousand `.a`s — but it builds a
-// thousand nested `Access` nodes, and sema walks those by recursion and
-// dies on them. The depth bound exists for the whole pipeline
-// (parser.zen says so), so it has to count what is BUILT.
-//
-// Once `primary` returns poison at the depth limit, the chain stops instead of
-// wrapping unconsumed postfix tokens around it.
+// Parse a left-associative postfix chain iteratively. Every produced AST link
+// still counts toward the shared depth limit.
 postfix = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     base    ::= p.primary(m).try();
     links   ::= 0;
@@ -208,15 +193,8 @@ postfix = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     Ok(base);
 }
 
-// Whether an expression could begin here — `primary`'s table, the
-// three prefix operators, `consume`, and the `{` an argument may be.
-//
-// Asked where a DELIMITED LIST has to choose between "another element"
-// and "this list is simply never closed". `println("{}", 1 + 2;` is an
-// unclosed `(` and nothing else; a list that reads the `;` as one more
-// argument says "expected an expression" at a place where the author's
-// mistake is not, and says it FIRST, which buries the sentence that
-// points at the `(`.
+// Whether the current token can begin an expression. Delimited lists use this
+// to stop before reporting their missing closer.
 starts_expr* = (p :: Parser) bool {
     p.peek().kind.match({
         Ident       => true,
@@ -241,9 +219,8 @@ starts_expr* = (p :: Parser) bool {
     });
 }
 
-// Whether the token here extends the chain. `<` is the only one that
-// needs more than its own identity: `a < b` is a comparison and
-// `alloc.Vec<i32>()` is a call, and only the scan can tell.
+// Whether the token extends a postfix chain; `<` requires lookahead to
+// distinguish type arguments from comparison.
 postfix_continues = (p :: Parser) bool {
     p.peek().kind.match({
         Dot         => true,
@@ -263,8 +240,7 @@ postfix_step = (p :: Parser, m: Mark, base: ExprId) Res<ExprId, AllocError> {
     });
 }
 
-// `alloc.Vec<i32>()` — type arguments, but only if a `(` closes them.
-// `a < b` is the other and far commoner reading; the scan decides.
+// Parse type arguments followed by a call.
 targs_call = (p :: Parser, m: Mark, base: ExprId) Res<ExprId, AllocError> {
     targs ::= p.alloc.Vec<TypeId>();
     p.type_args(targs).try();
@@ -277,9 +253,7 @@ after_dot = (p :: Parser, m: Mark, base: ExprId) Res<ExprId, AllocError> {
     p.dot_target(m, base, name);
 }
 
-// The two intrinsics wear the shape of a method call and are not one.
-// Recognised by name HERE, once, which is precisely what stops the
-// name from having to be special-cased everywhere else.
+// Recognize `.match` and `.try` intrinsics before ordinary access.
 dot_target = (
     p    :: Parser,
     m    : Mark,
@@ -442,10 +416,7 @@ named_arg_name = (p :: Parser) Res<Res<Ident>, AllocError> {
     Ok(Ok(name));
 }
 
-// A `{` in argument position is a record — the brace literal an impl
-// body and a builder call are both made of. It is the only place a
-// `{` starts an expression, which is what keeps `Name = { .. }` a
-// struct declaration everywhere else (grammar D11).
+// A brace in argument position begins a record expression.
 arg_value = (p :: Parser) Res<ExprId, AllocError> {
     p.at_kind(TokenKind.BraceOpen).match({
         true  => p.record_expr(),
@@ -459,10 +430,6 @@ record_expr = (p :: Parser) Res<ExprId, AllocError> {
     p.record_body(entries).try();
     p.add_expr(ExprKind.Record(Record(entries: entries)), m);
 }
-
-// -------------------------------------------------------------------
-// primaries
-// -------------------------------------------------------------------
 
 primary = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     p.peek().kind.match({
@@ -505,9 +472,7 @@ word_expr = (p :: Parser, m: Mark, kind: ExprKind) Res<ExprId, AllocError> {
     p.add_expr(kind, m);
 }
 
-// `@meta(n)` and `@meta(self: @Self)` — the second is the only place in
-// the language where an argument carries a type annotation, which is
-// why `Meta` has fields of its own rather than being bent into an Arg.
+// Parse value and typed forms of `@meta`.
 meta_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     p.bump().try();
     open = p.here_span();
@@ -633,10 +598,7 @@ array_lit = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     p.add_expr(ExprKind.Array(ArrayLit(elems: elems)), m);
 }
 
-// A comma-separated expression list between one delimiter and its
-// closer, trailing comma allowed. Shared by an array literal and a
-// fixed array's arguments, which differ only in which bracket they
-// use.
+// Comma-separated expression list with an optional trailing comma.
 elem_list = (
     p       :: Parser,
     out     :: Vec<ExprId>,
@@ -657,23 +619,8 @@ elem_list = (
     Ok(p.span_from(start));
 }
 
-// -------------------------------------------------------------------
-// nodes
-// -------------------------------------------------------------------
-
-// THE poison_/add_ PAIR IS ONE OF FOUR — poison_pattern/add_pattern in
-// parse_pattern.zen, poison_type/add_type in parse_type.zen,
-// poison_block in parse_stmt.zen. Not one shared helper on `Parser`:
-// each wraps a different arena family and the four node types are
-// distinct on purpose (ast_id.zen), so the only common text is three
-// field fillings and there is nothing generic to extract. Change one
-// pair's shape, change all four.
-
-// What stands where an expression could not be read. `Unit` and not a
-// new `Error` kind: the AST has no poison node, and adding one would
-// change a shape four subsystems are already built against for the
-// benefit of a tree nobody walks — `p.diags` is non-empty, so no
-// consumer ever reaches this. Reported as a hole rather than filled.
+// Recovery placeholder at an empty span; consumers reject the accompanying
+// diagnostic before walking it.
 poison_expr* = (p :: Parser) Res<ExprId, AllocError> {
     p.tree.add_expr(Expr(
         kind: ExprKind.Unit,

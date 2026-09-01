@@ -12,8 +12,6 @@ expr = std.parse.parse_expr
 params_list, type_params = std.parse.parse_member
 ret_ahead = std.parse.parse_lookahead
 
-// A type, unions and all. The one entry point; everything else in
-// this file is below it.
 type* = (p :: Parser) Res<TypeId, AllocError> {
     p.enter().try();
     id = p.union_type().try();
@@ -21,18 +19,12 @@ type* = (p :: Parser) Res<TypeId, AllocError> {
     Ok(id);
 }
 
-// A type in a slot that may hold none. `Res<TypeId>` is the AST's
-// written-or-not, so a caller that has already decided a type follows
-// says so the same way wherever it is — a declaration's, a function's
-// return, a lambda's, a member's, a parameter's.
 written_type* = (p :: Parser) Res<Res<TypeId>, AllocError> {
     t = p.type().try();
     Ok(Ok(t));
 }
 
-// `A | B | C`, gathered flat. One member is not a union: `i32` stays
-// a `Named` rather than becoming a one-member `Union`, because the
-// formatter must not print a bar the author did not write.
+// Union members are stored flat. A type without `|` keeps its original kind.
 union_type = (p :: Parser) Res<TypeId, AllocError> {
     m     = p.open();
     first = p.primary_type_at(m).try();
@@ -52,9 +44,6 @@ union_rest = (p :: Parser, m: Mark, first: TypeId) Res<TypeId, AllocError> {
     p.add_type(TypeKind.Union(Union(members: members)), m)
 }
 
-// Everything a type may be that is not a union. The dispatch is on
-// the first token alone and needs no lookahead — which is the whole
-// reason `@Self`, `_` and `...` are tokens rather than names.
 primary_type = (p :: Parser) Res<TypeId, AllocError> {
     m = p.open();
     p.primary_type_at(m);
@@ -82,10 +71,7 @@ primary_type_here = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     });
 }
 
-// `_` is an identifier to the lexer — "the parser reads the wildcard
-// pattern, the lexer only sees a name" — so the `_` of `Res<Cfg, _>`
-// is decided here, by its spelling, in the one type position that can
-// mean it.
+// `_` is lexed as an identifier and means inference only in type position.
 named_or_infer = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     p.at_text(WILDCARD).match({
         true  => p.token_type(TypeKind.Infer, m),
@@ -93,16 +79,13 @@ named_or_infer = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     });
 }
 
-// A one-token type: `@Self`, `_`, `...`.
 token_type = (p :: Parser, kind: TypeKind, m: Mark) Res<TypeId, AllocError> {
     p.bump().try();
     p.add_type(kind, m);
 }
 
-// `i32`, `Vec<T>`, `Map<K, V>`, `Res<(), AllocError>`.
-//
 // Zen has no `>>` operator, so nested generics close without a lexer
-// hack. That is a real property of the language and not luck.
+// special case.
 named_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     name = p.ident("expected a type name").try();
     args ::= p.alloc.Vec<TypeId>();
@@ -113,9 +96,7 @@ named_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     p.add_type(TypeKind.Named(Named(name: name, args: args)), m);
 }
 
-// `<i32, ArgError>` after a type name. A separate function from
-// `type_params` because these are arguments and those are
-// declarations: `<K: Eq + Hash, V>` has bounds and this never does.
+// Type arguments do not accept the bounds allowed on type parameters.
 type_args* = (p :: Parser, out :: Vec<TypeId>) Res<(), AllocError> {
     open = p.here_span();
     p.bump().try();
@@ -132,8 +113,7 @@ type_args* = (p :: Parser, out :: Vec<TypeId>) Res<(), AllocError> {
     Ok(());
 }
 
-// `[u8, 64]`, `[u8, i32.BITS]`. The count is an EXPRESSION because it
-// is comptime, not because it is a literal.
+// A fixed-array count is a comptime expression, not necessarily a literal.
 array_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     open = p.here_span();
     p.bump().try();
@@ -151,16 +131,7 @@ array_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     p.add_type(TypeKind.Array(ArrayType(elem: elem, count: count)), m);
 }
 
-// `()` the unit type, and `(a: i32, b: i32) i32` the function type.
-// One `(` and two readings, decided by what follows the closing `)`: a
-// function type always writes its return type (grammar D15a), so a
-// parameter list with nothing after it is not one — which is also what
-// keeps `Res<(), AllocError>` reading as unit rather than as a function
-// of no arguments.
-//
-// `ret_ahead` and not `starts_type`, because the token after a `()` in
-// RETURN position is the next member's name and a name begins a type.
-// See parse_lookahead.zen: this is the one call site that discovered it.
+// `()` is unit unless a function return type follows the parameter list.
 paren_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     ps ::= p.alloc.Vec<Param>();
     span = p.params_list(ps).try();
@@ -170,8 +141,6 @@ paren_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     });
 }
 
-// `<T>(a: T) T` — a generic function type. The only place a type
-// begins with `<`.
 fn_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     tps ::= p.alloc.Vec<TParam>();
     p.type_params(tps).try();
@@ -212,10 +181,6 @@ fn_type_rest = (
     )), m);
 }
 
-// Whether a type could begin here. Asked in exactly two places — is
-// this `)` the end of a unit type or of a parameter list, and does a
-// lambda write a return type — and answered from the first token,
-// because every type form above is decided by one.
 starts_type* = (p :: Parser) bool { p.peek().kind.starts_type_kind() }
 
 starts_type_kind* = (kind: TokenKind) bool {
@@ -230,14 +195,7 @@ starts_type_kind* = (kind: TokenKind) bool {
     });
 }
 
-// What stands where a type could not be read. `Infer` and not a new
-// `Error` kind: `_` already means "unknown here", every consumer
-// already handles it, and the diagnostic already said what went
-// wrong. A poison node exists to keep the tree walkable, not to carry
-// a second copy of the error.
-//
-// One of the four poison_/add_ wrapper pairs — parse_expr.zen's, above
-// `poison_expr`, says why they are four and not one shared helper.
+// Recovery inserts an inferred type so later tree walks remain valid.
 poison_type* = (p :: Parser) Res<TypeId, AllocError> {
     p.tree.add_type(Type(
         kind: TypeKind.Infer,
@@ -247,8 +205,6 @@ poison_type* = (p :: Parser) Res<TypeId, AllocError> {
     ))
 }
 
-// Wrap a kind in the node every type shares. `start` was taken before
-// the type's first token; the end is where its last one finished.
 add_type* = (p :: Parser, kind: TypeKind, m: Mark) Res<TypeId, AllocError> {
     p.tree.add_type(Type(
         kind: kind,

@@ -10,27 +10,23 @@ Decl, Function, Param, Member, Const, Bind, Stmt = std.ast.ast_node
 Ident, Import = std.ast
 node_at, in_span = std.ast.ast_find
 
-// Checked type with the declaring name's span.
 TypeAt* = {
     span*: Span,
     id*: TypeId,
 }
 
-// Checked expression supplying a local's inferred type.
 ValueAt* = {
     span*: Span,
     id*: ExprId,
 }
 
-// Imports carry their spelling because the binding has no expression or
-// type id; definition can resolve it while hover returns no answer.
+// Import bindings resolve definitions but have no local type or expression.
 Tell* = Nothing
     | Sig(Function)
     | OfType(TypeAt)
     | OfValue(ValueAt)
     | Imported(Ident)
 
-// Prefer the tight identifier span before consulting enclosing arena nodes.
 told_at* = (tree: Ast, file: str, p: Pos) Tell {
     named = named_at(tree, file, p);
     is_nothing(named).match({
@@ -43,7 +39,6 @@ is_nothing* = (t: Tell) bool {
     t.match({ Nothing => true, _ => false })
 }
 
-// Arena module index for a source file; sema World uses the same order.
 module_index_of* = (tree: Ast, file: str) Res<usize> {
     Range(0, tree.module_count()).find((i) {
         tree.module_at(i).match({
@@ -53,12 +48,10 @@ module_index_of* = (tree: Ast, file: str) Res<usize> {
     })
 }
 
-// Keep the first resolved name.
 pick = (have: Tell, cand: Tell) Tell {
     is_nothing(have).match({ true => cand, false => have })
 }
 
-// Scan top-level declarations and the arena's flat block list.
 named_at = (tree: Ast, file: str, p: Pos) Tell {
     found ::= Tell.Nothing;
     Range(0, tree.module_count()).loop((h, i) {
@@ -102,9 +95,7 @@ decl_told = (d: Decl, file: str, p: Pos) Tell {
     })
 }
 
-// Every binding on the left of `A, B = some.module` is its own name and
-// its own cursor target. The module graph owns what it means; this AST
-// query carries only the spelling and the exact span to that resolver.
+// Each imported binding has its own cursor span.
 import_told = (im: Import, file: str, p: Pos) Tell {
     found ::= Tell.Nothing;
     im.names.loop((h, n) {
@@ -120,8 +111,7 @@ imported_told = (name: Ident, file: str, p: Pos) Tell {
     })
 }
 
-// A function's name is its SIGNATURE; its params are their declared
-// types — one `in_span` away, hence one function.
+// A function name resolves to its signature; parameters resolve to their types.
 fn_told = (f: Function, file: str, p: Pos) Tell {
     in_span(f.name.span, file, p).match({
         true  => Tell.Sig(f),
@@ -135,9 +125,7 @@ params_told = (ps: Vec<Param>, file: str, p: Pos) Tell {
     found;
 }
 
-// A PARAMETER WITHOUT A WRITTEN TYPE IS `Nothing` — absent only in a
-// closure, where the type comes from the call site. A real gap,
-// answered `null` rather than guessed.
+// Parameters without written types have no AST-level type answer.
 param_told = (prm: Param, file: str, p: Pos) Tell {
     hit = in_span(prm.name.span, file, p);
     prm.type.match({
@@ -175,9 +163,7 @@ member_told = (m: Member, file: str, p: Pos) Tell {
     })
 }
 
-// A struct field has a written type; one SUPPLIED in an impl body or a
-// record literal has none and carries a value instead. The one with
-// neither (unspellable today) is `Nothing`.
+// Supplied members resolve through their value; declared fields use their type.
 field_told = (span: Span, t: Res<TypeId>, v: Res<ExprId>, hit: bool) Tell {
     t.match({
         Ok(id) => at_type(span, id, hit),
@@ -188,14 +174,7 @@ field_told = (span: Span, t: Res<TypeId>, v: Res<ExprId>, hit: bool) Tell {
     })
 }
 
-// --- nodes -------------------------------------------------------------
-
-// What `ast_find.zen` found, said as a `Tell`. A `TypeNode` makes a
-// WRITTEN TYPE hoverable — `i32`, `Vec<T>`, `Res<Cfg, _>` — with no new
-// query, since `type_from_ast`'s memo is keyed on exactly this id. A
-// `PatternNode` stays `Nothing`: `n` in `Ok(n)` is a binder the checker
-// never writes down (`Binding` releases at scope exit,
-// `sema_check.zen`), and re-deriving it would duplicate work.
+// Pattern nodes have no checked type memo; written type nodes do.
 node_told = (tree: Ast, file: str, p: Pos) Tell {
     node_at(tree, file, p).match({
         None  => Tell.Nothing,
@@ -208,11 +187,8 @@ node_told = (tree: Ast, file: str, p: Pos) Tell {
     })
 }
 
-// An expression, unless it is the TARGET of a binding. `s` in
-// `s = a + b;` is an `Expr` the checker never typed as one — it is the
-// left of a `Bind`, and the checker only opened a scope entry for it. So
-// `expr_memo` misses; the binding's own type (its annotation if it has
-// one, its value if not) is the honest answer.
+// Binding targets resolve through their annotation or value because they are
+// not checked as standalone expressions.
 expr_told = (tree: Ast, e: ExprId) Tell {
     found ::= at_value(tree.expr_at(e).span, e, true);
     tree.blocks_each((bid, block) {
@@ -239,12 +215,6 @@ bind_told = (have: Tell, b: Bind, span: Span, e: ExprId) Tell {
         }),
     })
 }
-
-// --- the two constructors ----------------------------------------------
-//
-// `hit` is threaded rather than branched at every call site: "did the
-// cursor land here" is written once per name, the answer's shape once
-// per KIND.
 
 at_type = (span: Span, id: TypeId, hit: bool) Tell {
     hit.match({

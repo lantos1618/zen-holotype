@@ -87,11 +87,7 @@ Parser* = {
         });
     }
 
-    // The lexer's `Span` carries no `file` and its `Pos` carries a byte
-    // `offset`; an AST node's `Span` carries the file and no offset.
-    // Both are right — a token belongs to one Source and a node
-    // outlives it — so the conversion happens HERE, once, and nothing
-    // downstream sees two span types.
+    // Convert a source-local lex span to a file-qualified AST span.
     span_of* = (self: @Self, t: Token) Span {
         Span(
             file: self.source.file,
@@ -100,20 +96,13 @@ Parser* = {
         );
     }
 
-    // A token's bytes: quotes, escapes and comment markers included,
-    // exactly as written. `Literal.text` is specified as the raw source
-    // slice, because the formatter reprints it byte for byte.
+    // Raw token bytes including quotes, escapes, and comment markers.
     text* = (self: @Self, t: Token) str { text_of(self.source, t) }
 
-    // One non-trivia token further on. Two grammatical decisions need
-    // it: `name:` versus `name =` inside a record body, and `Name`
-    // versus `Name(` in a pattern.
+    // One non-trivia token ahead.
     peek_next* = (self: @Self) Token { self.peek_n(1) }
 
-    // The `n`th non-trivia token from the cursor, `0` being the cursor
-    // itself. Three is the deepest anything asks — `A . impl (` — and
-    // it is asked once per declaration, so a scan is cheaper than a
-    // second index to keep in agreement.
+    // The nth non-trivia token from the cursor; zero is current.
     peek_n* = (self: @Self, n: usize) Token {
         found ::= self.eof_token();
         seen  ::= 0;
@@ -130,9 +119,7 @@ Parser* = {
         found;
     }
 
-    // The stream, by index, for the bounded scans that decide the three
-    // ambiguities. They look at kinds and never at the cursor, so they
-    // are the one thing here that reads past `at`.
+    // Indexed access for bounded grammatical lookahead.
     tokens_len* = (self: @Self) usize { self.tokens.len }
 
     token_kind_at* = (self: @Self, k: usize) TokenKind {
@@ -152,23 +139,17 @@ Parser* = {
 
     here* = (self: @Self) Pos { self.here_span().start }
 
-    // A node's span, closed. `start` was taken before its first token
-    // was consumed; `prev_end` is where its last one ended.
+    // Close a node span at the last consumed token.
     span_from* = (self: @Self, start: Pos) Span {
         Span(file: self.source.file, start: start, end: self.prev_end)
     }
 
-    // Open a node: where it starts, and the trivia that came before it.
-    // Taken FIRST — both are facts about the token the node begins at,
-    // and consuming it destroys them. Every node in this folder is
-    // opened with one of these and closed with the matching `add_*`.
+    // Open a node and claim its leading trivia before consuming it.
     open* = (self :: @Self) Mark {
         Mark(start: self.here(), leading: self.claim_leading())
     }
 
-    // The identifier under the cursor, or a diagnostic and an empty one.
-    // Empty rather than absent: a declaration with no readable name is
-    // still a declaration, and dropping it loses every node inside it.
+    // Read an identifier or return an empty recovery identifier.
     ident* = (self :: @Self, message: str) Res<Ident, AllocError> {
         self.at_kind(TokenKind.Ident).match({
             true  => self.ident_here(),
@@ -187,38 +168,21 @@ Parser* = {
         Ok(Ident(text: "", span: self.empty_span()));
     }
 
-    // Consume one token and say nothing. What recovery is made of.
     skip* = (self :: @Self) Res<(), AllocError> {
         self.bump().try();
         Ok(());
     }
 
-    // Success explicitly typed with the parser's allocation error channel.
     nothing* = (self: @Self) Res<(), AllocError> { Ok(()) }
 
-    // An empty span at the cursor, for a poison node: it stands where
-    // the missing construct would have stood and covers no bytes, so
-    // nothing downstream mistakes it for source the author wrote.
     empty_span* = (self: @Self) Span {
         here = self.here();
         Span(file: self.source.file, start: here, end: here);
     }
 
-    // WHERE A MISSING TOKEN GOES, which is not where the parser found
-    // out it was missing. `(x == 0).then(() { x = 1 })` wants a `;`
-    // after the `1`; a caret on the `}` names the one token on the line
-    // that is fine. Same rule as `expect_close` in the other direction:
-    // anchor on a position someone can put a cursor on and type the
-    // fix. It matters most at the end of a line, where the next token
-    // is on the NEXT one — a trailing `|` on line 15 reported at 16:1
-    // names a line the author did not write.
     gap_span* = (self: @Self) Span {
         Span(file: self.source.file, start: self.prev_end, end: self.prev_end)
     }
-
-    // -----------------------------------------------------------------
-    // moving
-    // -----------------------------------------------------------------
 
     // Consume the current token and drain the trivia behind it.
     // Draining EAGERLY is what makes trailing trivia expressible: a
@@ -290,8 +254,6 @@ Parser* = {
         ));
     }
 
-    // Consume `kind` if it is here — an optional comma, an optional
-    // `*`, an optional return type.
     eat* = (self :: @Self, kind: TokenKind) Res<bool, AllocError> {
         self.at_kind(kind).match({
             true  => { self.bump().try(); Ok(true) },
@@ -299,9 +261,6 @@ Parser* = {
         });
     }
 
-    // Consume `kind` or say so, once, in the caller's words — only the
-    // caller knows what was being built: "expected `=>` after this
-    // arm's pattern" is a sentence "expected FatArrow" cannot become.
     expect* = (self :: @Self, kind: TokenKind, message: str) Res<bool, AllocError> {
         self.at_kind(kind).match({
             true  => self.took(),
@@ -309,7 +268,6 @@ Parser* = {
         });
     }
 
-    // Separate typed arms keep the result type explicit.
     took = (self :: @Self) Res<bool, AllocError> {
         self.bump().try();
         Ok(true);
@@ -320,11 +278,7 @@ Parser* = {
         Ok(false);
     }
 
-    // `expect`, anchored where the missing token GOES rather than on
-    // the token that arrived instead. Not every `expect` wants this: a
-    // missing `=>` is best reported on the expression that turned up
-    // where the arrow belonged, because that IS what the reader has to
-    // look at. A missing `;` is the other case.
+    // Require a token and anchor failure at its insertion point.
     expect_after* = (self :: @Self, kind: TokenKind, message: str) Res<bool, AllocError> {
         self.at_kind(kind).match({
             true  => self.took(),
@@ -337,11 +291,7 @@ Parser* = {
         Ok(false);
     }
 
-    // Consume a closing delimiter, or point at the OPENING one. The
-    // author's mistake is the `(` they never closed; the end of the
-    // file is merely where the parser found out. Anchoring on the
-    // opener turns "unexpected end of file" into a position someone can
-    // put a cursor on.
+    // Require a closing delimiter and anchor failure at its opener.
     expect_close* = (self :: @Self, kind: TokenKind, message: str, open: Span) Res<bool, AllocError> {
         self.at_kind(kind).match({
             true  => self.took(),
@@ -362,13 +312,6 @@ Parser* = {
         Ok(false);
     }
 
-    // -----------------------------------------------------------------
-    // complaining
-    // -----------------------------------------------------------------
-
-    // One diagnostic, at the cursor. Every syntax error goes through
-    // here or through `expect_close`, so "how many diagnostics did one
-    // mistake produce" is a question about this file and nowhere else.
     error* = (self :: @Self, message: str) Res<(), AllocError> {
         self.error_at(message, self.here_span())
     }
@@ -380,10 +323,7 @@ Parser* = {
         });
     }
 
-    // WHICH SENTENCE a rejection carries is `parse_diag.zen`'s, not
-    // this file's — including the one case where the caller's is
-    // overridden, a file that simply stopped. `truncated` is that whole
-    // rule.
+    // Replace the message when input ended before the construct completed.
     say = (self :: @Self, message: str, span: Span) Res<(), AllocError> {
         self.said = true;
         self.diags.add(diag(
@@ -437,10 +377,8 @@ Parser* = {
         });
     }
 
-    // Claim all trivia remaining at end of file.
     claim_rest* = (self :: @Self) TriviaRun { self.claim_leading() }
 
-    // Claim trivia between a block's last statement and closing brace.
     claim_close* = (self :: @Self) TriviaRun { self.claim_leading() }
 
     // Depth counts AST links, including links produced by iterative postfix
@@ -465,7 +403,6 @@ Parser* = {
         });
     }
 
-    // Set the depth baseline for a function or lambda body.
     run_from* = (self :: @Self) usize {
         was           = self.run_base;
         self.run_base = self.depth + 1;
@@ -476,36 +413,17 @@ Parser* = {
 
     leave* = (self :: @Self) () { self.depth = self.depth - 1; }
 
-    // `leave`, once per link, for a loop that charged its levels one at
-    // a time. The links of a chain are all open until the chain ends —
-    // each node is built AROUND the last — so they are released
-    // together, not as the loop goes round.
     unwind* = (self :: @Self, links: usize) () { self.depth = self.depth - links; }
 }
 
-// `alloc.Parser(lexed)`. It takes what `scan` RETURNS, tokens and
-// source together, because the two are useless apart: a token is a
-// span into bytes it does not carry. `lexed.diags` stays the caller's
-// — a file that did not lex is reported and not parsed, and deciding
-// that is the driver's job.
-//
-// The cursor is NOT primed here: priming drains trivia, which
-// allocates, and a constructor that can fail is one every caller has
-// to `.try()`. `module` primes it as its first act.
+// Construct over a lexed source. Lexer diagnostics remain with the caller;
+// parser entry points drain initial trivia.
 Parser* = (a: Alloc, lexed: Lexed) Parser {
     a.Parser(lexed, a.Ast())
 }
 
-// `alloc.Parser(lexed, tree)` — the same constructor, handed a tree
-// that is already holding modules.
-//
-// A WHOLE PROGRAM IS ONE `Ast`. An id is an index into its arena, so
-// ninety-one parsers with ninety-one trees are ninety-one id spaces and
-// an `ExprId` from one means nothing to a `Checker` holding another.
-//
-// It is a value rather than a reference: the driver hands the tree in,
-// reads `p.tree` back, then constructs the next parser. Only one parser may
-// own a given tree at a time because a growing `Vec` can relocate storage.
+// Extend an existing AST id space. Only one parser may own the mutable tree at
+// a time.
 Parser* = (a: Alloc, lexed: Lexed, tree: Ast) Parser {
     origin = Span(
         file: lexed.source.file,
@@ -523,7 +441,6 @@ Parser* = (a: Alloc, lexed: Lexed, tree: Ast) Parser {
     );
 }
 
-// What a trivia token is, as trivia.
 trivia_kind* = (self: TokenKind) TriviaKind {
     self.match({
         BlockComment => TriviaKind.BlockComment,

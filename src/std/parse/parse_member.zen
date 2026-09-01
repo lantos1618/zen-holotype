@@ -14,11 +14,7 @@ expr = std.parse.parse_expr
 type, written_type = std.parse.parse_type
 fn_value = std.parse.parse_decl
 
-// -------------------------------------------------------------------
-// bodies
-// -------------------------------------------------------------------
-
-// `{ member (,)? member .. }`; commas between members are optional.
+// Commas between body members are optional.
 struct_members* = (p :: Parser, out :: Vec<Member>) Res<Span, AllocError> {
     p.member_list(out, true)
 }
@@ -100,9 +96,7 @@ member_kind = (
     });
 }
 
-// `x: i32`, `len :: usize = 0` in a struct body; `width: expr` in a
-// record. `typed` is which body we are in, and it is the only thing
-// that tells the two apart — the tokens are identical.
+// `typed` distinguishes declarations from record entries, whose syntax overlaps.
 after_colon = (
     p        :: Parser,
     name     : Ident,
@@ -164,10 +158,7 @@ split_r4 = (
     });
 }
 
-// A record's entry, written `width: self.radius * 2.0` or `width =
-// ..`: the `:` and the `=` supply the same thing and read the same
-// way. There is no type, because the field being satisfied already
-// has one.
+// Record entries accept either `:` or `=` before their value.
 supplied_member = (
     p        :: Parser,
     name     : Ident,
@@ -184,8 +175,6 @@ supplied_member = (
     )));
 }
 
-// `name = sig {..}`, `name ::= sig`, and — in a record — `name = expr`
-// where the field being satisfied is not a function.
 after_assign = (
     p          :: Parser,
     name       : Ident,
@@ -246,13 +235,7 @@ member_value = (p :: Parser) Res<Res<ExprId>, AllocError> {
     Ok(Ok(v));
 }
 
-// -------------------------------------------------------------------
-// parameters
-// -------------------------------------------------------------------
-
-// `(a: i32, b: i32)`, `(h, v)`, `()`. The span is the whole list
-// including its parentheses, because wrap-or-not is a decision about
-// the list and not about any one parameter.
+// The parameter-list span includes both parentheses.
 params_list* = (p :: Parser, out :: Vec<Param>) Res<Span, AllocError> {
     start = p.here();
     open  = p.here_span();
@@ -260,12 +243,7 @@ params_list* = (p :: Parser, out :: Vec<Param>) Res<Span, AllocError> {
         TokenKind.ParenOpen,
         "expected `(` to open a parameter list"
     ).try();
-    // A PARAMETER IS A NAME, so a token that is not one ends the list
-    // rather than being reported as a bad parameter. `(i + 1 < f.len;`
-    // is an unclosed `(` and the diagnostic that says so points at the
-    // opener, which is the mistake; "expected a parameter name" at the
-    // `+` names a place where nothing is wrong and arrives FIRST,
-    // burying it.
+    // A non-name ends the list so an unclosed `(` is diagnosed at its opener.
     running ::= p.at_kind(TokenKind.Ident);
     running.loop((h) {
         before = p.at;
@@ -308,12 +286,7 @@ param_type = (p :: Parser) Res<Res<TypeId>, AllocError> {
     p.written_type();
 }
 
-// -------------------------------------------------------------------
-// type parameters
-// -------------------------------------------------------------------
-
-// `<T>`, `<T: Rect>`, `<K: Eq + Hash, V>`. Bounds are a LIST because
-// `+` joins them and `|` does not (`TParam` in ast_node.zen).
+// Type-parameter bounds are joined with `+`; `|` is reserved for unions.
 type_params* = (p :: Parser, out :: Vec<TParam>) Res<(), AllocError> {
     open = p.here_span();
     p.expect(TokenKind.Lt, "expected `<` to open a type parameter list").try();

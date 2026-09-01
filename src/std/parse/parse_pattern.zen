@@ -40,9 +40,7 @@ pattern_here = (p :: Parser) Res<PatternId, AllocError> {
     });
 }
 
-// "cover every case or write `_`" — and `_` reaches here as an
-// ordinary identifier, because a wildcard is a spelling question in a
-// pattern position rather than a lexical one.
+// `_` is lexed as an identifier and means wildcard only in pattern position.
 name_or_wild = (p :: Parser, m: Mark) Res<PatternId, AllocError> {
     p.at_text(WILDCARD).match({
         true  => p.wild_pattern(m),
@@ -67,8 +65,6 @@ literal_pattern = (
     );
 }
 
-// `None`, `Macos`, `Shape.Unit` — and `Ok(n)`, which is the same rule
-// with a payload behind it.
 path_pattern = (p :: Parser, m: Mark) Res<PatternId, AllocError> {
     name = p.qualified_name().try();
     p.at_kind(TokenKind.ParenOpen).match({
@@ -111,13 +107,7 @@ qualified_name* = (p :: Parser) Res<QualifiedName, AllocError> {
     Ok(QualifiedName(segments: segments, span: p.span_from(start)));
 }
 
-// What stands where a pattern could not be read. `_` and not a new
-// kind: a wildcard matches anything, so a poisoned arm can never make
-// a match look LESS exhaustive than it is and turn one syntax error
-// into a second, spurious, exhaustiveness error.
-//
-// One of the four poison_/add_ wrapper pairs — parse_expr.zen's, above
-// `poison_expr`, says why they are four and not one shared helper.
+// Recovery uses wildcard to avoid a secondary exhaustiveness error.
 poison_pattern* = (p :: Parser) Res<PatternId, AllocError> {
     p.tree.add_pattern(Pattern(
         kind: PatternKind.Wild,
