@@ -42,15 +42,10 @@ stream_write* = (s: Stream, bytes: str) Res<(), H2Error> {
     });
 }
 
-stream_read* = (
-    s   : Stream,
-    a   : Alloc,
-    buf :: Vec<u8>,
-    n   : usize
-) Res<usize, H2Error> {
+stream_read* = (s: Stream, buf :: Vec<u8>, n: usize) Res<usize, H2Error> {
     s.match({
         Tcp(t) => t.read(buf, n).map_err((e) { from_tcp_err(e) }),
-        Tls(t) => t.read(a, buf, n).map_err((e) { from_tls_err(e) }),
+        Tls(t) => t.read(buf, n).map_err((e) { from_tls_err(e) }),
     });
 }
 
@@ -66,7 +61,7 @@ read_n* = (s: Stream, a: Alloc, buf :: Vec<u8>, n: usize) Res<(), H2Error> {
     left ::= n;
     (left > 0).loop((h) {
         chunk ::= a.Vec<u8>();
-        got = s.stream_read(a, chunk, left).try();
+        got = s.stream_read(chunk, left).try();
         (got > 0).ensure(H2Error.RecvFailed).try();
         at = buf.len;
         buf.grow_by(got).try(H2Error.RecvFailed);
@@ -95,7 +90,7 @@ alpn_check* = (s: Stream, a: Alloc) Res<(), H2Error> {
         Tcp(_) => Ok(()),
         Tls(t) => {
             buf ::= a.Vec<u8>();
-            n = t.alpn(a, buf).try((e) { from_tls_err(e) });
+            n = t.alpn(buf).try((e) { from_tls_err(e) });
             str_at(buf.ptr(), n).eq("h2").match({
                 true  => Ok(()),
                 false => Err(H2Error.ProtocolFailed),

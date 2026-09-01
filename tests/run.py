@@ -679,6 +679,7 @@ class TlsLoopbackPeer(LoopbackPeer):
                     with tls:
                         if attempt == 1:
                             raise RuntimeError("the mismatched hostname was accepted")
+                        tls.sendall(b"x")
                         if tls.recv(1) != b"":
                             raise RuntimeError("the verified TLS stream did not close")
         except (OSError, RuntimeError, ssl.SSLError) as exc:

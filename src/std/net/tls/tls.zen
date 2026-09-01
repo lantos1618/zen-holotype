@@ -160,12 +160,11 @@ TlsStream* = {
         tls_dial(a, host, port, true)
     }
 
-    alpn* = (self: @Self, a: Alloc, buf :: Vec<u8>)
-            Res<usize, TlsError> {
+    alpn* = (self: @Self, buf :: Vec<u8>) Res<usize, TlsError> {
         self.open.ensure(TlsError.Closed).try();
-        selected ::= a.Vec<Ptr<u8>>();
+        selected ::= self.alloc.Vec<Ptr<u8>>();
         selected.add(null_ptr<u8>()).try(TlsError.ReadFailed);
-        selected_len ::= a.Vec<u32>();
+        selected_len ::= self.alloc.Vec<u32>();
         selected_len.add(0).try(TlsError.ReadFailed);
         SSL_get0_alpn_selected(self.ssl, selected.ptr(), selected_len.ptr());
         n = selected_len.ptr().read(0).to_usize();
@@ -210,19 +209,18 @@ TlsStream* = {
         })
     }
 
-    read* = (self: @Self, a: Alloc, buf :: Vec<u8>, n: usize)
-            Res<usize, TlsError> {
+    read* = (self: @Self, buf :: Vec<u8>, n: usize) Res<usize, TlsError> {
         self.open.ensure(TlsError.Closed).try();
         (n == 0).match({
             true  => Ok(0),
-            false => self.read_nonempty(a, buf, n),
+            false => self.read_nonempty(buf, n),
         })
     }
 
-    read_nonempty = (self: @Self, a: Alloc, buf :: Vec<u8>, n: usize)
+    read_nonempty = (self: @Self, buf :: Vec<u8>, n: usize)
                     Res<usize, TlsError> {
         buf.reserve(n).try(TlsError.ReadFailed);
-        got ::= a.Vec<usize>();
+        got ::= self.alloc.Vec<usize>();
         got.add(0).try(TlsError.ReadFailed);
         answer: Res<usize, TlsError> = Err(TlsError.ReadFailed);
         waiting ::= true;
@@ -237,12 +235,9 @@ TlsStream* = {
                     error = SSL_get_error(self.ssl, rc);
                     (!(error == SSL_ERROR_WANT_READ
                         || error == SSL_ERROR_WANT_WRITE)).then(() {
-                        (error == SSL_ERROR_ZERO_RETURN).match({
-                            false => { waiting = false; },
-                            true  => {
-                                answer  = Err(TlsError.Closed);
-                                waiting = false;
-                            },
+                        waiting = false;
+                        (error == SSL_ERROR_ZERO_RETURN).then(() {
+                            answer = Err(TlsError.Closed);
                         });
                     });
                 },
