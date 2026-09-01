@@ -1,7 +1,3 @@
-// Generic argument inference for calls and construction. Explicit type
-// arguments take precedence over bindings inferred from value arguments.
-// Unresolved parameters remain free until a consumer requires a concrete type.
-
 Expr, ExprId, Call, Arg = std.ast
 Decl, Enum, Struct, TypeId, Impl = std.ast
 AllocError = std.mem
@@ -26,14 +22,6 @@ check_ctor_fields = sema.sema_hoist
 check_ctor_shape = sema.sema_bound
 Found, members_of = sema.sema_member
 
-// A GENERIC STRUCT IS CONSTRUCTED AT WHAT THE CALL WROTE, and at its own
-// parameters when the call wrote nothing.
-//
-// `Box<i32>(held: 7)` says which `Box` outright. `Vec(alloc: a)` inside
-// `Vec<T>`'s own constructor says nothing and means the declaration's
-// own `T` — which the enclosing instantiation then substitutes. Both
-// answer an APPLIED type: a bare `Vec` has no arguments to substitute
-// and no fields a backend could lay out, so it is never the answer.
 construct* = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
             Res<TyId, AllocError> {
     c.resolve_call(id, d.id).try();
@@ -41,38 +29,10 @@ construct* = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
     c.ctor_args(call, d, ctx, args).try();
     applied = c.types.named(d.id, d.qname, d.name, args).try();
     ty      = c.settled_ctor_type(call, d, ctx, args, applied).try();
-    // THE GATE THE TWO SWALLOW ARMS DOWNSTREAM DEPEND ON. Inference
-    // (`unify_ctor_field`) answers a member lookup's None with "nothing
-    // to see", and so does the shape check's `named_arg_fits` — whose Ok
-    // arm never asks `Found.constant` either. This call refuses every
-    // argument that could reach either swallow arm BEFORE they run, and
-    // the order is load-bearing: lift or reorder it and
-    // `Box(held: 1, m: 100)` compiles, runs, exits 0, and prints
-    // `n=7`, while `Cfg(w: 1, cap: 99)` runs and prints the declaration's
-    // `cap=50`. Pinned from the outside by
-    // must-fail/sema/construction_inference_names_no_member,
-    // construction_inference_names_a_constant and
-    // construction_shape_names_no_member (verified red with this call
-    // commented out, 2026-08-25).
     c.check_ctor_fields(call, ty, ctx).try();
     c.check_ctor_shape(call, ty, c.tree.expr_at(id).span).try();
     Ok(ty);
 }
-
-// ---------------------------------------------------------------------
-// WHAT THE ARGUMENTS SAY A CONSTRUCTION'S TYPE ARGUMENTS ARE
-//
-// `Pair(first: 5, second: p)` writes no type arguments, and the only
-// thing that says which `Pair` it is are the arguments: `first: A` meets
-// a `5`. That is the SAME inference a generic function's arguments
-// already get above — asked of a field instead of a parameter — and
-// leaving it out is what made a local `Pair<A, B>` at its own free
-// variables, so `p.first` reached no member and the backend had no
-// layout to write.
-//
-// A PARAMETER NO ARGUMENT REACHES STAYS FREE, exactly as at a call:
-// `Range(0, 5)` names no `T` and nothing here is entitled to guess one.
-// ---------------------------------------------------------------------
 
 settled_ctor_type = (
     c       :: Checker,
@@ -113,9 +73,6 @@ rebuilt_ctor_type = (c :: Checker, d: Def, vars: Vec<TyId>, inst: Inst)
     c.types.named(d.id, d.qname, d.name, args)
 }
 
-// NAMED ARGUMENTS ONLY, the restriction `check_ctor_fields` already
-// states: a field is reached by its name, and a positional argument to
-// a constructor is a different resolution and not this rule's to read.
 unify_ctor_arg = (
     c       :: Checker,
     a       : Arg,
@@ -129,9 +86,6 @@ unify_ctor_arg = (
     })
 }
 
-// The field is read off the type at its OWN parameters, so a declared
-// `first: A` comes back as the very `Var` `vars` holds and the binding
-// lands where `rebuilt_ctor_type` looks for it.
 unify_ctor_field = (
     c       :: Checker,
     a       : Arg,
@@ -148,31 +102,6 @@ unify_ctor_field = (
     })
 }
 
-// A VARIANT CALL IS A GENERIC-FUNCTION APPLICATION. `variant_ctor` hands
-// back `Fn([payload], enum)` with the payload still at the declaration's
-// own parameters, and `fn_ret` extracts `.ret` — so `Opt.Some(41)` typed
-// the let `Opt<Var>` and gen_c mangled a free parameter into the symbol.
-// The same inference every generic call already gets (`infer_targs`,
-// `instantiated_ret`): unify the payload against the settled argument,
-// then substitute over the answer.
-//
-// THE SUBSTITUTION RUNS OVER AN APPLIED FORM OF THE ENUM, not over `ty`.
-// `ty` is the bare head the access resolved to (`decl_as_type` interns it
-// with NO arguments), so a substitution walked over it had no `Var` to
-// reach — instrumented, the binding was made (`inst_len=1`) and thrown
-// away in the same breath, because `subst_named` answers an argumentless
-// application unchanged. The applied form is rebuilt at the declaration's
-// OWN parameters (`enum_own_vars`, the vars `tparam_vars` mints), which
-// is exactly where unification wrote: the payload resolves in the enum's
-// declaring module against those same vars, so `T := i32` lands on the id
-// the rebuild looks up. What nothing bound stays free, and the refusal
-// for what remains free is the consumers' (`has_var`), as at any other
-// call.
-//
-// The rebuilt type goes through `types.named` like `rebuilt_ctor_type`:
-// one interned id per answer, and `assignable`'s `same_applied` reads two
-// applications of one declaration structurally, so the fresh id agrees
-// with a parsed `Opt<i32>` wherever one is written.
 variant_call_type* = (
     c    :: Checker,
     call : Call,
@@ -335,12 +264,6 @@ payload_says = (
     })
 }
 
-// A TYPE ARGUMENT IS NOT AN ANNOTATION. An unsettled integer literal is
-// `int` and settles to the type WRITTEN for it; a type argument writes
-// nothing, so `Pair(first: 5, ..)` settles its `5` the way every other
-// unannotated `5` settles rather than making `int` the argument a
-// mangled symbol then carries — which would mint a `Pair<int, int>`
-// beside the `Pair<i32, i32>` every annotated program builds.
 settled_arg_ty = (c :: Checker, a: Arg, ctx: Ctx) Res<TyId, AllocError> {
     got = c.type_of(a.value, ctx).try();
     c.is_literal_ty(got).match({
@@ -387,11 +310,6 @@ decl_tparams_of = (c :: Checker, d: Def, dec: Decl, out :: Vec<TyId>)
     })
 }
 
-// A GENERIC CANDIDATE IS INSTANTIATED: `<T>(x: T) T` called with an
-// `i32` answers `i32` and not `T`. The instantiation is recorded under
-// the call's own id beside the declaration, because downstream needs both —
-// a backend that knew which function but not which `T` would be picking
-// one of the two answers out of the air.
 instantiate* = (
     c       :: Checker,
     id      : ExprId,
@@ -421,16 +339,6 @@ instantiated_ret = (
     c.subst(k.ret, inst)
 }
 
-// THE EDGE THE TERMINATION CHECK FOLLOWS. `sema_depth.zen` asks whether
-// the instantiation set is finite, and it cannot ask it of one call: the
-// answer lives in the CHAIN a call belongs to, and `grow<Vec<T>>` is
-// only divergent because it sits inside `grow`. So the edge is recorded
-// here — where the callee, its type parameters and what this call gave
-// them are all in hand — and the walk runs once the whole program has
-// been checked.
-//
-// A free parameter stays its own `Var`, and the walk stops on a chain
-// that still mentions one rather than guessing.
 note_edge = (c :: Checker, id: ExprId, k: Cand, inst: Inst)
             Res<(), AllocError> {
     args ::= c.alloc.Vec<TyId>();
@@ -449,9 +357,6 @@ arg_for = (v: TyId, inst: Inst) TyId {
     inst.lookup(v).match({ Ok(t) => t, None => v })
 }
 
-// WHAT THE CALL SAID `T` IS. The header's two sources in precedence
-// order — written first, because `bind` keeps the first binding — and
-// then what a bound says. A parameter neither reaches stays free.
 call_inst = (
     c       :: Checker,
     call    : Call,
@@ -474,7 +379,7 @@ written_targs = (c :: Checker, call: Call, k: Cand, inst :: Inst, ctx: Ctx)
     })
 }
 
-// The written arguments mean what they mean AT THE CALL SITE, so they
+// Written arguments resolve at the call site, so they
 // resolve in the caller's module and not the callee's.
 bind_written = (
     c     :: Checker,
@@ -510,10 +415,6 @@ infer_at = (
     })
 }
 
-// A LAMBDA SAYS NOTHING ABOUT `T`. "A closure passed to a function whose
-// signature is already known infers its parameter types FROM that
-// signature", so the arrow points the other way and a lambda's poison
-// type is not an inference.
 infer_from = (c :: Checker, param: TyId, a: Actual, inst :: Inst)
              Res<(), AllocError> {
     a.is_lambda.match({
@@ -521,24 +422,6 @@ infer_from = (c :: Checker, param: TyId, a: Actual, inst :: Inst)
         false => unify(c, param, a.ty, inst),
     })
 }
-
-// ---------------------------------------------------------------------
-// A PARAMETER NAMED ONLY INSIDE ANOTHER'S BOUND
-//
-// `<R: Range<T>, T> = (range: R, body: (h: LoopHandle, value: T) ())` is
-// the form the whole loop family is written in, and `range.zen` says
-// why: a bound MONOMORPHISES, so `at` is a direct call and the body
-// inlines. The cost is that `T` appears in no parameter of its own —
-// the only thing naming it is the closure, and "a closure infers its
-// parameter types FROM the signature" points that arrow the other way.
-// So the loop above leaves `T` free and everything downstream sees an
-// element nothing settled: `filter`'s own `alloc.Vec<T>()` has no
-// symbol to write, and a value typed `T` is a foreign parameter that
-// reaches no members at all.
-//
-// ONCE `R` IS KNOWN THE BOUND ANSWERS, and both shapes it comes in are
-// one unification against the bound as written.
-// ---------------------------------------------------------------------
 
 infer_from_bounds = (c :: Checker, k: Cand, inst :: Inst)
                     Res<(), AllocError> {
@@ -574,17 +457,6 @@ head_is = (c: Checker, x: TyNamed, b: TyId) bool {
     c.types.at(b).match({ Named(y) => x.decl.eq(y.decl), _ => false })
 }
 
-// THE ARGUMENT IS THE BOUND ITSELF: `Range(0, 6)` reaching `R:
-// Range<T>`. A value of the bound's own type carries only what its
-// declaration gives it, and `range.zen` gives it nothing — "a Range
-// that supplies no `at` walks its own index space, which is what makes
-// `Range(0, 5)` mean 0, 1, 2, 3, 4 with nothing behind it". So an
-// argument nothing settled IS the index, and the index is a `usize`.
-//
-// That is not a guess, it is the answer the backend already writes:
-// `gen_c_loop.lower_settled` walks a range that stores its own bounds
-// with `elem` fixed at `usize`. The two have to agree, or a fold's
-// accumulator is declared at a type the walk does not produce.
 infer_own_bound = (c :: Checker, bound: TyId, g: TyId, inst :: Inst)
                   Res<(), AllocError> {
     usize_ty = c.types.prim("usize").try();
@@ -624,25 +496,6 @@ named_args = (c :: Checker, ty: TyId, out :: Vec<TyId>)
     Ok(());
 }
 
-// THE ARGUMENT IMPLS THE BOUND: `Vec<i32>` reaching `R: Range<T>`.
-// "An impl lives with the type, not with the trait", so the impls of
-// the argument's own declaration are the ones to read, and
-// `Vec.impl(Range<T>, ..)` is where it says which of `Vec`'s OWN
-// arguments the bound's argument is. The impl writes `Vec`'s `T`;
-// putting it through the receiver's own instantiation is what turns it
-// into `i32`.
-//
-// A FIXED ARRAY IMPLS IT INTRINSICALLY, the inference half of what
-// `sema_bound.array_satisfies` proves at a call site: `[T, N]` is a type
-// constructor with no declaration to hang an impl on, so there is no
-// written answer to look up and the element IS the bound's argument.
-// Without this arm an array receiver settled no `T`, which loop and find
-// hid (the backend derives their pass type off the array itself) and
-// filter and map exposed -- both refused as "a generic call whose type
-// arguments nothing settles", because their `T` has to ride inside the
-// returned `Res<Vec<U>>`. The bound is recognised by its SHAPE here,
-// exactly as `array_satisfies` recognises it there; one rule, two files,
-// because neither file can see the other's subject.
 infer_impl_bound = (c :: Checker, bound: TyId, g: TyId, inst :: Inst)
                    Res<(), AllocError> {
     c.types.at(g).match({
@@ -660,9 +513,6 @@ infer_array_bound = (c :: Checker, bound: TyId, elem: TyId, inst :: Inst)
     })
 }
 
-// The one argument the walk's element fills. A range bound carries
-// exactly one -- `Range<T>` -- and a shape that reaches here with none
-// binds nothing rather than something wrong.
 unify_array_elem = (c :: Checker, bound: TyId, elem: TyId, inst :: Inst)
                    Res<(), AllocError> {
     bs ::= c.alloc.Vec<TyId>();
@@ -688,9 +538,6 @@ impl_bound_at = (c :: Checker, bound: TyId, n: TyNamed)
     c.impl_bound_from(ids, 0, bound, n)
 }
 
-// The first impl of that bound. Written as a walk rather than a loop
-// because the answer is the FIRST hit and a `find` cannot ask a
-// question that allocates.
 impl_bound_from = (
     c     :: Checker,
     ids   : Vec<ImplId>,

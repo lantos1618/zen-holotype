@@ -1,11 +1,3 @@
-// src/sema/sema_depth.zen
-// Termination checking for generic instantiation. Expanding chains such as
-// `grow<T> -> grow<Vec<T>>` are stopped before monomorphization runs without
-// bound. The diagnostic points at the deepest call whose arguments grow.
-//
-// Calls with concrete arguments start independent roots. Method calls do not
-// yet contribute instantiation edges, so method-only divergence is not covered.
-
 Decl, Struct, Member, Field, Span, nowhere = std.ast
 Alloc, AllocError = std.mem
 Vec, Map = std.collections
@@ -24,20 +16,12 @@ enter_struct_tvars, member_type = sema.sema_member
 // value consistent across compiler implementations.
 DEPTH_BUDGET: usize = 24
 
-// One instantiation on the chain. `size` is the whole reason a frame is
-// kept rather than counted: blame is decided by comparing it with the
-// frame below.
 Frame = {
     name: str,
     span: Span,
     size: usize,
 }
 
-// The walk's own state, threaded rather than global.
-//
-// `visited` is a `Map` and not a scan: the roots number in the thousands
-// for a real program, and a linear membership test would make this walk
-// quadratic in the size of the source for no reason.
 Walk = {
     frames :: Vec<Frame>,
     visited :: Map<str, bool>,
@@ -67,15 +51,7 @@ Walk* = (a: Alloc) Walk {
     Walk(frames: a.Vec<Frame>(), visited: a.Map<str, bool>())
 }
 
-// ---------------------------------------------------------------------
 // the rule
-// ---------------------------------------------------------------------
-
-// Every instantiation chain the program starts, walked to the budget.
-//
-// Run after the whole program is checked, because that is when the edges
-// exist: an edge is recorded where a call RESOLVES, and the chain a call
-// belongs to is not knowable until every body has been walked.
 check_depth* = (c :: Checker) Res<(), AllocError> {
     w ::= c.alloc.Walk();
     c.fn_roots(w).try();
@@ -83,12 +59,6 @@ check_depth* = (c :: Checker) Res<(), AllocError> {
     Ok(());
 }
 
-// ---------------------------------------------------------------------
-// functions
-// ---------------------------------------------------------------------
-
-// A root is a call that already knows what it instantiates: no type
-// parameter of the caller reaches its arguments.
 fn_roots = (c :: Checker, w :: Walk) Res<(), AllocError> {
     Range(0, c.edge_count()).loop((h, i) { c.fn_root_at(i, w).try() });
     Ok(());
@@ -146,9 +116,6 @@ enter_now = (
     Ok(());
 }
 
-// The callee's own calls, with its type parameters bound to what this
-// instantiation gave them. Visited once per (declaration, arguments):
-// the same instantiation reached twice is the same subtree.
 expand = (
     c     :: Checker,
     owner : str,
@@ -189,10 +156,6 @@ out_edge = (c :: Checker, owner: str, i: usize, inst: Inst, w :: Walk)
     })
 }
 
-// Only a call inside THIS body, and only one that threads a type
-// parameter through. A call with settled arguments is a root of its own
-// and is walked there — following it here would re-derive the whole
-// monomorphised program at every node.
 follow = (c :: Checker, owner: str, e: InstEdge, inst: Inst, w :: Walk)
          Res<(), AllocError> {
     (e.from_owner.eq(owner) && (settled(c, e.args) == false)).match({
@@ -201,9 +164,6 @@ follow = (c :: Checker, owner: str, e: InstEdge, inst: Inst, w :: Walk)
     })
 }
 
-// A parameter the substitution did not reach leaves a `Var` behind, and
-// the chain stops there rather than guessing what it stood for. A guess
-// would be a diagnostic about a program nobody wrote.
 follow_subst = (c :: Checker, e: InstEdge, inst: Inst, w :: Walk)
                Res<(), AllocError> {
     args ::= c.alloc.Vec<TyId>();
@@ -214,21 +174,7 @@ follow_subst = (c :: Checker, e: InstEdge, inst: Inst, w :: Walk)
     })
 }
 
-// ---------------------------------------------------------------------
 // types
-// ---------------------------------------------------------------------
-
-// THE SAME RULE FOR A TYPE, and it needs no call at all. `Tree<T>` with
-// a field `child: Tree<Vec<T>>` needs `Tree<Vec<i32>>` to lay out
-// `Tree<i32>`, and so on down; no value of any of them is ever
-// constructed, because naming the type in a signature is already enough
-// to require its layout.
-//
-// THE ROOTS ARE READ OUT OF THE TYPE STORE. A generic struct matters
-// here only once something applies it to settled arguments, and every
-// such application is already interned — `Tree<i32>` is in the store
-// because `root_value` takes one. So there is no second pass over the
-// declarations to write, and a struct nothing ever names costs nothing.
 type_roots = (c :: Checker, w :: Walk) Res<(), AllocError> {
     n = c.types.count_of().to_usize();
     Range(0, n).loop((h, i) { c.type_root_at(i, w).try() });
@@ -319,10 +265,6 @@ expand_struct = (
     })
 }
 
-// The type parameters are pushed exactly as `struct_members` pushes
-// them, because a field's written type resolves in the declaration that
-// binds its names: `child: Tree<Vec<T>>` reads `T` as this struct's own
-// parameter or it reads it as an undefined name.
 expand_fields = (
     c    :: Checker,
     s    : Struct,
@@ -358,9 +300,6 @@ struct_inst = (
     Ok(());
 }
 
-// Only STORAGE widens a layout. A member that is a function or a
-// constant is not laid out inside the struct, so it cannot be the reason
-// the layout fails to terminate.
 field_edge = (
     c      :: Checker,
     m      : Member,
@@ -399,18 +338,7 @@ field_step = (c :: Checker, n: TyNamed, span: Span, w :: Walk)
     })
 }
 
-// ---------------------------------------------------------------------
 // blame
-// ---------------------------------------------------------------------
-
-// THE INNERMOST FRAME THAT WIDENED, and not whichever frame happened to
-// hit the ceiling. That is what makes the mutual case point at
-// `pong<Vec<T>>` — the call that grows — rather than at `ping<T>`, which
-// forwards what it was given.
-//
-// The fallback is the deepest frame, which is what a chain that reached
-// the budget without ever widening deserves: nothing grew, so no call is
-// more at fault than the last one.
 blame = (c :: Checker, w :: Walk) Res<(), AllocError> {
     w.done = true;
     w.frames.get(w.blamed()).match({
@@ -423,21 +351,13 @@ blame = (c :: Checker, w :: Walk) Res<(), AllocError> {
     })
 }
 
-// ---------------------------------------------------------------------
-// the two questions asked of a type argument list
-// ---------------------------------------------------------------------
-
-// Whether the list is free of type parameters nobody has substituted.
-// A chain is only followed once its arguments are settled, because an
-// unsettled one names no particular instantiation.
 settled = (c: Checker, args: Vec<TyId>) bool {
     Range(0, args.len).find((i) {
         args.get(i).match({ Ok(t) => c.has_var(t), None => false })
     }).match({ Ok(_) => false, None => true })
 }
 
-// STRUCTURAL SIZE — the growth signal. `Vec<i32>` counts more than
-// `i32`, and that inequality is the whole of what "widens" means.
+// Structural size is the growth signal used to detect widening recursion.
 args_size = (c: Checker, args: Vec<TyId>) usize { c.list_size(args, 0) }
 
 list_size = (c: Checker, list: Vec<TyId>, i: usize) usize {
@@ -461,9 +381,6 @@ ty_size = (c: Checker, t: TyId) usize {
     })
 }
 
-// A node's identity: which declaration, at which arguments. The store's
-// own key is used for each argument because it is already canonical —
-// two spellings of one type intern to one id and so to one key.
 node_key = (c :: Checker, owner: str, args: Vec<TyId>)
            Res<str, AllocError> {
     out ::= c.alloc.String().try();

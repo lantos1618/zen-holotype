@@ -1,30 +1,3 @@
-// src/sema/sema_hoist.zen
-// What lifts into a `Res`, and what does not.
-//
-// A bare T lifts into Res<T> when exactly one variant carries it. The lift
-// itself needs no code: the backend
-// builds an `Ok` for a value that fits the success payload. Sema only
-// owes the two cases where a reader would be guessing:
-//   - `Res<i32, i32>` has TWO variants carrying `i32`, so a bare 32 is
-//     ambiguous and the explicit form is required.
-//   - only SUCCESS lifts. A bare error value at a `Res` return is not
-//     an `Err` — a failure that lifted silently would be unwritten.
-//
-// Never count an unsettled slot: `assignable` is lenient about a type
-// nobody has computed (`Var`, `Infer`, poison), so counting those would
-// make `<T, E>() Res<T, E>` ambiguous at every tail. Standing rule:
-// never invent a diagnostic out of missing information.
-//
-// The two call sites are a function's tail (`sema_decl.zen`, after the
-// body is typed) and a constructor's field (`sema_apply.zen`, after
-// the construction's type is known). A binding with a written type
-// goes through `coerce` instead, which reports the ordinary mismatch.
-//
-// `check_arms` also puts a match's arms where the match itself
-// stands. It lives here because every answer it has for a `Res` slot
-// is one of the answers above — an arm is a tail, and a tail that
-// lifts must go on lifting.
-
 Expr, ExprId, Block, BlockId, Stmt, Call, Arg, Span = std.ast
 Match = std.ast
 AllocError = std.mem
@@ -38,10 +11,6 @@ storage_seat_name = sema.sema_supply
 check_literal = sema.sema_trap
 type_of = sema.sema_type
 
-// A value of type `got` arriving where `want` is expected, when nothing
-// else has already checked the pair. Silent unless the two hoisting
-// refusals apply: a value that simply does not fit is somebody else's
-// diagnostic, and a value that fits needs nothing at all.
 hoist_check* = (c :: Checker, file: str, span: Span, got: TyId, want: TyId)
                Res<(), AllocError> {
     c.assignable(got, want).match({
@@ -50,14 +19,6 @@ hoist_check* = (c :: Checker, file: str, span: Span, got: TyId, want: TyId)
     })
 }
 
-// A value that neither fits nor lifts is reported by the positional checker.
-// Constructor shape validation belongs in sema_bound because it needs
-// `satisfies_bound`:
-// `Buf(alloc: alloc)` hands an `Arena` to an `alloc: Alloc` field, and a
-// bound is a promise kept by an impl, not a type `assignable` compares.
-//
-// Importing sema_bound here would close a sema_hoist -> sema_bound ->
-// sema_call -> sema_hoist cycle.
 hoist_into = (c :: Checker, file: str, span: Span, got: TyId, want: TyId)
              Res<(), AllocError> {
     c.types.at(want).match({
@@ -66,9 +27,6 @@ hoist_into = (c :: Checker, file: str, span: Span, got: TyId, want: TyId)
     })
 }
 
-// The candidate count, and the only three answers it has. Two carriers
-// is ambiguous; one that is the failure is a failure nobody wrote; the
-// success alone lifts and there is nothing to say.
 hoist_into_res = (
     c    :: Checker,
     file : str,
@@ -99,9 +57,6 @@ count_carriers = (
     })
 }
 
-// Reached only when the two carriers were not both present, so a
-// failure here is the ONLY reading — and it is the one that does not
-// lift.
 lone_failure = (c :: Checker, file: str, span: Span, err: bool)
                Res<(), AllocError> {
     err.match({
@@ -110,13 +65,10 @@ lone_failure = (c :: Checker, file: str, span: Span, err: bool)
     })
 }
 
-// A slot nobody has computed carries nothing YET, so a `Res` with an
+// An unsettled slot carries no countable value, so a `Res` with an
 // unsettled success payload cannot be counted at all.
 countable = (c: Checker, r: TyRes) bool { settled(c, r.value) }
 
-// `error` is meaningful only under `Failure`: `Absence` puts the unit
-// type there and `Open` puts the `Infer` hole, and neither is a variant
-// carrying anything a value could be mistaken for.
 carries_failure = (c: Checker, got: TyId, r: TyRes) bool {
     r.form.match({
         Failure => settled(c, r.error) && c.assignable(got, r.error),
@@ -142,30 +94,12 @@ two_readings = (c :: Checker, file: str, span: Span, got: TyId, want: TyId)
     )
 }
 
-// The variant that WOULD have carried it, named: the fix is to write
-// `Err(..)` out, and a diagnostic that says "only success lifts" without
-// naming what did not is half of one.
 failure_never_lifts = (c :: Checker, file: str, span: Span)
                       Res<(), AllocError> {
     c.report(file, span, SemaFault.HoistNotSuccess(NameFault(name: "Err")))
 }
 
-// -----------------------------------------------------------------
 // the two positions
-// -----------------------------------------------------------------
-
-// A body's value against the type the signature promised: the one
-// place a function's tail meets its return type, so the one place a
-// bare success can lift into a `Res` — or fail to. The tail's ARMS are
-// checked beside it, under the same exemption: see `check_arms`.
-//
-// Also the one place a body ending in nothing is caught: hoisting used
-// to be the only question asked here, so a `()` tail closing an `i32`
-// was waved through, which is what let the print sugar close any
-// function at all.
-//
-// Span is the TAIL EXPRESSION'S, not the block's — that's the value
-// the author has to change.
 check_return* = (c :: Checker, body: BlockId, ctx: Ctx, got: TyId)
                 Res<(), AllocError> {
     blk = c.tree.block_at(body);
@@ -175,9 +109,6 @@ check_return* = (c :: Checker, body: BlockId, ctx: Ctx, got: TyId)
     })
 }
 
-// The tail as ONE value, then the tail's arms as the several values it
-// actually is. `value_was_asked_for` gates both, so the `;`-terminated
-// unit tail that closes any function keeps closing it — arms and all.
 tail_fits = (c :: Checker, blk: Block, id: ExprId, got: TyId, want: TyId)
             Res<(), AllocError> {
     c.return_fits(blk, id, got, want).try();
@@ -187,9 +118,6 @@ tail_fits = (c :: Checker, blk: Block, id: ExprId, got: TyId, want: TyId)
     })
 }
 
-// Fitting the family isn't fitting the type: `f = () i32 { 3000000000 }`
-// is an `int` literal, and `assignable` says every one of those fits
-// every integer type — hence `check_literal` on the agreeing side too.
 return_fits = (c :: Checker, blk: Block, id: ExprId, got: TyId, want: TyId)
               Res<(), AllocError> {
     node = c.tree.expr_at(id);
@@ -199,10 +127,6 @@ return_fits = (c :: Checker, blk: Block, id: ExprId, got: TyId, want: TyId)
     })
 }
 
-// Decided by `want` and nowhere else, so the two rules can't both fire
-// on one tail: a `Res` return is the hoisting question and
-// `hoist_into_res` owns every answer to it (including silence); any
-// other return type is the ordinary mismatch.
 refuse_return = (
     c    :: Checker,
     blk  : Block,
@@ -216,10 +140,6 @@ refuse_return = (
     })
 }
 
-// A tail that is already a `Res` isn't a hoisting question — nothing to
-// lift, and `assignable` already answered whether it fits. Catches
-// `Err("not an error at all")` in a function declared `Res<i32, Error>`,
-// where a `str` isn't that error set.
 res_return = (
     c    :: Checker,
     blk  : Block,
@@ -234,10 +154,6 @@ res_return = (
     })
 }
 
-// A value with nowhere to lift is the tail's own mismatch. The refusal goes
-// through `wrong_return` so the two exemptions still hold: a `()`
-// return discards anything, and a `;`-terminated tail that yields
-// nothing still closes the function.
 lift_or_refuse = (
     c    :: Checker,
     blk  : Block,
@@ -253,42 +169,15 @@ lift_or_refuse = (
     })
 }
 
-// A node that covers no bytes was not written. The parser stands one
-// where a construct it could not read would have gone —
-// `parser.empty_span`, "it stands where the missing construct would
-// have stood and covers no bytes, so nothing downstream mistakes it
-// for source the author wrote". Typing that poison would cascade the
-// original syntax diagnostic.
 was_written = (node: Expr) bool {
     (node.span.start.line != node.span.end.line)
         || (node.span.start.col != node.span.end.col)
 }
 
-// Either reading `hoist_into_res` recognises, so the two rules never
-// report the same tail twice: a value that fits the success payload
-// lifts, and one that reads as the failure already has its own
-// diagnostic. `assignable` is lenient about an unsettled payload, which
-// is what keeps `<T, E>() Res<T, E>` silent here.
 lands_somewhere = (c: Checker, got: TyId, r: TyRes) bool {
     c.assignable(got, r.value) || c.carries_failure(got, r)
 }
 
-// The tail fits the return type — the whole rule, and general: a print's
-// value is unit (`sema_call.print_or_call`), so `f = () i32 {
-// println("x") }` returns nothing where an `i32` was promised, and
-// `Err("not an error at all")` no longer closes a `Res<i32, Error>`.
-//
-// TWO EXEMPTIONS (one rule, either side: a value nobody asked for need
-// not fit):
-//   - a function declared `()` discards whatever its body ends with —
-//     that IS what `()` means at a return type.
-//   - a `;`-terminated last statement that yields NOTHING (see
-//     `corpus/sema/statement_tail_is_not_a_value`). The `;` alone isn't
-//     the exemption: DESIGN.md's "`0;` closes a `Res<i32, E>` function
-//     like `Ok(0);` does" makes a `;`-terminated tail the return, and
-//     `block_type` carries its type out for that reason. So
-//     `println("noisy");` closes an `i32` function (no value to return)
-//     but `Err(Error.IoError);` does not (a value that doesn't fit).
 wrong_return = (c :: Checker, blk: Block, node: Expr, got: TyId, want: TyId)
                Res<(), AllocError> {
     c.value_was_asked_for(blk, got, want).match({
@@ -348,48 +237,11 @@ stmt_tail_expr = (c: Checker, s: Stmt) Res<ExprId> {
     })
 }
 
-// -----------------------------------------------------------------
 // the third position: an arm
-// -----------------------------------------------------------------
-
-// EVERY ARM PRODUCES THE MATCH'S VALUE, so every arm stands where the
-// match stands and owes what the match owes.
-//
-// Nothing asked them. `sema_join.zen` says what a match is WORTH and
-// deliberately declines to invent a supertype for arms that disagree —
-// "two arms of genuinely different types mean something the language
-// cannot express" — but declining answered the FIRST arm's type and
-// said nothing about the rest. `f = (b: bool) i32 { b.match({ true =>
-// 1, false => false }) }` typed as `i32`, compiled, ran, and printed
-// 0: a wrong answer, not a missing message.
-//
-// ASKED HERE AND NOT IN THE JOIN, because the join has no expectation
-// to name. "expected i32" is the POSITION's word; the first arm is not
-// entitled to speak for the position, and a diagnostic that said
-// "expected int" — the first arm's literal type — would blame the
-// wrong line. Same walk `check_literal` already makes for a literal's
-// range, for the reason given there: "a match arm is walked here since
-// it has no caller of its own — the match settles its context".
 check_arms* = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
     c.arms_owe(id, want, Blame.Position)
 }
 
-// THE ARMS' OWN AGREEMENT, asked where nothing decides their type.
-// `x = b.match({ true => 1, false => false })` takes its type FROM the
-// value, so `sema_place.written_want` had nothing to hold the arms to —
-// and four such positions (an untyped binding, an operand, a print
-// argument, a parameter declared `T`) went on accepting the very
-// program the `match_arms_disagree*` tests reject wherever a type IS
-// written. Each compiled, ran, and printed the 0 those tests exist to
-// stop.
-//
-// A TYPE PARAMETER IS THE INSTRUCTIVE ONE: it wrote a word down, and
-// `assignable` says every arm reaches an unsubstituted variable — so
-// the word decided nothing and the silence read as agreement.
-//
-// The word the arms owe is then their own join, read back from the memo
-// rather than recomputed for `arm_fits`'s reason. `Blame` is what keeps
-// that from being said in the position's voice.
 check_arms_agree* = (c :: Checker, id: ExprId) Res<(), AllocError> {
     c.expr_memo.get(id).match({
         None       => Ok(()),
@@ -397,11 +249,6 @@ check_arms_agree* = (c :: Checker, id: ExprId) Res<(), AllocError> {
     })
 }
 
-// WHOSE WORD `want` IS, and the only thing the two callers above differ
-// by. A written type is the POSITION's word and a refusal names it —
-// "expected i32". A join is the ARMS' word, and the same refusal in the
-// position's voice would print "expected int", the first arm's literal
-// type, as though something had asked for it.
 Blame* = Position | Arms
 
 arms_owe = (c :: Checker, id: ExprId, want: TyId, blame: Blame)
@@ -430,10 +277,6 @@ arm_within = (c :: Checker, id: ExprId, want: TyId, blame: Blame)
     })
 }
 
-// THE TYPE THE MATCH ALREADY COMPUTED, never a fresh one: the arm's
-// pattern binders left scope when the arm did, so re-typing `Ok(n) =>
-// n` here would report `n` undefined. A miss is silence — an arm the
-// match never typed is not an arm this rule knows anything about.
 arm_fits = (c :: Checker, id: ExprId, node: Expr, want: TyId, blame: Blame)
            Res<(), AllocError> {
     c.expr_memo.get(id).match({
@@ -442,10 +285,6 @@ arm_fits = (c :: Checker, id: ExprId, node: Expr, want: TyId, blame: Blame)
     })
 }
 
-// Refused exactly the way a return is, and it must be: an arm is a
-// tail. So a `Res` want is hoisting's question and hoisting's alone
-// (`true => 1` still closes a `Res<i32, E>` match), and anything else
-// is the ordinary mismatch.
 arm_agrees = (c :: Checker, node: Expr, got: TyId, want: TyId, blame: Blame)
              Res<(), AllocError> {
     c.assignable(got, want).match({
@@ -493,10 +332,6 @@ arms_disagree = (c :: Checker, node: Expr, got: TyId, want: TyId)
     )
 }
 
-// `Row(n: 32)` on a field declared `Res<i32>`: construction is the
-// other place a value lands somewhere it didn't name, into the field's
-// declared type.
-//
 check_ctor_fields* = (c :: Checker, call: Call, ty: TyId, ctx: Ctx)
                      Res<(), AllocError> {
     call.args.loop((h, i, a) { c.check_ctor_field(a, i, ty, ctx).try() });
@@ -542,13 +377,6 @@ check_named_field = (
     })
 }
 
-// THE REFUSAL THE SILENT DROP WAS. An argument naming no member of the
-// constructed type is not an argument anyone can store, so accepting it
-// wrote a zero nobody wrote — the leaving-out twin of
-// `check_ctor_shape`'s missing-required-field rule. The fault carries
-// the constructed TYPE because that is what the sentence is about:
-// "`nosuch` on `A`" names the lookup that failed, at the argument's
-// name, where the author wrote it.
 ctor_no_member = (c :: Checker, a: Arg, name: str, ty: TyId)
                  Res<(), AllocError> {
     poison = c.types.unknown().try();
@@ -563,14 +391,6 @@ ctor_no_member = (c :: Checker, a: Arg, name: str, ty: TyId)
     )
 }
 
-// What the member is decides what the argument means. A field is
-// storage the construction supplies; a struct-body constant (R4:
-// `y: i32 = 20`) is one value per type, read as `A.y`, so a
-// construction cannot supply that constant as if it were storage.
-//
-// `field_fits` keeps every question it asked of a field's value — lift,
-// literal range, arms — and asks them only where they have an answer:
-// of storage, never of a constant.
 ctor_field_or_constant = (
     c    :: Checker,
     a    : Arg,
@@ -586,12 +406,6 @@ ctor_field_or_constant = (
     })
 }
 
-// The fault carries the OWNING type, because that is what the sentence
-// is about — `y` is a constant of `A`, and naming the supplied value's
-// own type instead ("a constant of `int`") points the reader three
-// lines away from the declaration that explains the refusal. The
-// argument's NAME is where the mistake sits, so it is where the
-// diagnostic goes.
 ctor_names_constant = (
     c    :: Checker,
     a    : Arg,

@@ -1,17 +1,3 @@
-// src/sema/sema_try.zen
-// `.try()`, and the rules that go with it.
-//
-// "It unwraps Ok, or returns the Err — or the None — from the ENCLOSING
-// function." All law 4: the enclosing function must return a compatible
-// Res, a `Res<T>` may not try into a `Res<T, E>` function, and nothing
-// is converted.
-//
-// Split out of `sema_type.zen` (subject: "what does this node mean" and
-// the memo discipline for it); this one is the failure model — which Res
-// forms propagate into which, what a set must contain. `try_type` is one
-// arm of `expr_kind` and nothing else calls into this family, so the
-// seam is exactly one import.
-
 ExprId, Span, Lambda, Paren, Param = std.ast
 AllocError = std.mem
 Vec = std.collections
@@ -24,11 +10,6 @@ block_type = sema.sema_type
 param_type, type_from_ast = sema.sema_denote
 push_tparams, module_name = sema.sema_inst
 
-// `at` is the `try` TOKEN, not the node — the node's span starts at the
-// operand, so `checked(n).try()` reported on the node would point at a
-// call that's perfectly well formed. TESTING.md asks for the first byte
-// of the smallest offending node: the four characters the author has to
-// change.
 try_type* = (
     c       :: Checker,
     at      : Span,
@@ -277,11 +258,6 @@ try_absence* = (c :: Checker, at: Span, got: TyId, value: TyId, err: TyId)
     Ok(value)
 }
 
-// "propagation merges sets" — containment, not conversion; the callee's
-// set must already be part of the caller's, no From bridges them.
-//
-// A `Res<T>` declares no error, so a callee raising a real set has nowhere to
-// propagate; `absence_into_failure` handles the mirror direction.
 try_set* = (c :: Checker, at: Span, r: TyRes, want: TyRes)
           Res<TyId, AllocError> {
     both_failures(r.form, want.form).match({
@@ -298,9 +274,6 @@ try_into_absence* = (c :: Checker, at: Span, r: TyRes, want: TyRes)
     })
 }
 
-// Mirrors `sema_check.zen`'s `absence_into_failure`; kept here rather
-// than beside it because that file is at STYLE.md's line cap and this
-// rule has one caller.
 failure_into_absence = (got: ResForm, want: ResForm) bool {
     got.match({
         Failure => want.match({ Absence => true, _ => false }),
@@ -308,9 +281,6 @@ failure_into_absence = (got: ResForm, want: ResForm) bool {
     })
 }
 
-// A caller whose own set is `_` hasn't declared one, so there's nothing
-// to be contained IN — it raises what the callee raises, and
-// `sema_raise.zen` settles the signature once the body is walked.
 try_contained* = (c :: Checker, at: Span, r: TyRes, want: TyRes)
                 Res<TyId, AllocError> {
     c.is_infer(want.error).match({
@@ -319,10 +289,6 @@ try_contained* = (c :: Checker, at: Span, r: TyRes, want: TyRes)
     })
 }
 
-// The callee's SET and not its name: `WriteError` raised into an
-// inferred set contributes `IoError` and `AllocError`, so the caller's
-// declared set is asked to contain members, not a spelling. `union_ty`
-// flattens the rest.
 try_raises* = (c :: Checker, r: TyRes) Res<TyId, AllocError> {
     c.raise(c.set_of(r.error)).try();
     Ok(r.value);

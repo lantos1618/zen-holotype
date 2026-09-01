@@ -1,8 +1,3 @@
-// Generic substitutions and instantiation edges. `Inst` pairs type-variable
-// ids with their arguments. Generic bodies are checked once; call and member
-// sites record their substitutions. `subst` preserves an unbound variable so
-// consumers can refuse incomplete instantiations explicitly.
-
 Decl, Struct, Enum, TParam, Span = std.ast
 Alloc, AllocError = std.mem
 Vec = std.collections
@@ -12,10 +7,6 @@ TyId, TyNamed, TyRes, TyFn, ResForm = sema.sema_ty
 decl_at = sema.sema_def
 Checker = sema.sema_check
 
-// One instantiation: which concrete type each type parameter became.
-// The two `Vec`s are private, so an `Inst` can be held by value — living
-// in a memo and a backend work queue at once, since nothing mutates it
-// after `bind` finishes.
 Inst* = {
     vars :: Vec<TyId>,
     args :: Vec<TyId>,
@@ -24,9 +15,7 @@ Inst* = {
     // substitution every non-generic declaration is lowered under.
     len* = (self: @Self) usize { self.vars.len }
 
-    // The i-th parameter and what it became, in declaration order —
-    // needed to REBASE an instantiation (a call inside a generic body
-    // instantiates at the enclosing body's own parameters).
+    // Parameters and their substitutions remain in declaration order.
     var_at* = (self: @Self, i: usize) Res<TyId> { self.vars.get(i) }
 
     arg_at* = (self: @Self, i: usize) Res<TyId> { self.args.get(i) }
@@ -64,16 +53,6 @@ Inst* = {
     }
 }
 
-// One call instantiating one generic declaration, paired with the call
-// that made it, for `sema_depth.zen` to ask whether the instantiation
-// set is finite. `Checker.inst_memo` holds the same answer keyed by
-// call site, but a `Map` never lists, so edges are also appended to a
-// `Vec` in resolution order for the termination walk.
-//
-// `from_owner` is the generic function whose body holds the call (empty
-// at top level), making the walk a graph: an edge out of `ping` has
-// `from_owner = "ping"` and `args` in `ping`'s own type parameters, for
-// `subst` to chain forward.
 InstEdge* = {
     from_owner*: str,
     to_owner*: str,
@@ -91,13 +70,6 @@ Inst* = (a: Alloc) Inst {
     Inst(vars: a.Vec<TyId>(), args: a.Vec<TyId>())
 }
 
-// ---------------------------------------------------------------------
-// substitution
-// ---------------------------------------------------------------------
-
-// `ty` with every bound parameter replaced. Structural and total: an
-// unmentioned parameter is unchanged, a mentioned-but-unbound one keeps
-// it, since this has no position to report at.
 subst* = (c :: Checker, ty: TyId, inst: Inst) Res<TyId, AllocError> {
     (inst.len() == 0).match({
         true  => Ok(ty),
@@ -116,9 +88,6 @@ subst_kind = (c :: Checker, ty: TyId, inst: Inst) Res<TyId, AllocError> {
     })
 }
 
-// A nominal type is rebuilt from its arguments and keeps its
-// declaration: `Vec<T>` at `T = u8` is `Vec<u8>`, which is a DIFFERENT
-// interned id and the same declaration.
 subst_named = (c :: Checker, n: TyNamed, ty: TyId, inst: Inst)
               Res<TyId, AllocError> {
     (n.args.len == 0).match({
@@ -127,10 +96,6 @@ subst_named = (c :: Checker, n: TyNamed, ty: TyId, inst: Inst)
     })
 }
 
-// `TyNamed` carries the bare name and declaration but not the qualified
-// name the store keys on, so it's rebuilt from the declaration — the
-// same two segments `Def.qname` joins, so the instantiation interns
-// under the generic form's own path.
 rebuild_named = (c :: Checker, n: TyNamed, inst: Inst)
                 Res<TyId, AllocError> {
     args ::= c.alloc.Vec<TyId>();
@@ -187,10 +152,6 @@ subst_list* = (c :: Checker, src: Vec<TyId>, inst: Inst, out :: Vec<TyId>)
     Ok(());
 }
 
-// Still mentions an unsubstituted parameter. `tcode` renders a `Var` as
-// one letter, so `Vec<T>`/`Vec<U>` would collide into one C definition —
-// silently wrong, the exact failure class monomorphisation exists to
-// avoid. Unanswerable consumers refuse instead.
 has_var* = (c: Checker, ty: TyId) bool {
     c.types.at(ty).match({
         Var(_)   => true,
@@ -208,13 +169,6 @@ any_has_var = (c: Checker, list: Vec<TyId>) bool {
     }).match({ Ok(_) => true, None => false })
 }
 
-// ---------------------------------------------------------------------
-// where an instantiation comes from
-// ---------------------------------------------------------------------
-
-// The `Ty.Var`s a declaration's type parameters denote. `owner` must be
-// the same string every reader builds, since `Var` is interned on it —
-// `owner_of` is the one builder.
 tparam_vars* = (
     c       :: Checker,
     tparams : Vec<TParam>,
@@ -227,8 +181,7 @@ tparam_vars* = (
     Ok(());
 }
 
-// The same vars, PUSHED INTO SCOPE rather than collected: a struct's
-// `<T>` and a member's `<U>` resolve out of the tvar stack the same way.
+// Push type parameters into the same scope used for later substitution.
 push_tparams* = (c :: Checker, tparams: Vec<TParam>, owner: str)
                 Res<(), AllocError> {
     tparams.loop((h, tp) {
@@ -238,9 +191,6 @@ push_tparams* = (c :: Checker, tparams: Vec<TParam>, owner: str)
     Ok(());
 }
 
-// A declaration's qualified name: module plus own name. `sema_call.zen`
-// and `sema_member.zen` agree with this because both join the same two
-// segments the same way.
 owner_of* = (c :: Checker, mi: usize, name: str) Res<str, AllocError> {
     out ::= c.alloc.String("{}.{name}", module_name(c, mi)).try();
     Ok(out.view());
@@ -250,9 +200,6 @@ module_name* = (c: Checker, mi: usize) str {
     c.world.table_at(mi).match({ Ok(t) => t.name, None => "" })
 }
 
-// The instantiation a generic TYPE carries: `Vec<GenDiag>` binds `Vec`'s
-// own `T`, so a member of a generic receiver answers about the
-// receiver, not the declaration. Empty for the common non-generic case.
 inst_of_named* = (c :: Checker, n: TyNamed) Res<Inst, AllocError> {
     inst ::= c.alloc.Inst();
     (n.args.len > 0).match({
@@ -288,10 +235,6 @@ fill_tparams = (c :: Checker, n: TyNamed, s: Struct, inst :: Inst)
     Ok(());
 }
 
-// An enum's own arguments bind its parameters exactly as a struct's do:
-// `Hold<Wide>` must answer `Has : Wide`, or the layout writes the
-// payload as the bare parameter and the match arm reads it back as a
-// structure. Same two steps as `fill_tparams`, over `e.tparams`.
 fill_enum_tparams = (c :: Checker, n: TyNamed, e: Enum, inst :: Inst)
                     Res<(), AllocError> {
     owner = owner_of(c, n.decl.module.to_usize(), e.name.text).try();
@@ -332,18 +275,7 @@ zip_arg = (c :: Checker, v: TyId, args: Vec<TyId>, i: usize, inst :: Inst)
     })
 }
 
-// ---------------------------------------------------------------------
 // inference
-// ---------------------------------------------------------------------
-
-// Bind what an argument says about a declared parameter's type
-// parameters. `<T>(p: Ptr<T>)` given `Ptr<u8>` binds `T = u8`; the walk
-// is ordinary structural match, no occurs check, since a `Var` never
-// appears inside the actual.
-//
-// Silent on disagreement: a parameter that doesn't line up binds
-// nothing, and the caller finds out through `has_var` — reporting here
-// would raise a diagnostic for an overload that was only being tried.
 unify* = (c :: Checker, param: TyId, actual: TyId, inst :: Inst)
          Res<(), AllocError> {
     c.types.at(param).match({
@@ -355,10 +287,6 @@ unify* = (c :: Checker, param: TyId, actual: TyId, inst :: Inst)
     })
 }
 
-// Unknown and inference placeholders say nothing about a parameter and never
-// become bindings. A structured type that still contains a type variable is a
-// valid open binding; consumers decide whether remaining variables are usable
-// through `has_var`.
 bind_actual = (c :: Checker, param: TyId, actual: TyId, inst :: Inst)
               Res<(), AllocError> {
     c.usable_actual(actual).match({
@@ -379,8 +307,7 @@ unify_named = (c :: Checker, n: TyNamed, actual: TyId, inst :: Inst)
     })
 }
 
-// Only two applications of ONE declaration say anything about each
-// other's args: `Vec<T>` vs `Map<K, V>` is a mismatch, not inference.
+// Only applications of the same declaration can unify their arguments.
 unify_args = (c :: Checker, n: TyNamed, m: TyNamed, inst :: Inst)
              Res<(), AllocError> {
     n.decl.eq(m.decl).match({

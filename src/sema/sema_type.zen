@@ -1,7 +1,3 @@
-// Expression and block typing. `type_of` memoizes by `ExprId`; blocks use
-// their trailing expression as their value. Calls, matches, member access,
-// `.try()`, and written types delegate to their focused modules.
-
 Expr, ExprId, Literal = std.ast
 Decl, Const = std.ast
 Block, BlockId, Stmt = std.ast
@@ -36,16 +32,10 @@ seed_left_spine, spine_ahead = sema.sema_spine
 type_from_ast, self_type, declared_or_alias = sema.sema_denote
 
 type_of* = (c :: Checker, id: ExprId, ctx: Ctx) Res<TyId, AllocError> {
-    // A WALK'S PROJECTION IS ASKED AGAIN PER PASS (`sema_meta.zen`):
-    // while the backend lowers one pass, a marked `recv.at(field)` is
-    // the CURRENT field's type, not the memo's last one. A miss is this
-    // function's ordinary question, below.
     c.walk_projection_type(id, ctx).try().match({
         Ok(ty) => Ok(ty),
         None   => c.rechecking().match({
-            // inside a walk's per-field check the memo's READ is
-            // bypassed — the body is typed again BECAUSE the answer
-            // changes per field; the write in `compute_expr` stands.
+            // Field-walk bodies are retyped because the projected type changes.
             true  => c.compute_expr(id, ctx),
             false => c.expr_memo.get(id).match({
                 None    => c.compute_expr(id, ctx),
@@ -65,11 +55,6 @@ compute_expr* = (c :: Checker, id: ExprId, ctx: Ctx)
     Ok(got);
 }
 
-// `id` is threaded beside `node` for the two kinds that record an answer
-// under it: a call names a declaration, and a field access names the
-// type that supplied it. An `Expr` is a value and carries no id, so a
-// query that writes into a memo keyed on the node has to be told which
-// node it is.
 expr_kind* = (c :: Checker, id: ExprId, node: Expr, ctx: Ctx)
              Res<TyId, AllocError> {
     node.kind.match({
@@ -94,16 +79,6 @@ expr_kind* = (c :: Checker, id: ExprId, node: Expr, ctx: Ctx)
     })
 }
 
-// A CLOSURE'S SHAPE, WHICH IS ITS ARITY AND NOTHING ELSE: `sema.zen`
-// says a closure "infers its parameter types FROM that signature, not
-// the other way", so every slot is the `_` hole and only the count is
-// known.
-//
-// NOT WHAT `expr_kind` ANSWERS, and deliberately. Poison is right for
-// a closure a signature is about to supply — the ordinary
-// `f.loop((h, v) { .. })` — and the price of poison is that it agrees
-// with everything. Only a caller that knows no signature is coming
-// asks for this instead; `sema_match.zen` is the one that does.
 lambda_type* = (c :: Checker, l: Lambda) Res<TyId, AllocError> {
     hole = c.types.infer().try();
     params ::= c.alloc.Vec<TyId>();
@@ -111,12 +86,6 @@ lambda_type* = (c :: Checker, l: Lambda) Res<TyId, AllocError> {
     c.types.fn_ty(params, hole)
 }
 
-// `[0, 1, 2]` — a fixed array whose count is how many were written and
-// whose element is the FIRST one's type ("the reading is chosen by what
-// the elements ARE": nothing here is a type, so this is a literal). The
-// rest are still typed, for their own diagnostics. An empty literal has
-// no element to ask, and `_` is the honest answer — the same hole
-// `Res<Cfg, _>` writes.
 array_lit_type* = (c :: Checker, a: ArrayLit, ctx: Ctx)
                  Res<TyId, AllocError> {
     elem ::= c.types.infer().try();
@@ -127,9 +96,6 @@ array_lit_type* = (c :: Checker, a: ArrayLit, ctx: Ctx)
     c.types.array(elem, a.elems.len)
 }
 
-// A fixed array's written element type is the expected type for each value.
-// Check literal bounds and match-arm agreement here because no assignment,
-// parameter, or field check surrounds an array element.
 fixed_array_type* = (c :: Checker, f: FixedArray, ctx: Ctx)
                    Res<TyId, AllocError> {
     ty   = c.type_from_ast(f.type, ctx).try();
@@ -143,17 +109,10 @@ fixed_array_type* = (c :: Checker, f: FixedArray, ctx: Ctx)
     Ok(ty);
 }
 
-// A written array type that resolved to something else is a type
-// somebody has already reported on, and it expects nothing of its
-// elements.
 element_of = (c: Checker, ty: TyId) TyId {
     c.types.at(ty).match({ Array(a) => a.elem, _ => ty })
 }
 
-// `buf[i]`. The element, when the receiver is a fixed array — the one
-// place a literal index can be compared against a count, since both
-// are known at once here. Everything else indexes through the `index`
-// its type declares, the backend's question; it stays poison here.
 index_element_type* = (c :: Checker, node: Expr, x: Index, ctx: Ctx)
                      Res<TyId, AllocError> {
     base = c.type_of(x.base, ctx).try();
@@ -170,9 +129,6 @@ array_element = (c :: Checker, node: Expr, x: Index, a: TyArray)
     Ok(a.elem);
 }
 
-// An integer literal is its own type until a context settles it —
-// "a literal's type comes from its context". `int` and `float` are
-// assignable to every width, and to nothing else.
 literal_type* = (c :: Checker, l: Literal) Res<TyId, AllocError> {
     l.kind.match({
         Int   => c.types.prim("int"),
@@ -183,14 +139,6 @@ literal_type* = (c :: Checker, l: Literal) Res<TyId, AllocError> {
     })
 }
 
-// A bare identifier. A local shadows everything, then the module's
-// own declarations, then what it imported — and the `*` gate is
-// inside `defs_of`, not repeated here.
-//
-// A WALK'S TWO BINDERS ARE ASKED ABOUT FIRST (`sema_meta.walk_name`):
-// their legal readings — `field.name`, `recv.at(field)`, `h.break()`,
-// `h.next()` — never reach here, so a name that still does is the
-// comptime term standing as a VALUE, and the wall answers.
 name_type* = (c :: Checker, id: ExprId, node: Expr, text: str, ctx: Ctx)
             Res<TyId, AllocError> {
     c.walk_name(text).match({
@@ -202,10 +150,6 @@ name_type* = (c :: Checker, id: ExprId, node: Expr, text: str, ctx: Ctx)
     })
 }
 
-// A name answered out of the scope stack. The id is threaded so a use
-// of a formal parameter is WRITTEN DOWN (`param_memo`): the binding is
-// released at scope exit, and after it the LSP has no way to tell a
-// parameter from a `let`-style local without this bit.
 bound_name_type = (c :: Checker, id: ExprId, b: Binding)
                   Res<TyId, AllocError> {
     b.param.match({
@@ -215,9 +159,6 @@ bound_name_type = (c :: Checker, id: ExprId, b: Binding)
     Ok(b.ty);
 }
 
-// `None` is the prelude's own variant: `Res<T>` is recognised
-// structurally, so the value form is too. It carries no reason — that's
-// what makes it an absence, not an error.
 unbound_name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
                     Res<TyId, AllocError> {
     text.eq("None").match({
@@ -239,11 +180,6 @@ global_name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
     })
 }
 
-// A MODULE IS A NAMESPACE, NOT A VALUE — the mistake is the USE, not
-// the binding: `sh = shape` then `sh.reseat(3)` is a real pattern the
-// corpus gates, but `println("{}", sh)` is not. The diagnostic lands
-// here, naming the module the bare name stands for — the old error was
-// "cannot print a value of this type".
 value_def_type* = (c :: Checker, node: Expr, d: Def) Res<TyId, AllocError> {
     c.alias_module(d.id).match({
         None   => c.def_type(d),
@@ -251,11 +187,6 @@ value_def_type* = (c :: Checker, node: Expr, d: Def) Res<TyId, AllocError> {
     })
 }
 
-// A BARE VARIANT: `Two` where a visible enum declares it, and no
-// declaration of that name does. A declaration wins, and must:
-// `Res*, Ok*, None* = std.core.result` puts variant names in scope
-// everywhere, so a program declaring one of them means the declaration
-// — the variant is what's left when nothing else answered.
 variant_name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
                     Res<TyId, AllocError> {
     found ::= c.alloc.Vec<Def>();
@@ -282,19 +213,6 @@ unresolved_name* = (c :: Checker, node: Expr, text: str)
     c.types.unknown()
 }
 
-// A name that denotes a DECLARATION rather than a value: a type used as
-// a value is the type itself (`Shape.Unit` reads through it), a
-// function's own type is what overload resolution narrows.
-//
-// A CONSTANT IS NOT ITS OWN TYPE, the one form here that isn't:
-// `RES_PATH* : str = "std.core.result.Res"` binds a `str`, so reading
-// the name as a nominal type `RES_PATH` failed every argument built
-// from it against that `str` parameter — "no overload matches" on a
-// call whose only irregularity was a named argument.
-//
-// AN ALIAS IS NOT ITS OWN TYPE EITHER, for the same reason:
-// `Alias.Circle` is `Shape.Circle`. `declared_or_alias` is the
-// written-type path's resolution, asked with no arguments.
 def_type* = (c :: Checker, d: Def) Res<TyId, AllocError> {
     d.kind.match({
         ConstDef => c.const_type(d),
@@ -313,9 +231,6 @@ decl_as_type* = (c :: Checker, d: Def) Res<TyId, AllocError> {
     c.types.named(d.id, d.qname, d.name, empty)
 }
 
-// What a constant's name denotes: the type it was declared with, or —
-// with none written — the type of the value it was bound to. Resolved
-// in the declaring module, as `alias_written_type` is and for its reason.
 const_type* = (c :: Checker, d: Def) Res<TyId, AllocError> {
     decl_at(c.tree, d.id).match({
         Ok(x) => c.const_decl_type(x, d),
@@ -339,17 +254,6 @@ written_or_value = (c :: Checker, k: Const, ctx: Ctx) Res<TyId, AllocError> {
     })
 }
 
-// `a == b` is `bool` whatever the operands are; `a + b` is the
-// operands' type — both sides typed either way, since a diagnostic
-// inside an unused operand is still a diagnostic.
-//
-// THE LEFT OPERAND IS SEEDED FIRST WHEN IT IS ITSELF AN OPERATOR
-// (`sema_spine.zen`): an operator chain is left-nested and built with a
-// loop, so `b.lhs` can be ten thousand levels deep and recursing
-// segfaults. The seed types those levels bottom-up, the order this
-// function reaches them anyway, so `type_of` below is a memo hit; the
-// guard just keeps the walk's frame off the stack for an ordinary
-// operand — most of them.
 binary_type* = (c :: Checker, node: Expr, b: Binary, ctx: Ctx)
               Res<TyId, AllocError> {
     c.spine_ahead(b.lhs).match({
@@ -371,12 +275,8 @@ binary_type* = (c :: Checker, node: Expr, b: Binary, ctx: Ctx)
     // `==` dispatches to `Eq`, and a type with no impl has nothing to
     // call — the operand type is what says so, never the result's
     c.check_eq(b, operand).try();
-    // AN OPERAND ANSWERS TO ITS PAIR — `sema_operand.zen` says how
+    // Validate the operands as a pair after their individual checks.
     c.operands_agree(b, lhs, rhs).try();
-    // AN OPERAND WRITES NO TYPE DOWN, so a match standing in one owes
-    // only its own arms — `arith_type` above takes the join and never
-    // asks what it was joined from, which is how `b.match({ true => 1,
-    // false => false }) + 1` came out `2`.
     c.check_arms_agree(b.lhs).try();
     c.check_arms_agree(b.rhs).try();
     Ok(got);
@@ -404,9 +304,6 @@ unary_type* = (c :: Checker, node: Expr, u: Unary, ctx: Ctx)
     })
 }
 
-// `&c.width` on an impl-supplied field: there is no storage, so there is
-// no address. The diagnostic lands on the address-of expression, which
-// is where the `&` the author has to delete is.
 addr_type* = (c :: Checker, node: Expr, u: Unary, inner: TyId, ctx: Ctx)
             Res<TyId, AllocError> {
     operand = c.tree.expr_at(u.operand);
@@ -439,25 +336,6 @@ no_address* = (c :: Checker, node: Expr, a: Access, inner: TyId)
     Ok(inner);
 }
 
-// -----------------------------------------------------------------
-// blocks
-//
-// "A block is a value too." Its value is the trailing expression
-// written without a `;`, or — DESIGN.md — a `;`-terminated tail; the
-// AST records only what was written, and this is where that's decided.
-// -----------------------------------------------------------------
-
-// A LOOP HANDLE IS NOT A VALUE, so no block EVALUATES to one. The
-// question lives here and not at `check_return` because the loop body
-// has no return-type slot to fail against: `check_return` only ever
-// sees a function body, so `{ h }` as the tail of `.loop((h, x) {..})`
-// passed sema in silence and gen_c emitted `(void)(zu_l1h);`, refused
-// by cc alone. Asked once, where every block's value is decided.
-//
-// BOTH SPELLINGS ARE ASKED, because they compile to the same C: the
-// written value, and the `;`-terminated last statement a block falls
-// out through. `sema_hoist.tail_expr` reads only the first, which is
-// why the fallback lives beside the reader of `Block.value`.
 refuse_handle_tail* = (c :: Checker, block: Block, got: TyId)
                       Res<(), AllocError> {
     tail_node(block).match({
@@ -506,10 +384,6 @@ block_type* = (c :: Checker, id: BlockId, ctx: Ctx)
     Ok(got);
 }
 
-// Every statement, in order, so a binding is in scope for the ones
-// after it. The last statement's type is carried out because a
-// `;`-terminated tail closes a function: "`0;` closes a Res<i32, E>
-// function like `Ok(0);` does".
 walk_stmts* = (c :: Checker, block: Block, ctx: Ctx)
              Res<TyId, AllocError> {
     last ::= c.types.prim("()").try();
@@ -529,7 +403,3 @@ stmt_type* = (c :: Checker, s: Stmt, ctx: Ctx) Res<TyId, AllocError> {
         Decl(_)  => c.types.prim("()"),
     })
 }
-
-// `target = value;` is its own subject and lives in `sema_place.zen`:
-// a declaration and a write are one statement here, and telling them
-// apart is a question about the TARGET rather than about any node.

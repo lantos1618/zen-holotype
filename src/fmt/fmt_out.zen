@@ -1,35 +1,11 @@
-// src/fmt/fmt_out.zen
-// Where the formatted bytes go, and the two whitespace rules that are
-// this stage's whole opinion.
-//
-//   - A RUN OF BLANK LINES IS ONE BLANK LINE (ast_span.zen: one `Blank`
-//     stands for a run of any length so collapsing it has somewhere to
-//     apply — this is that somewhere).
-//   - A BLANK LINE HAS TO SEPARATE SOMETHING: one owed before anything
-//     is written, or after the last thing, separates nothing and is
-//     dropped — i.e. a file starts on line one, ends with one newline.
-//
-// The blank is OWED rather than written, which makes both rules one
-// mechanism: `blank` records a separator is due, `open` pays it only
-// when content follows, and paying clears the debt so it cannot
-// double-pay.
-//
-// Not `gen.gen_emit.Emit`: `Emit` indents by depth in units of four and
-// never sees a line it did not write; this sink writes whole
-// already-indented lines and tracks a debt, not a depth.
-
 Alloc, AllocError = std.mem
 str, String = std.text
 Range = std.core
 
-// Columns are 1-based everywhere (`Pos.col`, ast_span.zen), so the
-// margin is 1. Named rather than a literal `1`, which a refactor could
-// silently turn into `0` and shift every comment one space left.
 FIRST*: usize = 1
 
 Out* = {
-    // `::` since every write mutates THIS buffer's own bytes — a
-    // bitwise copy wouldn't see them (STYLE.md's test for the marker).
+    // Writes mutate this buffer, so it must be borrowed mutably.
     text* :: String,
 
     // Anything at all has been written. Until it has, an owed blank
@@ -40,21 +16,10 @@ Out* = {
     // A blank line is due before the next content.
     owed :: bool = false,
 
-    // One line of content and the newline that ends it. `s` may hold
-    // newlines of its own — a declaration passed through verbatim is one
-    // string — and they cost nothing, because this sink adds no
-    // indentation for them to fight with.
     say* = (self :: @Self, s: str) Res<(), AllocError> {
         self.say_at(FIRST, s)
     }
 
-    // The same, starting at the author's own column.
-    //
-    // A COMMENT KEEPS THE COLUMN IT WAS WRITTEN IN — the verbatim rule
-    // applied to trivia, not a missing feature. A continuation comment
-    // on the next line is that NEXT declaration's leading trivia, and a
-    // printer with an opinion on comment placement would yank it to the
-    // margin and break a paragraph it never read.
     say_at* = (self :: @Self, col: usize, s: str) Res<(), AllocError> {
         self.open().try();
         Range(FIRST, col).loop((h, i) { self.text.add(' ').try() });
@@ -62,10 +27,6 @@ Out* = {
         self.text.add('\n')
     }
 
-    // Ask for a blank line before whatever comes next. Allocates nothing
-    // but still speaks `Res`, since its caller matches it beside `say`
-    // and sibling arms must agree on a type (`Parser.nothing` is the
-    // same pattern).
     blank* = (self :: @Self) Res<(), AllocError> {
         self.owed = true;
         Ok(());

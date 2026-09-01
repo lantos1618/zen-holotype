@@ -1,7 +1,3 @@
-// Lifetime checks for `@scope` values and arena-backed views. A scope value
-// may be used by work that completes inside its block, but may not be returned,
-// stored in longer-lived data, or captured by an escaping closure.
-
 ExprId, BlockId, Block, Call, Struct = std.ast
 Paren, Access, Member, Function, Param, Span, TypeId = std.ast
 Try, Name, Expr = std.ast
@@ -18,19 +14,6 @@ arena_var, scoped_var, UNTYPED = sema.sema_own
 TyId = sema.sema_ty
 own_member = sema.sema_recv
 
-// RETURNED. The block is gone by the time the caller has the value, so
-// every defer on it would run against a dead frame. Only the FUNCTION
-// BODY's value is asked — a nested block's `@scope` value hands it to
-// an enclosing block that's still open — and asked from INSIDE
-// `own_block`, while this frame's bindings are still on `o.vars`: a
-// binding of `@scope` records `scoped` only where it was declared, and
-// `own_release` drops it before `check_own`'s caller would look.
-//
-// PROVENANCE, not syntax, which is what makes this half different from
-// the two rules above it: `here = () Scope { s = @scope; s; }` leaves
-// through the NAME, one step past any syntactic match. `tail_expr` and
-// not `Block.value` — a body's last expression is the value it returns
-// whether or not the author wrote the closing `;`.
 check_scope_returned* = (c :: Checker, o :: Own, id: BlockId, b: Block)
                          Res<(), AllocError> {
     (id.index == o.body.index).match({
@@ -42,10 +25,6 @@ check_scope_returned* = (c :: Checker, o :: Own, id: BlockId, b: Block)
     })
 }
 
-// STORED. `register(@scope, env)` passes it inward, legal; `Holder(s:
-// @scope)` puts it in a value that can outlive the block. Read the same
-// at the call site; only the resolved declaration tells them apart —
-// what `call_memo` exists for.
 check_scope_stored* = (c :: Checker, id: ExprId, k: Call)
                       Res<(), AllocError> {
     c.is_construction(id).match({
@@ -73,9 +52,6 @@ refuse_scope_args = (c :: Checker, k: Call) Res<(), AllocError> {
     Ok(());
 }
 
-// The keyword itself, wherever it was written — the syntactic half the
-// STORED rule reads on a construction's arguments. Provenance lives in
-// the RETURNED rule above; this stays a match on the AST kind.
 refuse_scope_expr = (c :: Checker, id: ExprId) Res<(), AllocError> {
     node = c.tree.expr_at(id);
     node.kind.match({
@@ -88,11 +64,6 @@ refuse_scope_expr = (c :: Checker, id: ExprId) Res<(), AllocError> {
     })
 }
 
-// CAPTURED. The block outlives every frame registered on it (what
-// non-escaping buys, and what makes `Scope` a bare pointer into
-// automatic storage), so a closure outliving the block holds a pointer
-// to a dead frame — use-after-free, not a style rule. Reported at the
-// use inside the body: no separate capture list to point at.
 check_scope_captured* = (c :: Checker, o :: Own, span: Span, text: str)
                         Res<(), AllocError> {
     captures_scope(o, text).match({
@@ -101,28 +72,6 @@ check_scope_captured* = (c :: Checker, o :: Own, span: Span, text: str)
     })
 }
 
-// ---------------------------------------------------------------------
-// WHICH BINDING NAMES A BLOCK, AND WHERE A TAIL DRAWS ON ONE
-//
-// The RETURNED rule reads the same state `sema_own.zen`'s walk keeps for
-// the capture rule — a binding whose initialiser names the block records
-// `OwnVar.scoped` where it was declared (`sema_own.zen`, `declare_var`)
-// — so the walk below is PROVENANCE over that flag, not syntax. It is
-// what lets the tail refuse `s`, `Ok(s)` and `h.s` one step past the
-// keyword itself.
-//
-// WHAT IT DOES NOT COVER, named rather than hidden. Bindings are
-// tainted by the keyword or by naming a tainted binding — one written
-// step, `t = s`; a taint is not chased through a field path (`h.s`)
-// nor out of a callee, and a parameter of type `Scope` is not recorded
-// at all (`own_params` sets `scoped: false`). All of it is the same
-// fail-open direction this file already takes: a false rejection makes
-// a correct program uncompilable, a missing check only misses.
-// ---------------------------------------------------------------------
-
-// The innermost node whose value names this frame's block, or none —
-// returned as a node so the refusal points at the value that leaves,
-// not at the wrapper that carries it.
 scope_escape = (c :: Checker, o :: Own, id: ExprId) Res<ExprId> {
     c.scope_carries(o, id).match({
         false => None,
@@ -146,9 +95,6 @@ named_scope = (c :: Checker, o :: Own, id: ExprId, text: str) Res<ExprId> {
     scoped_var(o, text).match({ true => Ok(id), false => None })
 }
 
-// `Ok(s)` is a call whose ARGUMENT carries the block out; nothing else
-// about a callee can name this frame's block, so only the arguments are
-// asked, first offender wins.
 scope_escape_in_args = (c :: Checker, o :: Own, k: Call) Res<ExprId> {
     Range(0, k.args.len).find((i) {
         k.args.get(i).match({
@@ -168,9 +114,6 @@ scope_escapes = (c :: Checker, o :: Own, id: ExprId) bool {
     c.scope_escape(o, id).match({ Ok(_) => true, None => false })
 }
 
-// A binding that merely NAMES one tainted (`t = s`) is tainted itself —
-// the flag propagates one written step at declaration time, so the tail
-// walk needs no second kind of answer.
 scope_alias* = (c :: Checker, o :: Own, id: ExprId) bool {
     node = c.tree.expr_at(id);
     node.kind.match({
@@ -209,12 +152,6 @@ scope_fault_name = (node: Expr) str {
     })
 }
 
-// Whether a value of this type could BE a block, or carry one out. The
-// gate that keeps `wrap = (env: Env) () { register(@scope, env) }`
-// compiling — its tail is a call whose argument names the block INWARD,
-// legal — while refusing a wrapper whose payload does leave. A primitive
-// is a copy and ends the chase; anything not a primitive is not
-// something this file can rule out, so it is followed.
 scope_carries = (c :: Checker, o :: Own, id: ExprId) bool {
     c.may_carry_scope(c.place_type(o, id))
 }
@@ -229,10 +166,6 @@ may_carry_scope = (c: Checker, ty: TyId) bool {
     })
 }
 
-// A binding of `@scope` names the block exactly as the keyword does, so
-// `sema_own.zen` records the answer on it when declared. Chased no
-// further than what's WRITTEN — `t = s` where `s` holds one is not
-// seen, the same syntactic limit the two rules above have.
 is_scope_value* = (c :: Checker, id: ExprId) bool {
     c.tree.expr_at(id).kind.match({
         Scope    => true,
@@ -240,26 +173,6 @@ is_scope_value* = (c :: Checker, id: ExprId) bool {
         _        => false,
     })
 }
-
-// ---------------------------------------------------------------------
-// WHICH CLOSURES ESCAPE
-//
-// Read off the CALLEE'S SIGNATURE — law 7's job: "does it allocate,
-// mutate, fail, escape — read the signature". `spawn` is declared
-// `(self, a: Alloc, body: () Res<T, ThreadError>)`; the `Alloc` beside
-// the body says "an escaping closure needs memory" — no allocator, no
-// place to keep a closure past return.
-//
-// So `loop`/`fold`/`then` are untouched (no Alloc param), and
-// `map`/`filter`, which do, are read as escaping at no cost: a body
-// must NAME a `@scope` binding to be refused at all.
-//
-// WHAT IT DOES NOT COVER, named rather than hidden: a free function
-// taking `Alloc` is not asked, only a method. A callee whose type isn't
-// memoized, or whose member comes from an impl rather than the type's
-// own body, reads as NON-escaping — fail-open, since a false rejection
-// makes a correct program uncompilable and a missing check only misses.
-// ---------------------------------------------------------------------
 
 call_escapes* = (c :: Checker, o :: Own, k: Call) bool {
     c.tree.expr_at(k.callee).kind.match({
@@ -291,9 +204,6 @@ takes_alloc = (c :: Checker, f: Function) bool {
     }).match({ Ok(_) => true, None => false })
 }
 
-// `Alloc` by NAME, on the parameter as written — the argument's own
-// type is the wrong thing to ask (`env.mem.alloc()` hands out an
-// `Arena`); the callee declares what it's entitled to keep.
 param_is_alloc = (c :: Checker, p: Param) bool {
     p.type.match({
         None    => false,
@@ -307,39 +217,6 @@ type_is_alloc = (c :: Checker, tid: TypeId) bool {
         _        => false,
     })
 }
-
-// ---------------------------------------------------------------------
-// AN ARENA-BACKED VIEW MAY NOT OUTLIVE THE ARENA
-//
-// `alloc ::= env.mem.alloc()` makes an ordinary scope-local value, so
-// `Arena.drop` frees its pages at the end of the body. Returning a `str`
-// from `buf.view()` would therefore hand the caller freed memory.
-//
-// PROVENANCE, NOT SYNTAX, which is what makes this different from the
-// three `@scope` rules above: the walk taints a BINDING when its
-// initialiser makes an arena, or names a binding already tainted, and
-// the tail of the function body is refused when it names one. Recorded
-// on `OwnVar.arena` because only `sema_own.zen`'s walk knows what a
-// name meant where it was written.
-//
-// A BINDING IS THE WHOLE TRIGGER, deliberately. `Built(arena:
-// env.mem.alloc(), cur: None)` (`src/lsp/lsp_built.zen:215`) makes an
-// arena inline and MOVES it into the value it returns — the struct now
-// owns it, nothing is dropped at the end of the body, and no name is
-// mentioned, so this rule never sees it. The same for an arena that
-// arrived as a parameter: the caller's frame outlives this one, and
-// `own_params` records `arena: false`.
-//
-// WHAT IT DOES NOT COVER, named rather than hidden. The FUNCTION BODY's
-// tail only, matching `check_scope_returned` — a value that leaves
-// through a struct field stored in an out-parameter, or through a
-// closure, is not asked. The walk does not enter `Match`, so a body
-// whose tail is a match returning an arena-backed view from one arm is
-// missed. A taint is not chased through an assignment to a binding
-// declared before the arena, nor out of a callee. All of that is the
-// same fail-open direction the file already takes: a false rejection
-// makes a correct program uncompilable, a missing check only misses.
-// ---------------------------------------------------------------------
 
 check_arena_returned* = (c :: Checker, o :: Own, id: BlockId, b: Block)
                         Res<(), AllocError> {
@@ -380,14 +257,6 @@ draws_on_arena = (c :: Checker, o :: Own, id: ExprId) bool {
     c.arena_name(o, id).match({ Ok(_) => true, None => false })
 }
 
-// WHICH tainted binding this expression draws on, or none. The name is
-// carried rather than a bool so the diagnostic can say which allocator
-// the value is standing on.
-//
-// The pointer guard is what keeps the walk from over-tainting: `buf.len`
-// and `buf.view().eq(x)` are a `usize` and a `bool`, copies that carry
-// no address into the pages, so the taint stops at them. Only `str` and
-// the types this file cannot see through are followed.
 arena_name = (c :: Checker, o :: Own, id: ExprId) Res<str> {
     c.holds_pointer(o, id).match({
         false => None,
@@ -410,9 +279,6 @@ named_arena = (o: Own, text: str) Res<str> {
     arena_var(o, text).match({ true => Ok(text), false => None })
 }
 
-// `Ok(buf.view())` and `Tag(name: buf.view())` are both a `Call` whose
-// ARGUMENT is the escaping value; `buf.view()` is one whose RECEIVER is.
-// All three spellings reach a return today, so all three are asked.
 arena_name_in_call = (c :: Checker, o :: Own, k: Call) Res<str> {
     c.arena_name_of_callee(o, k.callee).match({
         Ok(n) => Ok(n),
@@ -446,19 +312,10 @@ arg_draws_on_arena = (c :: Checker, o :: Own, k: Call, i: usize) bool {
     })
 }
 
-// Whether a value of this type could hold an address into the arena's
-// pages. A number, a `bool` or `()` is a copy and ends the chase; `str`
-// is the view this whole rule is about; anything not a primitive is not
-// something this file can rule out, so it is followed.
 holds_pointer = (c :: Checker, o :: Own, id: ExprId) bool {
     c.carries_address(c.place_type(o, id))
 }
 
-// A `Res` is asked about its VALUE: `write_items(items, body)` in
-// `src/lsp/lsp_serve.zen:723` names an arena-backed `Vec` and returns
-// `Res<(), AllocError>`, so nothing of the arena leaves with it. Reading
-// the wrapper instead of the payload made that a false rejection, which
-// is the shape of mistake this rule cannot afford.
 carries_address = (c :: Checker, ty: TyId) bool {
     ty.eq(UNTYPED).match({
         true  => true,

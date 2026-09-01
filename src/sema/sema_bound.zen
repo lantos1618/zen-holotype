@@ -1,17 +1,3 @@
-// src/sema/sema_bound.zen
-// What a bound promises, and who owes it: an IMPL, and a CALL SITE.
-//
-// Impl validation and call-site validation both answer whether a type keeps
-// a declared promise through `satisfies_bound`. Member lookup remains in
-// `sema_member.zen`; this module owns rejection of invalid bound use.
-//
-// A BOUND IS A PROMISE, and `satisfies_bound` is deliberately narrow: an
-// impl of it, or the same type, and nothing else. A type that happens to
-// have a field of the right name has not made the promise, and accepting
-// it would make the bound a shape check rather than a declaration —
-// which is the difference between "which struct's shape do I need" and
-// "whatever has these names".
-
 Decl, Struct, Impl, Member, Call, Arg, TypeId = std.ast
 Field, Const, Function, Span, Binary, BinOp = std.ast
 AllocError = std.mem
@@ -30,13 +16,6 @@ Cand, TBound, Actual = sema.sema_call
 ty_at, is_tvar = sema.sema_cand
 res_sugar = sema.sema_denote
 
-// TWO THINGS ARE WRONG WITH AN IMPL, and they are asked in that order:
-// where it is written, and what it supplies.
-//
-// "`A.impl(B, {..})` supplies a value for every field `B` declares."
-// Every field, and every member the bound left to the impl — a sealed or
-// default member has a body already, and an optional hook is optional by
-// declaration.
 check_impl* = (c :: Checker, id: ImplId, mi: usize) Res<(), AllocError> {
     c.world.impl_at(c.tree, id).match({
         Ok(im) => c.check_one_impl(im, id, mi),
@@ -52,18 +31,6 @@ check_one_impl = (c :: Checker, im: Impl, id: ImplId, mi: usize)
     Ok(());
 }
 
-// AN IMPL IS ONLY EVER CONSULTED THROUGH THE MODULE THAT DECLARES ITS
-// TARGET. `World.impls_named` is whole-program, but every reader of it
-// — `local_bound_is` below, `sema_supply`, `sema_apply`, `sema_drop`
-// and five sites in `gen_c` — narrows the list with
-// `n.decl.module == id.decl.module`, which is DESIGN.md's "there are no
-// orphan impls" doing double duty as the disambiguator between two
-// same-named types. An impl written anywhere else is therefore not a
-// weaker impl, it is dead text.
-//
-// A TARGET THAT RESOLVES TO NOTHING IS SOMEBODY ELSE'S DIAGNOSTIC: it
-// is an undefined name, not a misplaced impl, and reporting it here
-// would say "move it" about a type that does not exist.
 check_home = (c :: Checker, im: Impl, id: ImplId, mi: usize)
              Res<(), AllocError> {
     defs ::= c.alloc.Vec<Def>();
@@ -74,11 +41,6 @@ check_home = (c :: Checker, im: Impl, id: ImplId, mi: usize)
     })
 }
 
-// THE SAME LOOKUP THE READERS MAKE, and it has to be the same one: a
-// primitive's impls hang off the PRELUDE declaration of its name
-// (`prim_impls_bound`), so asking the impl's own module instead would
-// bless an impl beside a locally-declared `u8` that no bound will ever
-// find.
 target_defs = (c :: Checker, name: str, mi: usize, out :: Vec<Def>)
               Res<(), AllocError> {
     is_prim(name).match({
@@ -128,10 +90,6 @@ owed = (c :: Checker, im: Impl, m: Member, span: Span) Res<(), AllocError> {
     })
 }
 
-// A field with no default, or a member the bound declared with no body
-// and no `::=`. The four forms are DESIGN.md's method table verbatim:
-// Required must be provided, Sealed and Default already are, and a Hook
-// is optional by construction.
 required* = (m: Member) bool {
     m.kind.match({
         Field(f)    => f.value.match({ Ok(_) => false, None => true }),
@@ -144,30 +102,6 @@ missing = (c :: Checker, span: Span, name: str) Res<(), AllocError> {
     c.report(span.file, span, SemaFault.ImplMissingField(NameFault(name: name)))
 }
 
-// ---------------------------------------------------------------------
-// THE SAME QUESTION, ASKED OF A CONSTRUCTION
-//
-// "Did you supply every required member" was answered for an impl and
-// not asked at a constructor, so `Plain = { n*: i32, m*: i32 }` built as
-// `Plain(n: 7)` compiled, emitted `(Plain){ .n = 7 }`, and read `p.m` as
-// zero — a value nobody wrote, indistinguishable from one somebody did.
-// DESIGN.md:1394 already had the rule: "a field with a default is
-// optional; no default and no Res means required".
-//
-// It lives HERE, beside `owed`, because the two are one rule read twice
-// and `required` is already written down once.
-//
-// TWO NARROWINGS, and each is a form a construction CANNOT supply:
-//
-//   - A FUNCTION MEMBER is the impl's, not the constructor's.
-//     `Ifc(n: 1, go: real_go)` does not lower — a bound member
-//     dispatches to the impl, and the fat value is built by the
-//     coercion, never by naming the member in a literal. Demanding it
-//     here would be demanding something unspellable.
-//   - A `Res` FIELD IS OPTIONAL BY ITS TYPE. `Opts = { name: Res<str> }`
-//     writes no default and needs none: absence IS `None`, which is
-//     DESIGN.md's sentence and not an inference from it.
-//
 check_ctor_shape* = (c :: Checker, call: Call, ty: TyId, span: Span)
                     Res<(), AllocError> {
     c.refuse_surplus_arg(call, ty).try().match({
@@ -222,14 +156,6 @@ refuse_surplus_one = (c :: Checker, a: Arg, i: usize, ty: TyId)
     })
 }
 
-// THE OTHER HALF: a value that does not fit the field it names.
-// `Holder(n: "nope")` on `n: i32` emitted `.zu_m1n = (zg_str){..}` into
-// an `int32_t` and left `cc` to be the type checker.
-//
-// `sema_hoist.zen` is where this looks like it belongs, and its header
-// says why it is not there: the escape below needs `satisfies_bound`,
-// and importing this file into that one closes a cycle through
-// `sema_call`.
 arg_fits_field = (c :: Checker, a: Arg, i: usize, ty: TyId)
                  Res<(), AllocError> {
     a.name.match({
@@ -257,16 +183,6 @@ named_arg_fits = (c :: Checker, a: Arg, name: str, ty: TyId)
     })
 }
 
-// AN `Arena` INTO AN `Alloc` FIELD IS NOT A MISMATCH. `assignable`
-// answers about types; a bound is a promise, and the fat value is built
-// at the coercion exactly as it is at a parameter of a bound type. Asked
-// last, because it is the expensive question and the common answer is
-// that the types simply match.
-// THE MEMO AND NOT `type_of`: `check_ctor_fields` runs first in
-// `construct` and types every argument on its way past, so asking again
-// would type the expression twice and need a `Ctx` threaded here to do
-// it. A miss is an argument nothing typed, and nothing is what this says
-// about it.
 arg_value_fits = (c :: Checker, a: Arg, want: TyId) Res<(), AllocError> {
     c.expr_memo.get(a.value).match({
         None    => Ok(()),
@@ -274,18 +190,6 @@ arg_value_fits = (c :: Checker, a: Arg, want: TyId) Res<(), AllocError> {
     })
 }
 
-// NAMED `arg_value_fits` AND `want_is_res` because `value_fits` is
-// `sema_cand.zen`'s and `lifts_into` is `gen_c_hoist.zen`'s. The C
-// namespace is flat and two modules declaring one top-level name is a
-// self-host hazard; the style gate sees it first, by going quiet — a
-// name with two declarations is one its ufcs rule stands down on, so
-// the reading was two ledgers suddenly overstating in files I never
-// touched.
-//
-// A `Res` FIELD IS NOT THIS CHECK'S BUSINESS. `Row(n: 32)` on a field
-// declared `Res<i32>` is a bare value LIFTING, which `check_ctor_fields`
-// answers through `hoist_into_res` — and it is not assignable, so asking
-// here reported three corpus programs that were right.
 fits_or_refuse = (c :: Checker, a: Arg, got: TyId, want: TyId)
                  Res<(), AllocError> {
     (c.assignable(got, want) || c.want_is_res(want)).match({
@@ -316,14 +220,6 @@ absent_fields = (c :: Checker, call: Call, ty: TyId, span: Span)
     Ok(());
 }
 
-// The member and where to blame it — bundled because a fifth parameter
-// here is a signature the formatter breaks over five lines.
-//
-// NOT `Site`, which is what this was called for an hour: the C namespace
-// is FLAT, `gen_c_member.zen` already declares a `Site`, and two modules
-// declaring one top-level name do not self-host. The symptom is not a
-// name error — it is 107 corpus programs emitting C that calls functions
-// nothing declared.
 Owed = {
     m: Member,
     span: Span,
@@ -364,19 +260,6 @@ ctor_required = (c :: Checker, m: Member, ty: TyId)
     })
 }
 
-// THE WRITTEN NAME, AND NEITHER `members_of` NOR THE MEMO. Asking the
-// member table during `construct` costs more than a lookup — it walks
-// impls and instantiates, in the middle of the resolution that is
-// queueing the construction, and 107 corpus programs came out naming
-// `Vec<Diag>(alloc)` in C that never declared it. `type_memo` is the
-// cheap alternative and is not filled for a field's written type by the
-// time a construction elsewhere asks, so it answered "not a Res" for
-// `m: Res<str>`.
-//
-// `Res` IS A NAME AND NOT A KIND — `TypeKind` has no `Res` arm; DESIGN.md
-// gives the failure model one spelling and `sema_ty.zen` interns it from
-// exactly this name. Reading the AST costs nothing and moves nothing,
-// which is the whole requirement here.
 written_res = (c :: Checker, t: Res<TypeId>, owner: TyId)
               Res<bool, AllocError> {
     t.match({
@@ -395,17 +278,6 @@ ctor_missing = (c :: Checker, span: Span, name: str) Res<(), AllocError> {
     c.report(span.file, span, SemaFault.CtorMissingField(NameFault(name: name)))
 }
 
-// Whether `ty` keeps the promise `bound` makes: an impl of it, or the
-// same type — and nothing else. "The bound is the promise", so a type
-// that happens to have a field of the right name has not made one.
-//
-// `same_type` and not `eq`: `Vec.impl(Range<T>, ..)` writes `Vec`'s own
-// `T`, the call `v.loop(..)` wants `loop`'s `T`,
-// and those are two `TyVar`s by construction — `TyVar` is nominal on its
-// owner precisely so they cannot be confused. An id compare therefore
-// says NO to every generic bound in the program, which is not a check,
-// it is a blanket rejection. `sema_check.zen` states the rule once and
-// both halves of this file read it.
 satisfies_bound* = (c :: Checker, ty: TyId, bound: TyId)
                    Res<bool, AllocError> {
     c.same_type(ty, bound).match({
@@ -417,9 +289,6 @@ satisfies_bound* = (c :: Checker, ty: TyId, bound: TyId)
     })
 }
 
-// `Receive<T>` describes one message accepted by an actor. The behavior is
-// written once, in the actor's Actor impl, so generic senders do not require a
-// second forwarding impl merely to name that capability.
 actor_receives = (c :: Checker, ty: TyId, bound: TyId)
                  Res<bool, AllocError> {
     c.receive_bound(bound).match({
@@ -519,12 +388,6 @@ impls_bound = (c :: Checker, ty: TyId, bound: TyId) Res<bool, AllocError> {
     })
 }
 
-// A primitive's impls hang off its prelude declaration — "a prelude
-// declaration of a primitive's name IS that primitive" (sema_member.zen's
-// prim_members, which a dot's lookup already goes through) — so the
-// question is the NAMED one, asked of that declaration under the
-// primitive's own spelling. `u8.impl(ToU32, ..)` is what makes
-// `<T: ToU32>` accept a u8.
 prim_impls_bound = (c :: Checker, p: Prim, bound: TyId) Res<bool, AllocError> {
     defs ::= c.alloc.Vec<Def>();
     c.world.prelude_of(p.name, defs).try();
@@ -540,26 +403,10 @@ prim_impls_bound = (c :: Checker, p: Prim, bound: TyId) Res<bool, AllocError> {
     })
 }
 
-// A FIXED ARRAY SATISFIES `Range` INTRINSICALLY, and `std/core/range.zen`
-// says why it can be nothing else: "`[T, N]` is a type constructor, not a
-// name, so there is no `[T, N].impl(..)` to write — the impl target in
-// the grammar is an identifier, and there is no module that declares
-// `[T, N]` for the impl to live in." So the compiler supplies what no
-// module could have written.
-//
-// RECOGNISED BY THE BOUND'S SHAPE and never by the name `Range`, which
-// is the rule the backend's own `supplies_bounds` already keeps: "a
-// bound is just which struct's shape do I need". Matching on the name
-// would make one library's spelling part of the language.
 array_satisfies = (c: Checker, bound: TyId) bool {
     c.array_range_shape(bound)
 }
 
-// The shape half of the intrinsic, shared with `sema_apply`'s inference:
-// a fixed array walks a bound that declares `start` and `end`, and
-// nothing else. Matching on the name would make one library's spelling
-// part of the language -- "a bound is just which struct's shape do I
-// need", the rule the backend already keeps.
 array_range_shape* = (c: Checker, bound: TyId) bool {
     bound_declares(c, bound, "start") && bound_declares(c, bound, "end")
 }
@@ -622,29 +469,12 @@ impl_bound_is = (c :: Checker, id: ImplId, n: TyNamed, bound: TyId)
     })
 }
 
-// Through `impl_bound_type` and not `type_from_ast` directly, so the
-// target's own type parameters are in scope: `Vec.impl(Range<T>, ..)`
-// writes `Vec`'s `T`, and there is no other declaration of that name to
-// find.
 bound_matches = (c :: Checker, im: Impl, mi: usize, bound: TyId)
                 Res<bool, AllocError> {
     got = c.impl_bound_type(im, mi).try();
     Ok(c.same_type(got, bound));
 }
 
-// ---------------------------------------------------------------------
-// bounds at a call site
-//
-// "The bound is the promise; this call does not keep it." The type
-// argument is read off the parameter it appears in, which is the only
-// place a call site says what it is.
-// ---------------------------------------------------------------------
-
-// `at` IS THE CALL AND NOT THE ARGUMENT. `Dot(x: 1)` is a well-formed
-// expression that means exactly what it says; what does not keep the
-// promise is the CALL that instantiates `scale` with `T = Dot`, and that
-// is the node whose first byte this reports. An argument is only the
-// offending node when the argument alone is wrong.
 check_bounds* = (c :: Checker, cand: Cand, actuals: Vec<Actual>, at: Span)
                 Res<(), AllocError> {
     cand.tbounds.loop((h, tb) {
@@ -666,9 +496,6 @@ check_one_bound = (
     })
 }
 
-// The first parameter written as the bare type parameter. A nested one
-// — `Vec<T>` — would need unification, and inferring a bound from a
-// position the language has not settled is inventing a reason.
 param_of_var = (c: Checker, cand: Cand, name: str) Res<usize> {
     Range(0, cand.params.len).find((i) {
         c.var_named(ty_at(cand.params, i), name, cand.owner)
@@ -730,25 +557,6 @@ bound_not_satisfied = (c :: Checker, tb: TBound, a: Actual, at: Span)
     )
 }
 
-// ---------------------------------------------------------------------
-// `==` is `Eq.eq`
-//
-// "`==` through `Eq` is the only operator that dispatches to an impl",
-// so a type supplying no `eq` has nothing for `==` to call. That is a
-// bound not kept, which is why the rule is here and not with the
-// operators: the question it asks is the one this file exists to ask.
-//
-// REFUSED IN SEMA AND NOT BY THE BACKEND, which is the whole of the
-// change: the program is wrong and will stay wrong, and "codegen does
-// not lower this yet" tells the reader the COMPILER is unfinished.
-//
-// COMPARING TAGS AND PAYLOADS STRUCTURALLY IS THE ALTERNATIVE AND IT IS
-// WORSE. An impl may override `eq` for custom equality, and a `==` that
-// compared bytes would then disagree with `.eq()` on the same two values
-// — which is exactly what "`ne` is always `!eq`, they can never diverge"
-// exists to prevent.
-// ---------------------------------------------------------------------
-
 check_eq* = (c :: Checker, b: Binary, operand: TyId) Res<(), AllocError> {
     (is_eq_op(b.op) && c.dispatches_eq(operand)).match({
         false => Ok(()),
@@ -760,17 +568,10 @@ is_eq_op = (op: BinOp) bool {
     op.match({ Equal => true, NotEqual => true, _ => false })
 }
 
-// A scalar is C's own `==` and needs no impl. `unbounded` covers the
-// rest: an unsubstituted `T` reaches the backend as the type it was
-// instantiated with, where the same question is asked again.
 dispatches_eq = (c: Checker, ty: TyId) bool {
     (c.scalar_eq(ty) || c.unbounded(ty)) == false
 }
 
-// The backend's rule, asked one layer up: every primitive but `str` and
-// `()` compares with the C operator. `str` is on this side of the line
-// because it is an ordinary struct in the prelude and impls its own
-// `Eq` — which is how a literal comparison finds one.
 scalar_eq = (c: Checker, ty: TyId) bool {
     c.types.at(ty).match({
         Prim(p) => p.name.eq("str") == false && p.name.eq("()") == false,
@@ -787,8 +588,7 @@ prove_eq = (c :: Checker, b: Binary, operand: TyId) Res<(), AllocError> {
     })
 }
 
-// THE LEFT OPERAND'S FIRST BYTE, which is the `==` expression's own: an
-// operator chain is left-nested, so `a == b` begins where `a` does.
+// A left-nested equality expression begins at its left operand.
 eq_needs_impl = (c :: Checker, b: Binary, operand: TyId)
                 Res<(), AllocError> {
     poison = c.types.unknown().try();

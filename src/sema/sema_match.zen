@@ -1,10 +1,3 @@
-// Pattern normalization, arm typing, and exhaustive-match checking.
-//
-// Coverage uses Maranget's usefulness algorithm. An arm is unreachable when
-// it adds no value beyond preceding rows; a wildcard that remains useful after
-// all rows proves the match is incomplete. Poison and unresolved scrutinee
-// types skip coverage because they provide no trustworthy case set.
-
 Expr, ExprId, Span, Literal, nowhere = std.ast
 Pattern, PatName, Destructure, PatternId = std.ast
 Match, QualifiedName, Lambda = std.ast
@@ -23,13 +16,6 @@ join = sema.sema_join
 const_def = sema.sema_const
 push_tparams, module_name = sema.sema_inst
 
-// A pattern, normalised: the three shapes the algorithm knows.
-//
-// `WildPat` covers a bare `_` AND a binder — they cover the same values,
-// the binder is a name for what was covered, not a narrowing. Same
-// reason a name that is not a case of the scrutinee's type becomes one:
-// `Left(Blank)` and `Ok(n)` are the same three tokens, and which is
-// which "depends on what is in scope".
 PatKind* = WildPat | CtorPat | LitPat
 
 Pat* = {
@@ -41,10 +27,6 @@ Pat* = {
     span*: Span,
 }
 
-// The pattern arena. Normalisation SYNTHESISES patterns — a case with a
-// payload written without one covers the payload with a wildcard — so
-// the normalised form can't be the AST's. A `Pat` holding a `Pat` has no
-// size, so a sub-pattern is an index, as `ast_arena.zen` argues for `ExprId`.
 Pats* = {
     rows :: Vec<Pat>,
     alloc: Alloc,
@@ -87,10 +69,6 @@ Pats* = {
 
 Pats* = (a: Alloc) Pats { Pats(rows: a.Vec<Pat>(), alloc: a) }
 
-// Maranget's matrix: `n` rows of `width` pattern indices. Flat, with the
-// row length carried, rather than a `Vec<Vec<usize>>` — a nested generic
-// and one allocation per row to describe a rectangle whose width is
-// already known.
 PatMatrix* = {
     cells :: Vec<usize>,
     width*: usize,
@@ -114,14 +92,7 @@ PatMatrix* = (a: Alloc, width: usize) PatMatrix {
     PatMatrix(cells: a.Vec<usize>(), width: width, n: 0, alloc: a)
 }
 
-// ---------------------------------------------------------------------
-// THE QUERY: what a `.match` is
-// ---------------------------------------------------------------------
-
-// Every arm is checked, in order, and the value is the arms' join. The
-// checks run BEFORE the arms are typed, so a program with a missing case
-// still gets types for the arms it wrote — an LSP showing one error must
-// still be able to hover the rest.
+// Resolve the value type of a match expression.
 match_type* = (c :: Checker, node: Expr, mt: Match, ctx: Ctx)
               Res<TyId, AllocError> {
     sty = c.type_of(mt.scrutinee, ctx).try();
@@ -146,14 +117,6 @@ norm_arms = (
     Ok(());
 }
 
-// ---------------------------------------------------------------------
-// normalisation
-//
-// The AST can't say whether `Gone` is a case or a binder — "that is
-// sema's question, and a parser answering it is a parser guessing." The
-// case list answers it here, once, and everything below reads the answer.
-// ---------------------------------------------------------------------
-
 norm_pattern* = (c :: Checker, ps :: Pats, pid: PatternId, ty: TyId, ctx: Ctx)
                 Res<usize, AllocError> {
     node = c.tree.pattern_at(pid);
@@ -165,9 +128,6 @@ norm_pattern* = (c :: Checker, ps :: Pats, pid: PatternId, ty: TyId, ctx: Ctx)
     })
 }
 
-// Sub-patterns are normalized against the constructor payload. For a union of
-// enums, `Member(Leaf)` becomes a member constructor containing the leaf
-// pattern; nominal enums keep their ordinary single-constructor shape.
 norm_destructure = (
     c    :: Checker,
     ps   :: Pats,
@@ -229,10 +189,6 @@ norm_name = (
     })
 }
 
-// A bare name that is no case of the set: when a MEMBER declares it the
-// name is that leaf written flat — `NotANumber` under
-// `Trouble = AllocError | ParseError` — and normalises exactly as its
-// two-level spelling does. Anything else falls through to a binder.
 norm_set_name = (
     c    :: Checker,
     ps   :: Pats,
@@ -263,9 +219,6 @@ norm_qualified = (
     })
 }
 
-// Exactly two segments: `Member.Leaf`. The member must name a member of
-// the set and the leaf a case of that member — anything else falls
-// through to a binder with its report, unchanged.
 norm_member_dot = (
     c    :: Checker,
     ps   :: Pats,
@@ -285,10 +238,6 @@ norm_member_dot = (
     })
 }
 
-// Locals may bind normally even when a constant has the same spelling.
-// Otherwise an uppercase name that is neither a case nor a qualified member is
-// reported: treating it as a wildcard binder would make the remaining arms
-// unreachable and incorrectly mark the match exhaustive.
 norm_binder = (
     c    :: Checker,
     ps   :: Pats,
@@ -305,9 +254,7 @@ norm_binder = (
             SemaFault.ConstPattern(NameFault(name: text))
         ).try();
     });
-    // ONE MISTAKE, ONE DIAGNOSTIC: a name that IS a constant in scope has
-    // an owner, and the constant complaint already says everything the
-    // no-owner complaint would say again.
+    // Constants already receive the more specific constant-pattern diagnostic.
     (is_const == false && c.not_a_case(ty, text).try()).then(() {
         c.report(
             node.span.file,
@@ -318,11 +265,6 @@ norm_binder = (
     ps.add(binder_pat(text, node.span)).try()
 }
 
-// Is this name ownerless? Only an UPPER-CASE name can be: a lower-case
-// one is a binder by shape, in any type, with or without cases. Asked
-// only where a case list exists — poison, a hole and an unsubstituted
-// type parameter have none to consult, and inventing a diagnostic out of
-// that absence is the mistake this file's header records (§8).
 not_a_case = (c :: Checker, ty: TyId, text: str) Res<bool, AllocError> {
     c.checkable(ty).match({
         false => Ok(false),
@@ -343,10 +285,7 @@ is_case* = (c :: Checker, ty: TyId, name: str) Res<bool, AllocError> {
     Ok(find_case(cases, name).match({ Ok(_) => true, None => false }));
 }
 
-// ---------------------------------------------------------------------
 // the checks
-// ---------------------------------------------------------------------
-
 check_coverage = (
     c    :: Checker,
     ps   :: Pats,
@@ -372,13 +311,6 @@ pick_name = (take: bool, name: str, so_far: str) str {
     take.match({ true => name, false => so_far })
 }
 
-// ---------------------------------------------------------------------
-// usefulness
-//
-// `U(matrix, q)`, the header's question. Three cases on the head of
-// `q`; the algorithm is which matrix each recurses on.
-// ---------------------------------------------------------------------
-
 head_is_ctor = (p: Pat, name: str) bool {
     p.kind.match({ CtorPat => p.name.eq(name), _ => false })
 }
@@ -399,10 +331,6 @@ is_wild = (p: Pat) bool {
     p.kind.match({ WildPat => true, _ => false })
 }
 
-// Stable facts for one match coverage walk. `Checker` remains a method
-// argument because records are values: copying it would make reports and type
-// interning land on a copy. Matrix, query, and type columns remain explicit
-// because each recursion specialises them independently.
 MatchCoverage = {
     pats :: Pats,
     sty  : TyId,
@@ -596,10 +524,6 @@ MatchCoverage = {
         self.useful(c, sm, q2, t2)
     }
 
-    // A wildcard splits on whether the rows above it already name every
-    // case. If they do, each case is asked separately — how `Left(Full(n))`,
-    // `Left(Blank)`, `Right(_)`, `Gone` is proved complete without a `_`. If
-    // not, only the rows that are themselves wildcards can stand in the way.
     useful_wild = (
         self  :: @Self,
         c     :: Checker,
@@ -860,12 +784,6 @@ useful* = (
     Ok(got)
 }
 
-// ---------------------------------------------------------------------
-// arm values
-// ---------------------------------------------------------------------
-
-// Every arm produces the match's value, and the match's type is their join.
-// A bare `Ok(..)` arm is `Open`, so an adjacent settled arm supplies its form.
 arm_types = (
     c    :: Checker,
     ps   :: Pats,
@@ -935,7 +853,7 @@ arm_closure_type = (c :: Checker, id: ExprId, l: Lambda, ctx: Ctx)
 }
 
 // The names a pattern introduces, in the arm's own scope: `Ok(n)` binds
-// `n` to the PAYLOAD's type — the only reason it was carried this far.
+// `n` to the payload type.
 bind_pattern* = (c :: Checker, ps: Pats, i: usize, ty: TyId)
                 Res<(), AllocError> {
     p = ps.at(i);
@@ -963,10 +881,7 @@ bind_payload = (c :: Checker, ps: Pats, p: Pat, ty: TyId)
     c.bind_pattern(ps, p.sub, payload)
 }
 
-// ---------------------------------------------------------------------
 // the small pieces
-// ---------------------------------------------------------------------
-
 wild_pat* = (span: Span) Pat {
     Pat(
         kind: PatKind.WildPat,
@@ -1011,21 +926,12 @@ sub_pat = (name: str, sub: usize, span: Span) Pat {
     )
 }
 
-// `Member.Leaf` against a set: one case of the MEMBER, written flat.
-// The leaf rides as the SUB-pattern, exactly as `Member(Leaf)` spells
-// itself — same usefulness columns, same bindings, same backend — so
-// two arms under one member stay distinguishable and a later arm is
-// never swallowed by an earlier one.
 dot_pat* = (c :: Checker, ps :: Pats, member: str, leaf: str, span: Span)
            Res<usize, AllocError> {
     hole = c.leaf_hole(ps, leaf, span).try();
     ps.add(sub_pat(member, hole, span))
 }
 
-// The sub-pattern a leaf narrows with: the case itself when the member
-// declares it, a wildcard otherwise. A miss is not input — the caller
-// only reaches here with a member in hand — so the reading invents
-// nothing.
 leaf_hole = (c :: Checker, ps :: Pats, leaf: str, span: Span)
             Res<usize, AllocError> {
     (leaf.len > 0).match({
@@ -1034,11 +940,6 @@ leaf_hole = (c :: Checker, ps :: Pats, leaf: str, span: Span)
     })
 }
 
-// `Leaf` written bare under a set whose MEMBER declares it — and the
-// same shape when the bare name IS a member (`AllocError => ..`). One
-// ctor on the set with the leaf as its sub-pattern, exactly what the
-// qualified spellings normalise to; the backend answers the same
-// question in `name_cond`, so the two halves cannot drift.
 member_leaf = (c :: Checker, ps :: Pats, mty: TyId, text: str, span: Span)
               Res<usize, AllocError> {
     name = c.member_name(mty);
@@ -1049,7 +950,7 @@ member_leaf = (c :: Checker, ps :: Pats, mty: TyId, text: str, span: Span)
     ps.add(sub_pat(name, hole, span))
 }
 
-// The NAME a set's member is spelled by — the ctor a pattern for that
+// The name a set member's constructor uses in a pattern.
 // member carries. `sym_union_member` spells the same thing in C.
 member_name = (c :: Checker, mty: TyId) str {
     c.types.at(mty).match({

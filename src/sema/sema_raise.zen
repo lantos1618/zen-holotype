@@ -1,18 +1,3 @@
-// src/sema/sema_raise.zen
-// What a body raises, and the signature inferred from it.
-//
-// `Res<T, _>` infers the error set from a private function's body.
-// Exported signatures must write the set explicitly because they cross a
-// module boundary (`InferredSetExported` in `sema_diag.zen`).
-//
-// TWO SOURCES, BOTH NEEDED: a `.try()` propagates its callee's set into
-// the accumulator; a body ending in `Err(..)` never propagates and
-// shows its set only in the block's own type. `parse_pair` has the
-// first, `read_num` the second — the pair TESTING.md names.
-//
-// The settled set is written into the return type's memo for later sema and
-// code-generation queries.
-
 Function, TypeId, Span = std.ast
 AllocError = std.mem
 Vec = std.collections
@@ -37,10 +22,6 @@ settle_raised* = (
     })
 }
 
-// The declared error, when the author wrote `_` for it — `None` for a
-// function that named its set or returns no `Res` at all; the raised
-// list is dropped there since the ordinary containment rule already
-// reported anything wrong.
 inferred_error = (c :: Checker, ret: TyId) Res<TyId> {
     c.types.at(ret).match({
         Res(r) => c.infer_hole(r),
@@ -68,9 +49,6 @@ settle_signature = (
     c.write_ret(f, ctx, set)
 }
 
-// `*` means this name crosses a module boundary, and a crossing type is
-// written. The set is still settled after the report, so one unwritten
-// signature is one diagnostic, not one per call site.
 report_if_exported = (c :: Checker, f: Function) Res<(), AllocError> {
     f.exported.match({
         false => Ok(()),
@@ -78,9 +56,6 @@ report_if_exported = (c :: Checker, f: Function) Res<(), AllocError> {
     })
 }
 
-// Lands on the `_`, since that's what the author has to replace —
-// naming the function instead would point at the one token already
-// correct.
 report_hole = (c :: Checker, f: Function) Res<(), AllocError> {
     span = c.hole_span(f).match({ None => f.name.span, Ok(s) => s });
     c.report(
@@ -111,9 +86,6 @@ arg_span = (c :: Checker, args: Vec<TypeId>, i: usize) Res<Span> {
     })
 }
 
-// The block's own type carries what a body raises by ENDING in it:
-// `Err(CfgError.Bad)` is the block's value, never a propagation, so
-// nothing put it in the accumulator.
 body_error = (c :: Checker, got: TyId, raised :: Vec<TyId>)
              Res<(), AllocError> {
     c.types.at(got).match({
@@ -130,9 +102,6 @@ keep_error = (c :: Checker, r: TyRes, raised :: Vec<TyId>)
     })
 }
 
-// An absence carries `()` as its error, an unresolved one poison —
-// neither is a member of anybody's set; adding either would make
-// `Res<i32, _>` settle as a set containing `()`.
 carries_error = (c :: Checker, r: TyRes) bool {
     c.is_infer(r.error).match({
         true  => false,

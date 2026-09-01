@@ -1,21 +1,3 @@
-// A trap the compiler can prove will fire is a compile error: constant
-// overflow, a constant zero divisor, `i32.MIN / -1` (overflow wearing
-// division's clothes), a literal out of its type's range, and a literal
-// index past a known length (DESIGN.md, the failure model).
-//
-// EVERY RULE HERE IS "PROVE IT OR SAY NOTHING", and what it may prove
-// with is `sema_const.zen`: a folder over literals, never through a
-// binding — the trap corpus routes values like `i32.MAX` through a
-// variable specifically so the compiler can't see them, and folding
-// through a binding would turn those runtime tests into compile errors.
-// That discipline is the other file's, stated there; this file is the
-// list of sentences it earns.
-//
-// The index rule lives with the arithmetic rules because `Ty.Array`
-// carries `count` (`[u8, 64]` and `[u8, 65]` are different types),
-// giving `buf[4]` on `[i32, 4]` both halves of the comparison at one
-// node — the same shape as a literal measured against its type.
-
 Expr, ExprId, Binary, Literal = std.ast
 Unary, Paren, Index, Match, ArrayLit = std.ast
 AllocError = std.mem
@@ -25,11 +7,6 @@ SemaFault, NameFault, TypeFault = sema.sema_diag
 Checker = sema.sema_check
 const_int, const_literal, fits, fold = sema.sema_const
 len_of, min_of = sema.sema_const
-// the rule
-// ---------------------------------------------------------------------
-
-// Dispatches trapping ops; wrapping forms (`+% -% *%`) fall to `_` and
-// stay silent by design.
 check_binary* = (c :: Checker, b: Binary, ty: TyId) Res<(), AllocError> {
     b.op.match({
         Div => c.check_divisor(b, ty),
@@ -126,10 +103,6 @@ with_both = (c :: Checker, b: Binary, ty: TyId, x: i64, y: i64)
     })
 }
 
-// fits declines a name its table does not hold, and a refusal is
-// not "it fits" — it is nothing proved, so nothing reported. The
-// `is_integer` guard above stays: it is what keeps floats and every
-// non-primitive out of the question at all.
 check_fits = (c :: Checker, b: Binary, ty: TyId, v: i64)
              Res<(), AllocError> {
     name = c.prim_name(ty);
@@ -158,33 +131,6 @@ overflow = (c :: Checker, b: Binary, name: str) Res<(), AllocError> {
     )
 }
 
-// ---------------------------------------------------------------------
-// the literal rule
-//
-// `literal_fits` reads "a literal's type comes from its context" as an
-// `int` literal agreeing with every integer type — right about the
-// family, not the value, so `n: i32 = 2147483648` wrapped at codegen
-// (same bug as `i32.MAX + 1` one fold earlier).
-//
-// Walks only forms that wrap a literal without changing it — parens and
-// the unary minus that makes `-1` one literal — never a folded
-// expression: `x: u8 = 200 + 100` is already `ProvenOverflow` at the
-// operator, and reporting here too would double the diagnostic.
-//
-// Unfoldable is not rejected: `18446744073709551615` and
-// `-9223372036854775808` exceed the `i64` this file folds in, so
-// `str.parse_i64` abstains, keeping `u64.MAX`/`i64.MIN` legal per
-// `corpus/lex/number_type_boundaries`.
-//
-// Eight call sites reach this, not just `check_assign`: `sema_place`,
-// `sema_call`, `sema_hoist` (return/ctor field), `sema_type` (array
-// element); a match arm is walked here since it has no caller of its
-// own — the match settles its context; and `sema_type.operands_agree`
-// asks it of a LITERAL OPERAND, from whichever side it stands on,
-// against the type its pair settles (`n / 200` on an `i8`), where no binding or call ever stood between the value and
-// its use.
-// ---------------------------------------------------------------------
-
 // Only `want` matters: the literal's own type is always `int` (nothing
 // else folds), so no caller needs to pass it.
 check_literal* = (c :: Checker, id: ExprId, want: TyId)
@@ -195,22 +141,6 @@ check_literal* = (c :: Checker, id: ExprId, want: TyId)
     })
 }
 
-// AN ELEMENT IS A TYPED SLOT TOO, and the range half above is not all
-// it owes. `[0, v]` with `v: i16` reaches a `[u8, 2]` because
-// `sema_type.array_lit_type` mints the literal's type from its FIRST
-// element — `[int, 2]` — and `array_assignable` grants that every array
-// of its length, the same family leniency that keeps `[1, 2, 3]` legal
-// at a `[u8, 3]`. So every other element's type was computed and thrown
-// away, and the `i16` stood in a `u8` slot unasked until the store
-// narrowed it to 255. The scalar twin `a: u8 = v` was always refused.
-//
-// THE MEMO'S ANSWER AND NEVER A FRESH ONE, for the reason
-// `sema_hoist.arm_fits` gives: every caller types the element before
-// asking, so a miss is an element nothing typed and this rule has
-// nothing to say about one. An int LITERAL is still `int` here and
-// still agrees with every integer type, so only a non-literal of
-// another type is refused — and `coerce` is what says so, since the
-// range fault above can name neither side.
 element_agrees* = (c :: Checker, id: ExprId, elem: TyId)
                   Res<(), AllocError> {
     node = c.tree.expr_at(id);
@@ -220,12 +150,6 @@ element_agrees* = (c :: Checker, id: ExprId, elem: TyId)
     })
 }
 
-// AN ELEMENT SITS WHERE THE ARRAY SITS. `xs: [u8, 3] = [1, 2, 300]`
-// writes `u8` nowhere an element can see, and `[int, 3]` now reaches
-// `[u8, 3]` by the same family rule this file exists to correct — so
-// without this the 300 would wrap to 44 unreported. `fixed_array_type`
-// asks the same question of `[u8, 3](1, 2, 300)`, where the type is
-// written beside the values instead of at the position.
 elements_within = (c :: Checker, id: ExprId, want: TyId)
                   Res<(), AllocError> {
     c.types.at(want).match({
@@ -242,25 +166,11 @@ array_elements = (c :: Checker, id: ExprId, a: TyArray) Res<(), AllocError> {
     })
 }
 
-// AN ARM PRODUCING AN ARRAY STANDS WHERE THE ARRAY STANDS — the same
-// recursion `literal_within` makes for a scalar one position down, and
-// `sema_hoist.arm_fits` cannot make it instead: it asks the arm about
-// its own type, and `[int, 2]` reaching a `[u8, 2]` is precisely the
-// family leniency this file exists to look through. So `e: [u8, 2] =
-// b.match({ true => [0, 300], .. })` wrapped to 44 unreported, and
-// `[0, v]` in the same arm narrowed an `i16` unreported — the whole
-// rule missing at one position rather than half of it.
 arm_arrays = (c :: Checker, m: Match, a: TyArray) Res<(), AllocError> {
     m.arms.loop((h, arm) { c.array_elements(arm.body, a).try() });
     Ok(());
 }
 
-// ELEMENT ZERO IS THE ARRAY'S OWN WORD: the literal's type was minted
-// from it, so whoever coerced the literal into this position has
-// already asked whether it fits and already reported it. Asking again
-// here would be one mistake said twice. `sema_type.fixed_array_type`
-// writes the type beside the values with no coercion in front of it,
-// and so asks about all of them.
 elem_literals = (c :: Checker, lit: ArrayLit, elem: TyId)
                 Res<(), AllocError> {
     lit.elems.loop((h, i, e) {
@@ -273,9 +183,6 @@ elem_literals = (c :: Checker, lit: ArrayLit, elem: TyId)
     Ok(());
 }
 
-// An arm's value sits in the match's own position: `m: i32 =
-// b.match({ true => 3000000000, .. })` puts the literal where `i32` is
-// — same reason parentheses are walked into.
 literal_within = (c :: Checker, id: ExprId, want: TyId)
                  Res<(), AllocError> {
     node = c.tree.expr_at(id);
@@ -290,14 +197,6 @@ arm_literals = (c :: Checker, m: Match, want: TyId) Res<(), AllocError> {
     Ok(());
 }
 
-// The fold is `const_int`'s: one number however many operators wrote it,
-// under the depth budget that lets a ten-thousand-term chain decline
-// instead of segfaulting (sema_const). A decline is usually "not
-// provably anything" -- a binding in the way, a chain past the budget --
-// and silence is right for it. A BARE `Int` literal is the one form with
-// no such excuse: its digits reached the tree only by fitting a u64
-// accumulator (`std/lex/lex_literal.zen`), so declining means they are
-// past i64, which every type but u64/usize cannot hold (#769).
 folded_within = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
     c.const_int(id).match({
         None  => c.unfoldable_within(id, want),
@@ -327,10 +226,6 @@ literal_kind_within = (c :: Checker, id: ExprId, l: Literal, want: TyId)
 
 value_within = (c :: Checker, id: ExprId, want: TyId, v: i64)
                Res<(), AllocError> {
-    // A REFUSAL IS NOT "IN RANGE" (#817): `fits` declines a name its
-    // table does not hold, and declining to report is the answer for
-    // what nothing was proved about — never a judgment from a guessed
-    // bound.
     fits(v, c.prim_name(want)).match({
         None      => Ok(()),
         Ok(false) => c.out_of_range(id, want),
@@ -355,14 +250,6 @@ out_of_range = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
     )
 }
 
-// THE RANGE QUESTION WITHOUT THE DIAGNOSTIC, for the one position sema
-// cannot reach. `h.break(300)` over a `[u8]` walk is a literal in a
-// typed slot like every other position this file guards, but it lives
-// inside a LAMBDA BODY and sema does not walk those — the backend is
-// the only pass that ever sees the pair. A `report` from there would
-// join a list already rendered, so the knowledge stays here with the
-// rest of the range rule and `gen_c_handle` asks for it in its own
-// voice (#766).
 literal_overflows* = (c: Checker, id: ExprId, want: TyId) bool {
     name = c.prim_name(want);
     is_integer(name).match({
@@ -378,8 +265,7 @@ int_literal_overflows = (c: Checker, id: ExprId, name: str) bool {
     })
 }
 
-// A REFUSAL IS NOT "IT FITS" (#817): the backend's one range question
-// reports only what was PROVED not to fit.
+// A failed proof is not evidence that the value fits.
 fits_says = (c: Checker, v: i64, name: str) bool {
     fits(v, name).match({
         None      => false,
@@ -388,13 +274,6 @@ fits_says = (c: Checker, v: i64, name: str) bool {
     })
 }
 
-// The literal as written, empty if not written as one (same pattern as
-// `written_index`, and the same shape `literal_int` walks). Parens
-// don't change a literal and neither does a leading minus — the minus
-// is part of how it was written — so `-1` reads back as `-1`, not as
-// `1`. The negated form is composed rather than sliced, which is why
-// this allocates and says so; `dotted` in sema_def.zen is the
-// precedent, and every other arm hands back a slice the tree owns.
 written_literal = (c: Checker, node: Expr) Res<str, AllocError> {
     node.kind.match({
         Literal(l) => Ok(l.text),
@@ -410,10 +289,6 @@ written_literal = (c: Checker, node: Expr) Res<str, AllocError> {
     })
 }
 
-// Unlike `const_int`, walks only literal, paren and unary-minus forms —
-// the tree's own nesting bounds the recursion. Arithmetic goes through
-// `const_int` at the caller (#769): a chain is left-nested and
-// unbounded, and folding it by recursion segfaulted on a long line.
 literal_int = (c: Checker, node: Expr) Res<i64> {
     node.kind.match({
         Literal(l) => const_literal(l),
@@ -436,15 +311,6 @@ negate_literal = (c: Checker, id: ExprId) Res<i64> {
         Ok(v) => Ok(0 - v),
     })
 }
-
-// ---------------------------------------------------------------------
-// the index rule
-//
-// A literal index past a known length is a compile error. The length is
-// the count in the type; the index folds like any other operand here,
-// so one reached through a binding is left to the runtime check — the
-// same literals-only discipline the arithmetic rules keep.
-// ---------------------------------------------------------------------
 
 check_index* = (c :: Checker, node: Expr, x: Index, a: TyArray)
                Res<(), AllocError> {
@@ -474,9 +340,6 @@ out_of_bounds = (c :: Checker, node: Expr, x: Index) Res<(), AllocError> {
     )
 }
 
-// The index as written (same pattern as `written_literal`): a source
-// slice the tree already owns, so nothing is allocated to outlive the
-// diagnostic; a fold quotes nothing.
 written_index = (c: Checker, x: Index) str {
     c.tree.expr_at(x.index).kind.match({
         Literal(l) => l.text,

@@ -1,10 +1,3 @@
-// src/sema/sema_place.zen
-// Type checking for Bind statements. The AST uses one shape for declarations
-// and writes: a bare fresh name introduces storage, while an existing name,
-// access, or index writes storage owned elsewhere. This module determines the
-// destination type and storage validity; ownership and receiver permission are
-// checked by sema_own and sema_recv.
-
 Expr, ExprId, Bind, Access = std.ast
 AllocError = std.mem
 str = std.text
@@ -24,10 +17,6 @@ settle_variant_at = sema.sema_apply
 
 refuse_handle_value = sema.sema_handle
 
-// `x = e;`, `x: T ::= e;`.
-//
-// A refused rebinding uses poison as its destination to avoid a second,
-// misleading value-type mismatch.
 bind_stmt* = (c :: Checker, b: Bind, ctx: Ctx) Res<TyId, AllocError> {
     got = c.type_of(b.value, ctx).try();
     c.refuse_handle_value(b.value, got).try();
@@ -102,9 +91,6 @@ report_rebound = (c :: Checker, b: Bind, old: Binding)
     Ok(true);
 }
 
-// Choose the destination type. A written type wins; otherwise a write uses the
-// existing place type and a declaration uses the value type. The value is
-// typed first because a declaration target may not exist yet.
 bind_want* = (c :: Checker, b: Bind, got: TyId, ctx: Ctx)
              Res<TyId, AllocError> {
     b.type.match({
@@ -116,13 +102,6 @@ bind_want* = (c :: Checker, b: Bind, got: TyId, ctx: Ctx)
     })
 }
 
-// A settled write uses its storage type. An unsettled literal slot has not
-// chosen a width: `n ::= 0`
-// freezes the family and nothing more — `int` is the literal's own
-// type, the slot it emits is an `int64_t`, and every integer reaches
-// one — so `fields ::= 0; fields = fields + m.NULL` stores an `i32`
-// exactly, while `n = 3.5` still has no integer to be. A settled slot
-// has chosen, and then the choice is the answer.
 store_want = (c :: Checker, old: TyId, got: TyId) Res<TyId, AllocError> {
     (c.is_literal_ty(old) && c.assignable(old, got)).match({
         true  => Ok(got),
@@ -130,9 +109,6 @@ store_want = (c :: Checker, old: TyId, got: TyId) Res<TyId, AllocError> {
     })
 }
 
-// A place's type is `type_of`'s answer for reads — a write asks the
-// same question of the same node. Unresolved comes back poisoned, which
-// `assignable` accepts: an unresolved place fails open.
 place_want* = (c :: Checker, id: ExprId, got: TyId, ctx: Ctx)
               Res<TyId, AllocError> {
     c.tree.expr_at(id).kind.match({
@@ -141,19 +117,6 @@ place_want* = (c :: Checker, id: ExprId, got: TyId, ctx: Ctx)
     })
 }
 
-// An inferred declaration settles array element literals because an array's
-// element cannot remain unsettled the way
-// a scalar's can. `n = 1` may stay `int` — C converts an `int64_t` into
-// every integer position — but `[i32, 3]` is a struct, and a local
-// declared `[int, 3]` reaches no `[i32, 3]` in the program.
-// `sema_apply.settled_arg_ty` settles a type argument for this reason
-// and in these words: a literal settles before it is minted into
-// another type. `gen_c_stmt.settled_value_type` is the same call at the
-// same statement.
-//
-// This runs only without a written type. A written `[u8, 3]` is the
-// elements' context and reaches them through `assignable`, so it never
-// arrives here — settling ahead of it would refuse what it accepts.
 settled_array* = (c :: Checker, ty: TyId) Res<TyId, AllocError> {
     c.types.at(ty).match({
         Array(a) => c.settled_elem(ty, a),
@@ -175,10 +138,6 @@ settled_elem = (c :: Checker, ty: TyId, a: TyArray) Res<TyId, AllocError> {
 check_assign* = (c :: Checker, b: Bind, got: TyId, want: TyId, ctx: Ctx)
                Res<(), AllocError> {
     node = c.tree.expr_at(b.value);
-    // A position with a written answer settles a bare nullary head
-    // (`nullary_settles`); everywhere else the mismatch stands.
-    // Asked here rather than through `coerce`, which reports as it
-    // answers and would have fired before this position got its say.
     (c.assignable(got, want) || c.nullary_settles(got, want)).match({
         true  => Ok(()),
         false => c.mismatch(node.span.file, node.span, got, want, ""),
@@ -191,13 +150,6 @@ check_assign* = (c :: Checker, b: Bind, got: TyId, want: TyId, ctx: Ctx)
     Ok(());
 }
 
-// Match arms stand in the match expression's expected position. A
-// declaration with a written type is such a place: `n: i32 = b.match({
-// true => 1, false => false })` puts both arms where `i32` is, and
-// `coerce` above only ever saw the first one's type.
-//
-// An inferred binding has no external expected type, so its arms must agree
-// with one another rather than treating the first arm as authoritative.
 written_want = (c :: Checker, b: Bind, want: TyId) Res<(), AllocError> {
     b.type.match({
         Ok(_) => c.check_arms(b.value, want),
@@ -205,9 +157,6 @@ written_want = (c :: Checker, b: Bind, want: TyId) Res<(), AllocError> {
     })
 }
 
-// Only a bare name introduces a binding; `c.len = ..` and `buf[i] = ..`
-// assign to something that already exists — why `Bind.target` is an
-// expression, not an `Ident`.
 bind_target* = (c :: Checker, b: Bind, ty: TyId, ctx: Ctx)
               Res<(), AllocError> {
     target = c.tree.expr_at(b.target);
@@ -236,9 +185,6 @@ bind_name = (
     })
 }
 
-// A plain write that misses the local frame may target an immutable module
-// constant and is refused. Explicitly typed and mutable forms remain fresh
-// declarations and may shadow that constant.
 fresh_or_refused = (
     c      :: Checker,
     b      : Bind,

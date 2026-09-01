@@ -1,8 +1,3 @@
-// Indexed module graph and name resolution. `defs_of` returns every overload
-// visible under a name; call resolution chooses among them. Names cross a
-// module boundary only through starred declarations or re-exports. Source
-// order is retained for overload and impl resolution.
-
 Ast, Module, Decl, Ident, Span, QualifiedName, Member = std.ast
 Import, Impl, Enum = std.ast
 Alloc, AllocError, Ptr = std.mem
@@ -11,26 +6,8 @@ str, String = std.text
 Range = std.core
 DeclId, ImplId = sema.sema_id
 
-// Which declaration form a name denotes. Not the declaration itself:
-// "if you have a `Decl`, you have the whole declaration", and this
-// layer only has to answer what KIND of thing was found so a caller
-// knows whether to expect a type or a value.
-//
-// Every variant carries the `Def` suffix, and that is the same rule
-// `ast_node.zen` follows when it writes `Equal` rather than `Eq`: a bare
-// `Struct` here is not a new name, it is `ast.Struct`, and
-// `A = B | C` where B and C are types in scope is DESIGN.md's OTHER
-// reading of that syntax — "a union of existing types". The bar form is
-// genuinely ambiguous between an enum and a union, and the language
-// resolves it by what the names mean, so a variant that shadows a type
-// silently becomes a union of it.
 DefKind* = StructDef | EnumDef | AliasDef | FunctionDef | ConstDef
 
-// One declaration, as a name resolves to it.
-//
-// `qname` is the module-qualified name and it is the identity — two
-// modules may declare `Circle` and they are two types. `name` is the
-// bare one, for a diagnostic to print.
 Def* = {
     name*: str,
     qname*: str,
@@ -40,10 +17,6 @@ Def* = {
     span*: Span,
 }
 
-// `Res*, Ok* = std.core.result` binds two names, each of which may or
-// may not be starred. Zen has no renaming import, so the local name and
-// the declared name are the same string — which is what makes following
-// the chain a lookup of the SAME name one module along.
 ImportBinding* = {
     name*: str,
     module*: str,
@@ -71,18 +44,8 @@ WorldIndex = {
 // same spelling.
 PRELUDE*: str = "std.core"
 
-// The same file, spelled the long way (`index_of` gives the rule).
-// Which spelling a module table ends up under is decided by whichever
-// import reached it first, and that must not decide whether a program
-// has a prelude — so both are tried and the short one wins.
 PRELUDE_FILE*: str = "std.core.core"
 
-// The module graph, and every query over names.
-//
-// It carries the `Alloc` for the reason `Vec` and `Ast` do: the tables
-// are built once and live as long as the compilation, so the allocator
-// is threaded in at construction and every query that grows a list says
-// `Res<_, AllocError>`.
 World* = {
     tables :: Vec<ModuleTable>,
     exact :: Map<str, usize>,
@@ -104,18 +67,6 @@ World* = {
         })
     }
 
-    // The module spelled `std.core.result`. A module's identity is
-    // its full dotted path — "names are qualified by path", and
-    // accepting a suffix would make two modules answer to one spelling.
-    //
-    // A FOLDER ROOT HAS A SECOND SPELLING, and only one. `std/core/
-    // core.zen` is `std.core.core` by the path rule and `std.core` by
-    // the folder rule, and both are written in this tree. They are one
-    // FILE, so they are one module, so the shorthand is a way of
-    // WRITING the identity rather than a second identity — which is
-    // exactly the line `bootstrap/modules.py` draws between a file's
-    // `dotted` and its `_module_index` aliases. Tried second, so an
-    // `a.b` that is a module of its own always wins over `a.b.b`.
     index_of* = (self: @Self, name: str) Res<usize> {
         self.exact.get(name).match({
             Ok(i) => Ok(i),
@@ -134,22 +85,6 @@ World* = {
     // the queries
     // -----------------------------------------------------------------
 
-    // Every declaration of `name` visible in module `mi`.
-    //
-    // Own declarations first and they are the whole answer when there
-    // are any: a module's own name is never shadowed by something it
-    // imported, because the import would have been a redeclaration.
-    // Otherwise the imports are followed, and `*` gates every hop, and
-    // last of all the prelude — the only name a module gets without
-    // writing an import, and so the only one that loses every tie.
-    //
-    // AN IMPORT BINDING IS AUTHORITATIVE, which is why the last line
-    // asks a question the first two do not. The prelude is the exception
-    // for a name NOBODY imported; a module that wrote an import already
-    // said what the name means here, so a binding the `*` gate rejected
-    // resolves to NOTHING. Falling through was worse than a missing
-    // diagnostic: `hex_digit`, blocked at its own boundary, came back
-    // out of `std.core.byte` and ran instead.
     defs_of* = (self: @Self, mi: usize, name: str, out :: Vec<Def>)
                Res<(), AllocError> {
         self.own_defs(mi, name, out).try();
@@ -303,17 +238,6 @@ World* = {
         })
     }
 
-    // "A name that is not imported is not visible, and the prelude is
-    // the only exception. That exception is what auto-imported means:
-    // `std.core` is imported into every module, so `Res`, `Ok`, `Vec`,
-    // `Map`, `str`, `Env` and the rest are in scope everywhere without a
-    // line."
-    //
-    // It is one more hop of the SAME walk — `exports_of`, `*` gating
-    // every step — and not a whole-program name table, which is the
-    // thing DESIGN.md rules out in the same paragraph. A module that IS
-    // the prelude asks nothing: its own defs and its own imports have
-    // already been consulted, and asking again would only re-walk them.
     prelude_defs = (self: @Self, mi: usize, name: str, out :: Vec<Def>)
                    Res<(), AllocError> {
         self.prelude_index().match({
@@ -323,10 +247,6 @@ World* = {
         Ok(());
     }
 
-    // Where the prelude is, under either of its two spellings. A
-    // program with no prelude module at all is a program with no
-    // prelude, which is a `None` and not a mistake — a test that
-    // compiles three files has one.
     prelude_index* = (self: @Self) Res<usize> {
         self.index_of(PRELUDE).match({
             Ok(p) => Ok(p),
@@ -352,10 +272,6 @@ World* = {
         self.exports_of(p, name, out, seen)
     }
 
-    // What the prelude exports under `name`, asked from nowhere in
-    // particular. `defs_of` reaches the same answer as the last hop of
-    // an ordinary walk; this is the direct question, for the caller that
-    // holds a PRIMITIVE and so has no module to ask from.
     prelude_of* = (self: @Self, name: str, out :: Vec<Def>)
                   Res<(), AllocError> {
         self.prelude_index().match({
@@ -374,25 +290,6 @@ World* = {
         Ok(hit)
     }
 
-    // EVERY EXPORTED DECLARATION OF `name` IN THE PROGRAM, in module
-    // order.
-    //
-    // This is not a hole in the `*` gate, it is the other half of the
-    // sentence the gate is written in: "importing a type pulls its
-    // world along: its methods, its trait impls, and exported ufcs
-    // functions (a free function whose first param is the type is
-    // callable as a method)". A free function whose first parameter is
-    // `u32` TRAVELLED WITH `u32`, so naming the type is what reached
-    // it, and the module it happens to live in was never imported by
-    // anybody. `to_usize` is on no prelude line and is called all over
-    // this tree.
-    //
-    // THE RECEIVER'S TYPE IS THE GATE and it is not applied here: this
-    // is only the pool, and a `World` knows names rather than types.
-    // The caller filters on the first parameter, which is what makes a
-    // free function a method at all — sharing the name never was. So
-    // this is a query only a DOT may ask; `f(x)` still goes through
-    // `defs_of` and still cannot see a module it did not import.
     exported_named* = (self: @Self, name: str, out :: Vec<Def>)
                       Res<(), AllocError> {
         self.index.read(0).exported.get(name).match({
@@ -413,20 +310,13 @@ World* = {
         Ok(());
     }
 
-    // What `mi` can see under `name` because it imported it.
-    //
-    // The `*` on the IMPORT is what re-exports; the `*` on the
-    // DECLARATION is what let it out of its own module. Both are
-    // checked, at their own hop, which is why a two-hop chain through a
-    // folder root works and a chain through an unstarred binding does
-    // not.
     imported_defs* = (self: @Self, mi: usize, name: str, out :: Vec<Def>)
                      Res<(), AllocError> {
         seen ::= self.alloc.Vec<usize>();
         self.follow(mi, name, out, seen, false)
     }
 
-    // Every EXPORTED declaration of `name` in module `mi`, following
+    // Every exported declaration of `name` in module `mi`, following
     // that module's own re-exports. This is what one hop of the chain
     // asks of the next.
     exports_of* = (self: @Self, mi: usize, name: str, out :: Vec<Def>,
@@ -443,18 +333,6 @@ World* = {
         Ok(());
     }
 
-    // Walk `mi`'s import list for `name` and ask the module it names.
-    //
-    // `reexport` IS THE STAR ON THE BINDING, a parameter because the
-    // same list answers two questions. Asked by `mi` itself, every
-    // binding counts — an import binds locally whatever its star says.
-    // Asked by somebody ELSE, only starred ones do: a star on an import
-    // is the whole re-export mechanism, and the walk without this flag
-    // re-exported every unstarred import.
-    //
-    // `seen` is the cycle guard, and it is needed rather than defensive:
-    // `std.core.display` and `std.text` import from each other, and a
-    // module graph is not required to be a tree.
     follow = (self: @Self, mi: usize, name: str, out :: Vec<Def>,
               seen :: Vec<usize>, reexport: bool) Res<(), AllocError> {
         visited(seen, mi).match({
@@ -493,13 +371,6 @@ World* = {
         Ok(());
     }
 
-    // Every impl in the program whose target is this type name.
-    //
-    // Whole-program, and it has to be: "an impl lives with the type, not
-    // with the trait", so `str.impl(Eq, ..)` is in `std.text` and a
-    // caller in another module still has to find it. There are no orphan
-    // impls, so the search is over declaring modules and not over
-    // importers.
     impls_named* = (self: @Self, tree: Ast, target: str, out :: Vec<ImplId>)
                    Res<(), AllocError> {
         self.index.read(0).impls.get(target).match({
@@ -509,14 +380,6 @@ World* = {
         Ok(());
     }
 
-    // THE GATE, ASKED OF THE IMPORT RATHER THAN OF A USE.
-    //
-    // Every import binding in `mi` that the `*` gate rejects. BINDINGS
-    // and not a count, because the diagnostic names the binding's own
-    // span: `view, hex_digit = text.text` is one declaration and two
-    // bindings, and only one of them is wrong. TWO THINGS IT DOES NOT
-    // CLAIM: a module the program does not contain has nothing to have
-    // exported FROM, and a module importing ITSELF is the cycle rule.
     blocked_imports* = (self: @Self, tree: Ast, mi: usize,
                         out :: Vec<ImportBinding>) Res<(), AllocError> {
         self.tables.get(mi).match({
@@ -550,12 +413,6 @@ World* = {
         })
     }
 
-    // Whether module `mi` lets `name` out at all. `exported_defs` answers
-    // with DEFS; this answers yes or no and knows one thing more, because
-    // a VARIANT IS NOT A DECLARATION: `Res*<T> = Ok(T) | None` files one
-    // `Def` and `Res*, Ok*, Err*, None* = std.core.result` names four off
-    // it. So the enum's own star answers for its variants; filing them as
-    // `Def`s would put `Ok` in the table every bare name resolves through.
     exports_name* = (self: @Self, tree: Ast, mi: usize, name: str,
                      seen :: Vec<usize>) Res<bool, AllocError> {
         defs ::= self.alloc.Vec<Def>();
@@ -567,26 +424,12 @@ World* = {
         Ok(defs.len > 0 || hits.len > 0);
     }
 
-    // THE ENUMS A BARE VARIANT NAME REACHES FROM `mi`, for the same
-    // reason: `Two` is a name a program may write and `defs_of` cannot
-    // answer for it. It is the SAME walk deliberately — the answer says
-    // which enum `Two` belongs to, and two walks that disagreed would
-    // pick two types. The enum is the answer and not the module holding
-    // it, because a nullary variant IS a value of its enum.
     variant_defs* = (self: @Self, tree: Ast, mi: usize, name: str,
                      out :: Vec<Def>) Res<(), AllocError> {
         seen ::= self.alloc.Vec<usize>();
         self.exports_variant(tree, mi, name, out, seen, false)
     }
 
-    // The variant half of the same walk, cycle guard and all. `hits`
-    // accumulates rather than setting a flag; a scalar assigned from two
-    // nested closures is not something this resolves.
-    //
-    // `reexport` IS THE STAR, a parameter for the reason `follow`'s is:
-    // asked by `mi` ABOUT ITSELF nothing has crossed a boundary, so an
-    // unstarred enum and an unstarred import both still bind. Asked by
-    // somebody ELSE, both stars are required.
     exports_variant = (self: @Self, tree: Ast, mi: usize, name: str,
                        hits :: Vec<Def>, seen :: Vec<usize>, reexport: bool)
                       Res<(), AllocError> {
@@ -636,8 +479,7 @@ World* = {
         })
     }
 
-    // EVERY HOP PAST THE FIRST CROSSES A BOUNDARY, so the star is asked
-    // from here on whatever the first hop was asked as.
+    // Every hop after the first crosses a module boundary and requires export.
     variant_hop_to = (self: @Self, tree: Ast, module: str, name: str,
                       hits :: Vec<Def>, seen :: Vec<usize>)
                      Res<(), AllocError> {
@@ -660,9 +502,6 @@ World* = {
     }
 }
 
-// Build the whole graph from a parsed `Ast`. One pass over every module
-// and every declaration in it, in source order, so the indices this
-// hands out are a pure function of the input.
 World* = (a: Alloc, tree: Ast) Res<World, AllocError> {
     index  ::= WorldIndex(
         exported: a.Map<str, Vec<Def>>(),
@@ -810,12 +649,6 @@ set_first = (index :: Map<str, usize>, name: str, at: usize)
     })
 }
 
-// One declaration, filed under the name it binds.
-//
-// An `Import` binds names without declaring them and an `Impl` binds no
-// name at all, so those two go to their own lists; everything else is a
-// `Def`. The order of this match is the order of `DeclKind`, so a new
-// declaration form is a compile error here rather than a silent miss.
 index_decl = (
     t  :: ModuleTable,
     a  : Alloc,
@@ -903,12 +736,6 @@ add_def = (
     ))
 }
 
-// `Res*, Ok*, None* = std.core.result` is three bindings of one module,
-// each starred independently. The module path is flattened to its dotted
-// spelling once, here, so nothing downstream walks segments.
-//
-// EACH BINDING KEEPS ITS OWN SPAN: one line binds three names and the
-// `*` gate rejects them one at a time.
 add_imports = (t :: ModuleTable, a: Alloc, im: Import) Res<(), AllocError> {
     path = dotted(a, im.module).try();
     im.names.loop((h, n) {
@@ -922,14 +749,6 @@ add_imports = (t :: ModuleTable, a: Alloc, im: Import) Res<(), AllocError> {
     Ok(());
 }
 
-// A `QualifiedName`'s dotted spelling — `std.core.result`.
-//
-// The segments are stored apart so a diagnostic can point at the one
-// that is wrong; this is the other direction, and it allocates, so it
-// takes an `Alloc` and says so. Rejoining rather than reading the span's
-// source text is deliberate: a `Span` names a position, and going back
-// to the bytes to recover something the AST already holds is how two
-// sources of one fact start disagreeing.
 dotted* = (a: Alloc, q: QualifiedName) Res<str, AllocError> {
     out ::= a.String().try();
     q.segments.loop((h, i, seg) {
@@ -978,11 +797,6 @@ imports_name = (t: ModuleTable, name: str) bool {
     }).match({ Ok(_) => true, None => false })
 }
 
-// The enums this module declares with a variant of this name.
-//
-// A VARIANT CARRIES NO STAR OF ITS OWN, as `exports_name` says. The gate
-// is asked only when `gated`, because a module reading its own file has
-// crossed no boundary and an unstarred enum there is still visible.
 collect_variant = (
     tree  : Ast,
     t     : ModuleTable,
@@ -1018,9 +832,6 @@ named_variant = (e: Enum, name: str) bool {
     }).match({ Ok(_) => true, None => false })
 }
 
-// How a module is NAMED to a reader. `text/text.zen` answers to
-// `text.text` by the path rule and to `text` by the folder rule, and a
-// person wrote the folder form — so a repeated last segment collapses.
 module_display* = (name: str) str {
     name.rfind('.').match({
         None      => name,

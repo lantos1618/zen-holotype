@@ -1,7 +1,3 @@
-// Detect expression statements whose values are discarded without an effect.
-// The trailing statement may provide the block value; earlier pure expressions
-// usually indicate a missing `.try()` or an unused call result.
-
 Vec = std.collections
 AllocError = std.mem
 Block, Stmt, ExprStmt, Match, Arm, ExprId = std.ast
@@ -9,9 +5,6 @@ TyId = sema.sema_ty
 Checker = sema.sema_check
 SemaFault, TypeFault = sema.sema_diag
 
-// THE ONE WAY IN, asked once per statement by `block_type`'s walk. It
-// takes the block and the position because whether a statement is the
-// tail is a fact about WHERE it stands, not about the statement.
 check_statement* = (
     c     :: Checker,
     block : Block,
@@ -26,9 +19,6 @@ check_statement* = (
     })
 }
 
-// The last statement of a block with no written tail IS the block's
-// value — `block_type` reads it back out — so it is used, never
-// discarded.
 is_tail = (block: Block, i: usize, n: usize) bool {
     block.value.match({ Ok(_) => false, None => i + 1 == n })
 }
@@ -49,10 +39,6 @@ discarded_expr = (c :: Checker, s: Stmt, e: ExprStmt, ty: TyId)
     })
 }
 
-// A `()` statement discarded nothing. Poison, a hole and a type
-// parameter are all "not yet known" — a parameter may BE `()` at the
-// call site — and a diagnostic out of missing information is invented,
-// not found.
 statement_value = (c: Checker, ty: TyId) bool {
     c.types.at(ty).match({
         Prim(p) => p.name.eq("()") == false,
@@ -63,21 +49,6 @@ statement_value = (c: Checker, ty: TyId) bool {
     })
 }
 
-// A PURE READ computes a value and nothing else: a literal, a name, a
-// field, a parenthesised read, a match over those. Everything else is
-// exempt, and each exemption is a place this language hides an effect
-// behind an expression:
-//
-//   - a CALL is run for its effect, `.try()` for the propagation,
-//     `consume` for the move;
-//   - ARITHMETIC can trap, and `self.len - i - 1;` is this tree's range
-//     guard — "unsigned underflow IS the trap" (std/core/byte.zen).
-//     What reads as dead is the check;
-//   - `==` dispatches to `Eq`, a call wearing an operator's clothes;
-//   - an INDEX into a fixed array is bounds-checked — the same trap.
-//
-// So the question is structural: any of those anywhere in the
-// expression makes the statement somebody's effect, not a discard.
 pure_read = (c :: Checker, id: ExprId) bool {
     node = c.tree.expr_at(id);
     node.kind.match({

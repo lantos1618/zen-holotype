@@ -1,7 +1,3 @@
-// Member values supplied by impls. Declared storage members take precedence;
-// impl-supplied members are computed, read-only, non-addressable, and excluded
-// from layout. Bound members resolve in the bound declaration's generic scope.
-
 Span = std.ast
 Decl, Struct, Impl, Member, Field = std.ast
 Function = std.ast
@@ -61,13 +57,6 @@ impl_supplies = (
     Ok(());
 }
 
-// An impl entry supplies the name, or the bound provides a body of its
-// own (`area` comes free needing only width and height). Either way the
-// TYPE is the bound's, never the supplied expression's:
-// `width: self.radius * 2.0` is an f64 because `Rect` said f64.
-//
-// A name is an overload set, so this adds one `Found` per declaration rather
-// than collapsing the set to one impl entry.
 supplied = (
     c    :: Checker,
     n    : TyNamed,
@@ -85,14 +74,6 @@ supplied = (
     Ok(());
 }
 
-// Which of the bound's declarations of a name the impl reaches: a
-// bodied member (sealed/default) comes along on its own; a bodiless one
-// is a requirement, reachable only when the impl supplied that name.
-//
-// Deliberately asks `has_member` rather than matching a particular
-// declaration — which signature an impl satisfied is `sema_bound.zen`'s
-// question, answered there against the whole set; a weaker rule here
-// would let the two files disagree.
 supplied_types = (
     c       :: Checker,
     im      : Impl,
@@ -121,10 +102,6 @@ keep_reachable = (
     })
 }
 
-// The bound an impl names, resolved with the target's type parameters
-// in scope (`Vec.impl(Range<T>, ..)` writes `Vec`'s own `T`). `Impl` has
-// no `tparams` — it borrows the target's. `type_from_ast` memoizes on
-// the node id, so the first reader here decides for all.
 impl_bound_type* = (c :: Checker, im: Impl, mi: usize)
                    Res<TyId, AllocError> {
     poison = c.types.unknown().try();
@@ -135,12 +112,6 @@ impl_bound_type* = (c :: Checker, im: Impl, mi: usize)
     Ok(got);
 }
 
-// An impl lives in the module that declares its target, so the target
-// is looked up only there — same fact that makes `Impl.target` an `Ident`.
-// The IMPL's own tvars, pushed before its bound is read. Named past the
-// plain `enter_target_tvars`: sema_decl.zen answers about a named TARGET
-// TYPE with the same three lines, and Zen has no overloading to tell
-// them apart.
 enter_impl_target_tvars = (c :: Checker, target: str, mi: usize)
                           Res<(), AllocError> {
     defs ::= c.alloc.Vec<Def>();
@@ -167,8 +138,7 @@ enter_decl_tvars = (c :: Checker, d: Decl, mi: usize) Res<(), AllocError> {
     })
 }
 
-// The bound declares it AND gives it a body: sealed and default members
-// come along with the impl, a required one does not.
+// Sealed and default bound members provide bodies; required members do not.
 has_body = (m: Member) bool {
     m.kind.match({
         Function(f) => f.body.match({ Ok(_) => true, None => false }),
@@ -197,10 +167,6 @@ add_supplied = (
     ))
 }
 
-// Third site of the bound-scope rule (see header). Returns the FIRST
-// declaration, for a reader that wants a type not a set: a computed
-// field like `width: self.radius * 2.0` has only one declaration, so
-// first/last/only agree; set-needing callers ask for the set.
 bound_member_type* = (c :: Checker, bound: TyId, name: str, self_ty: TyId)
                      Res<TyId, AllocError> {
     tys ::= c.alloc.Vec<TyId>();
@@ -208,8 +174,7 @@ bound_member_type* = (c :: Checker, bound: TyId, name: str, self_ty: TyId)
     tys.get(0).match({ Ok(t) => Ok(t), None => c.types.unknown() })
 }
 
-// EVERY declaration of the name, in source order — a name is an
-// overload set; a fold here would pick by writing order and call it a type.
+// Preserve every declaration in an overload set and its source order.
 bound_member_types* = (
     c       :: Checker,
     bound   : TyId,
@@ -319,20 +284,6 @@ bound_module = (c: Checker, bound: TyId) usize {
         _        => 0,
     })
 }
-
-// ---------------------------------------------------------------------
-// declared, which is not the same as reachable
-//
-// `keep_reachable` answers "does a dot reach this" and correctly says
-// NO for a hook no impl supplied: `Alloc.create` has no body in
-// `mem_alloc.zen`, no impl supplies one, and `gen_c_alloc.zen` writes it
-// — so `alloc.create<Node>()` resolving to nothing in sema is not a
-// mistake, while `b.size()` on a `Box` resolving to nothing is.
-//
-// Only a diagnostic needs to tell those apart, so only a diagnostic
-// asks this; a member lookup must answer "not reachable" to both, or
-// the backend's own answer to what `create` does stops counting.
-// ---------------------------------------------------------------------
 
 bound_declares* = (c :: Checker, ty: TyId, name: str)
                   Res<bool, AllocError> {

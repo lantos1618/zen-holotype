@@ -1,8 +1,3 @@
-// src/sema/sema_decl.zen
-// Eager declaration checks that must run even for unreachable code:
-// overload uniqueness, impl completeness, and declared bodies/signatures.
-// This walk drives memoized queries and owns no parallel type state.
-
 Module, Decl, Function, TParam, BlockId, Ident = std.ast
 Struct, Impl, Member, Enum = std.ast
 ExprId, TypeId, Const, Field = std.ast
@@ -40,13 +35,6 @@ check_module* = (c :: Checker, mi: usize) Res<(), AllocError> {
     })
 }
 
-// Every module in the compilation.
-//
-// The termination check runs LAST and over the whole program, because
-// that is the only point at which it can run at all: it follows chains
-// of instantiations across declarations and across modules, and a chain
-// is not knowable until every body that contributes an edge to it has
-// been walked.
 check_all* = (c :: Checker) Res<(), AllocError> {
     Range(0, c.world.count()).loop((h, mi) {
         c.check_module(mi).try();
@@ -67,9 +55,6 @@ check_table = (c :: Checker, t: ModuleTable, mi: usize)
     Ok(());
 }
 
-// One overload set per NAME, and checked once. The rule is about a set,
-// a set has no order, and visiting it once per member would report the
-// same pair as many times as the set is large.
 check_overload_sets = (c :: Checker, t: ModuleTable, mi: usize)
                       Res<(), AllocError> {
     seen ::= c.alloc.Vec<str>();
@@ -102,10 +87,7 @@ has_name = (seen: Vec<str>, name: str) bool {
     }).match({ Ok(_) => true, None => false })
 }
 
-// ---------------------------------------------------------------------
 // bodies
-// ---------------------------------------------------------------------
-
 check_bodies = (c :: Checker, mi: usize) Res<(), AllocError> {
     c.tree.module_at(mi).match({
         Ok(m) => c.check_decls(m, mi),
@@ -164,9 +146,6 @@ enum_payloads = (c :: Checker, e: Enum, mi: usize) Res<(), AllocError> {
     c.release_tvars(tmark)
 }
 
-// For a declaration otherwise shaped as a union, report the single bare
-// member that fails to name a type. Multiple misses remain a nominal enum;
-// payload variants and value-bound names also make it nominal.
 check_members = (c :: Checker, e: Enum, mi: usize)
                 Res<(), AllocError> {
     miss_at    ::= e.variants.len;   // sentinel: no bare member missed
@@ -199,9 +178,6 @@ check_members = (c :: Checker, e: Enum, mi: usize)
     })
 }
 
-// The one name standing between the declaration and its union reading,
-// told so at its own position -- the same fault, words and span a
-// signature position emits for the same text.
 report_member_miss = (c :: Checker, e: Enum, at: usize)
                      Res<(), AllocError> {
     name = e.variants.get(at).ok_or(AllocError.OutOfMemory).try().name;
@@ -221,9 +197,6 @@ binds_nothing = (c :: Checker, mi: usize, name: str) Res<bool, AllocError> {
     }))
 }
 
-// Whether the name denotes a TYPE: a struct, an enum, or an alias that
-// is not a module alias. A parameterised alias is a type constructor,
-// and `Vec` in member position reads as one, so it counts.
 binds_a_type = (c :: Checker, mi: usize, name: str) Res<bool, AllocError> {
     Ok(c.world.first_def_of(mi, name).try().match({
         None  => false,
@@ -369,12 +342,6 @@ field_value = (
                     self_ty
                 ).try();
                 node = c.tree.expr_at(v);
-                // A BARE FUNCTION NAME SUPPLIES A METHOD: `widen_u64 =
-                // to_u64` hands over the function itself, and the call
-                // machinery instantiates it at each use — the value's
-                // type here is the name standing for the declaration,
-                // not the signature a data position would owe. Only a
-                // DATA position owes the coercion.
                 data = (c.supplies_fn(got).try() == false);
                 data.then(() {
                     c.coerce(node.span.file, node.span, got, want, "").try();
@@ -389,10 +356,6 @@ field_value = (
     })
 }
 
-// Whether a value's type is the bare NAME of a function declaration —
-// `decl_as_type`'s answer for `to_i64` reached by bare name — rather
-// than a data type. The one case a supplied field's value is not
-// obliged to fit the field it supplies.
 supplies_fn = (c :: Checker, ty: TyId) Res<bool, AllocError> {
     c.types.at(ty).match({
         Named(n) => decl_at(c.tree, n.decl).match({
@@ -406,10 +369,6 @@ supplies_fn = (c :: Checker, ty: TyId) Res<bool, AllocError> {
     })
 }
 
-// The named declaration's own type, with no arguments: `@Self` inside a
-// member of `Vec<T>` is the `Vec` the declaration writes, and the
-// receiver a call site reaches is a different question asked at the call
-// site.
 named_self = (c :: Checker, name: str, mi: usize) Res<TyId, AllocError> {
     c.target_decl(name, mi).try().match({
         Ok(d) => c.decl_as_type(d),
@@ -417,9 +376,6 @@ named_self = (c :: Checker, name: str, mi: usize) Res<TyId, AllocError> {
     })
 }
 
-// The tvars of a NAMED TARGET TYPE -- an impl's name read as a type,
-// not an impl body being checked (`sema_supply.zen`'s twin). Same three
-// lines, different question; Zen has no overloading to share a name.
 enter_target_tvars = (c :: Checker, name: str, mi: usize)
                      Res<(), AllocError> {
     c.target_decl(name, mi).try().match({
@@ -484,9 +440,6 @@ check_function* = (c :: Checker, f: Function, m: Module, mi: usize)
     })
 }
 
-// Bodiless signatures still resolve generic bounds, parameters, and return
-// types in declaration scope. Body-only return, ownership, and raised-error
-// checks do not apply.
 check_signature = (
     c       :: Checker,
     f       : Function,
@@ -506,11 +459,6 @@ check_signature = (
     Ok(());
 }
 
-// The scope, the type parameters and the bounds all enter here and all
-// leave here, in one place, so a body that reports cannot leak a binding
-// into the next declaration. The raised list drains here for the reason
-// `settle_raised` states: a `.try()` in one body would otherwise be
-// attributed to the next declaration walked.
 check_body = (
     c       :: Checker,
     f       : Function,
@@ -532,11 +480,6 @@ check_body = (
     c.enter_owner("");
     c.check_return(body, ctx, got).try();
     c.settle_raised(f, ctx, got, rmark).try();
-    // AFTER typing and BEFORE the scope is released. Ownership is a fact
-    // about the path to a node rather than about the node, so it is a
-    // walk and not a query; and it reads the types typing decided rather
-    // than computing any, so the parameters have to still be bound when
-    // it runs.
     c.check_own(f, body, ctx).try();
     c.release_bounds(bmark).try();
     c.release_tvars(tmark).try();
@@ -544,13 +487,6 @@ check_body = (
     Ok(());
 }
 
-// `ret` and `has_ret` are what `.try()` answers to. A function that does
-// not return a `Res` has nowhere to return a failure TO, which is the
-// whole of the `TryOutsideRes` rule.
-//
-// `self_ty` present is what a member's body names `@Self` as freely as
-// its signature does; absent is a top-level function, where the poison
-// type stands in and `has_self` says so.
 body_ctx = (c :: Checker, f: Function, mi: usize, self_ty: Res<TyId>)
            Res<Ctx, AllocError> {
     poison = c.types.unknown().try();
@@ -580,9 +516,6 @@ is_res = (c: Checker, ty: TyId) bool {
     c.types.at(ty).match({ Res(_) => true, _ => false })
 }
 
-// The bounds are resolved with the type parameters already in scope, so
-// `<T: Boxy, U: Vec<T>>` reads `T` as the parameter and not as a
-// declaration of that name somewhere else.
 enter_generics = (c :: Checker, f: Function, owner: str, mi: usize)
                  Res<(), AllocError> {
     f.tparams.loop((h, tp) {
@@ -612,10 +545,6 @@ bind_params = (c :: Checker, f: Function, ctx: Ctx) Res<(), AllocError> {
     Ok(());
 }
 
-// The declaration's module-qualified name, which is what a `Ty.Var` is
-// nominal on. Built the same way `sema_def.zen` builds a `Def.qname`,
-// because the two have to agree: a type parameter resolved here and the
-// same one resolved from a candidate must intern to one type.
 qualified = (c :: Checker, m: Module, f: Function) Res<str, AllocError> {
     out ::= c.alloc.String("{}.{}", m.name, f.name.text).try();
     Ok(out.view());

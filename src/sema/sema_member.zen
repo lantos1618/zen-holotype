@@ -1,7 +1,3 @@
-// Member lookup across a type body, its impls, and in-scope bounds. A declared
-// field is storage; an impl-supplied field is computed, read-only, and
-// non-addressable. In-scope bounds, never file order, resolve competing impls.
-
 Expr, ExprId, Access, Span, TypeId, nowhere = std.ast
 Struct, Member = std.ast
 Field, Const, Function = std.ast
@@ -25,14 +21,6 @@ static_value = sema.sema_static
 meta_access, meta_len_chain, is_count_chain = sema.sema_meta
 meta_name_fold, meta_refused, walk_name, WalkName = sema.sema_meta
 
-// One thing a dot could reach. `computed`: false means the type declares
-// it (has an address); true means an impl supplies it (does not).
-// `exported`/`module` are law 6, carried rather than decided here since
-// `members_of` takes a type and a name, not a `Ctx` — the star is a fact
-// about the declaration, and both travel to the access site to be judged.
-// `constant`: the member is a struct-body Const (R4's `name: T = value`),
-// one value per type rather than storage per instance — a construction
-// names fields, so this bit is what lets one refuse to supply one.
 Found* = {
     name*: str,
     ty*: TyId,
@@ -45,31 +33,16 @@ Found* = {
     span*: Span,    // the declaration, or the impl — where the fix goes
 }
 
-// What a base expression denotes: a TYPE (`i32.MAX`, `Shape.Unit`) or a
-// VALUE (`p.x`) — reads the same, means different things, and only
-// resolution can tell them apart.
 Base* = {
     ty*: TyId,
     is_type*: bool,
 }
 
-// ---------------------------------------------------------------------
-// QUERY: the type of `base.name`
-// ---------------------------------------------------------------------
-
-// A `@meta` target is no member lookup: the whole access is the
-// comptime evaluator's question (`sema_meta.zen`), answered under the
-// written type the `Meta` node carries. Intercepted here rather than
-// in `expr_kind` because this is where the access is typed.
+// Resolve the type of `base.name`.
 access_type* = (c :: Checker, id: ExprId, node: Expr, ac: Access, ctx: Ctx)
                Res<TyId, AllocError> {
     c.tree.expr_at(ac.base).kind.match({
         Meta(_) => c.meta_access(ac, ctx),
-        // A WALK BINDER AS THE BASE (`sema_meta.zen`): `field.name` is
-        // the walk's one folding access, and every other reading of
-        // either binder — `field.len`, `h.break` standing as a value —
-        // is the comptime term asked for a member it does not have.
-        // A name that is nobody's binder takes the ordinary path.
         Name(n) => c.walk_name(n.text).match({
             WalkNone   => c.member_access(id, node, ac, ctx),
             WalkHandle => c.meta_refused(node),
@@ -81,16 +54,6 @@ access_type* = (c :: Checker, id: ExprId, node: Expr, ac: Access, ctx: Ctx)
 
 member_access = (c :: Checker, id: ExprId, node: Expr, ac: Access, ctx: Ctx)
                 Res<TyId, AllocError> {
-    // THE COUNT'S CHAIN, SEEN FROM ITS TOP: `.len` is an Access whose
-    // base is a Call whose callee is an Access whose base is a Meta —
-    // `@meta(T).fields().len`. Decided HERE and ANSWERED HERE, before
-    // anything types the call beneath it: the ordinary path would call
-    // `base_of` on the Call, whose Meta-based callee is the wall
-    // (`sema_call.member_call` refuses it), so the one shape this slice
-    // lifts out of the wall would meet its own refusal instead of its
-    // number. Every OTHER `.len` — on a Vec, a str, an array — misses
-    // the strict three-level shape and takes the ordinary path below,
-    // untouched.
     c.is_count_chain(ac).match({
         true  => c.meta_len_chain(ac, ctx),
         false => {
@@ -103,9 +66,6 @@ member_access = (c :: Checker, id: ExprId, node: Expr, ac: Access, ctx: Ctx)
     })
 }
 
-// A bare name that resolves to a declaration — or to a primitive — is
-// the type itself. A local binding shadows it, because a local always
-// shadows everything: `str` the parameter is not `str` the type.
 base_of* = (c :: Checker, id: ExprId, ctx: Ctx) Res<Base, AllocError> {
     node = c.tree.expr_at(id);
     node.kind.match({
@@ -119,12 +79,6 @@ value_base = (c :: Checker, id: ExprId, ctx: Ctx) Res<Base, AllocError> {
     Ok(Base(ty: ty, is_type: false));
 }
 
-// A name base is typed here because it's the one base `type_of` never
-// memoizes: a name is answered straight out of scope, so `p` in `p.left`
-// was typed and never recorded, leaving a hover on the receiver of a
-// field access with no answer for a node sema knew the type of. A type
-// name still gets no entry — `i32` in `i32.MAX` denotes no value, and a
-// wrong answer is worse than no answer (same rule `write_val` states).
 named_base = (c :: Checker, id: ExprId, node: Expr, text: str, ctx: Ctx)
              Res<Base, AllocError> {
     b = c.lookup(text).match({
@@ -138,9 +92,6 @@ named_base = (c :: Checker, id: ExprId, node: Expr, text: str, ctx: Ctx)
     Ok(b);
 }
 
-// A base answered out of the scope stack — `p` in `p.left`. Same
-// recording as `sema_type.bound_name_type`: a parameter use is noted
-// so the LSP can paint it one once the scope is gone.
 bound_base = (c :: Checker, id: ExprId, b: Binding) Res<Base, AllocError> {
     b.param.match({
         true  => c.param_memo.set(id, true),
@@ -163,10 +114,6 @@ global_base = (c :: Checker, node: Expr, text: str, ctx: Ctx)
 decl_base = (c :: Checker, node: Expr, text: str, ctx: Ctx)
             Res<Base, AllocError> {
     c.world.first_def_of(ctx.module, text).try().match({
-        // Through `def_type` and not `named` directly, so a constant
-        // used as a base reads its DECLARED type: `PATH.len` is a
-        // `str`'s `len`, and a nominal type called `PATH` has no
-        // members at all.
         Ok(d) => {
             ty = c.def_type(d).try();
             Ok(Base(ty: ty, is_type: is_type_def(d.kind)));
@@ -185,10 +132,7 @@ is_type_def* = (k: DefKind) bool {
     k.match({ StructDef => true, EnumDef => true, AliasDef => true, _ => false })
 }
 
-// ---------------------------------------------------------------------
 // `value.name`
-// ---------------------------------------------------------------------
-
 value_access* = (
     c    :: Checker,
     id   : ExprId,
@@ -207,12 +151,6 @@ opaque* = (c: Checker, ty: TyId) bool {
     c.is_unknown(ty) || c.is_infer(ty) || c.foreign_tvar(ty)
 }
 
-// A type parameter that is nobody's here: `Vec`'s own `T`, arriving on a
-// value because the call that produced it did not SUBSTITUTE (not this
-// function's `T` — `TyVar` is nominal on its owner). Checks both: an
-// enclosing `<T>` with no bound reaches no members, while a `T: Boxy`
-// reaches `Boxy`'s members regardless of whether the parameter was
-// pushed — that case is `bound_reachable`'s.
 foreign_tvar = (c: Checker, ty: TyId) bool {
     c.types.at(ty).match({
         Var(v) => c.in_scope_tvar(v.name, ty) == false,
@@ -220,23 +158,11 @@ foreign_tvar = (c: Checker, ty: TyId) bool {
     })
 }
 
-// Declared as a type parameter, or declared with a bound — either puts
-// it in scope. The bound alone is enough, and it's the case that
-// matters: `bound_reachable` reads bounds and nothing else, so a
-// constrained `T` has members to find — calling it foreign would silence
-// the diagnostic the bound exists to make possible.
 in_scope_tvar = (c: Checker, name: str, ty: TyId) bool {
     c.is_bounded(name)
         || c.lookup_tvar(name).match({ Ok(b) => b.ty.eq(ty), None => false })
 }
 
-// Law 6 reaches members too: `*` means the name crosses a module
-// boundary. Checked BEFORE `pick`, not inside it: a member the asking
-// module can't see isn't a candidate at all, and the mistake is at the
-// dot — skipping this lets `pick` fall through to `ufcs_or_missing` and
-// falsely claim the field doesn't exist. Compares against `Found.module`,
-// the DECLARING module, never the importing one, so an import can't
-// launder a name past the star by spelling (`zz = vec`, `Vec = vec.vec`).
 known_access = (
     c    :: Checker,
     id   : ExprId,
@@ -253,12 +179,6 @@ known_access = (
     })
 }
 
-// The first member of the set the asking module may not see. A struct
-// declares a name once, so a set from the type's own body has at most
-// one element and "first" is "the one"; a set from impls is all-computed
-// and never hidden. Exported because `members_of` has two consumers — a
-// call resolves its own callee in `sema_call.zen` — and gating only the
-// one this file owns once made `v.grow` a mistake and `v.grow()` legal.
 first_hidden* = (found: Vec<Found>, mi: usize) Res<Found> {
     found.find((f) { hidden_from(f, mi) })
 }
@@ -306,16 +226,6 @@ pick = (
     })
 }
 
-// The one place a member is settled, and so the one place the answer is
-// written down — monomorphisation replaces `T` with the concrete type,
-// and by then nothing says which impl was in view.
-//
-// A METHOD IS NOT THE VALUE ITS RETURN TYPE WOULD BE. `found.ty` of a
-// method is `Fn(..)`, and every position past this point — an argument
-// slot, an operand, a print hole — asks only whether that type fits, so
-// handing it on let `Range(0, s.len)` reach gen_c and emit C reading
-// `.len` off a struct that has no such member. The access is refused
-// here, at the dot where the missing call is.
 first_type = (c :: Checker, id: ExprId, ty: TyId, found: Vec<Found>)
              Res<TyId, AllocError> {
     found.get(0).match({
@@ -324,9 +234,6 @@ first_type = (c :: Checker, id: ExprId, ty: TyId, found: Vec<Found>)
     })
 }
 
-// The bound that promised it, or the receiver when the receiver's own
-// declaration carries it: `Boxy.area` reads `self.width` off `Boxy` and
-// EMITS at a `Tile` two impls supply a `width` for — `Boxy` picks.
 settled = (c :: Checker, id: ExprId, ty: TyId, f: Found)
           Res<TyId, AllocError> {
     from = c.is_unknown(f.bound).match({ true => ty, false => f.bound });
@@ -380,24 +287,6 @@ span_of = (found: Vec<Found>, i: usize) Span {
     found.get(i).match({ Ok(f) => f.span, None => nowhere() })
 }
 
-// "Importing a type pulls its world along: its methods, its trait impls,
-// and exported ufcs functions" (a free function whose first param is the
-// type, callable as a method). So a name the type doesn't declare is
-// still reachable if a function of that name exists — resolution happens
-// at the CALL, where the argument list is known.
-//
-// A MEMBER THE TYPE DOES DECLARE IS NOT A VALUE WHEN IT IS A METHOD. The
-// lookup answers `Fn(..)` for one — `String.len` is `(String) usize` —
-// and that answer flowed into every position that asks nothing but "does
-// it fit": an argument slot (`Range(0, s.len)`) and an operator's
-// operands took a bare method as if it were the number it returns, and
-// gen_c emitted C reading a struct member that does not exist. A method
-// is read only through its call, so `pick` refuses the access here —
-// naming the method and the call it is missing.
-//
-// THE NAME COMES OFF THE NODE BY ID, not off a carried value: every memo
-// this checker keeps is keyed by `ExprId`, and `settled` is reached from
-// several callers that hold exactly that.
 method_not_value = (c :: Checker, id: ExprId, fn_ty: TyId)
                    Res<TyId, AllocError> {
     poison = c.types.unknown().try();
@@ -440,9 +329,6 @@ no_such_field = (c :: Checker, node: Expr, ac: Access, ty: TyId)
     c.types.unknown()
 }
 
-// The member `ac` names on its base's type, when there is one — the one
-// lookup both member rules share, so they can never disagree about which
-// fields they judge.
 found_of = (c :: Checker, ac: Access, ctx: Ctx) Res<Res<Found>, AllocError> {
     b = base_of(c, ac.base, ctx).try();
     found ::= c.alloc.Vec<Found>();
@@ -458,13 +344,6 @@ computed_member* = (c :: Checker, ac: Access, ctx: Ctx)
     Ok(f.match({ Ok(m) => m.computed, None => false }));
 }
 
-// TWO RULES, NOT ONE (`field_write_outside` is the test that says so):
-// DESIGN.md, "`*` on a field means readable outside the module; mutation
-// only ever goes through exported methods." So this rule reads `module`,
-// not `exported` — no star grants writing, so an exported field and an
-// unexported one are equally unwritable from outside, and a field that
-// fails it is not told to add a star it already has. Computed members
-// are skipped: no storage, no declaring module to compare against.
 writable_member* = (c :: Checker, ac: Access, ctx: Ctx)
                    Res<(), AllocError> {
     c.found_of(ac, ctx).try().match({
@@ -495,13 +374,6 @@ not_writable = (c :: Checker, ac: Access, f: Found) Res<(), AllocError> {
 // Keep the first-result lookup independent of an enclosing expectation.
 first_found* = (found: Vec<Found>) Res<Found> { found.get(0) }
 
-// ---------------------------------------------------------------------
-// the member table
-// ---------------------------------------------------------------------
-
-// Every member of `ty` called `name`. The type's OWN members first, and
-// they are the whole answer when there are any: layout is declared, and
-// an impl cannot add storage to it.
 members_of* = (c :: Checker, ty: TyId, name: str, out :: Vec<Found>)
               Res<(), AllocError> {
     c.types.at(ty).match({
@@ -514,10 +386,6 @@ members_of* = (c :: Checker, ty: TyId, name: str, out :: Vec<Found>)
     Ok(());
 }
 
-// A behavior is declared on the actor's `Actor` impl, but selected through
-// its address. `Ref<A>.work(x)` therefore exposes the impl member with the
-// runtime-owned `(self, Context)` prefix removed. Unlike an ordinary method
-// call, the answer says whether the message entered the mailbox.
 behavior_members = (c :: Checker, ty: TyId, name: str, out :: Vec<Found>)
                    Res<(), AllocError> {
     c.ref_of_actor(ty).try().match({
@@ -673,10 +541,6 @@ actor_ref = (c :: Checker, n: TyNamed) Res<Res<TyId>, AllocError> {
         false => Ok(None),
         true  => n.args.get(0).match({
             None  => Ok(None),
-            // Ref's declaration already constrains its actor parameter at
-            // construction/spawn sites. Behavior lookup below verifies the
-            // concrete impl; repeating bound satisfaction here loses empty
-            // marker impls and makes a valid Ref look ordinary.
             Ok(a) => Ok(Ok(a)),
         }),
     })
@@ -690,9 +554,6 @@ actor_error_type = (c :: Checker) Res<Res<TyId>, AllocError> {
     c.actor_named_type("ActorError")
 }
 
-// Env.spawn's type parameter is settled by the actor value. Generic member
-// signatures otherwise retain their declaration Var in the current member
-// path, so construct this intrinsic result from the checked argument type.
 actor_spawn_ret* = (
     c        :: Checker,
     recv     : TyId,
@@ -736,9 +597,6 @@ spawn_result = (c :: Checker, actor: TyId, ordinary: TyId)
     })
 }
 
-// Resolve through the world, then pin the declaration's home. A user type
-// named `Actor` or `Ref` is not runtime syntax merely because it is spelled
-// the same way.
 actor_named_type = (c :: Checker, name: str) Res<Res<TyId>, AllocError> {
     defs ::= c.alloc.Vec<Def>();
     c.world.exported_named(name, defs).try();
@@ -761,13 +619,6 @@ actor_path = (name: str) str {
     })
 }
 
-// "A prelude declaration of a primitive's name IS that primitive"
-// (`sema_ty.named` records what minting a second one cost). `str` is an
-// ordinary struct in `std.text.text_str` carrying `len`, `get`, `index`
-// and `slice`, so a `Prim` gets the same lookup a `Named` gets, over the
-// declaration the prelude exports under the same spelling — impls
-// included, which is how `str`'s `Eq` reaches a literal. The receiver
-// stays the primitive's own `TyId`, not the prelude declaration's.
 prim_members = (
     c    :: Checker,
     p    : Prim,
@@ -791,9 +642,6 @@ prim_members = (
     })
 }
 
-// A type parameter's members are the ones its BOUNDS promise, and
-// nothing else: inside `<T: Boxy>(t: T)`, `t.width` reads `Boxy`'s width
-// and the two impls on the concrete type never come into it.
 bound_reachable = (
     c     :: Checker,
     tname : str,
@@ -809,10 +657,6 @@ bound_reachable = (
     Ok(());
 }
 
-// One `Found` per declaration, for the reason `sema_supply.zen` states at
-// `supplied`: `<T: Display>(t: T)` reaches the same two `toString`s a
-// concrete receiver does, and a bound answering with one type would make
-// the generic case pick differently from the concrete one.
 bound_member = (
     c     :: Checker,
     bound : TyId,
@@ -868,10 +712,6 @@ named_members = (
     Ok(());
 }
 
-// The receiver's arguments are substituted into what the declaration
-// promised: `Vec`'s own `get* = (self: @Self, i: usize) Res<T>` resolves
-// to `Res<T>` with `T` a `Var`, so a `Vec<u8>` reaching it answers
-// `Res<u8>` — via the receiver's own `TyNamed.args`, no second mechanism.
 struct_members = (
     c    :: Checker,
     s    : Struct,
@@ -936,9 +776,6 @@ add_own = (
     ))
 }
 
-// Resolved in the module that DECLARES the member, with `@Self` bound to
-// the type asked about — so `area* ::= (self: @Self) i32` reads as a
-// function of the receiver.
 member_type* = (c :: Checker, m: Member, mi: usize, self_ty: TyId)
                Res<TyId, AllocError> {
     ctx = c.self_ctx(mi, self_ty).try();

@@ -1,7 +1,3 @@
-// Semantic diagnostics are collected values; query failure remains reserved
-// for AllocError. Fault payloads keep structured names, spans, and type IDs so
-// this module owns all user-facing wording. Unknown types suppress cascades.
-
 Span = std.ast.ast_span
 str, String = std.text
 AllocError = std.mem
@@ -121,23 +117,12 @@ SemaFault* =
     | HandleNotAValue(NameFault)       // a loop handle names its loop, it is not a value
     | ConsumedByCapture(CaptureFault)  // a capture outlives the consume
 
-// Where the mistake is, and which one it is.
-//
-// `file` rides along rather than being read back out of `span`, because
-// a Diag outlives the module it came from — a driver holds diagnostics
-// from every file at once and sorts them.
 Diag* = {
     file*: str,
     span*: Span,
     fault*: SemaFault,
 }
 
-// The rule, as a sentence.
-//
-// Loose enough to reword, specific enough that it names the LAW rather
-// than the symptom: a reader who has just been told "type error" knows
-// only that they are stuck, and a reader told "only success lifts into
-// Res" knows what to write instead.
 message* = (fault: SemaFault) str {
     fault.match({
         UndefinedName(_)          => "undefined name: no binding of this name is in scope",
@@ -206,21 +191,12 @@ message* = (fault: SemaFault) str {
     });
 }
 
-// The whole diagnostic, on one line: `file:line:col: <sentence>`,
-// followed by whatever the fault carries.
-//
-// Rendering is the only thing in this module that allocates, and it
-// takes the `Types` store because a `TyId` is not a name — spelling one
-// is `Types.name_of`'s job and not a second copy of it here.
 render* = (self: Diag, types: Types, out :: String) Res<(), AllocError> {
     out.fmt("{}:{}: {}", self.file, self.span.start, message(self.fault)).try();
     write_detail(self.fault, types, out).try();
     Ok(());
 }
 
-// What the fault carries, appended to the sentence. A name is quoted; a
-// type contrast is written out both ways round, because "expected i32"
-// without "found str" is half a diagnostic.
 write_detail* = (fault: SemaFault, types: Types, out :: String)
                 Res<(), AllocError> {
     fault.match({

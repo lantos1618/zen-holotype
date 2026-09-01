@@ -1,9 +1,3 @@
-// src/sema/sema_vararg.zen
-// `vararg<T>` is an ordinary nominal type restricted to the final parameter.
-// Its storage borrows the caller's frame, so other positions would let it
-// escape. `pack_slot` and `pack_elem` are shared by call checking and lowering.
-// The separate `...` marker remains the heterogeneous formatting form.
-
 Ast, Module, Decl, Function, Struct, Impl, Member, Type, TypeId = std.ast
 AllocError = std.mem
 Vec = std.collections
@@ -13,17 +7,9 @@ TyId, Types, TyNamed = sema.sema_ty
 Checker = sema.sema_check
 SemaFault, NameFault = sema.sema_diag
 
-// The name, in one place. A name compare and not a declaration compare,
-// for the reason `Res` is recognised by its spelling and the backend
-// knows `Ptr` by its: there is one declaration of it, the prelude
-// exports it, and a program declaring a second `vararg` has shadowed the
-// prelude on purpose.
 VARARG*: str = "vararg"
 
-// ---------------------------------------------------------------------
 // what a call site asks
-// ---------------------------------------------------------------------
-
 // The `T` of a resolved `vararg<T>`, and `None` for every other type.
 pack_elem* = (types: Types, t: TyId) Res<TyId> {
     types.at(t).match({
@@ -39,9 +25,6 @@ named_pack_elem = (n: TyNamed) Res<TyId> {
     })
 }
 
-// Where the pack begins, when the last parameter is one. Callers ask
-// "is this variadic" and "where do the swallowed arguments start" at the
-// same moment, so it is one answer and not two.
 pack_slot* = (types: Types, params: Vec<TyId>) Res<usize> {
     (params.len == 0).match({
         true  => None,
@@ -63,9 +46,6 @@ slot_of = (types: Types, t: TyId, i: usize) Res<usize> {
     })
 }
 
-// The same question asked of a WRITTEN signature, before anything is
-// resolved: `gen_c_impl.zen` picks a member out of an overload set by
-// arity off the declaration, so it has a `Function` and no `Types`.
 tail_is_pack* = (tree: Ast, f: Function) bool {
     (f.params.len == 0).match({
         true  => false,
@@ -95,9 +75,6 @@ check_varargs* = (c :: Checker) Res<(), AllocError> {
     })
 }
 
-// The written form, before anything resolves it: `vararg` applied to
-// arguments, whatever they turn out to be. Asked of every type node in
-// the compilation, so it reads one field and compares one name.
 written_pack* = (node: Type) bool {
     node.kind.match({
         Named(n) => n.name.text.eq(VARARG),
@@ -112,13 +89,6 @@ check_mentions = (c :: Checker, found: Vec<TypeId>) Res<(), AllocError> {
     Ok(());
 }
 
-// A mention in the one allowed position owes the element rule; a mention
-// anywhere else owes nothing, because the position is already wrong.
-//
-// `vararg<vararg<i32>>` in a last parameter reports TWICE and that is
-// right: the outer says the element may not be a pack, the inner says a
-// pack is a last parameter's type. Both sentences are true of it, and
-// the reader has to delete both halves either way.
 check_mention = (c :: Checker, t: TypeId, tails: Vec<TypeId>)
                 Res<(), AllocError> {
     has_id(tails, t).match({
@@ -161,15 +131,6 @@ report_pack = (c :: Checker, t: TypeId, fault: SemaFault) Res<(), AllocError> {
     node = c.tree.type_at(t);
     c.report(node.span.file, node.span, fault)
 }
-
-// ---------------------------------------------------------------------
-// the allowed positions
-//
-// Every function's last parameter, wherever a function is declared: at
-// module level, in a struct body, in an impl. A bodyless declaration
-// counts — the three format doors are bodyless and a trait slot may be
-// too, and a signature is a signature.
-// ---------------------------------------------------------------------
 
 collect_tails = (c :: Checker, out :: Vec<TypeId>) Res<(), AllocError> {
     Range(0, c.tree.module_count()).loop((h, mi) {

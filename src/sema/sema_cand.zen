@@ -1,7 +1,3 @@
-// Candidate collection and signature matching. A dot also considers exported
-// UFCS functions whose first parameter accepts the receiver. Signatures resolve
-// in their declaring module with their own type parameters in scope.
-
 Decl, Function, TParam = std.ast
 AllocError = std.mem
 Vec = std.collections
@@ -57,10 +53,6 @@ travelled_def = (c :: Checker, d: Def, rty: TyId, out :: Vec<Cand>)
     Ok(())
 }
 
-// A declaration already in the list is not added twice: a module that
-// imported the function reaches it both ways, and one declaration is
-// one candidate or overload resolution reports its own answer as an
-// ambiguity.
 keep_travelled = (c :: Checker, k: Cand, rty: TyId, out :: Vec<Cand>)
                  Res<(), AllocError> {
     takes = takes_receiver(c, k, rty).try();
@@ -70,10 +62,6 @@ keep_travelled = (c :: Checker, k: Cand, rty: TyId, out :: Vec<Cand>)
     })
 }
 
-// A receiver fits the declared type, an implemented bound, or the function's
-// own type parameter. The last form is a universal extension such as
-// `<T>(self: T)`: it travels only under its declared name, and ordinary
-// overload matching still checks every argument after collecting it.
 takes_receiver = (c :: Checker, k: Cand, rty: TyId) Res<bool, AllocError> {
     k.params.get(0).match({
         None  => Ok(false),
@@ -114,7 +102,7 @@ cand_from_decl = (c :: Checker, d: Def, dec: Decl, out :: Vec<Cand>)
     })
 }
 
-// A signature is resolved in the declaring module, as the header says.
+// Resolve a signature in its declaring module.
 add_cand = (c :: Checker, d: Def, dec: Decl, f: Function, out :: Vec<Cand>)
            Res<(), AllocError> {
     out.add(c.make_cand(d, dec, f).try())
@@ -150,8 +138,7 @@ make_cand = (c :: Checker, d: Def, dec: Decl, f: Function)
     ))
 }
 
-// The FUNCTION form. `sema_inst.zen` owns the general one over a
-// Vec<TParam>; Zen has no overloading, so the two cannot share a name.
+// Push a function's type parameters into candidate-resolution scope.
 push_fn_tparams = (c :: Checker, f: Function, owner: str) Res<(), AllocError> {
     f.tparams.loop((h, tp) {
         text = tp.name.text;
@@ -304,9 +291,6 @@ spread_fits = (c :: Checker, actuals: Vec<Actual>, fixed: usize, elem: TyId)
     Ok(ok);
 }
 
-// A pack whose element type nothing says is its own poison: the type is
-// already reported, and answering with it keeps the arity question
-// truthful instead of accepting everything.
 pack_element_of = (c: Checker, pack: TyId) TyId {
     pack_elem(c.types, pack).match({ Ok(e) => e, None => pack })
 }
@@ -319,9 +303,6 @@ fits_at_ty = (c :: Checker, actuals: Vec<Actual>, i: usize, want: TyId)
     })
 }
 
-// Whether the last parameter says the list does not end — the bare `...`
-// marker, which `sema_denote.zen` interns as a primitive so this is a name
-// compare, or a `vararg<T>`, which is an ordinary nominal.
 is_variadic = (c: Checker, cand: Cand) bool {
     (cand.params.len > 0).match({
         false => false,
@@ -329,18 +310,11 @@ is_variadic = (c: Checker, cand: Cand) bool {
     })
 }
 
-// THE ANSWER THE BACKEND READS BACK. `gen_c_member.zen` asks it of a
-// resolved member signature, so the arity a call is emitted at is the
-// arity the checker accepted it at.
 tail_swallows* = (c: Checker, tail: TyId) bool {
     c.prim_name(tail).eq("...")
         || pack_elem(c.types, tail).match({ Ok(_) => true, None => false })
 }
 
-// The first `n` arguments, and no early exit — `find` takes a closure
-// that answers `bool`, and asking whether an argument keeps a bound is
-// a question that allocates. A candidate has a handful of parameters,
-// so the shape with nothing to get wrong is the right one.
 all_fit = (c :: Checker, cand: Cand, actuals: Vec<Actual>, n: usize)
           Res<bool, AllocError> {
     ok ::= true;

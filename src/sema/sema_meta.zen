@@ -1,12 +1,3 @@
-// Semantic evaluation for the supported @meta forms:
-//   @meta(name: T).name
-//   @meta(name: T).fields().len
-//   @meta(name: T).fields().loop((h, field) { ... })
-// Fold memos are keyed by the written TypeId so distinct generic
-// instantiations cannot share an answer. Field walks recheck the body once per
-// declared field and reject nested walks. Unsupported forms report
-// MetaNotImplemented without descending into their comptime argument.
-
 Expr, Type, TypeId, Access, Meta, Alias, Call, Struct = std.ast
 ExprId, Lambda, Param, Span = std.ast
 AllocError = std.mem
@@ -25,12 +16,6 @@ meta_type* = (c :: Checker, node: Expr, ctx: Ctx) Res<TyId, AllocError> {
     c.meta_refused(node)
 }
 
-// The intercept `sema_member.access_type` makes when the access target
-// is a Meta node: the whole access is the evaluator's question. The
-// backend hands back this same access when it lowers the expression,
-// and reads the folded text through `meta_str(t)` on the access's own
-// `Meta` node; the MEMO is keyed finer, on the written type, so two
-// instantiations never share a row.
 meta_access* = (c :: Checker, ac: Access, ctx: Ctx)
                Res<TyId, AllocError> {
     target = c.tree.expr_at(ac.base);
@@ -57,9 +42,6 @@ meta_len_chain* = (c :: Checker, ac: Access, ctx: Ctx)
     })
 }
 
-// One level down: the CALL's callee is the Access whose base is the
-// Meta. The access's own name decides what the chain reads — `fields`;
-// anything else on the same base (`@meta(T).name()`) stays the wall.
 chain_callee* = (c :: Checker, callee_id: ExprId, ctx: Ctx)
                 Res<TyId, AllocError> {
     node = c.tree.expr_at(callee_id);
@@ -72,10 +54,6 @@ chain_callee* = (c :: Checker, callee_id: ExprId, ctx: Ctx)
     })
 }
 
-// The chain's root. The Meta carries the WRITTEN TYPE EXPRESSION — the
-// memo key — handed over exactly as `.name`'s fold receives it; a Meta
-// without one (the value form, or a malformed spelling) has no count
-// to give and refuses rather than guesses.
 counted_base = (c :: Checker, base: ExprId, ctx: Ctx)
                Res<TyId, AllocError> {
     target = c.tree.expr_at(base);
@@ -127,9 +105,6 @@ meta_count_fold = (c :: Checker, target: Expr, t: TypeId, ctx: Ctx)
     c.meta_count(target, t, ty, ctx)
 }
 
-// Which declaration owns the count. The written spelling answers first
-// (`P2` counts Point's fields under P2's own row), everything else asks
-// the resolved type — the same split `.name` draws, for the same reason.
 meta_count = (
     c      :: Checker,
     target : Expr,
@@ -181,14 +156,6 @@ counted_decl = (
     })
 }
 
-// THE COUNT LANDS. The members are counted HERE, filtered to
-// `MemberKind.Field` — the view R2's `fields()` helper would allocate,
-// evaluated instead at the one site that asks: a count is a function of
-// the type, so it needs no storage beyond its memo row. The split is
-// syntactic (ast_node.zen): `k: i64 = 5` is a Const and `go* = ..` a
-// Function — only `p: i64` counts, which is what keeps Muddle at 2
-// against four members. ZERO fields fall through the filter zero times:
-// Empty answers 0 by never entering the arm.
 count_fields = (c :: Checker, s: Struct) Res<usize, AllocError> {
     n ::= 0;
     s.members.loop((h, m) {
@@ -200,10 +167,6 @@ count_fields = (c :: Checker, s: Struct) Res<usize, AllocError> {
     Ok(n)
 }
 
-// The fold lands: the struct's field count recorded under the WRITTEN
-// TYPE EXPRESSION's id for the same reason `.name`'s row is — two
-// instantiations of one generic never share a row (`Box<i64>` cannot
-// answer for `Box<bool>`).
 counted_record = (
     c      :: Checker,
     key    : TypeId,
@@ -215,13 +178,6 @@ counted_record = (
     c.meta_count_type()
 }
 
-// An alias folds to the count of WHAT THE USER WROTE — `@meta(x: P2)`
-// counts through P2's own row — reached one step short of the collapse.
-// Validation stays: an alias naming no struct (`Count = i64`) has no
-// fields to count and refuses rather than guess. The COUNT recorded is
-// the TARGET STRUCT'S — the written alias and the struct it names are
-// one type here, and the memo row is keyed on the written spelling
-// either way.
 counted_alias = (c :: Checker, al: Alias, owner: Def, target: Expr, t: TypeId)
                 Res<TyId, AllocError> {
     ty = c.alias_target_of(al, owner).try();
@@ -251,11 +207,6 @@ resolved_count = (c :: Checker, target: Expr, t: TypeId, ty: TyId)
     })
 }
 
-// The name lives on a declaration's payload node — the one the USER
-// WROTE (`P2 = Point` answers `P2`), reached through the written type
-// expression so two spellings of one type ask their own questions. A
-// poisoned or unknown resolution was reported on the way in and says
-// nothing twice.
 meta_decl = (
     c      :: Checker,
     target : Expr,
@@ -269,11 +220,6 @@ meta_decl = (
     })
 }
 
-// The written type expression decides which declaration is asked. A
-// written name resolves one step short of the alias collapse; any
-// other spelling — `@Self`, a primitive — has no written declaration,
-// so the RESOLVED type answers, which is where `@Self` finds its
-// struct.
 written_kind = (
     c      :: Checker,
     node   : Type,
@@ -331,18 +277,11 @@ written_alias = (c :: Checker, al: Alias, owner: Def, target: Expr, t: TypeId)
     })
 }
 
-// The fold lands. One memo, one row shape: `.name` records the text
-// under the written type (`t`). A count never touches this memo — it
-// has its own (`meta_count_memo`), also keyed on the written type.
 meta_record = (c :: Checker, key: TypeId, name: str) Res<TyId, AllocError> {
     c.meta_memo.set(key, name).try();
     c.types.str_ty()
 }
 
-// A written spelling that names no declaration of its own falls back
-// to the resolved type, whose own declaration carries the name. There
-// is no WRITTEN name on this path — `@Self` and friends have none — so
-// an alias here has nothing to answer and refuses rather than guess.
 resolved_decl = (c :: Checker, target: Expr, t: TypeId, ty: TyId)
                 Res<TyId, AllocError> {
     c.types.at(ty).match({
@@ -367,15 +306,6 @@ meta_refused* = (c :: Checker, node: Expr) Res<TyId, AllocError> {
     c.types.unknown()
 }
 
-// WHETHER THIS DOT IS THE COUNT'S CHAIN, AND NOTHING ELSE. Strictly
-// syntactic, so it can never answer for a `.len` that means a length
-// somewhere else: the access must be named `len`, its base must BE a
-// Call whose callee is an Access named `fields` whose own base is a
-// Meta carrying a written type. A Vec's `.len`, a str's, an array's —
-// none of them is a call of fields over a meta, and every one of them
-// misses this and takes the ordinary member path untouched. The
-// predicate reads nodes only; the fold itself lives in
-// `sema_meta.meta_len_chain`, which re-walks what this vouched for.
 is_count_chain* = (c :: Checker, ac: Access) bool {
     top = ac.name.text.eq("len");
     top.match({
@@ -405,33 +335,6 @@ is_count_chain* = (c :: Checker, ac: Access) bool {
     })
 }
 
-// ---------------------------------------------------------------------
-// M4 slice 2: the field walk
-//
-// `@meta(name: T).fields().loop((h, field) { .. })` — the one rule so
-// far that is not a fold but an UNROLLING. Sema checks the body once
-// per field of T, with `field` standing for that pass's field: its
-// `name` folds to a comptime `str`, and the instance projection
-// `recv.at(field)` types as that field's own type while staying
-// RESIDUAL — the backend rewrites it to the ordinary `recv.<name>`,
-// so the value half of the program is never evaluated, only copied.
-// `h` is the loop's own handle and answers exactly `break()` and
-// `next()`, both `()`; `break(v)` is M4-later and refused by name, as
-// is every other reading of either binder — they are comptime terms,
-// and a comptime term standing as a value is the wall.
-//
-// A NESTED WALK IS REFUSED, and the refusal is what keeps the budget
-// question closed: a walk inside a walk's body would recur into the
-// evaluator, which is the one shape §8's missing step budget exists
-// for. This slice declines the shape instead — `walk_stack` is a stack
-// of one, and a second walk meeting a nonempty one is the wall.
-// ---------------------------------------------------------------------
-
-// WHICH BINDER A NAME IN A WALK BODY RESOLVES TO, if either. The innermost
-// binding's SPAN is the identity: `lookup` answers the shadowing question
-// first, and a binding whose span is neither parameter's is the body's own
-// rebinding of the name — which reads as an ordinary local, not as the
-// walk's.
 WalkName* = WalkNone | WalkHandle | WalkField
 
 walk_name* = (c: Checker, text: str) WalkName {
@@ -458,12 +361,6 @@ span_eq = (a: Span, b: Span) bool {
         && (a.end.col == b.end.col)
 }
 
-// THE WALK BODY'S ONE FOLDING ACCESS: `field.name` is the pass's field
-// name as a comptime `str`. The marker is recorded and the TYPE is the
-// answer — the text itself changes with every pass, so nothing is
-// folded here that `walk_now` cannot answer fresher at lowering. Every
-// other member asked of the binder is the wall: a comptime term has
-// exactly one member.
 meta_name_fold* = (c :: Checker, id: ExprId, node: Expr, ac: Access)
                   Res<TyId, AllocError> {
     ac.name.text.eq("name").match({
@@ -475,12 +372,6 @@ meta_name_fold* = (c :: Checker, id: ExprId, node: Expr, ac: Access)
     })
 }
 
-// THE MEMBER-CALL DISPATCH, asked before the wall and the ordinary path
-// alike: one question, one answer, so `member_call` cannot drift from
-// what this file considers the walk's. `Ordinary` hands the call back
-// untouched — including the malformed near-misses of the walk's own
-// shape, which meet the wall one level down, at the `.fields()` call
-// written on the Meta, exactly as a bare `@meta(T).fields()` always has.
 MetaCall* = Answered(TyId) | Ordinary
 
 meta_member_call* = (
@@ -556,10 +447,6 @@ walk_proj_or_ordinary = (
     })
 }
 
-// `recv.at(field)` with the walk's OWN field binder as the one argument
-// — strictly syntactic, and the argument is never typed: it is a
-// comptime term, not a value, and a paren around it is a different
-// sentence (the ordinary path, which the binder's refusal then walls).
 is_projection = (c :: Checker, call: Call, ac: Access) bool {
     (ac.name.text.eq("at") && (call.args.len == 1)).match({
         false => false,
@@ -576,12 +463,6 @@ is_projection = (c :: Checker, call: Call, ac: Access) bool {
     })
 }
 
-// THE PROJECTION'S SEMA HALF. The receiver is typed the ordinary way;
-// the CURRENT pass's field is looked up on its type as if the user had
-// written the dot. Not finding it there is the walk's own mismatch —
-// the names came off the WRITTEN type, the receiver is whatever the
-// body projects through — and the diagnostic names the field, not the
-// `at`.
 meta_projection = (
     c    :: Checker,
     id   : ExprId,
@@ -632,9 +513,6 @@ no_projection = (c :: Checker, node: Expr, fname: str, ty: TyId)
     c.types.unknown()
 }
 
-// A projection is STORAGE: a computed member has none, a constant has no
-// per-instance half, and a function is a method, not a field. Everything
-// else marks the call for the backend and answers the field's own type.
 project_found = (c :: Checker, id: ExprId, node: Expr, f: Found)
                 Res<TyId, AllocError> {
     c.projectable(f).match({
@@ -653,12 +531,6 @@ projectable = (c: Checker, f: Found) bool {
     })
 }
 
-// THE PROJECTION'S TYPE, ASKED AGAIN PER PASS. The memo holds the last
-// pass sema checked; while the backend lowers a pass (`walk_now` is
-// nonempty), a marked call's type is the CURRENT field's instead —
-// recomputed from the receiver's memoized type, never re-resolved.
-// Every other node answers as it always has: a miss here is the memo's
-// question, not this rule's.
 walk_projection_type* = (c :: Checker, id: ExprId, ctx: Ctx)
                         Res<Res<TyId>, AllocError> {
     c.walk_field_now().match({
@@ -796,12 +668,6 @@ walk_with_body = (
     })
 }
 
-// WHICH STRUCT'S FIELDS THE WALK UNROLLS OVER — the count's discipline
-// (`meta_count` and its helpers) one level up: the WRITTEN name answers
-// first, an alias counts through to the struct it names, and anything
-// without a struct's payload — a primitive, a type parameter, an enum —
-// is the wall rather than a guess. Answers `true` with `out` filled, or
-// reports and answers `false`.
 walk_fields_of = (
     c      :: Checker,
     target : Expr,
@@ -921,9 +787,6 @@ resolved_walk = (c :: Checker, target: Expr, ty: TyId, out :: Vec<str>)
     })
 }
 
-// The field names, in declaration order — the count's `MemberKind.Field`
-// filter read as a LIST: a constant and a method are not walked, exactly
-// as they are not counted.
 walk_collect = (c :: Checker, s: Struct, out :: Vec<str>)
                Res<(), AllocError> {
     s.members.loop((h, m) {
@@ -989,11 +852,6 @@ walk_pass_with = (
     Ok(())
 }
 
-// WHETHER THIS CALL IS THE FIELD WALK, AND NOTHING ELSE. Strictly
-// syntactic, the count's chain one level deeper: `.loop` over ONE
-// argument that is a two-parameter lambda with no written types, over
-// `fields()` over a typed Meta. An ordinary `xs.loop((h, x) { .. })`
-// shares every word but the Meta root, and misses here.
 is_walk_chain* = (c :: Checker, call: Call, ac: Access) bool {
     ac.name.text.eq("loop").match({
         false => false,

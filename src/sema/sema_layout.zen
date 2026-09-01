@@ -1,10 +1,3 @@
-// src/sema/sema_layout.zen
-// Whole-program rejection of by-value struct layout cycles.
-//
-// Pointer-like and non-nominal fields terminate a path. Generic structs
-// abstain because cycles requiring substitution belong to instantiation.
-// Each cycle is reported once at its earliest source edge.
-
 Decl, Struct, Member, Field = std.ast
 Ident, Pos, TypeId = std.ast
 Alloc, AllocError = std.mem
@@ -17,9 +10,6 @@ SemaFault, NameFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
 type_from_ast = sema.sema_denote
 
-// One struct on the walk, and the field that reached it. A blame is
-// always an edge, so the root frame's `site` is never read, which is
-// why it costs nothing to give the root the struct's own name.
 Frame = {
     id: DeclId,
     site: Ident,
@@ -176,12 +166,6 @@ named_decl = (c: Checker, ty: TyId) Res<DeclId> {
     })
 }
 
-// ---------------------------------------------------------------------
-// the small answers
-// ---------------------------------------------------------------------
-
-// The struct a declaration is, when this walk can answer about one. A
-// generic struct abstains — see the header.
 struct_of = (c: Checker, id: DeclId) Res<Struct> {
     decl_at(c.tree, id).match({
         None  => None,
@@ -220,16 +204,10 @@ site_at = (path: Vec<Frame>, i: usize, fallback: Ident) Ident {
     path.get(i).match({ Ok(fr) => fr.site, None => fallback })
 }
 
-// Nearer the top of a file. Two files cannot be ordered by position, so
-// the one found first wins; the walk order is fixed, so every run
-// agrees.
 earlier = (a: Ident, b: Ident) Ident {
     earlier_pos(b.span.start, a.span.start).match({ true => b, false => a })
 }
 
-// Named for what it answers here -- "is x earlier" -- and not `before`:
-// ast_find.zen exports the same three lines under that name, and Zen has
-// no overloading to tell them apart.
 earlier_pos = (x: Pos, y: Pos) bool {
     (x.line < y.line) || ((x.line == y.line) && (x.col < y.col))
 }

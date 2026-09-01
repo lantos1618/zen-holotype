@@ -1,18 +1,3 @@
-// src/sema/sema_join.zen
-// Computes the value type of a match by folding once over its arms.
-// `sema_match.zen` decides which values reach an arm; this module decides
-// what comes back out.
-//
-// `Res` is the whole difficulty, and a deliberate one. `Ok(x)` is
-// OPEN — which `Res` it closes isn't decided until an expectation
-// says — so an arm carrying one is only half an answer. Joining is not
-// subtyping or unification: it reads the FORM off the arm that has one
-// and the PAYLOAD off the arm that has one, since a match written
-// `Ok(v)` / `None` has neither arm knowing both.
-//
-// Otherwise the first arm supplies the type: Zen has no numeric tower or
-// general common supertype. Arm agreement is checked by `sema_hoist`.
-
 AllocError = std.mem
 TyId, TyRes, is_failure = sema.sema_ty
 Checker = sema.sema_check
@@ -48,9 +33,6 @@ settled_literal = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
     })
 }
 
-// The same question with the arms the other way round, for
-// `settle_reversed`'s reason: which arm carried the literal is the
-// author's ordering, not a fact about the type.
 literal_reversed = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
     (c.is_literal_ty(b) && c.concrete(a) && c.assignable(b, a)).match({
         true  => Ok(a),
@@ -58,22 +40,10 @@ literal_reversed = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
     })
 }
 
-// NEVER SETTLE A LITERAL INTO A SLOT NOBODY HAS COMPUTED — `sema_hoist`
-// states the standing rule as "never count an unsettled slot".
-// `assignable` says an `int` reaches an unsubstituted `T`, so without
-// this the arm `false => <T>` in a generic body took the whole join to
-// `T` and handed codegen a `>` between two things it has no scalar for
-// (`std/mem/mem_arena.zen:126`).
 concrete = (c: Checker, id: TyId) bool {
     (unsettled(c, id) || c.is_var(id)) == false
 }
 
-// Settling an open `Res` takes the other arm's FORM and keeps its own
-// PAYLOAD. E.g. `op = p.peek().kind.match({ Bang => Ok(UnOp.Not), ..,
-// _ => None })` is `Res<UnOp>`: `None` says the FORM (absence, no
-// reason), `Ok` says the PAYLOAD. Taking `None`'s type whole threw the
-// payload away and answered `Res<Infer>` — a backend struct with an
-// `int` where `UnOp` goes.
 settled_res = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
     c.types.at(b).match({
         Res(rb) => c.settled_form(a, b, rb),
@@ -105,17 +75,6 @@ at_form = (c :: Checker, value: TyId, rb: TyRes) Res<TyId, AllocError> {
     })
 }
 
-// Two settled failures are one value with two ways to go wrong: the
-// match is worth `Res<T, Ea | Eb>`. DESIGN.md (Errors): "the error
-// type of a Res is a union, and propagation merges sets" — stated for
-// a call, but an arm is the same join sideways. First-arm-wins typed
-// `true => fails(n)` / `false => faults(n)` as `Res<(), AllocError>`
-// and left the second arm nowhere to go; gcc rejected the assignment.
-//
-// This is the one exception to first-arm-wins, and not an invented
-// supertype: the set already has a lattice (`union_ty` canonicalises,
-// `set_within` reads it), so the join exists and only the arms had
-// never been asked.
 merged_or_first = (c :: Checker, a: TyId, b: TyId) Res<TyId, AllocError> {
     c.types.at(a).match({
         Res(ra) => c.merge_against(a, b, ra),
@@ -131,12 +90,6 @@ merge_against = (c :: Checker, a: TyId, b: TyId, ra: TyRes)
     })
 }
 
-// Only two failures over one value type merge. An absence carries no
-// reason (no set to contribute); an open `Res` is `settled_res`'s case
-// above; two different value types are the "cannot express" case
-// first-arm-wins is for. An error still a hole is not a set either —
-// folding it in would freeze an undecided type into a union nobody
-// wrote.
 merge_failures = (c :: Checker, a: TyId, ra: TyRes, rb: TyRes)
                  Res<TyId, AllocError> {
     (is_failure(ra.form) && is_failure(rb.form) && ra.value.eq(rb.value)

@@ -1,19 +1,3 @@
-// The query engine. Everything else in this folder is a question asked
-// of it.
-// Sema is a set of memoized queries populated on demand. Each query follows
-// the same shape:
-//
-//     q(self :: @Self, key, ctx) Res<Answer, AllocError> {
-//         self.memo.get(key).match({
-//             None    => self.compute_q(key, ctx),   // fills the memo
-//             Ok(hit) => Ok(hit),
-//         })
-//     }
-//
-// Keys are stable node ids. Checker owns the allocator used by its memo tables;
-// query Err values are allocation failures only. Semantic diagnostics are
-// collected values, and a reported query returns Unknown to prevent cascades.
-
 Ast, ExprId, TypeId, Span = std.ast
 nowhere = std.ast
 BinOp, Unary, Binary, Access = std.ast
@@ -112,60 +96,17 @@ Checker* = {
     // Instantiation edges in resolution order.
     edges :: Vec<InstEdge>,
 
-    // WHOSE BODY IS BEING CHECKED. The qualified name of the enclosing
-    // function while `check_body` walks it, empty outside one.
-    //
-    // A call records the edge it makes, and an edge is only a
-    // continuation of a chain if it knows which body it came from —
-    // `pong<Vec<T>>` diverges because it is inside `ping`, and read on
-    // its own it is just a call. `check_body` is the one place that
-    // knows, so it is the one place that sets this.
     owner_now :: str = "",
 
-    // THE SET A NAME STANDS FOR. `A | B` is a union of existing types
-    // when every variant names one, and `WriteError` is then a NAME for
-    // that set rather than a type of its own. The named type stays what
-    // it was — gen_c's whole representation of a set is the declared
-    // enum — and this says what it MEANS, which is the only part
-    // containment needs. `sema_union.zen` explains why both are kept.
-    //
-    // Keyed on the named `TyId` and not on the declaration, so the
-    // read-only side — `set_assignable` below — can ask without an
-    // allocator. A name absent from this table is nominal and stands
-    // for itself, which is what `set_of` answers.
     set_memo* :: Map<TyId, TyId>,
 
-    // WHAT THE BODY BEING CHECKED RAISES. A `Res<T, _>` declares that
-    // its set is a fact about its body, so the body has to be walked
-    // before the signature is known — and every `.try()` that propagates
-    // through it drops its callee's set in here on the way past.
-    //
-    // A stack with a mark, like `locals`, because a lambda body is
-    // checked inside its enclosing function's and raises through it.
     raised :: Vec<TyId>,
 
-    // the scope stack: one flat Vec with marks, not a chain of frames.
-    // A chain needs indirection and every frame is an allocation; a
-    // stack needs a `usize` and `release` is what pops it.
+    // Scoped bindings share a flat stack; marks identify frame boundaries.
     locals :: Vec<Binding>,
 
-    // WHERE THE INNERMOST BLOCK STARTS in that stack. `release` needs
-    // only a mark passed down the call chain; deciding whether a name
-    // is bound in THIS block needs the mark to be readable from
-    // anywhere the block's statements reach, which a local cannot be.
     block_base :: usize,
 
-    // the type parameters in scope, and the bounds on them. Two stacks
-    // with marks, the same shape and for the same reason.
-    //
-    // A `Binding`'s `name` is the type parameter's — `T` — and its `ty`
-    // is the `Ty.Var` it denotes in `tvars`, or one of its bounds in
-    // `bounds`. `<K: Eq + Hash, V>` is three rows in `tvars` terms and
-    // two in `bounds`, because "`Eq + Hash` is two requirements on one
-    // type" and a list is the only shape that holds two.
-    //
-    // Not a field on `Ctx`: a `Ctx` is copied into every sub-query, and
-    // a Vec copied by value is one Vec shared by accident.
     tvars :: Vec<Binding>,
     bounds :: Vec<Binding>,
 
@@ -270,12 +211,6 @@ Checker* = {
     }
 
 
-    // THE FOLD'S TYPE, OUT LOUD. The count is a comptime `usize` at its
-    // own site — not a literal waiting for context — so a print hole or
-    // a typed let asks sema, which answered the fold, rather than the
-    // backend guessing. This is the one place §5's "no second evaluator"
-    // rule could be violated from the other side; it reads the memo, it
-    // computes nothing.
     meta_count_type* = (self :: @Self) Res<TyId, AllocError> {
         self.types.prim("usize")
     }
@@ -326,21 +261,9 @@ Checker* = {
         self.diags.add(Diag(file: file, span: span, fault: fault))
     }
 
-    // -----------------------------------------------------------------
-    // scopes
-    //
-    // `mark` / `release` rather than push/pop of frames: entering a
-    // block records where the stack was, leaving it drops everything
-    // added since. Shadowing falls out for free, because `lookup` walks
-    // from the top down.
-    // -----------------------------------------------------------------
 
     mark* = (self: @Self) usize { self.locals.len }
 
-    // A BLOCK IS A SCOPE OF ITS OWN, and this is the pair that says so.
-    // `enter_block` hands back the enclosing block's base for
-    // `leave_block` to restore, the same shape as `mark`/`release` —
-    // and for the same reason, since blocks nest.
     enter_block* = (self :: @Self) usize {
         was             = self.block_base;
         self.block_base = self.locals.len;
@@ -349,15 +272,6 @@ Checker* = {
 
     leave_block* = (self :: @Self, was: usize) () { self.block_base = was; }
 
-    // The binding of `name` DECLARED IN THE INNERMOST BLOCK, or
-    // nothing. `lookup` walks the whole stack, which is what a use site
-    // wants; a second declaration is only a mistake when the first one
-    // is a statement of the same block, because a nested block is how
-    // shadowing is spelled.
-    // Forward, where `lookup` walks backward: a block holds at most one
-    // binding of a name once this is enforced, so there is no innermost
-    // to find. `gen_c_state.bound_in_frame` is the same walk over the
-    // same shape, asking the backend's version of the question.
     lookup_here* = (self: @Self, name: str) Res<Binding> {
         Range(self.block_base, self.locals.len).find((k) {
             self.locals.get(k).match({
@@ -376,10 +290,6 @@ Checker* = {
         self.bind_at(name, ty, mutable, param, nowhere())
     }
 
-    // The same binding, with the position the name was written at. A
-    // backend re-walking a body has no position to give and does not
-    // need one; a declaration in source does, because `sema_place.zen`
-    // reports a second binding of the name by pointing at both.
     bind_at* = (self :: @Self, name: str, ty: TyId, mutable: bool,
                 param: bool, span: Span) Res<(), AllocError> {
         self.locals.add(Binding(
@@ -391,9 +301,7 @@ Checker* = {
         ))
     }
 
-    // Drop every binding added since `mark`. `Vec` has no truncate, so
-    // this takes the last element as many times as there are extras —
-    // which is what truncate would have been.
+    // Drop every binding added since `mark`.
     release* = (self :: @Self, mark: usize) Res<(), AllocError> {
         extra = self.locals.len - mark;
         Range(0, extra).loop((h, i) {
@@ -402,13 +310,6 @@ Checker* = {
         Ok(());
     }
 
-    // Move every binding added since `mark` aside, and put it back.
-    //
-    // `release` DROPS; a backend inlining a closure has to rewind to
-    // the frame the closure was written in, lower its body there, and
-    // then carry on with the callee's own bindings still live. Two
-    // verbs because those are two different intentions, and only one of
-    // them is reversible.
     detach_locals* = (self :: @Self, mark: usize, saved :: Vec<Binding>)
                      Res<(), AllocError> {
         extra = self.locals.len - mark;
@@ -434,13 +335,6 @@ Checker* = {
         Ok(());
     }
 
-    // -----------------------------------------------------------------
-    // type parameters and their bounds
-    //
-    // `<T: Boxy>` puts `T` in scope as a type and `Boxy` in scope as
-    // what `T` promises — and that promise is the only thing that can
-    // choose between two impls supplying one name.
-    // -----------------------------------------------------------------
 
     tvar_mark* = (self: @Self) usize { self.tvars.len }
 
@@ -545,11 +439,6 @@ Checker* = {
     // agreement
     // -----------------------------------------------------------------
 
-    // Whether `got` is acceptable where `want` is expected. One-way, and
-    // deliberately lenient in three places: poison agrees with everything
-    // (one mistake, one diagnostic), a hole agrees with everything (`_`
-    // is a hole), and a literal agrees with any type of its family (a
-    // literal's type comes from its context).
     assignable* = (self: @Self, got: TyId, want: TyId) bool {
         got.eq(want)
             || self.is_unknown(got) || self.is_unknown(want)
@@ -561,15 +450,6 @@ Checker* = {
             || self.uninstantiated(got, want)
     }
 
-    // TWO ARRAYS AGREE WHEN THEIR ELEMENTS DO, AT ONE LENGTH — the
-    // leniency the line above grants a literal, read one level down.
-    // `[1, 2, 3]` is `[int, 3]`, and a position that writes `[u8, 3]`
-    // is the context those elements' type comes from, exactly as a
-    // parameter is for a bare `1`. Without this a written array type
-    // refused every literal ever written at it.
-    //
-    // The elements go back through `assignable`, so `[i32, 3]` still
-    // does not reach `[u8, 3]` and `[u8, 3]` does not reach `[u8, 4]`.
     array_assignable = (self: @Self, got: TyId, want: TyId) bool {
         self.types.at(got).match({
             Array(g) => self.array_fits(g, want),
@@ -584,17 +464,6 @@ Checker* = {
         })
     }
 
-    // TWO `Res` AGREE WHEN THEIR PARTS DO, and this is the one place
-    // hoisting is paid for. "`Ok(x)` is written before anyone knows
-    // whether it closes a `Res<i32>` or a `Res<i32, E>`", so a bare
-    // `Ok(..)` is `Open` — a form nobody has decided — and `Open` closes
-    // either way. A DECIDED form must match: a `Res<T, E>` is not a
-    // `Res<T>`, and accepting one for the other would let a failure
-    // reach a signature with nowhere to return it.
-    //
-    // The parts go back through `assignable`, so `Res<u8>` reaches
-    // `ok_or`'s `Res<T>` by the same rule that carries `Vec<T>` to
-    // `Vec<Member>`, and `Res<i32>` still does not reach `Res<str>`.
     res_assignable = (self: @Self, got: TyId, want: TyId) bool {
         self.types.at(got).match({
             Res(g) => self.res_fits(g, want),
@@ -682,9 +551,7 @@ Checker* = {
 
     raised_mark* = (self: @Self) usize { self.raised.len }
 
-    // The ACCESS a member id stands for, when it is one — `method_not_value`
-    // reads the name and its span off it. A miss answers `None`: an access
-    // that never reported keeps reporting nothing here.
+    // Return the access represented by a member id, when available.
     access_at* = (self: @Self, id: ExprId) Res<Access> {
         node = self.tree.expr_at(id);
         node.kind.match({
@@ -697,9 +564,7 @@ Checker* = {
         self.raised.add(e)
     }
 
-    // Everything raised since `mark`, moved out. It is a take and not a
-    // read because the enclosing body has already been walked: leaving
-    // the rows behind would make the NEXT function raise them too.
+    // Move out every raised type recorded since `mark`.
     take_raised* = (self :: @Self, mark: usize, out :: Vec<TyId>)
                    Res<(), AllocError> {
         Range(mark, self.raised.len).loop((h, i) {
@@ -725,12 +590,6 @@ Checker* = {
         })
     }
 
-    // A union target accepts any of its members: widening an error set
-    // is what `.try()` does, and it is not a conversion.
-    //
-    // Both sides go through `set_of` because either may be a NAME for a
-    // set — `WriteError` accepting an `AllocError` is the whole point,
-    // and it is spelled with a name on both sides of the question.
     set_assignable = (self: @Self, got: TyId, want: TyId) bool {
         wide = self.set_of(want);
         self.types.at(wide).match({
@@ -750,9 +609,7 @@ Checker* = {
         self.is_float_literal(got) && is_float(self.prim_name(want))
     }
 
-    // Report a mismatch, or say nothing. The one place `expected X,
-    // found Y` is raised, so the rule for when it is NOT raised —
-    // poison, holes, literals — lives in `assignable` alone.
+    // Report a mismatch unless `assignable` accepts the pair.
     coerce* = (self :: @Self, file: str, span: Span, got: TyId, want: TyId,
                name: str) Res<(), AllocError> {
         self.assignable(got, want).match({
@@ -787,11 +644,6 @@ Checker* = {
         })
     }
 
-    // `!` is logical negation — the method table has no `Not` to
-    // dispatch to, so the operand is `bool` and nothing else. The
-    // question goes through `coerce` so an operand that already
-    // reported stays one mistake, one diagnostic, and the position is
-    // the operator token, where the `!` the author has to delete is.
     check_not* = (self :: @Self, u: Unary, inner: TyId)
                  Res<TyId, AllocError> {
         want = self.types.bool_ty().try();
@@ -799,18 +651,6 @@ Checker* = {
         Ok(want);
     }
 
-    // The operand-side half of being a logical operator, and the same
-    // rule `check_not` states for `!`: `&&` and `||` short-circuit, and
-    // short-circuiting is deciding whether the RIGHT side runs off the
-    // left side's truth — which only a bool has. Every other predicate
-    // (`<`, `==`) takes whatever scalar it is given, so the comparison
-    // rule never covered these two.
-    //
-    // EACH SIDE ASKED ON ITS OWN, through the same `coerce`: a single
-    // question about the pair would have to name one type as `found`,
-    // and `true && 1` would then report the left one — a sentence about
-    // the operand that is fine. Poison and holes stay silent there, so
-    // one wrong operand is still one diagnostic.
     check_logical* = (self :: @Self, b: Binary, lhs: TyId, rhs: TyId)
                      Res<(), AllocError> {
         is_logical(b.op).match({
@@ -862,19 +702,6 @@ Checker* = {
     }
 }
 
-// `alloc.Checker(tree)` — a ufcs function whose first parameter is an
-// Alloc, beside the type it builds, exactly as `Vec`, `Map`, `Ast` and
-// `Types` are. It builds the module graph eagerly, because every query
-// below needs it and building it twice is the thing memoization exists
-// to prevent.
-//
-// THE TREE MUST BE FINISHED FIRST. An `Ast` is a value — six `Vec`s, each
-// a pointer, a length and a capacity — so this copies a SNAPSHOT. A node
-// added to the caller's tree afterwards is invisible here, and asking
-// about its id traps in `ast_arena.zen`, which is correct for an id the
-// arena never handed out and says nothing about where the mistake was.
-// Holding a reference instead would not help: a `Vec` grows by
-// reallocating, so any handle taken before a growth points at freed pages.
 Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
     c ::= Checker(
         tree: tree,
@@ -909,14 +736,6 @@ Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
     Ok(c);
 }
 
-// THE `*` GATE IS A FACT ABOUT THE GRAPH, so it is asked once, here,
-// where the graph is built — and not by a query, because no query would
-// ever reach it. `defs_of` can only ever answer "nothing is in scope
-// under that name"; the mistake is one hop away in the IMPORT, and by
-// the time a use site notices, the name it wanted has already been
-// filtered out. That is why this rule was silent for so long: the only
-// thing left to see was a backend that could not resolve a symbol, which
-// names the wrong phase and the wrong law.
 check_import_gate = (c :: Checker) Res<(), AllocError> {
     blocked ::= c.alloc.Vec<ImportBinding>();
     Range(0, c.world.count()).loop((h, mi) {
@@ -926,9 +745,6 @@ check_import_gate = (c :: Checker) Res<(), AllocError> {
     Ok(());
 }
 
-// The two halves, unjoined. `sema_diag.zen` builds the sentence — this
-// rule knows which name was refused and by which module, and nothing
-// about how that reads.
 report_blocked = (c :: Checker, b: ImportBinding) Res<(), AllocError> {
     c.report(
         b.span.file,
@@ -952,16 +768,8 @@ Ctx* = (module: usize, none: TyId) Ctx {
     )
 }
 
-// The `TyId` a lookup falls back to before the store has answered. It is
-// index 0, which the store's own construction order makes the first type
-// ever interned; nothing reads it as a type, only as a placeholder an
-// error path immediately replaces.
 UNRESOLVED* : TyId = TyId(index: 0)
 
-// `==`, `!=`, `<` and their kin are `bool` whatever they compare;
-// everything else in `BinOp` yields its operands' type. `&&`/`||` come
-// out `bool` through this too — but unlike a comparison they also
-// demand bool operands, which `check_logical` asks.
 is_predicate* = (op: BinOp) bool {
     op.match({
         Equal => true, NotEqual => true,
@@ -976,9 +784,6 @@ is_logical* = (op: BinOp) bool {
     op.match({ And => true, Or => true, _ => false })
 }
 
-// Which `Res` a value is, when one of the two has not been decided.
-// `Open` is what a bare `Ok(x)` carries and it closes either way; two
-// decided forms must be the same one.
 forms_fit* = (got: ResForm, want: ResForm) bool {
     got.match({
         Open    => true,
@@ -995,9 +800,6 @@ undecided_or = (f: ResForm, failure: bool) bool {
     })
 }
 
-// `Res<T>` propagating into a `Res<T, E>` function. Named because the
-// rule it stands for has a name: only success lifts, and an absence
-// carries no reason to become one.
 absence_into_failure* = (got: ResForm, want: ResForm) bool {
     got.match({
         Absence => want.match({ Failure => true, _ => false }),

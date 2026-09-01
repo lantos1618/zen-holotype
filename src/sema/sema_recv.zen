@@ -1,13 +1,3 @@
-// Who is allowed to write through a name.
-//
-// `::` marks a receiver that mutates its own bytes. The requirement is
-// shallow and composes through every link in the receiver path.
-//
-// A `:` field containing a `Vec` therefore cannot call a mutating Vec method,
-// while capability values such as `Alloc` remain usable because their methods
-// do not mutate the capability handle itself. Direct assignments use the same
-// receiver-path check as method calls.
-
 Expr, ExprId = std.ast
 Struct, Member, Function = std.ast
 Call, Access, Index, Name, Paren, Field, Const = std.ast
@@ -20,23 +10,6 @@ SemaFault, NameFault = sema.sema_diag
 Own, var_mutable, path_root = sema.sema_own
 place_type, refuse = sema.sema_own
 
-// ---------------------------------------------------------------------
-// RULE: a `::` method needs a mutable receiver
-//
-// Only a path rooted at a local is checked — a safety rule, not a
-// shortcut. A call-result receiver is a temporary this frame owns
-// outright and can always be written; a receiver rooted at a module or
-// type name is not a value at all, and asking its type would report a
-// mistake the program does not contain.
-// ---------------------------------------------------------------------
-
-// The receiver a `::` method would write through, asked of the INDEX
-// `path_root` answered: only a binding this frame declares can be
-// aliased, and only one marked writable is written by the call.
-
-// The walk only means something when THIS call's receiver was copied:
-// a `::` receiver is handed the address of the place itself, so an
-// argument's write through it is seen and there is nothing to refuse.
 check_receiver* = (c :: Checker, o :: Own, k: Call, ctx: Ctx)
                   Res<(), AllocError> {
     c.tree.expr_at(k.callee).kind.match({
@@ -85,15 +58,6 @@ require_mutable = (c :: Checker, o :: Own, a: Access) Res<(), AllocError> {
     })
 }
 
-// A by-value receiver is spilled into a temporary BEFORE any argument's
-// call runs (gen_c_call.zen: "a receiver stands before every argument"),
-// so an argument call that writes that same place through `::` writes
-// the caller's bytes and the callee reads the copy — `b.read(b.bump())`
-// reads pre-bump. One walk over the argument list: an argument that is
-// itself a method call on the SAME binding this call's receiver is
-// rooted at, whose method is `::` (`wants_mutable` answers). Anything
-// else — a different root, a call-result base, a name this frame does
-// not bind — is not aliased and stays out of it.
 snapshotted = (c :: Checker, o :: Own, arg: ExprId, root: usize) bool {
     c.tree.expr_at(arg).kind.match({
         Call(k) => c.tree.expr_at(k.callee).kind.match({
@@ -130,9 +94,6 @@ check_snapshotted = (c :: Checker, o :: Own, k: Call, root: usize)
     Ok(());
 }
 
-// Every link, from the binding out to the receiver. A link the lookup
-// cannot resolve permits the write — the fail-open this pair of files
-// applies everywhere.
 place_mutable = (c :: Checker, o :: Own, id: ExprId) bool {
     node = c.tree.expr_at(id);
     node.kind.match({
@@ -148,17 +109,6 @@ link_mutable = (c :: Checker, o :: Own, a: Access) bool {
         && c.field_mutable(c.place_type(o, a.base), a.name.text)
 }
 
-// ---------------------------------------------------------------------
-// RULE: a write needs a mutable place
-//
-// The same composed question as the receiver rule, asked of a write:
-// `p.x = 1` needs `p` to permit the write and `x` to be `::`, since a
-// bitwise copy of `p` would not see it. `sema_own.zen` owns the walk
-// that finds the targets and calls in here; a bare name never arrives,
-// since Zen spells assignment and declaration the same, and whether
-// `n = 1` is a write is `sema_own.zen`'s question about its own scope.
-// ---------------------------------------------------------------------
-
 check_write_place* = (c :: Checker, o :: Own, id: ExprId)
                      Res<(), AllocError> {
     node = c.tree.expr_at(id);
@@ -169,10 +119,6 @@ check_write_place* = (c :: Checker, o :: Own, id: ExprId)
     })
 }
 
-// The position is the target, where the write is written. The name is
-// the link that refuses, which is not the same thing: `q.y = 2` with a
-// `::` binding and a `:` field is wrong at `y`, and naming `q` would
-// send the reader to the marker that is already right.
 refuse_immutable_link = (c :: Checker, o :: Own, node: Expr, id: ExprId)
                         Res<(), AllocError> {
     c.immutable_link(o, id).match({
@@ -181,11 +127,6 @@ refuse_immutable_link = (c :: Checker, o :: Own, node: Expr, id: ExprId)
     })
 }
 
-// Which sentence, decided by whether the refusing link is the receiver.
-// Every other link names a binding or field the author can re-mark;
-// `self` names neither — the `::` that would permit the write goes on
-// the METHOD, so the method is what the diagnostic names ("self is
-// declared `:`" gives the reader nothing to act on).
 refuse_link = (c :: Checker, o :: Own, node: Expr, nm: str)
               Res<(), AllocError> {
     (nm.eq("self") && (o.method.len > 0)).match({
@@ -200,9 +141,6 @@ refuse_link = (c :: Checker, o :: Own, node: Expr, nm: str)
     })
 }
 
-// From the binding outwards, the first link that does not permit a
-// write — so a `:` binding is reported before the fields reached
-// through it, since fixing the binding makes the rest legal.
 immutable_link = (c :: Checker, o :: Own, id: ExprId) Res<str> {
     node = c.tree.expr_at(id);
     node.kind.match({
@@ -229,17 +167,6 @@ field_link = (c: Checker, ty: TyId, name: str) Res<str> {
     c.field_mutable(ty, name).match({ true => None, false => Ok(name) })
 }
 
-// ---------------------------------------------------------------------
-// what a dot reaches, asked without reporting
-//
-// `sema_member.zen` answers this properly, with impl selection, bounds,
-// and substitution. This asks a smaller question off the declaration
-// directly — is there a member of this name, what marker did it carry —
-// because the full query is entitled to raise diagnostics and these
-// walks are not: an ownership pass reporting an ambiguity would be
-// reporting it a second time.
-// ---------------------------------------------------------------------
-
 wants_mutable = (c: Checker, ty: TyId, name: str) bool {
     c.own_member(ty, name).match({
         None  => false,
@@ -247,10 +174,6 @@ wants_mutable = (c: Checker, ty: TyId, name: str) bool {
     })
 }
 
-// A receiver is the first parameter and nothing more, so this asks what
-// the first parameter is. `self` by name: a free function whose first
-// parameter happens to be `::` is a function taking a mutable parameter,
-// not a method — calling it is not a dot.
 receiver_is_mutable* = (m: Member) bool {
     m.kind.match({
         Function(f) => first_param_mutable(f),
@@ -272,9 +195,6 @@ field_mutable = (c: Checker, ty: TyId, name: str) bool {
     })
 }
 
-// NOT `Member.mutable`: that is the data convention (Function
-// answers false); ownership asks whether the member may write its
-// receiver, and a method may, so Function answers true here.
 member_is_mutable = (m: Member) bool {
     m.kind.match({
         Field(f)    => f.mutable,
@@ -283,13 +203,6 @@ member_is_mutable = (m: Member) bool {
     })
 }
 
-// The type's own body, and only it. An impl-supplied member is not
-// searched — a deliberate narrowing: selecting between impls is
-// `sema_member.zen`'s rule, needs bounds in scope, and may report an
-// ambiguity, all of which this walk has given up. A `::` method
-// supplied by an impl is a check this file does not make (fail-open,
-// not unsound), and it costs nothing: no impls to scan means no
-// allocator, so every caller above stays a plain `bool`.
 own_member* = (c: Checker, ty: TyId, name: str) Res<Member> {
     c.types.at(ty).match({
         Named(n) => c.named_member(n, name),

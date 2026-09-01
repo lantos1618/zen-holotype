@@ -1,18 +1,3 @@
-// Module-graph checks. Ordinary module import cycles are legal in a
-// whole-program compilation; cycles among top-level constant values are not:
-//
-//     even.zen:  seed_odd = odd.odd        seed_even* = seed_odd + 1
-//     odd.zen:   seed_even = even.even     seed_odd*  = seed_even + 1
-//
-// There is no order that computes both, whatever the compiler does with
-// the modules. So the graph built below is over CONSTANTS and the
-// diagnostic is anchored on the IMPORT — because the dependency is what
-// the program means and the import is what the author wrote.
-//
-// A direct self-import is diagnosed separately as a typo. Cycle diagnostics
-// render here because their payload is an ordered list of modules rather than
-// one of SemaFault's scalar payload shapes.
-
 Ast, Module, Decl, Expr, Import, Pos, Span, ExprId, nowhere = std.ast
 Alloc, AllocError = std.mem
 Vec = std.collections
@@ -20,32 +5,16 @@ str, String = std.text
 Range = std.core
 World, Def, DefKind, dotted, module_display = sema.sema_def
 
-// Every module-level constant, and which module wrote it.
-//
-// A `Span` and not an `ExprId`, because the names a constant's value
-// mentions are found by SCANNING the expression arena for what this span
-// contains. That is `ast_find.zen`'s technique and it is here for
-// `ast_find.zen`'s reason: "a walk would need every node form to know
-// its own children — the thing the id'd arenas exist to avoid". A walk
-// that forgot one form would silently miss a cycle and report nothing; a
-// span contains what it contains, whatever forms are added later.
 ConstSite = {
     module: usize,
     span:   Span,
 }
 
-// One module needing a constant of another before it can compute its
-// own. Both ends are indices into the `World`'s tables, which are the
-// modules in the order the walk found them.
 Edge = {
     from: usize,
     to:   usize,
 }
 
-// BOTH RULES, AND THE COUNT THEY OWE. The driver adds the count to its
-// tally and prints `out`, exactly as it does for sema's own diagnostics
-// — `zen_build.zen`'s `check_tree` is the one caller and the shape it
-// already had.
 check_module_graph* = (a: Alloc, tree: Ast, w: World, out :: String)
                       Res<usize, AllocError> {
     n ::= self_imports(a, tree, w, out).try();
@@ -53,10 +22,7 @@ check_module_graph* = (a: Alloc, tree: Ast, w: World, out :: String)
     Ok(n);
 }
 
-// ---------------------------------------------------------------------
 // a module that imports itself
-// ---------------------------------------------------------------------
-
 self_imports = (a: Alloc, tree: Ast, w: World, out :: String)
                Res<usize, AllocError> {
     n ::= 0;
@@ -117,9 +83,6 @@ import_self = (
     })
 }
 
-// ANCHORED ON THE MODULE PATH and not on the names it binds. One line
-// may bind three names and every one of them is fine; the mistake is the
-// path they were asked to come from.
 say_self_import = (m: Module, at: Span, out :: String)
                   Res<usize, AllocError> {
     write_where(out, at).try();
@@ -130,15 +93,7 @@ say_self_import = (m: Module, at: Span, out :: String)
     Ok(1);
 }
 
-// ---------------------------------------------------------------------
 // a cycle in top-level constants
-// ---------------------------------------------------------------------
-
-// NO EDGES, NO WORK. A program whose constants never reach across a
-// module boundary — which is nearly every program, and this compiler's
-// own source is one — pays a single scan of the expression arena and
-// stops. The reachability below is only ever run on a graph that has
-// something in it.
 const_cycles = (a: Alloc, tree: Ast, w: World, out :: String)
                Res<usize, AllocError> {
     es = const_edges(a, tree, w).try();
@@ -157,9 +112,6 @@ cycles_in = (a: Alloc, tree: Ast, w: World, es: Vec<Edge>, out :: String)
     Ok(n);
 }
 
-// A module is ON a cycle exactly when it can reach itself in one hop or
-// more, which is what `reach_from` answers and why it seeds its frontier
-// with `start` and its result without it.
 cycle_at = (
     a    : Alloc,
     tree : Ast,
@@ -175,9 +127,6 @@ cycle_at = (
     })
 }
 
-// ONE SENTENCE PER CYCLE, not one per module on it. Every member can
-// reach itself, so every member would otherwise report the same cycle
-// rotated — and the reader would be told the same thing three times.
 report_component = (
     a      : Alloc,
     tree   : Ast,
@@ -195,13 +144,6 @@ report_component = (
     })
 }
 
-// The modules that need `mi` and that `mi` needs: a strongly connected
-// component, computed as two reachabilities rather than as Tarjan.
-//
-// That is a size decision made once and worth stating. Tarjan with no
-// recursion budget is an explicit work stack and a page of code; two
-// reachabilities are eight lines and cost `O(V·E)` on a graph whose
-// edges are cross-module CONSTANT uses. A program has a handful.
 component_of = (a: Alloc, es: Vec<Edge>, mi: usize, onward: Vec<usize>)
                Res<Vec<usize>, AllocError> {
     comp ::= a.Vec<usize>();
@@ -239,14 +181,6 @@ add_if_reaches = (
     })
 }
 
-// Whether `mi` is the earliest-NAMED module on this cycle.
-//
-// Canonicalising on the name is what makes the sentence stable: the same
-// cycle reads `even -> odd -> even` whichever module the walk happened
-// to enter it from. Index order would have been stable too and would
-// have depended on the walk, which is a loader's business and not a
-// program's meaning. `bootstrap/modules.py` canonicalises on the name
-// for the same reason.
 first_named = (w: World, comp: Vec<usize>, mi: usize) bool {
     Range(0, comp.len).find((k) {
         module_name_of(w, comp.get(k).value_or(mi)).before(module_name_of(w, mi))
@@ -291,16 +225,6 @@ write_hop = (out :: String, name: str, k: usize) Res<(), AllocError> {
     out.add(module_display(name))
 }
 
-// A shortest walk from `start` back to `start`, `start` at both ends.
-//
-// Breadth first, so the sentence names the tightest cycle there is
-// rather than whichever one a depth-first walk wandered into — a reader
-// handed a nine-module path for a two-module mistake has been told the
-// truth and not the answer.
-//
-// `prev` holds an index into `order` rather than a module, which is what
-// lets the path be walked back out with no map: `order` is append-only
-// and a module enters it exactly once.
 shortest_cycle = (a: Alloc, es: Vec<Edge>, start: usize, comp: Vec<usize>)
                  Res<Vec<usize>, AllocError> {
     order  ::= a.Vec<usize>();
@@ -353,8 +277,7 @@ take_edge = (
     })
 }
 
-// The FIRST edge back to the start wins. Breadth first means it is on a
-// shortest walk, and a second one could only name a longer one.
+// Breadth-first search keeps the first edge that closes a shortest cycle.
 close_cycle = (at: usize, closed :: Vec<usize>) Res<(), AllocError> {
     (closed.len == 0).match({
         false => Ok(()),
@@ -377,10 +300,6 @@ open_edge = (
     })
 }
 
-// The path, start first, read back off the predecessor chain and
-// reversed into place. `prev` always points EARLIER in `order` — a
-// module is appended after the one that reached it — so the walk back
-// strictly decreases and reaches 0.
 unwind_cycle = (
     a      : Alloc,
     order  : Vec<usize>,
@@ -403,9 +322,6 @@ unwind_cycle = (
     Ok(path);
 }
 
-// Every module reachable from `start` by ONE HOP OR MORE. `start` seeds
-// the frontier and not the result, so it appears in the answer exactly
-// when something leads back to it — which is the whole cycle test.
 reach_from = (a: Alloc, es: Vec<Edge>, start: usize)
              Res<Vec<usize>, AllocError> {
     seen  ::= a.Vec<usize>();
@@ -428,14 +344,7 @@ step_reach = (e: Edge, from: usize, seen :: Vec<usize>, front :: Vec<usize>)
     })
 }
 
-// ---------------------------------------------------------------------
 // the constant graph
-// ---------------------------------------------------------------------
-
-// ONE SCAN OF THE EXPRESSION ARENA, and every name in it that is written
-// inside a module-level constant, resolved. Everything else falls out on
-// its kind, which is what makes scanning a whole program's expressions
-// on every build cheap enough to do.
 const_edges = (a: Alloc, tree: Ast, w: World) Res<Vec<Edge>, AllocError> {
     sites = const_sites(a, tree).try();
     es  ::= a.Vec<Edge>();
@@ -527,25 +436,12 @@ site_module = (sites: Vec<ConstSite>, k: usize) Res<usize> {
     })
 }
 
-// Whether `at` is inside `outer`, IN THE SAME FILE.
-//
-// `ast_find.inside` is this question asked without a file, which is the
-// one thing that cannot be dropped here: two modules' spans differ in
-// their file and overlap in their lines, so a containment test without
-// it would read one module's name as being inside another's constant.
-//
-// The positions are compared FIRST and they are integers. This runs once
-// per name in the program against every module-level constant in it, and
-// a file-name compare on every pair would be the whole cost of the check.
 encloses = (outer: Span, at: Span) bool {
     at.start.at_or_after(outer.start)
         && outer.end.at_or_after(at.end)
         && outer.file.eq(at.file)
 }
 
-// EVERY declaration this name could mean, filtered to the constants that
-// live somewhere else. A name resolving to a constant of this same module
-// is an ordering question inside one file, which is not this rule.
 resolved_edges = (a: Alloc, w: World, mi: usize, name: str, es :: Vec<Edge>)
                  Res<(), AllocError> {
     found ::= a.Vec<Def>();
@@ -590,15 +486,6 @@ has_edge = (es: Vec<Edge>, from: usize, to: usize) bool {
     })
 }
 
-// ---------------------------------------------------------------------
-
-// WHERE THE READER IS SENT: the import in `from` that names `to`.
-//
-// The dependency is between two CONSTANTS, but nobody writes a
-// dependency — they write an import, and that is the line to change. The
-// first such import wins, and the module's own span is the fallback for
-// the one way an edge exists without an import: the prelude, which every
-// module gets without writing a line.
 edge_span = (a: Alloc, tree: Ast, w: World, from: usize, to: usize)
             Res<Span, AllocError> {
     tree.module_at(from).match({
@@ -646,9 +533,6 @@ keep_if_names = (
     })
 }
 
-// Whether this dotted path denotes module `mi`. `index_of` and not a
-// string compare, because a folder root answers to two spellings and
-// both of them are the same module.
 names_module = (w: World, path: str, mi: usize) bool {
     w.index_of(path).match({
         Ok(j) => j == mi,
@@ -656,11 +540,6 @@ names_module = (w: World, path: str, mi: usize) bool {
     })
 }
 
-// `file:line:col: `, which is how every diagnostic this compiler prints
-// opens. `sema_diag.render` writes the same three fields for a `Diag`;
-// this writes them for a sentence that is not one. `at.start` is a
-// `Pos` with its own `Display` (`ast_span.zen`), so the two halves are
-// one format and not three hand-spelled writes.
 write_where = (out :: String, at: Span) Res<(), AllocError> {
     out.fmt("{}:{}: ", at.file, at.start)
 }

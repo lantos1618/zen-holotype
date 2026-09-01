@@ -1,19 +1,3 @@
-// A LoopHandle identifies its active loop and has no value storage. Bindings,
-// ordinary call arguments, block tails, and construction fields must refuse it.
-//
-// The one legal inward path is the spliced body: a lambda's parameters
-// are bound by the frame it is inlined into, and `gen_c_inline
-// .lower_arg_value` rewrites a handle argument to the depth of the
-// loop it names. So `(g: LoopHandle) ()`, a body type carrying one,
-// and `h.break(..)` / `h.next()` inside the body itself stay legal.
-//
-// This leaf module lets every semantic position share the rule without an
-// import cycle. LoopHandle is recognized by where it is declared, not by who names it: a program
-// may call its own struct `LoopHandle` and bind that freely — the
-// refusal answers the library type alone. An unknown module reads as
-// NOT the handle — fail-open, since a missed check only misses while a
-// false one refuses a legal program.
-
 Arg, ExprId = std.ast
 AllocError = std.mem
 str = std.text
@@ -40,9 +24,6 @@ is_handle_decl* = (c :: Checker, mi: usize, name: str) bool {
     })
 }
 
-// The handle AS WRITTEN, parens unwrapped, for the diagnostic to say
-// what stood in the value position — `h` nine times out of ten, never
-// assumed.
 handle_spelling* = (c :: Checker, id: ExprId) str {
     c.tree.expr_at(id).kind.match({
         Name(n)  => n.text,
@@ -60,9 +41,6 @@ refuse_handle_at* = (c :: Checker, id: ExprId) Res<(), AllocError> {
     )
 }
 
-// Report at the value that cannot be retained;
-// the bind itself runs on, so one mistake stays one diagnostic and
-// nothing downstream re-asks. (`sema_place.bind_stmt`, the BIND seat.)
 refuse_handle_value* = (c :: Checker, id: ExprId, got: TyId)
                         Res<(), AllocError> {
     c.is_handle_ty(got).match({
@@ -71,9 +49,6 @@ refuse_handle_value* = (c :: Checker, id: ExprId, got: TyId)
     })
 }
 
-// A real callee formal has storage. Ask after the candidate
-// is chosen (`sema_call.args_handle_check`), so the diagnostic names
-// the handle rather than inventing an overload failure.
 refuse_handle_argument* = (c :: Checker, a: Arg, want: TyId, ctx: Ctx)
                           Res<(), AllocError> {
     c.type_of(a.value, ctx).match({
@@ -94,11 +69,6 @@ refuse_unless_inward* = (c :: Checker, a: Arg, want: TyId)
     })
 }
 
-// A FORMAL RECEIVES HANDLES INWARD when its type mentions LoopHandle:
-// `(g: LoopHandle) ()` holds the handle itself; `(i: usize, g:
-// LoopHandle) bool` threads it beside other arguments. Nothing else
-// can: a handle stored in a struct would make it escapable, which
-// `loop_handle.zen` rules out ("never stored, returned, or captured").
 formal_takes_handle* = (c :: Checker, ty: TyId) Res<bool, AllocError> {
     c.types.at(ty).match({
         Fn(f) => c.fn_param_has_handle(f.params),
