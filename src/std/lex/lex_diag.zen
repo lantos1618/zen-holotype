@@ -1,22 +1,11 @@
 // What the lexer says when the bytes are wrong.
 // Diagnostics are collected values; lex returns Err only for AllocError. The
 // scanner resynchronizes after each fault so one source can report several.
-//
-// A FAULT CARRIES NO TEXT. `message` is a fixed sentence and the span
-// names the bytes; the renderer (which holds the Source) quotes the
-// offending run itself. That keeps a Diag comparable, printable, and free
-// of an allocation per mistake.
-//
-// One mistake yields one diagnostic anchored where the fix belongs:
-// `StringSpansLine`
-// points at the opening quote, not the newline the scanner noticed, and a
-// run of stray bytes is one diagnostic rather than one per byte.
+// Spans identify the bytes to fix; messages remain fixed and allocation-free.
 
 Span = std.lex.lex_token
 str = std.text
 
-// every way a byte sequence can fail to be a Zen token. Each variant is a
-// distinct mistake with a distinct fix; none of them is "syntax error"
 LexFault* =
       UnterminatedString       // end of file inside "..."
     | StringSpansLine          // a newline inside "..."
@@ -35,18 +24,12 @@ LexFault* =
     | MisplacedBom             // a byte-order mark past offset 0
     | StrayByte                // begins no token at all
 
-// where the mistake is, and which one it is. `file` rides along because a
-// Diag outlives the Source it came from — it is handed to a driver that is
-// holding diagnostics from several files at once
 Diag* = {
     file*: str,
     fault*: LexFault,
     span*: Span,
 }
 
-// the sentence. Loose enough to reword, specific enough that it names the
-// rule rather than the symptom: every one of these is a line of
-// DESIGN.md's "Lexical rules", and the rule is what the reader needs
 message* = (fault: LexFault) str {
     fault.match({
         UnterminatedString  => "unterminated string literal: end of file before the closing quote",

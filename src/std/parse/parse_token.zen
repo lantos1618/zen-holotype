@@ -1,38 +1,17 @@
-// src/std/parse/parse_token.zen
-// What the parser asks of a token, and nothing else.
-//
-// The alphabet is `src/std/lex/lex_token.zen`'s, re-exported unchanged so a
-// sibling writes `TokenKind` once. This file owns parser-specific trivia,
-// wildcard, and empty-stream behavior.
-//
-// Comments remain tokens so the parser can attach them; whitespace is derived
-// from gaps between spans. Token text is borrowed from Source through text_of
-// instead of being duplicated in every token. `_` is an Ident token and is
-// interpreted as a wildcard only in the grammar positions that permit one.
-// Parser.span_of is the single conversion from source-local lex spans to AST
-// spans that carry a file identity.
+// Parser-specific token helpers. Comments remain tokens, token text is borrowed
+// from Source, and `_` becomes a wildcard only in permitted grammar positions.
 
 Token*, TokenKind*, Source*, Lexed*, text_of*, kind_name* = std.lex.lex
 
 Pos, Span = std.lex.lex
 
-// The token a cursor reads when there is nothing to read.
-//
-// `scan` promises exactly one `Eof`, last, so this is unreachable on
-// any stream a lexer produced — but a parser that traps on an empty
-// one crashes on a bug somewhere else, and the crash is what nobody
-// can diagnose.
-//
-// This constructor lives with the lex Token and Span names, avoiding an
-// ambiguous lex/AST Span at parser call sites.
+// Synthetic Eof for an empty token stream.
 empty_eof* = () Token {
     at = Pos(offset: 0, line: 1, col: 1);
     Token(kind: TokenKind.Eof, span: Span(start: at, end: at));
 }
 
-// Whether a kind is trivia, asked in exactly one place — the cursor's
-// advance — and answered here because it is a fact about the alphabet
-// and not about the cursor.
+// Whether a token carries source trivia.
 is_trivia* = (kind: TokenKind) bool {
     kind.match({
         LineComment  => true,
@@ -41,8 +20,6 @@ is_trivia* = (kind: TokenKind) bool {
     });
 }
 
-// The one identifier the parser reads as a keyword. `_` lexes as a
-// name, so a wildcard pattern and an inferred type are the only two
-// things that ever ask, and they ask through this rather than each
-// spelling the underscore themselves.
+// `_` remains an identifier until the parser recognizes wildcard or inference
+// syntax.
 WILDCARD*: str = "_"

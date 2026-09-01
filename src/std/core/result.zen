@@ -1,49 +1,21 @@
-// Res is the whole failure story. Res<T> is absence — a lookup that
-// can legitimately miss. Res<T, E> is failure with a reason a caller
-// can act on. A bug is neither: that's a trap. Law 4 keeps the two
-// apart: only success lifts, Err and None are always written, a
-// reason is never invented.
+// Res<T> represents optional presence. Res<T, E> represents failure with a
+// reason. A bare success value may lift to Ok; None and Err remain explicit.
 
-// absence: no reason is carried, because there is none to carry
 Res*<T> = Ok(T) | None
 
-// failure, with the reason. E is a set: `A | B` is an anonymous enum
-// of two variants, so merging error sets on propagation never changes
-// Res's shape — a single error type is just a set of one.
 Res*<T, E> = Ok(T) | Err(E)
 
-// HOISTING. A bare T lifts into Res<T> wherever a Res is expected:
+// A bare T lifts to Ok when exactly one variant carries T:
 //
 //   Foo = { bar: Res<i32> }
-//   foo = Foo(bar: 32)      // lifted to Ok(32)
-//   foo = Foo(bar: Ok(32))  // identical, written out
-//
-// Same in returns: `0;` closes a Res<i32, E> exactly as `Ok(0);`
-// does. It applies only when exactly one variant carries T; Err and None are
-// always explicit.
+//   foo = Foo(bar: 32)      // equivalent to Ok(32)
 
-// `.try()` IS AN INTRINSIC: documented here, declared nowhere — no
-// `try` field on Res, no function to import. Unwraps Ok, or returns
-// the Err (or None) from the ENCLOSING function — a jump through a
-// frame boundary, exactly what `h.break(v)` is: a non-escaping
-// closure may return through its caller, an escaping one may not (no
-// caller frame to return through).
-//
-//   sb ::= alloc.String("{}", x).try();   // Ok: sb is the String
-//   self.toString(sb).try();              // Err: this frame returns it
-//
-// Three rules:
-//   - the enclosing function must return a compatible Res
-//   - a Res<T> may not .try() into a Res<T, E> function — name the
-//     reason first, with ok_or below
-//   - failure never indents: .try() is what makes early exit cheap
-//     enough that a pyramid is never the shorter option
+// `.try()` is intrinsic. It unwraps Ok or returns None/Err from the enclosing
+// function. The enclosing return type must be compatible; use `ok_or` before
+// propagating None into a result that requires an error value. `.try()` may
+// cross a non-escaping closure but not an escaping one.
 
-// Name the reason for an absence. This is the only conversion from Res<T> to
-// Res<T, E>; error identities never change implicitly.
-//
-//   row = table.get("ada").try();                        // ERROR
-//   row = table.get("ada").ok_or(Error.NotFound).try();  // required form
+// Convert absence to a named error; error identities never change implicitly.
 ok_or* = <T, E>(r: Res<T>, reason: E) Res<T, E> {
     r.match({
         Ok(value) => Ok(value),

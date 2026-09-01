@@ -1,37 +1,18 @@
-// Non-allocating integer parsers on str. They accept a complete decimal
-// spelling and return None for empty, malformed, or out-of-range input.
-// Signed parsers accept one optional leading minus; a leading plus is not
-// part of the grammar.
-//
-//   ""            None  no digits at all
-//   "-3"          Ok    one leading minus; "--3" and "- 3" are not
-//                       numbers, and neither is "+3"
-//   "3x"          None  digits must run to the end of the bytes
-//   past i64      None  checked before each multiply — signed overflow
-//                       is UB in C, so checking after is not an answer
-
-// The signed fold runs negative: a
-// negative accumulator can absorb i64.MIN exactly, where a positive one
-// loses MAX+1 before it can ever look at the sign. The sign is applied
-// once, at the end, where the two halves of the range part ways: under
-// a minus every magnitude down to MIN is in range, without one only
-// magnitudes up to MAX are — so the accumulator landing on MIN with no
-// sign is one-past-MAX text, and that is an absence.
+// Non-allocating complete-decimal integer parsing. Empty, malformed,
+// plus-prefixed, or out-of-range input returns None. Signed parsing accumulates
+// a negative value so i64.MIN is representable without overflow.
 DIGIT_ZERO, digit_value = std.core.byte
 
 parse_i64* = (self: str) Res<i64> {
     parsed: Res<i64> = loop<i64>((h) {
-        // Reject empty input before reading the optional sign.
         (self.len == 0).then(() { h.break() });
 
-        // Digits begin after one optional leading minus.
         negative ::= self[0] == '-';
         first    ::= negative.match({
             true  => 1,
             false => 0,
         });
 
-        // Find the first non-digit, or self.len when the tail is all digits.
         count : usize = 0;
         stop  : usize = self.len;
         Range(first, self.len).loop((hh, i) {
@@ -41,7 +22,6 @@ parse_i64* = (self: str) Res<i64> {
             });
         });
 
-        // The digit run must be non-empty and consume the entire input.
         (count == 0 || stop != self.len).then(() { h.break() });
 
         // Check quotient and sign-specific final digit before multiplying.
@@ -50,7 +30,6 @@ parse_i64* = (self: str) Res<i64> {
         acc     : i64  = 0;
         overrun : bool = false;
         Range(first, self.len).loop((hh, i) {
-            // The preceding pass proved every byte here is '0'..'9'.
             d ::= self[i] - DIGIT_ZERO;
             (acc < 0 - edge || (acc == 0 - edge && d > limit)).then(() {
                 overrun = true;
@@ -59,7 +38,6 @@ parse_i64* = (self: str) Res<i64> {
             acc = acc * 10 - d;
         });
 
-        // Out-of-range text has no i64 value.
         overrun.then(() { h.break() });
 
         // Without a sign, a magnitude of exactly MIN is one past MAX.
@@ -67,7 +45,6 @@ parse_i64* = (self: str) Res<i64> {
             (acc == i64.MIN).then(() { h.break() });
         });
 
-        // acc is already negative; only the unsigned spelling is negated.
         h.break(negative.match({
             true  => acc,
             false => 0 - acc,

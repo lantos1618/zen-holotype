@@ -1,4 +1,3 @@
-// src/zen/zen_write.zen
 // The program as one C file per module, and what to say when a write
 // will not go.
 //
@@ -21,15 +20,9 @@ Checker = sema.sema
 Emit, CBackend, order, render_symbol_map = gen.gen
 lower_program, emit_header, emit_unit, unit_used = gen.gen
 
-// One `.c` per module beside the one `zen.h` they all include, written
-// into `dir`, which must already exist (`std.env.Fs` writes files, and
-// nothing else). Answers HOW MANY FAULTS it added, because the caller
-// owns the tally and a fault here is a value like any other.
-//
-// THE DIAGNOSTICS ARE READ BEFORE ONE BYTE IS WRITTEN, exactly as the
-// single-file path does it: the header is assembled first because
-// assembling it is what emits the type definitions, and everything a
-// unit adds after that is bytes already lowered.
+// Emit one `.c` file per used module beside a shared `zen.h`. The destination
+// directory must exist. Diagnostics are collected before any file is written;
+// the result is the number of write or lowering faults.
 emit_units* = (
     a          : Alloc,
     env        : Env,
@@ -94,9 +87,7 @@ write_symbol_map_at = (a: Alloc, env: Env, be :: CBackend, path: str)
     })
 }
 
-// MODULE 0 IS WRITTEN WHATEVER IT HOLDS: it is the root, and `main` is
-// emitted into it. Every other module with no body of its own
-// contributes no file, because an empty one still costs a process.
+// Always write the root module. Skip other modules with no emitted body.
 write_unit = (
     env  : Env,
     tree : Ast,
@@ -127,10 +118,7 @@ write_unit_at = (
     write_at(scratch, env, dir, name.view(), out.view())
 }
 
-// THE FILE IS NAMED FOR THE MODULE, dots and all, because the module
-// path is already the one name no two modules share — a counter would
-// renumber every file when one module was added, and a renamed file is
-// a compiler-cache miss.
+// Use the stable dotted module name as the translation-unit filename.
 unit_file* = (tree: Ast, u: usize, out :: String) Res<(), AllocError> {
     tree.module_at(u).match({
         None  => out.add("zg_unit"),

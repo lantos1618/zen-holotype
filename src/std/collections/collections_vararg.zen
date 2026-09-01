@@ -1,38 +1,15 @@
-// src/std/collections/collections_vararg.zen
-// vararg<T> — the arguments a call wrote, as a value.
-//
-// `f = (v: vararg<i32>)` takes zero or more i32 and receives them as ONE
-// value: a borrowed run of T and its length, the same two words `str` is.
-// Borrowed, so nothing here allocates and nothing here frees; the storage
-// belongs to the CALLER's frame and lives exactly as long as the call.
-//
-// THIS IS AN ORDINARY DECLARED STRUCT, and that is the whole design.
-// `vararg<i32>` is a nominal type like `Vec<i32>`, so it parses, resolves,
-// interns, lays out and copies with no new machinery — which is what makes
-// it FORWARDABLE where `args: ...` is not: `...` is a marker carrying no
-// element type and no length, so it has no C spelling to pass on.
-//
-// THERE IS NO CONSTRUCTOR, deliberately. `data` carries no `*`, so the only
-// thing that can build one is a call site, which the backend expands
-// (`gen_c_call.zen`, `write_pack`). A vararg cannot outlive its call and
-// cannot be forged into one that does.
-//
-// `vararg` may not nest — `vararg<vararg<T>>` is refused (sema_vararg.zen).
-// That is what lets one pack slot read two ways without ambiguity: N values
-// of T, or exactly one vararg<T> being forwarded.
+// A borrowed run of variadic arguments. The caller owns the storage, so a
+// vararg cannot escape the call. A vararg can be forwarded but cannot nest.
 
 Ptr = std.mem
 Range = std.core.range
 
 vararg*<T> = {
-    // borrowed, never owned, and IMMUTABLE — `str`'s two fields exactly:
-    // no allocator, so there is nothing to free and no way to grow.
+    // Borrowed immutable storage.
     data: Ptr<T>,
-    len*: usize,      // * so a count is readable outside this module
+    len*: usize,
 
-    // the lookup-can-miss form, `Vec.get`'s shape — what the `Range` impl
-    // below answers through, so a walk stops at the end rather than
-    // reading past the run.
+    // Bounds-checked lookup.
     get* = (self: @Self, i: usize) Res<T> {
         (i < self.len).match({
             true  => Ok(self.data.read(i)),
@@ -40,9 +17,7 @@ vararg*<T> = {
         });
     }
 
-    // what `v[i]` means. Out of range is a BUG not a miss, so it TRAPS,
-    // exactly as `str.index` does: the subtraction underflows for every
-    // `i >= len`, and unsigned underflow IS the trap.
+    // Indexing traps when `i` is out of range.
     index* = (self: @Self, i: usize) T {
         self.len - i - 1;
         self.data.read(i);
@@ -51,9 +26,7 @@ vararg*<T> = {
     is_empty* = (self: @Self) bool { self.len == 0 }
 }
 
-// a vararg IS a Range of its elements, so `v.loop(..)`, `v.find(..)` and
-// `v.map(..)` are the ones every other sequence has — `get` already
-// answers what `at` asks. start/end are SUPPLIED, not stored.
+// Range iteration uses the borrowed elements directly.
 vararg.impl(Range<T>, {
     start: 0,
     end: self.len,

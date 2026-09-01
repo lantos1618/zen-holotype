@@ -2,20 +2,13 @@
 // delimiters. Binary chains and postfix chains are iterative so AST depth does
 // not consume parser stack. Ambiguities use bounded lookahead:
 //
-//   `(..)` is a LAMBDA if `{` or a return type follows, otherwise a
-//   parenthesized expression. Grammar D15a makes a return type
-//   mandatory on a signature, so there is nothing else it could be.
+//   `(..)` is a lambda when a body or return type follows; otherwise it is a
+//   parenthesized expression.
 //
-//   `[..]` is a FIXED ARRAY TYPE APPLIED TO ARGUMENTS if it holds
-//   exactly two items and a `(` follows; otherwise an array literal.
-//   `[i32, 4](2, 3, 5, 7)` and `[0, 1, 2]` are the two cases and this
-//   is the whole of the rule.
+//   `[..]` is a fixed-array constructor when it has two items and a call
+//   follows; otherwise it is an array literal.
 //
-//   `.match(` and `.try(` are their OWN nodes and not calls, because
-//   neither names anything a caller could have imported. AST_CONTRACT
-//   requires it: a `Try` parsed as a call "creates a name that must be
-//   special-cased everywhere it could be shadowed".
-//
+//   `.match(` and `.try(` have dedicated AST nodes rather than Call nodes.
 
 AllocError = std.mem
 Span, Ident, no_trivia = std.ast.ast_span
@@ -31,8 +24,7 @@ arms = std.parse.parse_match
 body_block = std.parse.parse_stmt
 record_body, params_list, type_params = std.parse.parse_member
 
-// The lowest binding strength of all: `consume a + b` moves the sum,
-// not `a`. grammar.js D2.
+// `consume` has the lowest binding strength: `consume a + b` moves the sum.
 expr* = (p :: Parser) Res<ExprId, AllocError> {
     p.enter().try();
     id = p.expr_guarded().try();
@@ -61,13 +53,7 @@ consume_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     p.add_expr(ExprKind.Consume(Consume(operand: operand)), m);
 }
 
-// -------------------------------------------------------------------
-// precedence
-// -------------------------------------------------------------------
-
-// grammar.js D1's table, and the only place it is written down in this
-// compiler. 0 means "not a binary operator", which is also how the
-// loop below knows to stop.
+// Binary precedence. Zero means the token is not a binary operator.
 precedence* = (kind: TokenKind) usize {
     kind.match({
         BarBar    => 1,
@@ -112,9 +98,8 @@ binary_op = (kind: TokenKind) BinOp {
     });
 }
 
-// The spine. `min` is the weakest operator this call will absorb; a
-// left-associative operator recurses at `min + 1` on its right, which
-// is what makes `a - b - c` read `(a - b) - c` and not `a - (b - c)`.
+// `min` is the weakest precedence this call absorbs. Recursing at
+// `precedence + 1` makes equal-precedence operators left-associative.
 binary_from = (p :: Parser, m: Mark, min: usize) Res<ExprId, AllocError> {
     lhs     ::= p.unary_at(m).try();
     running ::= true;
@@ -150,9 +135,7 @@ binary_step = (
     )), m.bare());
 }
 
-// `!`, `-`, `&`. `&` appears once in DESIGN.md, in an example marked
-// ERROR for an unrelated reason — so it parses, and sema rejects
-// taking the address of a computed field.
+// Parse unary `!`, `-`, and address-of `&`.
 unary_at = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     op = p.peek().kind.match({
         Bang  => Ok(UnOp.Not),
@@ -582,9 +565,7 @@ unit_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     p.add_expr(ExprKind.Unit, m);
 }
 
-// `Paren` is a node of its own because POSITIONS.md asserts a span for
-// it, and because a formatter re-deriving parens from precedence will
-// eventually print `a + b * c` for `(a + b) * c`.
+// Preserve parentheses explicitly so formatting retains grouping.
 grouped_expr = (p :: Parser, m: Mark, open: Span) Res<ExprId, AllocError> {
     inner = p.expr().try();
     p.expect_close(
@@ -601,9 +582,7 @@ generic_lambda = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     p.lambda(m, tps);
 }
 
-// A lambda's return type is optional and means `()` when omitted; a
-// DECLARATION must write one, and that is sema's rule rather than a
-// shape (AST_CONTRACT, `Function.ret`).
+// A lambda's omitted return type means `()`; declarations must write one.
 lambda* = (p :: Parser, m: Mark, tps: Vec<TParam>) Res<ExprId, AllocError> {
     ps ::= p.alloc.Vec<Param>();
     span = p.params_list(ps).try();

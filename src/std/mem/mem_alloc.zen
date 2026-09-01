@@ -6,39 +6,18 @@
 
 Ptr = std.mem.mem_ptr
 
-// Allocation has one observable failure.
 AllocError* = | OutOfMemory
 
-// The allocator interface. Implementations: an arena (env.mem.alloc(),
-// the one this library ships), a fixed buffer, C's malloc.
-//
-// Methods borrow the handle because allocation mutates state behind it, not
-// the handle bytes. This lets collections keep copied Alloc fields immutable.
+// Allocator interface implemented by arenas, fixed buffers, or foreign heaps.
 Alloc* = {
-    // Implementations provide raw and realloc; higher-level storage builds on
-    // these primitives.
-    //
-    // raw is bytes only — size and alignment in, address out. Naming
-    // what the bytes are is `Ptr.to`, one level down
     raw* = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError>
 
-    // count is the new element count. A null p is a fresh
-    // allocation, letting an empty Vec grow through the same call as
-    // a full one
+    // Resize to `count` elements. A null pointer requests fresh storage.
     realloc* = <T>(self: @Self, p: Ptr<T>, count: usize) Res<Ptr<T>, AllocError>
 
-    // optional hook (`::=`, no body). An arena no-ops this (frees
-    // every page at once on drop); a malloc allocator does the real
-    // thing. Neither is a stub.
+    // Optional release hook. Arenas may defer reclamation until arena drop.
     free* ::= <T>(self: @Self, p: Ptr<T>) ()
 
-    // typed convenience: one T's worth of storage, pre-sized
     create* ::= <T>(self: @Self) Res<Ptr<T>, AllocError>
 
-    // Vec, Map and String stay beside their owning types as UFCS functions, so
-    // std.mem never sees inside a Vec and mem/collections don't
-    // cross-import. Vec and Map return a bare value: empty
-    // owns no pages, so construction can't fail. String is the exception: it
-    // must hold a formatted result, so it allocates at
-    // once.
 }

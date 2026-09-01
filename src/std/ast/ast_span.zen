@@ -1,24 +1,8 @@
-// src/std/ast/ast_span.zen
-// Where a node is, and what surrounds it.
-//
-// DESIGN.md: every AST node carries a `file` plus a half-open
-// `start..end` span, each end a `line:col` with a 1-based byte column.
-// A point isn't enough — without an end, the formatter can't reprint a
-// node and the LSP can't select one.
-//
-// tests/corpus/parse/POSITIONS.md is the authority for the rest:
-//   - `end` is one past the last byte.
-//   - a span includes the node's own delimiters and all children,
-//     excludes the separator that follows it.
-//   - a STATEMENT's span includes its `;`; the expression inside does
-//     not: `Ok(0);` is 25:5..25:11, `Ok(0)` is 25:5..25:10.
-//   - a node's span does NOT include leading trivia — trivia has its
-//     own span, which is what lets `fmt` move a declaration without
-//     dragging its comment along.
+// AST source positions and trivia. Spans are half-open, include a node's
+// delimiters and children, and exclude leading trivia and following
+// separators. Statement spans include their semicolon.
 
-// A point in a file. `col` counts BYTES, not codepoints or UTF-16
-// units — `str` is bytes everywhere else here; an LSP converts to
-// UTF-16 at the wire, as its own testable step.
+// A source point with a one-based line and byte column.
 Pos* = {
     line*: usize,
     col*: usize,
@@ -33,80 +17,51 @@ Pos* = {
     }
 }
 
-// `line:col`, both 1-based with byte columns. Display lives with Pos and the
-// sink form appends into whatever buffer the caller
-// is already holding, digits through `write_usize` — the same writer
-// every hand copy used — and nothing else.
+// Display as `line:col`.
 Pos.impl(Display, {
     toString ::= (self: @Self, out :: Sink) Res<(), WriteError> {
         out.fmt("{}:{}", self.line, self.col)
     }
 })
 
-// Half-open: [start, end). `file` is always relative to the
-// compilation root — traps print it, gen_c emits it, and an absolute
-// path would make two checkouts of one tree emit different bytes.
+// Half-open `[start, end)` span. `file` is compilation-root-relative.
 Span* = {
     file*: str,
     start*: Pos,
     end*: Pos,
 }
 
-// Whitespace is trivia too: a blank line between two declarations is a
-// thing the author wrote and the formatter must not silently delete.
-// One Blank stands for a run of blank lines, however long — collapsing
-// them is a formatting rule, and a rule needs somewhere to apply.
+// Blank represents one or more blank lines between source nodes.
 TriviaKind* = LineComment | BlockComment | Blank
 
-// `text` is the raw source slice, comment markers and all. The
-// formatter reprints it byte for byte; nothing here parses it.
+// Raw source trivia, including comment markers.
 Trivia* = {
     kind*: TriviaKind,
     text*: str,
     span*: Span,
 }
 
-// Where a node's trivia lives: a run of `Ast.trivia`, which holds
-// every comment and blank in the file in source order. `len` of 0 is
-// no trivia, which is the overwhelming majority of nodes.
-//
-// Two words, and that is the reason for the indirection. A node
-// carrying two `Vec<Trivia>` instead would carry sixteen — a Vec is
-// eight words here, because the `Alloc` it grows through is a fat
-// value — and it would pay that on every node in the tree to describe
-// something almost no node has.
+// Contiguous run in `Ast.trivia`; zero length means no trivia.
 TriviaRun* = {
     at*: usize,
     len*: usize,
 }
 
-// The empty run. A function rather than a constant because every node
-// constructor writes it, and `no_trivia()` says what it means where a
-// bare `TriviaRun(at: 0, len: 0)` says only how it is spelled.
+// Empty trivia run.
 no_trivia* = () TriviaRun { TriviaRun(at: 0, len: 0) }
 
-// The span for a thing with no source position, such as a supplied trait
-// member or whole-module diagnostic.
-//
-// `line: 0` is what makes it recognisable: source lines are 1-based, so
-// no real position collides with it.
+// Span for generated values with no source position. Line zero is the marker.
 nowhere* = () Span {
     Span(file: "", start: Pos(line: 0, col: 0), end: Pos(line: 0, col: 0))
 }
 
-// One identifier, with the span of the identifier alone. Every name in
-// a declaring or referring position is one of these rather than a bare
-// `str`, because rename, go-to-definition and "no such field" all need
-// to point at the name and not at the node that contains it.
+// Identifier text and the span of that text alone.
 Ident* = {
     text*: str,
     span*: Span,
 }
 
-// A dotted name: `std.core.result` in an import, `Shape.Unit` in a
-// pattern. Segments are stored apart so a diagnostic can point at the
-// segment that is wrong rather than at the whole name; `span` covers
-// the whole name, dots included.
+// Dotted name with individually addressable segments and a complete span.
 QualifiedName* = {
     segments*: Vec<Ident>,
     span*: Span,

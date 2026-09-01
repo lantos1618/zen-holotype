@@ -1,4 +1,3 @@
-// src/std/parse/parser.zen
 // Shared parser state: cursor, AST, diagnostics, trivia ownership, and depth.
 // Syntax errors append diagnostics and poison nodes so parsing can continue;
 // allocation failure is the only returned failure.
@@ -13,26 +12,13 @@ Diag, diag, diag_at, truncated = std.parse.parse_diag
 // spines are iterative and therefore do not consume this budget.
 MAX_DEPTH*: usize = 304
 
-// A node, opened. The two facts that are true at a node's first token
-// and false one token later: where it begins, and what trivia stood
-// before it. One value and not two parameters, because a parse
-// function taking a `Pos` and a `TriviaRun` separately is one someone
-// will one day hand the wrong pair.
+// A node's starting position and leading trivia.
 Mark* = {
     start*: Pos,
     leading*: TriviaRun,
 
-    // The same position with the trivia given away. A node built
-    // AROUND another one — a `Binary` over its left operand, a `Call`
-    // over its callee — starts at the same token, and only one of them
-    // may own the run or the formatter prints the comment twice. The
-    // inner node has it; this is how the outer one says so.
-    //
-    // That is the right way round: an expression is never the outermost
-    // node at its own first token (a statement, argument, arm or field
-    // always opened before it), so the run is empty wherever the
-    // distinction is visible, and where it is not empty — an array
-    // element, which has no wrapper node — the innermost IS the element.
+    // Preserve the position while transferring trivia ownership to an inner
+    // node. This prevents nested nodes from printing the same trivia twice.
     bare* = (self: @Self) Mark {
         Mark(start: self.start, leading: no_trivia())
     }
@@ -41,69 +27,39 @@ Mark* = {
 Parser* = {
     tokens: Vec<Token>,
 
-    // The bytes the tokens were cut from. A token is a kind and a span
-    // and carries no text (`lex_token.zen`: a `str` on every token of a
-    // ten-megabyte file holds what both ends of the span already name),
-    // so the parser holds the Source and slices it where a name or a
-    // literal needs its bytes.
+    // Source bytes used to recover text from token spans.
     source*: Source,
 
-    // Always the index of a NON-trivia token. Everything between the
-    // previous token and this one has already been drained into
-    // `tree.trivia` and named by `pending`.
+    // Index of the current non-trivia token.
     at* :: usize = 0,
 
-    // The tree being built, and the reason a caller constructs a Parser
-    // rather than calling a parse function with an `Ast`: a Vec is a
-    // header of its own, so a copy of an `Ast` diverges from the
-    // original the first time either grows. Read back as `p.tree`.
+    // AST owned by this parser.
     tree* :: Ast,
 
     diags* :: Vec<Diag>,
 
-    // Where the last token consumed ended: the second half of a node's
-    // `start_of(first) .. end_of(last)` span, half-open.
+    // End of the last consumed token.
     prev_end* :: Pos = Pos(line: 1, col: 1),
 
-    // The line the last token passed ended on. A blank line is a gap
-    // between two spans and nothing else, so this is the whole of the
-    // state that measuring one needs.
+    // End line used when deriving blank-line trivia.
     gap_line :: usize = 1,
 
-    // The trivia gathered before `at`, unclaimed. A node beginning at
-    // this token takes it; the first one to ask is the OUTERMOST,
-    // because recursive descent enters outside-in, which is exactly
-    // AST_CONTRACT.md's ownership rule.
+    // Trivia gathered before `at` and not yet claimed by a node.
     pending :: TriviaRun,
 
-    // The depth guard. `anchor` is the outermost construct of the
-    // current run — set as depth leaves `run_base` — because a
-    // diagnostic pointing at level 257 of a 10,000-deep file names the
-    // one place the author cannot see the problem from.
-    //
-    // A RUN STARTS INSIDE A BODY AND NOT AT IT: a function's body is
-    // the function, not a level within it, so the outermost bracket of
-    // `main = () { {{{{ .. }}}} }` is the first `{` on the statement
-    // and not `main`'s own. A body is the only thing that moves
-    // `run_base`; an ordinary nested block is a level like any other,
-    // which keeps the anchor on the first of ten thousand braces.
+    // Recursive-depth guard. `anchor` identifies the outermost construct in
+    // the current body so an overflow diagnostic points to a useful location.
     depth :: usize = 0,
     run_base :: usize = 0,
     anchor :: Span,
     too_deep* :: bool = false,
 
-    // Whether a diagnostic has been reported since the last statement
-    // or declaration boundary. See `hushed`.
+    // Whether this statement or declaration has already emitted a diagnostic.
     said :: bool = false,
 
     alloc*: Alloc,
 
-    // -----------------------------------------------------------------
-    // looking
-    // -----------------------------------------------------------------
-
-    // The token under the cursor. Past the end this is the `Eof` the
-    // lexer promised, forever, so no loop below needs a length check.
+    // Current token. Past the end, continue returning Eof.
     peek* = (self: @Self) Token {
         self.tokens.get(self.at).match({
             Ok(t) => t,
@@ -111,16 +67,12 @@ Parser* = {
         });
     }
 
-    // The text under the cursor. Two questions need it: is this
-    // identifier the wildcard `_`, and is this method call `.impl(`.
+    // Whether the current identifier has the requested text.
     at_text* = (self: @Self, want: str) bool {
         self.at_kind(TokenKind.Ident) && self.text(self.peek()) == want
     }
 
-    // What a cursor past the end reads. `scan` promises exactly one
-    // `Eof`, last, so this is that token — but trapping on an empty
-    // stream would crash on a bug somewhere else, so an empty one
-    // reads position zero and gets a `None` turned into `Eof`.
+    // Return the scan's final Eof token, or a synthetic one for empty input.
     eof_token = (self: @Self) Token {
         (self.tokens.len == 0).match({
             true  => empty_eof(),
@@ -317,15 +269,8 @@ Parser* = {
         ));
     }
 
-    // A BLANK LINE IS DERIVED, NOT LEXED: whitespace "is recoverable
-    // exactly from the gap between two spans, and 'was there a blank
-    // line here' is `next.start.line > prev.end.line + 1` rather than a
-    // stored fact that can go stale."
-    //
-    // Measured here, once, at the only place that cares: the formatter
-    // must not silently delete a blank line the author wrote, and
-    // `TriviaKind.Blank` is where it survives. One `Blank` stands for a
-    // run however long — collapsing them is a formatting rule.
+    // Derive blank-line trivia from the gap between token spans. One Blank
+    // represents a run of one or more blank lines.
     blank_before = (self :: @Self, t: Token) Res<(), AllocError> {
         (t.span.start.line > self.gap_line + 1).match({
             true  => self.keep_blank(t),
@@ -455,37 +400,16 @@ Parser* = {
     // next stands on its own, so the next mistake is a new one.
     resume* = (self :: @Self) () { self.said = false; }
 
-    // -----------------------------------------------------------------
-    // trivia
-    //
-    // The parser decides ownership once; everything downstream reads
-    // it. AST_CONTRACT.md fixes both rules; this implements them.
-    // -----------------------------------------------------------------
-
-    // The run gathered before the current token, claimed by the first
-    // node to ask. Recursive descent enters outside-in, so the first
-    // asker IS the outermost node beginning at that token — which is
-    // why a file's opening comments belong to the declaration and not
-    // to its name.
-    //
-    // PRECONDITION: call at ENTRY, before consuming anything. A node
-    // that claims after consuming a token claims the wrong run.
+    // Claim trivia immediately before consuming the node's first token. The
+    // outermost node beginning there owns the run.
     claim_leading* = (self :: @Self) TriviaRun {
         run          = self.pending;
         self.pending = no_trivia();
         run;
     }
 
-    // The comment that follows a node on its own line. Only the nodes a
-    // list or a body separates — field, parameter, variant, arm,
-    // statement, declaration — ask for this, which is AST_CONTRACT.md's
-    // "the outermost node whose span ends before it on that line" made
-    // decidable: those are exactly the nodes that finish last on their
-    // line.
-    //
-    // Takes ONE piece off the front of the pending run, so the run
-    // stays contiguous and the next node's leading trivia begins where
-    // this left off.
+    // Claim one same-line trailing comment, leaving the remaining run for the
+    // next node.
     claim_trailing* = (self :: @Self, end: Pos) TriviaRun {
         (self.pending.len == 0).match({
             true  => no_trivia(),
@@ -513,44 +437,14 @@ Parser* = {
         });
     }
 
-    // Everything left at end of file. It has nowhere else to go, and a
-    // formatter that drops it fails its own round trip.
+    // Claim all trivia remaining at end of file.
     claim_rest* = (self :: @Self) TriviaRun { self.claim_leading() }
 
-    // A block's closing brace, claimed by the block the brace closes.
-    //
-    // A block is the one node whose last act is consuming a delimiter
-    // of its own — a statement ends at `;` or at its value, and it is
-    // the enclosing block that moves past either; a block ends AT its
-    // `}` and must move past it itself. The comment between the last
-    // statement (or, in a bare block or closure body, the opening
-    // `{`) and that `}` sits in `pending` while the body is read: no
-    // statement begins there to claim it as leading, no statement has
-    // ended there to claim it as trailing, and bumping the brace
-    // without claiming first would drain the run PAST the comment and
-    // overwrite pending with one starting beyond it — the comment
-    // owned by nobody, found by walking every run of every node
-    // against the arena.
-    //
-    // So the block claims what stands before its own closing token,
-    // exactly as `Module.trailing` owns what stands before end of
-    // file: nowhere else for it to go, and a formatter that drops it
-    // fails its own round trip. AST_CONTRACT.md names this rule
-    // beside the other three.
+    // Claim trivia between a block's last statement and closing brace.
     claim_close* = (self :: @Self) TriviaRun { self.claim_leading() }
 
-    // -----------------------------------------------------------------
-    // depth
-    //
-    // A crash is not a diagnostic. Every recursive entry point in this
-    // folder brackets itself with these two and checks `too_deep`
-    // before recursing again, which unwinds a 10,000-deep file instead
-    // of riding it into the stack guard.
-    //
-    // Depth counts AST links, including links built by postfix loops, because
-    // later phases recursively walk the resulting tree. `unwind` releases
-    // loop-charged links one at a time.
-    // -----------------------------------------------------------------
+    // Depth counts AST links, including links produced by iterative postfix
+    // parsing. Excess depth becomes a diagnostic rather than a stack overflow.
 
     enter* = (self :: @Self) Res<(), AllocError> {
         (self.depth == self.run_base).match({
@@ -571,10 +465,7 @@ Parser* = {
         });
     }
 
-    // A body opened, and the depth a run inside it counts from. The
-    // pair is a caller's to hold because a body is recognised by its
-    // CALLER — `fn_body`, a lambda's — and nowhere else: to `block`
-    // every brace looks alike.
+    // Set the depth baseline for a function or lambda body.
     run_from* = (self :: @Self) usize {
         was           = self.run_base;
         self.run_base = self.depth + 1;

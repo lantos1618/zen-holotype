@@ -1,52 +1,22 @@
-// src/std/parse/parse_diag.zen
-// What a rejection is.
-//
-// Parser diagnostics follow three contracts:
-//
-//   ONE MISTAKE, ONE DIAGNOSTIC. Recovery prevents one missing token from
-//   cascading into a message for every following token.
-//
-//   ANCHORED WHERE THE FIX GOES, not where the parser noticed. An
-//   unclosed `(` points at the OPENING delimiter — end of file names
-//   no useful location — and a too-deep nesting error points at the
-//   outermost bracket of the run rather than at the level that
-//   happened to exceed the limit.
-//
-//   COLLECTED, NEVER RAISED. A diagnostic is a value in a Vec. One bad
-//   declaration must not stop the file, or the second mistake is only
-//   ever found on the second run.
-//
+// Parser diagnostics are collected as values. Recovery avoids cascades, and
+// spans point to the token or delimiter a user needs to change.
 Pos, Span = std.ast.ast_span
-// which of two positions comes first, from the file that already had to
-// decide it for an editor's cursor; `truncated` asks it of an anchor.
 before = std.ast.ast_find
 
-// A place to look that is not where the error is. `unclosed` points at
-// the `(`; `expected `=>`` points at the arm whose pattern was read.
-// One note and not a list: the parser's cases each have exactly one
-// second place, and the multi-position diagnostics TESTING.md requires
-// — an impl collision, a duplicate signature — are sema's, where both
-// positions are declarations and neither is subordinate.
+// One secondary location related to a diagnostic.
 Note* = {
     message*: str,
     span*: Span,
 }
 
-// `message` is always a string LITERAL, never a built one, and that is
-// a decision rather than a limitation. A parser that formats its
-// messages needs an Alloc to say "expected `)`", so a diagnostic
-// could fail to be reported for want of memory — which is the one
-// moment a compiler must not be silent. Whole literals also read
-// better: "expected `=>` after this arm's pattern" says more than
-// "expected FatArrow, found Ident" ever does.
+// Messages are static strings, so reporting does not allocate.
 Diag* = {
     message*: str,
     span*: Span,
     note*: Res<Note>,
 }
 
-// The two constructors, so that a call site says which shape it is
-// building instead of writing `None` forty times.
+// Construct a diagnostic without a secondary note.
 diag* = (message: str, span: Span) Diag {
     Diag(message: message, span: span, note: None)
 }

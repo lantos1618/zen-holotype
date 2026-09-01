@@ -1,36 +1,15 @@
-// src/std/parse/parse_decl.zen
-// Declarations, and the one question this parser really has to answer.
-//
-// `Name = <thing>` IS SEVEN DIFFERENT DECLARATIONS. A struct, an enum,
-// an alias, a function, a function signature, an import and a
-// constant are all written with a name, an `=` and a value; grammar
-// R1a decides between them by the SHAPE of the value and nothing else,
-// and this file is the only place that knowledge lives.
+// Declaration parsing. The shape after `Name =` distinguishes declaration
+// kinds:
 //
 //     { .. }              struct
-//     | A   /  A | B      enum — the leading bar is what makes a
-//                         one-variant enum and an alias different
-//                         declarations rather than the same three
-//                         tokens, and it is why no lookahead is needed
+//     | A   /  A | B      enum
 //     (..) T { .. }       function, with a body
 //     (..) T              function, signature only
 //     a.b.c               import
 //     Name / Name<T>      alias
-//     anything else       a constant
+//     anything else       constant
 //
-// THE LEADING BAR IS THE WHOLE DESIGN. Without it `AllocError =
-// OutOfMemory` and `Alias = Shape` are indistinguishable, and
-// `TestError = Failed(str)` and `Circle1 = AddFoo(Circle)` are the same
-// five tokens. With it the fork closes before it opens, an enum is
-// declarable anywhere, and this parser needs no position rule and no
-// guess. tests/corpus/parse/leading_bar_separates_alias_from_enum.zen
-// is that pair, gated.
-//
-// COST TO ACCEPT KNOWINGLY, and DESIGN.md already prices it: a
-// declaration does not terminate, so `Shape = Circle | Square |`
-// followed by `main = ..` reads as a variant named `main` and a stray
-// `=`. The diagnostic lands on the `=` rather than on the bar. That is
-// this parser being right about the language.
+// The leading bar distinguishes a one-variant enum from an alias.
 
 AllocError = std.mem
 Span, Pos, Ident, no_trivia = std.ast.ast_span
@@ -46,14 +25,7 @@ body_block = std.parse.parse_stmt
 qualified_name = std.parse.parse_pattern
 struct_members, record_body, params_list, type_params = std.parse.parse_member
 
-// -------------------------------------------------------------------
-// the file
-// -------------------------------------------------------------------
-
-// A whole module (`Module` in ast_node.zen names its fields). Its span
-// is the whole file — trivia included, because there is nothing outside
-// it for the trivia to be beside — and its trailing run is whatever is
-// left at end of file.
+// Parse a whole module. Its span and trailing trivia cover the complete file.
 module* = (p :: Parser, name: str) Res<Module, AllocError> {
     start = Pos(line: 1, col: 1);
     p.drain().try();
@@ -79,11 +51,7 @@ module* = (p :: Parser, name: str) Res<Module, AllocError> {
     ));
 }
 
-// Recovery at module level: to the next token that could begin a
-// declaration, which is a name outside any bracket. One mistake, one
-// diagnostic, and the next declaration still gets parsed — which is
-// the difference between a compiler that reports fifty errors and one
-// that reports the same error fifty times.
+// Recover at the next identifier outside brackets.
 recover* = (p :: Parser) Res<(), AllocError> {
     p.bump().try();
     depth   ::= 0;
@@ -100,10 +68,6 @@ recover* = (p :: Parser) Res<(), AllocError> {
     Ok(());
 }
 
-// -------------------------------------------------------------------
-// one declaration
-// -------------------------------------------------------------------
-
 declaration* = (p :: Parser, module_level: bool) Res<Decl, AllocError> {
     m = p.open();
     p.impl_ahead().match({
@@ -112,10 +76,7 @@ declaration* = (p :: Parser, module_level: bool) Res<Decl, AllocError> {
     });
 }
 
-// `Circle.impl(Rect, { .. })` — a call in statement position that
-// declares. It is its own form and not a call because module level has
-// no expression statements at all, so giving it a rule costs no
-// ambiguity and gains a node the formatter and the LSP can match on.
+// Parse `Circle.impl(Rect, { .. })` as an impl declaration.
 impl_decl = (p :: Parser, m: Mark) Res<Decl, AllocError> {
     target = p.ident("expected the type an impl is for").try();
     p.bump().try();
@@ -145,8 +106,7 @@ impl_decl = (p :: Parser, m: Mark) Res<Decl, AllocError> {
     )), m);
 }
 
-// `Circle` `.` `impl` `(` — recognised by shape, because `impl` is not
-// a reserved word and an ordinary binding may still be called one.
+// `impl` is contextual, so recognize the full `Circle.impl(` shape.
 impl_ahead* = (p :: Parser) bool {
     p.at_kind(TokenKind.Ident)
         && p.peek_n(1).kind == TokenKind.Dot
@@ -171,9 +131,8 @@ named_decl = (p :: Parser, m: Mark, module_level: bool) Res<Decl, AllocError> {
     p.decl_value(m, names, tparams, written, mutable, module_level);
 }
 
-// `Res*, Ok*, None*` — the name list exists for imports, because
-// "re-export is an import whose bindings are starred" and there is no
-// `export` and no `from`. Every other declaration has exactly one.
+// Imports may bind multiple names (`Res*, Ok*, None*`); other declarations
+// have one.
 decl_names = (
     p       :: Parser,
     names   :: Vec<ImportName>,
@@ -364,14 +323,8 @@ fn_decl = (
     p.add_decl(DeclKind.Function(f), m);
 }
 
-// `<T>(a: T) T { .. }`, whoever writes it: "a method is a `Function`
-// inside a `Member`" (AST_CONTRACT), so a declaration's function and an
-// impl's method are one node — and reading them is one rule, not one
-// rule per caller.
-//
-// `form` records whether `=` or `::=` was written and `body` whether a
-// `{ .. }` followed, and the two are not redundant. DESIGN.md's method
-// table is at `Form` in ast_node.zen.
+// Parse a function value shared by declarations and method members. `form`
+// records `=` versus `::=`; `body` records whether `{ .. }` followed.
 fn_value* = (
     p          :: Parser,
     name       : Ident,
@@ -436,10 +389,7 @@ has_body = (p: Parser, body: Res<BlockId>) bool {
     });
 }
 
-// TWO INDEPENDENT INPUTS, so this is a 2x2 TABLE and NOT a ladder: every
-// one of the four cells names a different `Form`. A flat guard list cannot
-// say it -- `rebindable` first would answer `Hook` for both bodies and
-// `Default` would be reachable from nowhere. Nested is the shape.
+// Select the method form from rebindability and body presence.
 form_of = (rebindable: bool, body: bool) Form {
     rebindable.match({
         true  => body.match({
@@ -453,9 +403,7 @@ form_of = (rebindable: bool, body: bool) Form {
     });
 }
 
-// Type parameters may be written on either side of the `=` —
-// `f*<T> = (x: T) T` and `f* = <T>(x: T) T` are the same declaration,
-// and DESIGN.md writes both. Whichever list is non-empty is the one.
+// Type parameters may appear before or after `=`; prefer the non-empty list.
 merge_tparams = (p: Parser, head: Vec<TParam>, own: Vec<TParam>) Vec<TParam> {
     (head.len == 0).match({
         true  => own,

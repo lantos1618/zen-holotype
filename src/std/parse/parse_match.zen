@@ -1,20 +1,5 @@
-// src/std/parse/parse_match.zen
-// Match arms.
-//
-// "Control flow is one thing: `.match`, a method." So there is no
-// match rule and no match statement — only the argument `.match`
-// takes, which is what this file reads. `parse_expr.zen` recognises
-// the call and hands over at the `{`.
-//
-// EXHAUSTIVENESS IS NOT HERE. "Match is always exhaustive, in every
-// position: cover every case or write `_`" is a load-bearing
-// correctness property and it is sema's, checked on the `Match` node
-// this builds. A parser that tried would have to know what an enum is.
-//
-// `=>` IS LOCATED, not merely required. `Arm.arrow_span` exists
-// because the formatter aligns arms on it, and it cannot align what it
-// cannot find. It is taken before the token is consumed, so a missing
-// `=>` still leaves the diagnostic and the span on the same token.
+// Parse the arm list passed to `.match`. Sema checks exhaustiveness.
+// Arm.arrow_span retains `=>` for diagnostics and formatting.
 
 AllocError = std.mem
 Span = std.ast.ast_span
@@ -26,9 +11,8 @@ pattern = std.parse.parse_pattern
 expr = std.parse.parse_expr
 block_expr = std.parse.parse_stmt
 
-// `{ pattern => expr, .. }` — the arm list, and the span of the braces
-// around it. A trailing comma is allowed; `DESIGN.md` writes one on
-// every multi-line match it contains.
+// `{ pattern => expr, .. }`, including its braces. A trailing comma is
+// allowed.
 arms* = (p :: Parser, out :: Vec<Arm>) Res<Span, AllocError> {
     start = p.here();
     open  = p.here_span();
@@ -52,8 +36,7 @@ arms* = (p :: Parser, out :: Vec<Arm>) Res<Span, AllocError> {
     Ok(p.span_from(start));
 }
 
-// One arm, claiming its own trailing trivia — the `trivia_in_arm` and
-// `trivia_between_arms` cases in tests/corpus/parse are this line.
+// Parse one arm and claim its trailing trivia.
 one_arm = (p :: Parser) Res<Arm, AllocError> {
     m     = p.open();
     pat   = p.pattern().try();
@@ -63,11 +46,8 @@ one_arm = (p :: Parser) Res<Arm, AllocError> {
     end  = p.prev_end;
     span = p.span_from(m.start);
 
-    // The arm consumes its OWN separator, and that is what makes
-    // `Circle => "c",  // after an arm` attach to this arm rather than
-    // become the leading trivia of the next one. The span is taken
-    // first, because a node's span excludes the separator that follows
-    // it (POSITIONS.md).
+    // Consume the comma after taking the span so a same-line comment remains
+    // attached to this arm.
     p.eat(TokenKind.Comma).try();
     Ok(Arm(
         pattern: pat,

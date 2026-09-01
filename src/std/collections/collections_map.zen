@@ -1,62 +1,37 @@
-// src/std/collections/collections_map.zen
-// Map<K, V>. Hash narrows the search and Eq confirms collisions.
-//
-// TWO VECS — the whole design:
-//   entries   every key and value, dense, in INSERTION order
-//   slots     the index: open-addressed, linearly probed, holding
-//             positions in `entries` and nothing else
-//
-// Iteration order is insertion order: `set`
-// appends a new key and overwrites an existing one in place, so no row
-// ever moves. Probe order (a function of the hash) never reaches the
-// surface.
+// Insertion-ordered hash map. Dense entries preserve iteration order; a
+// separate open-addressed index narrows lookups before Eq confirms a key.
 
 Alloc, AllocError = std.mem
 Range = std.core.range
 Vec = std.collections.collections_vec
 LoopHandle = std.core.loop.loop_handle
 
-// a hash is u64, a Vec indexes in usize — reducing one to a slot
-// changes type. `std.core.num` is lossless-only and this narrows
-// wherever usize isn't 64 bits, so it's declared here privately
-// (taking the low word is what a slot reduction does anyway).
+// Narrow a hash to the target's index width.
 to_usize = (self: u64) usize
 
-// a slot holds a ONE-BASED position in `entries`, so zero means empty
-// with no second liveness array — `entries.len` right after an add IS
-// that position, already encoded.
+// Slots store one-based entry positions; zero marks an empty slot.
 SLOT_EMPTY: usize = 0
 
-// GROWTH. Up to six dense rows need no index. The seventh starts at 16
-// slots; from there the index doubles before an entry would fill more
-// than three quarters — geometric like Vec, for amortised O(1).
-//
-// The quarter left empty is not slack: a probe stops at the first
-// empty slot, so a full table would walk every slot on a miss — the
-// linear scan this file exists to delete.
+// Small maps scan their dense entries. Larger maps keep the probe table below
+// 75% load and grow geometrically.
 SLOTS_MIN: usize = 8
 LOAD_NUM: usize = 3
 LOAD_DEN: usize = 4
 SMALL_MAX: usize = 6
 
-// internal: no *, not visible outside std.collections
 Entry<K, V> = {
     hash: u64,
     key: K,
     value: V,
 }
 
-// bounds: K must be Eq + Hash — hash without eq is a wrong answer, eq
-// without hash is a bare scan.
 Map*<K: Eq + Hash, V> = {
     entries :: Vec<Entry<K, V>>,
 
-    // the index. `slots.len` is zero or a power of two
+    // Empty or power-of-two probe table.
     slots :: Vec<usize>,
 
-    // a rehash builds a fresh index, so a Map allocates (law 1). `:`
-    // since an Alloc is a handle (two words into the arena) that
-    // allocating through never mutates.
+    // Allocator used when the index grows.
     alloc: Alloc,
 
     set* = (self :: @Self, key: K, value: V) Res<(), AllocError> {
@@ -75,10 +50,7 @@ Map*<K: Eq + Hash, V> = {
         Ok(e.value);
     }
 
-    // how many rows the index holds — new keys only: an overwrite
-    // rewrites the row WHERE IT SITS and appends nothing, so len counts
-    // keys, not sets. The count IS `entries`, but entries stays sealed:
-    // what a Map is made of is not part of what a Map is.
+    // Number of distinct keys.
     len* = (self: @Self) usize { self.entries.len }
 
     // Walk key/value pairs in insertion order without allocating.
@@ -92,9 +64,7 @@ Map*<K: Eq + Hash, V> = {
         });
     }
 
-    // the settled slot says which case a set is: occupied means the
-    // key is already here, overwritten WHERE IT SITS (insertion order
-    // holds); empty means a new key, appended and pointed at from here
+    // Overwrite an existing entry in place or append a new one.
     place = (self :: @Self, s: usize, entry: Entry<K, V>) Res<(), AllocError> {
         held = self.slots.get(s).ok_or(AllocError.OutOfMemory).try();
         (held > SLOT_EMPTY).match({
@@ -105,8 +75,7 @@ Map*<K: Eq + Hash, V> = {
 
     append = (self :: @Self, s: usize, entry: Entry<K, V>) Res<(), AllocError> {
         self.entries.add(entry).try();
-        // post-add, `entries.len` IS the one-based position just
-        // added — the slot encoding, nothing to compute
+        // The new length is the appended entry's one-based slot value.
         put(self.slots, s, self.entries.len);
     }
 
@@ -115,8 +84,7 @@ Map*<K: Eq + Hash, V> = {
         (self.slots.len == 0).match({
             true  => self.entries.add(entry),
             false => {
-                // reserve leaves a quarter empty, so this None is
-                // unreachable; handle it rather than overwrite a row
+                // A reserved table should always have a free slot.
                 s = self.settle(entry.hash, entry.key)
                     .ok_or(AllocError.OutOfMemory).try();
                 self.place(s, entry);
@@ -124,7 +92,7 @@ Map*<K: Eq + Hash, V> = {
         })
     }
 
-    // the position in `entries` of this key, or None
+    // Position in entries, or None when absent.
     index_of = (self: @Self, h: u64, key: K) Res<usize> {
         (self.slots.len == 0).match({
             true  => Range(0, self.entries.len).find((i) {
@@ -133,7 +101,7 @@ Map*<K: Eq + Hash, V> = {
             false => {
                 s    = self.settle(h, key).try();
                 held = self.slots.get(s).try();
-                // an EMPTY settled slot ends the path without the key
+                // An empty settled slot means the key is absent.
                 (held > SLOT_EMPTY).match({
                     true  => Ok(held - 1),
                     false => None,
@@ -142,28 +110,23 @@ Map*<K: Eq + Hash, V> = {
         });
     }
 
-    // the slot this key settles on: first on its probe path that holds
-    // it or is empty. None only when `reserve` has failed to keep a
-    // slot free.
+    // First slot on the probe path that is empty or holds this key.
     settle = (self: @Self, h: u64, key: K) Res<usize> {
-        // an index with no slots settles nothing, and `% 0` TRAPS
+        // Avoid modulo by zero for an unindexed small map.
         (self.slots.len > 0).match({
             true  => self.walk(h, key, self.slots.len),
             false => None,
         });
     }
 
-    // linear probing: path starts at the hash's own slot, steps
-    // forward wrapping, so n steps see every slot once and the first
-    // empty one ends it
+    // Linear probing from the hash's home slot, wrapping once.
     walk = (self: @Self, h: u64, key: K, n: usize) Res<usize> {
         start = h.to_usize() % n;
         k     = Range(0, n).find((step) { self.settles((start + step) % n, h, key) }).try();
         Ok((start + k) % n);
     }
 
-    // an EMPTY slot stops the walk (path ends, key absent), and so does
-    // the slot already holding this key
+    // Stop at an empty slot or the matching key.
     settles = (self: @Self, s: usize, h: u64, key: K) bool {
         self.slots.get(s).match({
             None  => false,
@@ -174,8 +137,7 @@ Map*<K: Eq + Hash, V> = {
         });
     }
 
-    // hash is a cheap pre-filter; eq answers. an absent key landing on
-    // an occupied slot walks on rather than returning that row's value
+    // Hash filters candidates; Eq confirms the key.
     confirms = (self: @Self, i: usize, h: u64, key: K) bool {
         self.entries.get(i).match({
             None  => false,
@@ -201,9 +163,7 @@ Map*<K: Eq + Hash, V> = {
         });
     }
 
-    // double the index and rebuild it. `entries` is never touched —
-    // already dense with its own hash per row, so rehash calls `hash`
-    // zero times and moves zero rows
+    // Double and rebuild only the index, preserving dense entries and hashes.
     rehash = (self :: @Self) Res<(), AllocError> {
         n          = (self.slots.len == 0).match({
             true  => SLOTS_MIN * 2,
@@ -213,8 +173,7 @@ Map*<K: Eq + Hash, V> = {
         self.refill();
     }
 
-    // point every slot at the entry that owns it. keys are unique, so
-    // each entry walks to an empty slot and none displaces another
+    // Reinsert each entry position into the fresh index.
     refill = (self :: @Self) Res<(), AllocError> {
         room ::= true;
         Range(0, self.entries.len).loop((h, i) {
@@ -236,9 +195,8 @@ Map*<K: Eq + Hash, V> = {
     }
 }
 
-// a fresh index of `n` empty slots. BUILT not cleared: a grow that
-// runs out of memory leaves the old index in place, not a half-cleared
-// one
+// Build a fresh empty index so allocation failure cannot partially clear the
+// existing one.
 empty_slots = (a: Alloc, n: usize) Res<Vec<usize>, AllocError> {
     fresh ::= a.Vec<usize>();
     room  ::= true;
@@ -254,10 +212,8 @@ empty_slots = (a: Alloc, n: usize) Res<Vec<usize>, AllocError> {
     });
 }
 
-// Vec.set past len is None, unreachable here (every write is already
-// length-checked) but handled anyway: AllocError is the one failure
-// this module speaks.
-//
+// Convert an unexpected out-of-bounds write into the module's allocation
+// error.
 put = <T>(v :: Vec<T>, i: usize, value: T) Res<(), AllocError> {
     v.set(i, value).match({
         None  => Err(AllocError.OutOfMemory),
@@ -265,9 +221,6 @@ put = <T>(v :: Vec<T>, i: usize, value: T) Res<(), AllocError> {
     });
 }
 
-// `alloc.Map<str, i32>()`: ufcs constructor beside Map, since `entries`
-// isn't exported. a bare value, not a Res: an empty Map owns no pages
-// (empty Vec, zero slots) — the first set allocates both and returns
 // Res. the bound travels with the return type: a Map<K, V> with K not
 // Eq + Hash isn't a Map, so this can't be written `<K, V>`
 Map* = <K: Eq + Hash, V>(a: Alloc) Map<K, V> {

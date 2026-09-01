@@ -1,31 +1,26 @@
 // UTF-8 decoding and encoding over byte-oriented str and String values.
-// Both directions share the boundary constants below. Byte-to-u32 conversion
-// only widens; multiplication by UTF8_CONT_SCALE supplies the six-bit shift
-// needed to assemble and split code points.
 
 str = std.text.text_str
 String = std.text.text_string
 AllocError = std.mem.mem
 
-// the offset of the byte where the sequence stops making sense
+// Offset of the first invalid byte.
 Utf8Error* = | Invalid(usize) | InvalidCodepoint(u32)
 
-// one decoded codepoint and the width of the sequence it came from
+// Decoded codepoint and its encoded width.
 Codepoint* = {
     value*: u32,
     len*: usize,
 }
 
-// a walk over the codepoints of a str. No Alloc, so it is a cursor, not a
-// collection — the caller keeps whatever it wants to keep
+// Non-allocating codepoint cursor over a str.
 Codepoints* = {
     bytes: str,
     at* :: usize,
 
     is_done* = (self: @Self) bool { self.at == self.bytes.len }
 
-    // decodes the sequence at the cursor and steps past it. Only valid while
-    // `is_done` is false
+    // Decode and advance. Call only while not done.
     next* = (self :: @Self) Res<u32, Utf8Error> {
         c       = codepoint_at(self.bytes, self.at).try();
         self.at = self.at + c.len;
@@ -47,15 +42,14 @@ codepoint_at* = (s: str, at: usize) Res<Codepoint, Utf8Error> {
     });
 }
 
-// walks every sequence and keeps none of them
+// Validate every sequence.
 validate_utf8* = (s: str) Res<(), Utf8Error> {
     walk ::= s.codepoints();
     loop(!walk.is_done(), (h) { walk.next().try(); });
     Ok(());
 }
 
-// the count that `len` deliberately is not. Characters cost a walk, and the
-// walk is written out here so the price is visible at the call
+// Count codepoints; str.len counts bytes instead.
 count_codepoints* = (s: str) Res<usize, Utf8Error> {
     walk ::= s.codepoints();
     n    ::= 0;
@@ -65,10 +59,6 @@ count_codepoints* = (s: str) Res<usize, Utf8Error> {
     });
     Ok(n);
 }
-
-// ---------------------------------------------------------------------------
-// UTF-8's own boundaries, exported since callers may want them
-// ---------------------------------------------------------------------------
 
 UTF8_ASCII_MAX*: u8 = 128       // first byte that is not a codepoint by itself
 UTF8_CONT_MIN*: u8 = 128        // continuation bytes are 128..191
@@ -86,18 +76,12 @@ UTF8_SURROGATE_MAX*: u32 = 57343
 UTF8_MAX_CODEPOINT*: u32 = 1114111
 UTF8_MAX_LEN*: usize = 4        // no sequence is longer
 
-// the byte-order mark, U+FEFF as its three bytes. The lexer skips one
-// at a file's start; home is here because these name UTF-8, not Zen.
+// UTF-8 byte-order mark for U+FEFF.
 BOM_FIRST*: u8 = 239
 BOM_SECOND*: u8 = 187
 BOM_THIRD*: u8 = 191
 
-// width of the sequence starting with `lead`, or 0 if it can't start one:
-// a continuation byte, an overlong lead, or past reach of U+10FFFF.
-// Early return over a pyramid: the one-shot loop is a breakable block,
-// each `.then` a guard that returns its length, the last break the rest.
-// The typed binding is load-bearing — a match on the loop call itself
-// leaves T unresolved, and the bootstrapper lowers it to garbage
+// Encoded width for a leading byte, or zero for an invalid lead.
 sequence_len = (lead: u8) usize {
     found: Res<usize> = loop((h) {
         (lead < UTF8_ASCII_MAX).then(() { h.break(1) });
@@ -113,7 +97,7 @@ sequence_len = (lead: u8) usize {
     });
 }
 
-// the 6 payload bits of the continuation byte at `at`
+// Six payload bits from a continuation byte.
 continuation = (s: str, at: usize) Res<u32, Utf8Error> {
     b = s.get(at).ok_or(Utf8Error.Invalid(at)).try();
     ((b >= UTF8_CONT_MIN) && (b < UTF8_LEAD_MIN)).match({
@@ -160,10 +144,6 @@ four_byte = (s: str, at: usize, lead: u8) Res<Codepoint, Utf8Error> {
     });
 }
 
-// ---------------------------------------------------------------------------
-// the other direction: a codepoint, as bytes
-// ---------------------------------------------------------------------------
-
 // Append one Unicode scalar value. Surrogates and values above U+10FFFF are
 // not Unicode scalar values and are rejected before any byte is written.
 push_utf8* = (v: u32, out :: String) Res<(), Utf8Error | AllocError> {
@@ -189,7 +169,7 @@ encoded_len = (v: u32) usize {
     1 + past(v, UTF8_ASCII_MAX.to_u32()) + past(v, UTF8_MIN_3) + past(v, UTF8_MIN_4)
 }
 
-// one more byte, or not
+// Whether the codepoint crosses another encoded-width boundary.
 past = (v: u32, bound: u32) usize {
     (v >= bound).match({ true => 1, false => 0 })
 }

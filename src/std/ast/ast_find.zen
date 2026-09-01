@@ -1,31 +1,11 @@
-// src/std/ast/ast_find.zen
-// Resolve a cursor position to the smallest AST node covering it. Editors
-// begin with a byte position rather than an AST root.
-//
-// SCAN, NOT WALK: `ast_arena.zen` holds every expression, type,
-// pattern and block in one flat `Vec` with its span, so this is a fold
-// over four lists, needing no traversal, parent links, or second index.
-//
-// SMALLEST WINS: two nodes covering one position are always nested, so
-// "strictly inside the best so far" totally orders the candidates —
-// the answer is deterministic regardless of arena order, which is what
-// `fmt` and the fixpoint stand on.
-//
-// Position convention is `AST_CONTRACT.md`'s: 1-based line, 1-based
-// BYTE column, span half-open (a position equal to `end` is PAST the
-// node).
-//
-// NOTHING HERE ALLOCATES (law 1): no `Alloc` parameter below. A cursor
-// query runs per keystroke.
+// Resolve a byte position to the smallest covering AST node. Nodes are scanned
+// from the arena's flat family lists; these queries do not allocate.
 str = std.text
 Pos, Span = std.ast.ast_span
 ExprId, TypeId, PatternId, BlockId = std.ast.ast_id
 Ast = std.ast.ast_arena
 
-// Which arena the answer came out of. An LSP asks different questions
-// of each — hover is `type_of` on an `ExprId`, and a `TypeId` under the
-// cursor is a go-to-definition on a written type — so the answer names
-// the family rather than erasing it to an index.
+// Typed reference to the arena family containing a result.
 NodeRef* = ExprNode(ExprId)
     | TypeNode(TypeId)
     | PatternNode(PatternId)
@@ -48,9 +28,8 @@ inside* = (inner: Span, outer: Span) bool {
         && (before(outer.start, inner.start) || before(inner.end, outer.end))
 }
 
-// THE QUERY: the smallest node of any family covering `p` in `file`.
-// `None` when `p` is in no node — past EOF or inside trivia — which is
-// a correct answer (hovering a comment gets nothing), not a failure.
+// Smallest node of any family covering `p`; None for trivia or positions
+// outside all nodes.
 node_at* = (tree: Ast, file: str, p: Pos) Res<NodeRef> {
     best ::= NodeRef.ExprNode(ExprId(index: 0));
     have ::= false;
@@ -86,10 +65,7 @@ node_at* = (tree: Ast, file: str, p: Pos) Res<NodeRef> {
     have.match({ true => Ok(best), false => None })
 }
 
-// HOVER'S OWN DOOR: the smallest EXPRESSION covering `p`. A separate
-// query rather than a filter over `node_at`: `x: i32 = 1` has a `Type`
-// node over `i32` and an `Expr` over `1` — hovering a VALUE's type
-// wants the expression specifically, not the smallest node of any kind.
+// Smallest expression covering `p`, independent of smaller type nodes.
 expr_node_at* = (tree: Ast, file: str, p: Pos) Res<ExprId> {
     best ::= ExprId(index: 0);
     have ::= false;
@@ -104,16 +80,12 @@ expr_node_at* = (tree: Ast, file: str, p: Pos) Res<ExprId> {
     have.match({ true => Ok(best), false => None })
 }
 
-// A candidate beats the best so far by covering the position and then
-// either being the first thing that does or sitting strictly inside
-// what already does.
+// Prefer the first covering candidate, then any candidate nested inside it.
 take = (cand: Span, file: str, p: Pos, have: bool, best: Span) bool {
     in_span(cand, file, p) && (!have || inside(cand, best))
 }
 
-// A span no candidate is inside, for the "nothing yet" state. It is
-// never read before `have` is true; it exists because a mutable local
-// needs a value to start at.
+// Initial span value, ignored until `have` is true.
 empty_span = () Span {
     Span(file: "", start: Pos(line: 0, col: 0), end: Pos(line: 0, col: 0))
 }

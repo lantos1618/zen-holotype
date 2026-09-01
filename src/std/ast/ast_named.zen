@@ -1,8 +1,5 @@
-// src/std/ast/ast_named.zen
-// Finds the declaration name under a cursor. Unlike `ast_find.node_at`,
-// this sees by-value `Ident`s (function/parameter names) and bind targets,
-// which have no arena id. `Tell` retains the node whose checked type is
-// the answer; LSP owns presentation and allocation.
+// Resolve declaration names and bind targets under a cursor, including
+// by-value identifiers with no arena id.
 
 str = std.text
 Range = std.core
@@ -13,16 +10,13 @@ Decl, Function, Param, Member, Const, Bind, Stmt = std.ast.ast_node
 Ident, Import = std.ast
 node_at, in_span = std.ast.ast_find
 
-// The type the checker gave THIS node. `span` is the name's own span,
-// not the node's: hovering `a` in `(a: i32)` must underline `a`, though
-// the answer's type is the `i32` beside it.
+// Checked type with the declaring name's span.
 TypeAt* = {
     span*: Span,
     id*: TypeId,
 }
 
-// The type the checker gave THIS expression. `s = a + b` has no written
-// type, so the local's type is its value's.
+// Checked expression supplying a local's inferred type.
 ValueAt* = {
     span*: Span,
     id*: ExprId,
@@ -36,10 +30,7 @@ Tell* = Nothing
     | OfValue(ValueAt)
     | Imported(Ident)
 
-// THE QUERY. A name first, a node second — containment, not preference:
-// an `Ident`'s span is the tightest span at a declaring position, while
-// the enclosing `Block` covers a nested declaration's name. Asking
-// `node_at` first would answer `BlockNode` there and lose the name.
+// Prefer the tight identifier span before consulting enclosing arena nodes.
 told_at* = (tree: Ast, file: str, p: Pos) Tell {
     named = named_at(tree, file, p);
     is_nothing(named).match({
@@ -52,10 +43,7 @@ is_nothing* = (t: Tell) bool {
     t.match({ Nothing => true, _ => false })
 }
 
-// WHICH MODULE IS THIS FILE, as its index in the arena — equal to its
-// index in sema's `World`, whose tables are built by walking
-// `module_count` in this same order (`sema_def.zen`). Here and not in
-// `src/lsp/`: `definition` and `completion` both asked.
+// Arena module index for a source file; sema World uses the same order.
 module_index_of* = (tree: Ast, file: str) Res<usize> {
     Range(0, tree.module_count()).find((i) {
         tree.module_at(i).match({
@@ -65,18 +53,12 @@ module_index_of* = (tree: Ast, file: str) Res<usize> {
     })
 }
 
-// The first non-`Nothing` of the two — a position is inside at most one
-// name, so a fold can be written without a flag beside it.
+// Keep the first resolved name.
 pick = (have: Tell, cand: Tell) Tell {
     is_nothing(have).match({ true => cand, false => have })
 }
 
-// --- names ------------------------------------------------------------
-
-// Every declared or imported name in the compilation, module level and
-// nested. TWO SCANS: `Module.decls` for the top level, `Block.stmts` for
-// a nested one — not a recursion into the first, since every block is
-// already flat in the arena.
+// Scan top-level declarations and the arena's flat block list.
 named_at = (tree: Ast, file: str, p: Pos) Tell {
     found ::= Tell.Nothing;
     Range(0, tree.module_count()).loop((h, i) {
@@ -102,10 +84,8 @@ stmt_named = (s: Stmt, file: str, p: Pos) Tell {
     })
 }
 
-// AN ENUM'S OR STRUCT'S NAME IS NOT HERE, deliberately: `type_memo` is
-// keyed on a written `TypeId` and a declaration site has none — `Foo` in
-// `Foo = { .. }` is an `Ident`, not a type node. A USE of `Foo` hovers
-// fine.
+// Struct and enum declaration names have no written TypeId; uses still resolve
+// through their type nodes.
 decl_told = (d: Decl, file: str, p: Pos) Tell {
     d.kind.match({
         Function(f) => fn_told(f, file, p),

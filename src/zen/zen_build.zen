@@ -1,4 +1,3 @@
-// src/zen/zen_build.zen
 // `zen build`: the five phases, wired together.
 //
 //     read -> lex -> parse -> check -> emit
@@ -156,9 +155,7 @@ Build* = {
         })
     }
 
-    // `file_of`'s rule over a DOTTED STRING rather than a parsed
-    // `QualifiedName`: the prelude is named by a constant with no
-    // import behind it, so there's no AST node to read segments off.
+    // Resolve the prelude's dotted constant without an import AST node.
     dotted_path = (self: @Self, dotted: str, folder: bool)
                   Res<str, AllocError> {
         base = self.std_base();
@@ -171,10 +168,6 @@ Build* = {
         Ok(out.view());
     }
 
-    // -----------------------------------------------------------------
-    // one module: read, lex, parse
-    // -----------------------------------------------------------------
-
     front = (self :: @Self, u: Unit, seen :: Vec<Unit>) Res<(), AllocError> {
         self.read(u.path).match({
             None     => Ok(()),
@@ -182,8 +175,7 @@ Build* = {
         })
     }
 
-    // THE OVERLAY FIRST, THE DISK SECOND — a miss is the whole of what
-    // a build without an editor attached does.
+    // Editor overlay takes precedence over disk contents.
     read = (self :: @Self, path: str) Res<str> {
         self.overlay.get(path).match({
             Ok(text) => Ok(text),
@@ -191,10 +183,7 @@ Build* = {
         })
     }
 
-    // A `str` NOT A `String`: the walk only `view()`s the bytes — scan
-    // holds spans into them and parse reads those back, so the buffer
-    // already had to outlive the `String` local. `str` lets one branch
-    // above hand back a buffer it does not own.
+    // Borrow the read buffer because lexer and parser spans refer into it.
     read_disk = (self :: @Self, path: str) Res<str> {
         self.env.fs.read(self.alloc, path).match({
             Ok(text) => Ok(text.view()),
@@ -202,17 +191,8 @@ Build* = {
         })
     }
 
-    // COUNTED, SAID AND HELD. Reached by the ENTRY and by a read that
-    // fails after the probe (the file left between `import_path` and
-    // `read`, or the failure is not absence at all) — for those the
-    // file itself IS the subject, so the span is its first position.
-    // An import whose target is absent never gets here: `missing_import`
-    // anchors that fault at the import, where the fix goes.
-    //
-    // HELD because a language server builds with `speaking` false, and
-    // collecting is then the ONLY way a missing module reaches
-    // `publishDiagnostics` — an unreadable import otherwise surfaced
-    // only as phantom `undefined name` faults downstream.
+    // Record read failures for both CLI output and LSP diagnostics. Missing
+    // imports use the import span; direct reads use the file's first position.
     fs_fault = (self :: @Self, path: str, e: FsError) Res<str> {
         self.faults = self.faults + 1;
         self.speaking.then(() { println("{}: {}", path, fs_message(e)); });
@@ -610,8 +590,7 @@ Build* = {
         );
     }
 
-    // WHAT THIS BUILD FOUND, as values — deliberately the same pair
-    // `Checker` exports, so one reader shape serves both.
+    // Collected build diagnostics.
     diag_count* = (self: @Self) usize { self.diags.len }
 
     diag_at* = (self: @Self, i: usize) Res<Diag> { self.diags.get(i) }

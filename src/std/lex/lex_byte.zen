@@ -1,20 +1,7 @@
-// src/std/lex/lex_byte.zen
-// Which kind of token, if any, a byte can begin.
-//
-// WHAT A BYTE IS belongs to std.core.byte and is not repeated here —
-// `is_digit`, `is_space`, `is_ident_start`, `is_ident_cont`. What's left
-// is what genuinely names Zen: which byte begins which token, and which
-// escapes Zen has.
-//
-// Classification and byte WALKING are separate files — this is a table,
-// lex_cursor.zen is a machine — so a change to what begins a token never
-// touches the code that counts lines.
-//
-// There is no `Punct` class, deliberately: lex_punct.zen owns that table
-// and says why a second copy here would be wrong. `Other` means only
-// "not one of the shapes below"; the punct table decides the rest.
+// Token-opening byte classes. General ASCII predicates live on u8;
+// punctuation is classified separately by lex_punct.
 
-// what a byte can start
+// What a byte can start.
 ByteClass* =
       Space      // skipped; never a token
     | Slash      // `//`, `/*`, or division: one byte of lookahead tells them apart
@@ -25,17 +12,14 @@ ByteClass* =
     | At         // @Self, @meta, @scope, and nothing else
     | Other      // punctuation, or a byte that begins no Zen token at all
 
-// THE escape set, and nothing else. An unknown escape is an error, never a
-// silent literal character: `"\q"` does not mean `q`. This one IS a Zen
-// fact rather than a byte fact, which is why it stays
+// Valid single-byte escapes. Unknown escapes are lexical errors.
 is_escape* = (b: u8) bool {
     b.is_in(['n', 't', 'r', 'v', 'f', '0', '\\', '\'', '"'])
 }
 
 class_of* = (b: u8) ByteClass {
     found: Res<ByteClass> = loop<ByteClass>((h) {
-        // GUARD ORDER IS PRIORITY: space beats digit beats ident-start,
-        // and what no predicate claims falls to the punct table.
+        // Classification order is significant for overlapping predicates.
         b.is_space().then(() { h.break(ByteClass.Space) });
         b.is_digit().then(() { h.break(ByteClass.Digit) });
         b.is_ident_start().then(() { h.break(ByteClass.Letter) });

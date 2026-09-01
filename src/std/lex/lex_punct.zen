@@ -1,24 +1,10 @@
-// src/std/lex/lex_punct.zen
-// Operators and brackets, and the rule that the longer token wins.
-//
-// MAXIMAL MUNCH IS THE WHOLE SUBJECT. `::=` is one token and not `::`
-// followed by `=`; `+%` is one and not `+` followed by `%`. Getting that
-// wrong does not produce a diagnostic, it produces a different program —
-// `x ::= 1` silently becoming a comparison — so it lives in one file with
-// one table and one helper that every multi-byte operator goes through.
-//
-// ONE TABLE. `punct_of` is the only place a punctuation byte is named, and
-// "is this byte punctuation?" is its domain rather than a second list.
-// lex_byte.zen deliberately has no `Punct` class for exactly this reason:
-// two lists disagree eventually, and the day they do, a byte lexes as a
-// token the table cannot name.
+// Operator and delimiter scanning. Multi-byte operators use maximal munch,
+// such as `::=` before `::` and `+%` before `+`.
 
 TokenKind = std.lex.lex_token
 Cursor = std.lex.lex_cursor
 
-// what a punctuation byte reads as ON ITS OWN. None means it begins no Zen
-// token at all — `?`, `#`, `~`, `$`, `` ` ``, `^`, `\` — which is the
-// scanner's cue to report a stray byte rather than invent a reading
+// Single-byte punctuation; None means the byte begins no Zen token.
 punct_of* = (b: u8) Res<TokenKind> {
     b.match({
         '!' => Ok(TokenKind.Bang),
@@ -46,10 +32,7 @@ punct_of* = (b: u8) Res<TokenKind> {
     });
 }
 
-// the token at the cursor, consumed. `single` is what `punct_of` already
-// said this byte reads as alone, so the fallthrough arm is the answer for
-// every byte that starts nothing longer — no second table, and no arm that
-// can only be reached by a bug
+// Consume a punctuation token, preferring its multi-byte form.
 punct_kind* = (cur :: Cursor, b: u8, single: TokenKind) TokenKind {
     b.match({
         '!' => cur.pair('=', TokenKind.BangEq, TokenKind.Bang),
@@ -67,14 +50,13 @@ punct_kind* = (cur :: Cursor, b: u8, single: TokenKind) TokenKind {
     });
 }
 
-// one byte, and that is the token
+// Consume one byte.
 solo* = (cur :: Cursor, kind: TokenKind) TokenKind {
     cur.bump();
     kind
 }
 
-// one byte, or two when `second` follows. Written once, so `+`/`+%` and
-// `*`/`*%` and `<`/`<=` cannot come to different conclusions
+// Consume one byte, plus `second` when present.
 pair* = (
     cur    :: Cursor,
     second : u8,
@@ -88,9 +70,7 @@ pair* = (
     });
 }
 
-// `...` is varargs. `..` is not a Zen token, so it lexes as two dots and
-// the parser is the one that objects — a lexer that guessed a range
-// operator here would be inventing syntax
+// `...` is variadic syntax; `..` remains two dot tokens.
 dot_kind* = (cur :: Cursor) TokenKind {
     (cur.at_byte(1, '.') && cur.at_byte(2, '.')).match({
         true  => { cur.bump(); cur.bump(); cur.bump(); TokenKind.Ellipsis },
@@ -98,8 +78,7 @@ dot_kind* = (cur :: Cursor) TokenKind {
     });
 }
 
-// `::=` before `::` before `:`, which is the ordering that keeps a mutable
-// binding from lexing as a comparison
+// Prefer `::=`, then `::`, then `:`.
 colon_kind* = (cur :: Cursor) TokenKind {
     cur.at_byte(1, ':').match({
         false => cur.solo(TokenKind.Colon),

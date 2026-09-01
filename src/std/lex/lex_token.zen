@@ -1,83 +1,40 @@
-// src/std/lex/lex_token.zen
-// What a token is: a kind, and where it came from.
-//
-// POSITIONS ARE DECIDED HERE because DESIGN.md decides them here — "every
-// AST node carries a file plus a half-open start..end span, each end a
-// line:col with a 1-based byte column, FROM THE LEXER UP". A point is not
-// enough: without an end the formatter cannot reprint a node and the LSP
-// cannot select one.
-//
-// A Pos carries the byte OFFSET as well as line and column. The offset
-// slices the source (`text_of` below); the line:col is what a diagnostic
-// prints. Keeping both costs a word and saves every consumer a scan, and
-// they can never disagree because the cursor advances them together.
-//
-// The FILE is not on a Span. Every token of one lex run shares it, so it
-// lives once on the Source that was lexed and once on each Diag that
-// escapes, rather than three words on every token of a ten-megabyte file.
+// Token kinds and half-open source positions. Offsets slice source bytes;
+// one-based line and byte-column values are used in diagnostics.
 
 str = std.text
 
-// a half-open byte range's endpoint. `line` and `col` are 1-based, and
-// `col` is a BYTE column: `str` is bytes, so "héllo".len is 6 and the
-// column after the é is 4. An editor column and a byte column differ on
-// exactly the inputs where saying "byte" is the only honest answer
+// A byte position. `line` and `col` are one-based; `col` counts bytes.
 Pos* = {
     offset*: usize,
     line*: usize,
     col*: usize,
 }
 
-// `line:col`, exactly what a diagnostic prints after `file:` — the
-// OFFSET IS NOT RENDERED (it slices, it does not speak), which is why
-// this is a definition of its own beside ast_span.zen's and not shared:
-// the two Pos types are different shapes with one printed half. Same
-// law as the AST twin: WITH THE TYPE, sink form only, no allocation —
-// digits through the same writer every hand copy used.
+// Display as `line:col`; the byte offset is not rendered.
 Pos.impl(Display, {
     toString ::= (self: @Self, out :: Sink) Res<(), WriteError> {
         out.fmt("{}:{}", self.line, self.col)
     }
 })
 
-// half-open: start..end, so `end.offset - start.offset` is the length and
-// an empty span is start == end. Eof is the empty span at the last byte
+// Half-open byte span. Eof has an empty span at the end of input.
 Span* = {
     start*: Pos,
     end*: Pos,
 }
 
-// the bytes that were lexed, and what to call them in a diagnostic. A
-// lexer takes text and a name for it; it never opens a file, because
-// opening one is authority and authority comes from Env
+// Source bytes and the filename used in diagnostics.
 Source* = {
     file*: str,
     text*: str,
 }
 
-// EVERY TOKEN SHAPE, flat. A nested `Punct(PunctKind)` would make every
-// parser match two levels deep to answer a one-level question.
-//
-// Comments are TOKENS, not discards: DESIGN.md attaches trivia to nodes,
-// and a lexer that drops a comment has already lost the formatter.
-// WHITESPACE is not a token — it is recoverable exactly from the gap
-// between two spans, and "was there a blank line here" is
-// `next.start.line > prev.end.line + 1` rather than a stored fact that can
-// go stale.
+// Complete token alphabet. Comments are tokens so the formatter can preserve
+// them; whitespace is derived from gaps between spans.
 TokenKind* =
-      Ident              // [A-Za-z_][A-Za-z0-9_]*, `_` included: the parser reads
-                         // the wildcard pattern, the lexer only sees a name
-    | Int(u64)           // the VALUE, already accumulated. The lexer had to add the
-                         // digits up to bounds-check them, so throwing the sum away
-                         // and making the parser redo it is work paid for twice.
-                         // u64 and not i64 because `-9223372036854775808` is unary
-                         // minus applied to a positive that only fits UNSIGNED —
-                         // the classic, and the reason the sign is the parser's
-    | Float              // no value: converting decimal digits to an f64 is a
-                         // ROUNDING decision, and rounding belongs where the target
-                         // type is known. A literal's type comes from its context,
-                         // so the lexer would have to guess. The digits are in the
-                         // span, which is the honest answer
+      Ident              // `[A-Za-z_][A-Za-z0-9_]*`; `_` is parsed later
+    | Int(u64)           // validated unsigned magnitude; sign is a unary operator
+    | Float              // source digits; conversion waits for the target type
     | Str
     | Char
     | True | False       // reserved by the grammar, so they are not Idents
@@ -105,25 +62,7 @@ TokenKind* =
                          // ask "what is here" at the end needs no second shape for
                          // the end, and "unexpected end of file" gets a position
 
-// TWO KINDS ARE THE SAME KIND, which is what every consumer of this
-// alphabet actually asks. Written here and not beside the asker because
-// "an impl lives in the module that declares its target, so there are no
-// orphan impls" (sema_bound.check_home) — an impl anywhere else is not a
-// weaker impl, it is dead text.
-//
-// `Int` COMPARES ITS VALUE. It is the one variant with a payload, and a
-// kind that ignored it would make `Int(5)` and `Int(6)` one value — an
-// equality that answers "same" about two different literals is the kind
-// of wrong answer nothing downstream can see. Every other variant is its
-// tag alone, so the inner match is the tag test.
-//
-// EACH ARM SPELLS ITS OWN NAME TWICE because a match is the only way to
-// ask a Zen enum which variant it is. The backend already numbers every
-// variant (`gen_c_layout.write_enum_tags`) and lowers this to
-// `a.zg_tag == b.zg_tag` forty-eight times over; the number is a codegen
-// detail with no spelling in the language, so this table is what the
-// source can say. It is a `cmp` the machine already knows how to do in
-// one instruction, written out. Reported.
+// Token equality compares Int payloads and otherwise compares variant tags.
 TokenKind.impl(Eq, {
     eq ::= (self: @Self, other: @Self) bool {
         self.match({
@@ -184,17 +123,12 @@ Token* = {
     span*: Span,
 }
 
-// the bytes a token was cut from. No copy and no Alloc: a str is a
-// borrowed view, and the token already holds both ends of it
+// Borrow the source bytes covered by a token.
 text_of* = (source: Source, token: Token) str {
     source.text.slice(token.span.start.offset, token.span.end.offset);
 }
 
-// what to call a kind out loud. The parser's "expected `;`, found `=>`" is
-// this function twice, so it belongs beside the enum rather than in
-// whichever consumer needed it first. Operators are named by their GLYPH
-// because that is what the author typed; a lexer does not know that `=` is
-// a binding, and saying so here would be the parser's knowledge leaking down
+// User-facing token names. Operators are named by their source glyphs.
 kind_name* = (kind: TokenKind) str {
     kind.match({
         Ident        => "an identifier",

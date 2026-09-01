@@ -6,29 +6,23 @@
 Alloc, AllocError = std.mem.mem_alloc
 Ptr = std.mem.mem_ptr
 
-// how much an arena asks the page authority for when it needs more.
-// Large enough that chaining is rare, small enough that one arena per
-// test doesn't reserve the machine
+// Default page size; larger individual requests receive a larger page.
 PAGE_BYTES: usize = 65536
 
 // Each run stores its byte length immediately before the returned pointer so
 // realloc can recover the old size.
 HEADER_BYTES: usize = usize.BITS / 8
 
-// The strictest alignment any Zen value needs. An arena aligns every
-// run to this instead of tracking T's own alignment, so realloc never
-// asks Ptr a second layout question
+// Strictest alignment required by Zen values.
 ALIGN_MAX: usize = 16
 
-// Round an offset up to the next multiple of align. Alignments are
-// powers of two, never zero, so `%` can't trap
+// `align` is a non-zero power of two.
 align_up = (offset: usize, align: usize) usize {
     raised = offset + align - 1;
     raised - (raised % align)
 }
 
-// One region from the page authority. Header lives in its own first
-// bytes (no second allocation); `prev` is the chain drop walks back
+// One arena page linked to its predecessor.
 Page* = {
     prev: Ptr<Page>,
     base: Ptr<u8>,    // first byte this page hands out
@@ -46,8 +40,7 @@ ArenaState = {
 Arena* = {
     state: Ptr<ArenaState>,
 
-    // hand `size` bytes out of the current page, or chain a new one.
-    // Private: bumping is how an arena works, not what it offers
+    // Allocate from the current page or chain a new one.
     bump = (self: @Self, s: ArenaState, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
         page  = s.head.read(0);
         slot  = align_up(s.next, HEADER_BYTES);
@@ -66,8 +59,7 @@ Arena* = {
         });
     }
 
-    // acquire a fresh page sized to satisfy this request outright
-    // (header, alignment, all), so the retry below runs exactly once
+    // Acquire a page large enough for this complete request.
     chain = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
         s     = self.state.read(0);
         want  = HEADER_BYTES + align + size;
@@ -106,9 +98,6 @@ Arena* = {
     }
 }
 
-// `self: @Self` on every one of these, deliberately: allocating
-// changes the pages behind the handle, never the handle's own bytes —
-// what lets Vec hold `alloc: Alloc` immutably and still grow through it.
 Arena.impl(Alloc, {
     raw = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
         s = self.state.read(0);
@@ -163,20 +152,14 @@ Arena.impl(Drop, {
     }
 })
 
-// Page authority received through Env. Its methods mutate operating-system
-// state behind the handle rather than the handle's own bytes.
+// Page authority received through Env.
 Mem* = {
-    // a fresh arena, rooted here. Owns no pages yet (first raw()
-    // chains one) so nothing here can fail — `alloc ::= env.mem.alloc()`
-    // needs no `.try()`, and Arena is a bare value not a Res
+    // A fresh arena owns no pages until its first allocation.
     alloc* = (self: @Self) Arena
 
-    // one region of at least `size` bytes, page-aligned, header
-    // written into its own first bytes, linked onto `prev`. Arena is
-    // the only caller — no second door
+    // Allocate a page-aligned region linked to `prev`.
     page* = (self: @Self, size: usize, prev: Ptr<Page>) Res<Ptr<Page>, AllocError>
 
-    // hand a region back. Arena.drop calls this once per page and once
-    // for the state cell allocated by `alloc`
+    // Release a page or arena state region.
     release* = <T>(self: @Self, region: Ptr<T>) ()
 }

@@ -1,16 +1,5 @@
-// src/std/lex/lex_scan.zen
-// The driver: one byte decides which scanner runs, and the scanners that
-// need no value of their own live here — comments, names, `@` names, the
-// punctuation call, and the bytes that begin nothing.
-//
-// `step` consumes one token or one fault. No scanner backs up or leaves the
-// cursor unchanged, so each iteration makes progress.
-//
-// Scanning continues after a fault at the next safe token boundary so one run
-// can report independent lexical mistakes.
-//
-// Bracket matching belongs to the parser, which has the grammatical context
-// needed to name the expected closer.
+// Byte dispatcher for names, comments, literals, punctuation, and invalid
+// runs. Every step advances, and scanning resumes after lexical faults.
 
 Lexer, Lexed = std.lex.lex_state
 TokenKind, Source = std.lex.lex_token
@@ -21,10 +10,6 @@ string, character, number = std.lex.lex_literal
 Alloc, AllocError = std.mem
 str = std.text
 
-// The entry point takes an Alloc because it builds token and fault Vecs. It
-// no exemption; takes a Source because a lexer is handed bytes and never
-// opens a file — opening one is authority, and authority comes from Env.
-//
 // Lexical faults are returned inside Lexed; Err is reserved for allocation
 // failure so scanning can continue after malformed input.
 scan* = (alloc: Alloc, source: Source) Res<Lexed, AllocError> {
@@ -35,21 +20,11 @@ scan* = (alloc: Alloc, source: Source) Res<Lexed, AllocError> {
     Ok(Lexed(source: source, tokens: lx.tokens, diags: lx.diags));
 }
 
-// A BOM is stripped only at offset 0. Anywhere
-// else it falls through to `stray` and is reported — a file that parses
-// differently depending on where an editor left a marker is worse than one
-// that says so.
-//
-// The three bytes are stepped over, not skipped, so the first real
-// character lands at column 4 — DESIGN.md specifies a 1-based BYTE column,
-// which must keep counting bytes to agree with `offset`.
+// Strip a BOM only at offset zero while retaining byte-based columns.
 strip_bom = (lx :: Lexer) () {
     lx.cur.at_bom().then(() { lx.cur.bump(); lx.cur.bump(); lx.cur.bump(); });
 }
 
-// one token, or one mistake. The None arm is end of file, which the loop
-// has already excluded — but match is exhaustive in every position, and
-// answering it honestly costs one line
 step = (lx :: Lexer) Res<(), AllocError> {
     lx.cur.peek().match({
         Ok(b) => lx.dispatch(b),
@@ -70,20 +45,12 @@ dispatch = (lx :: Lexer, b: u8) Res<(), AllocError> {
     });
 }
 
-// whitespace is not a token: the gap between two spans says everything
-// about it, and "was there a blank line here" is `next.start.line >
-// prev.end.line + 1` rather than a stored fact that can go stale
+// Whitespace is represented by gaps between token spans.
 skip = (lx :: Lexer) Res<(), AllocError> {
     lx.cur.bump();
     Ok(());
 }
 
-// ---------------------------------------------------------------------------
-// comments — trivia tokens
-// ---------------------------------------------------------------------------
-
-// `/` is the one byte that needs lookahead: two comment shapes and a
-// division operator all start with it
 slash = (lx :: Lexer) Res<(), AllocError> {
     lx.cur.at_byte(1, '/').match({
         true  => lx.line_comment(),
@@ -94,16 +61,14 @@ slash = (lx :: Lexer) Res<(), AllocError> {
     });
 }
 
-// to the end of the line, not including the newline: the newline is
-// whitespace and belongs to the gap, not to the comment
+// A line-comment token excludes its newline.
 line_comment = (lx :: Lexer) Res<(), AllocError> {
     from = lx.cur.pos();
     lx.cur.bump_while((b) { b != '\n' });
     lx.emit(TokenKind.LineComment, from);
 }
 
-// Block comments do not nest: `/* a /* b */` is closed. The scan is for
-// the first `*/` and there is no depth counter to get wrong
+// Block comments do not nest; the first `*/` closes the token.
 block_comment = (lx :: Lexer) Res<(), AllocError> {
     from = lx.cur.pos();
     lx.cur.bump();
@@ -120,20 +85,15 @@ block_comment = (lx :: Lexer) Res<(), AllocError> {
         });
     });
 
-    // unterminated: no token. There is no comment, only an opening — and the
-    // fault is reported at the `/*`, which is the thing that needs closing
+    // Unterminated comments produce a fault but no token.
     closed.match({
         true  => lx.emit(TokenKind.BlockComment, from),
         false => lx.report(LexFault.UnterminatedComment, from),
     });
 }
 
-// ---------------------------------------------------------------------------
-// names
-// ---------------------------------------------------------------------------
-
-// `[A-Za-z_][A-Za-z0-9_]*`, ASCII. `_` is an ordinary identifier here; that
-// it is the wildcard pattern is the parser's knowledge, not the lexer's
+// Identifiers are ASCII `[A-Za-z_][A-Za-z0-9_]*`; `_` becomes a wildcard only
+// when parsed as a pattern.
 name = (lx :: Lexer) Res<(), AllocError> {
     from = lx.cur.pos();
     lx.cur.bump_while((b) { b.is_ident_cont() });
@@ -182,11 +142,9 @@ is_keyword* = (word: str) bool {
     keyword_of(word).match({ Ok(_) => true, None => false })
 }
 
-// A spelling that generated Zen may safely use as a declaration or parameter.
 is_zen_name* = (word: str) bool { word.is_identifier() && !is_keyword(word) }
 
-// The @ namespace contains Self, meta, and scope. Any other @ name is a
-// lexical fault anchored at the @.
+// The @ namespace contains only Self, meta, and scope.
 at_name = (lx :: Lexer) Res<(), AllocError> {
     from = lx.cur.pos();
     lx.cur.bump();
@@ -197,8 +155,6 @@ at_name = (lx :: Lexer) Res<(), AllocError> {
     });
 }
 
-// the whole namespace, matched with the `@` still attached so the table
-// reads as the three things a user writes
 at_kind = (word: str) Res<TokenKind> {
     word.match({
         "@Self"  => Ok(TokenKind.AtSelf),
@@ -208,14 +164,6 @@ at_kind = (word: str) Res<TokenKind> {
     });
 }
 
-// ---------------------------------------------------------------------------
-// punctuation, and the bytes that are nothing
-// ---------------------------------------------------------------------------
-
-// `punct_of` is the table and its domain is the answer to "is this
-// punctuation". None cannot happen for a byte `class_of` called `Other`
-// unless the two ever disagree — and if they do, the fallthrough is a stray
-// byte, which is a safe answer rather than an invented token
 punctuation = (lx :: Lexer, b: u8) Res<(), AllocError> {
     from = lx.cur.pos();
     punct_of(b).match({
@@ -224,10 +172,7 @@ punctuation = (lx :: Lexer, b: u8) Res<(), AllocError> {
     });
 }
 
-// A maximal run of stray bytes, such as `~~~`, is reported once. A
-// byte-order mark past offset 0 is called what it is, because "unexpected
-// character" for a marker an editor inserted invisibly is a diagnostic
-// nobody can act on
+// Report a maximal invalid-byte run once; identify a misplaced BOM separately.
 stray = (lx :: Lexer) Res<(), AllocError> {
     from          = lx.cur.pos();
     misplaced_bom = lx.cur.at_bom();
@@ -238,8 +183,6 @@ stray = (lx :: Lexer) Res<(), AllocError> {
     });
 }
 
-// `?`, `#`, `~`, `$`, `^`, a backslash outside a literal, and every
-// non-ASCII byte: none of them begins a Zen token
 begins_no_token = (b: u8) bool {
     class_of(b).match({
         Other => punct_of(b).match({ Ok(_) => false, None => true }),

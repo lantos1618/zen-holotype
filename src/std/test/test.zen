@@ -1,40 +1,20 @@
-// No test keyword, no discovery baked into the compiler. A test is a
-// function whose single parameter is a Tester, a bench takes a
-// Bencher; build.zen finds them by walking the parsed module tree
-// (b.module) and filtering on that parameter — `zen test` just runs
-// the target that walk registered. Change the filter in build.zen and
-// you change what a test IS.
-//
-// The function name is the test name — name them as sentences
-// (`vec_grows`, `map_handles_collision`) since that's what a failure
-// prints.
+// Test and benchmark contexts. Function names are used as test names in
+// failure output.
 
 Alloc = std.mem
 Env = std.env
 str = std.text
 
-// One variant, bar leads. The str is what failed, in words — a Tester
-// reporting `Failed` with no reason would be a reason invented, law 4
-// read backwards.
+// Failed expectation with a user-facing reason.
 TestError* = | Failed(str)
 
 Tester* = {
-    // Starred since a test reads it: `t.alloc.Vec<i32>()` is the first
-    // line of half the corpus, user code in another module (law 6).
     env*: Env,
 
-    // A per-test arena, dropped after each test, so a leak is
-    // contained to the test that leaked and reportable by name.
+    // Per-test arena, dropped after the test.
     alloc*: Alloc,
 
-    // Res, not a trap: a failing expectation is something the harness
-    // acts on (records it, runs the next test); a trap is for a bug.
-    //
-    // The Failed reason is one fixed sentence: expect receives only a
-    // bool, so it cannot know what failed, and a Tester that invented
-    // specifics would report knowledge it does not have. Name the
-    // expectation in the test's name — that is what a failure prints.
-    // A caller-supplied reason is a signature change, not taken here.
+    // Return a failure so the harness can continue with later tests.
     expect* = (self: @Self, cond: bool) Res<(), TestError> {
         cond.match({
             true  => Ok(()),
@@ -46,23 +26,16 @@ Tester* = {
     expect_eq* = <T: Eq>(self: @Self, a: T, b: T) Res<(), TestError>
 }
 
-// Same discovery shape, different parameter: a bench takes a Bencher
-// as a test takes a Tester, in the same file as the code it measures.
-//
-// Because ALL allocation goes through Alloc, a Bencher counts
-// allocations and bytes per op for free, no instrumentation needed —
-// why allocs_op/bytes_op are a hard gate and ns_op (wall clock,
-// non-deterministic) is not.
+// Benchmark context with timing and allocation counters.
 Bencher* = {
     env*: Env,
     alloc*: Alloc,
 
-    // Runs f until timing stabilizes. `:` not `::` — a bitwise copy
-    // sees the same counters, since they live behind the handle.
+    // Run f until timing stabilizes.
     iter* = (self: @Self, f: () ()) BenchStats
 }
 
-// What one op cost; build.zen compares these against a Budget.
+// Per-operation benchmark measurements.
 BenchStats* = {
     ns_op*: u64,
     allocs_op*: u64,

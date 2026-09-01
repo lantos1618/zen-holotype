@@ -1,31 +1,9 @@
 // std.core.num
-//
-// The extremes and the width of every primitive numeric type.
-//
-// A struct body may bind a name to a VALUE, not a field — read as
-// `Type.NAME` (as `Shape.Unit` does). A field declares storage per
-// value; a constant declares one value per type, the only kind i32
-// could have, having no instances. Every constant is starred (law 6:
-// `*` means the name crosses a module boundary, so its type is
-// written, not inferred — `i32.MAX` is read from outside std). BITS
-// is a usize so it's usable wherever a comptime value is:
-// `buf: [u8, i32.BITS]`. The arithmetic these bound TRAPS rather than
-// wraps — `i32.MAX + 1` aborts (a trap the compiler can prove will
-// fire is a compile error); `+% -% *%` are the wrapping forms. Holds
-// for unsigned too: a u8 reaching 256 is the same bug an i8 reaching
-// 128 is.
+// Primitive numeric bounds, widths, conversions, and equality impls.
+// Arithmetic traps on overflow; `+%`, `-%`, and `*%` wrap.
 
-// `Eq` is imported and not inherited from the prelude: this file IS
-// part of the prelude, and the impls at the foot of it need the name.
-// std.core.eq imports nothing, so the graph still points down.
 Eq = std.core.eq
 Res, Ok, None = std.core.result
-
-// Negative extremes are plain literals: unary minus on a positive
-// that doesn't fit the type alone (classic; pinned by
-// tests/corpus/lex/number_i32_min_literal.zen). In C that token
-// sequence is a hazard, so gen_c emits `(-2147483647 - 1)` — a
-// backend concern, not a reason to split the value here.
 
 i8* = {
     MIN*: i8 = -128,
@@ -69,9 +47,6 @@ u32* = {
     BITS*: usize = 32,
 }
 
-// u64.MAX fits no signed C type, so gen_c suffixes it — the subject
-// of tests/corpus/codegen/literal_boundaries_unsigned.zen; constant
-// path and literal path must agree.
 u64* = {
     MIN*: u64 = 0,
     MAX*: u64 = 18446744073709551615,
@@ -87,13 +62,8 @@ usize* = {
     BITS*: usize = 64,
 }
 
-// MIN on a float is the type's minimum — the most negative FINITE
-// value, like i32's MIN — deliberately NOT C's FLT_MIN (smallest
-// positive normal, a different quantity, a classic footgun).
-//
-// Digits are written out: Zen's numeric literals are decimal `d.d`
-// only, no exponent form for 3.4028235e38. Both values are integers,
-// so the expansion is exact, not rounded.
+// Float MIN is the most negative finite value, not the smallest positive
+// normal value.
 
 f32* = {
     MIN*: f32 = -340282346638528859811704183484516925440.0,
@@ -107,9 +77,7 @@ f64* = {
     BITS*: usize = 64,
 }
 
-// conversions are methods, never a cast keyword. Only LOSSLESS
-// widening lives here — a narrowing conversion can fail, so it
-// belongs in a Res-returning function written on purpose.
+// Lossless widening conversions.
 to_u16* = (self: u8) u16
 to_u32* = (self: u8) u32
 to_u64* = (self: u8) u64
@@ -118,11 +86,8 @@ to_u64* = (self: u16) u64
 to_u64* = (self: u32) u64
 to_usize* = (self: u32) usize
 
-// usize is 64-bit on every current target, so conversion out is lossless;
-// u8/u16 fit any pointer
-// width. u64 -> usize is NOT declared here: lossless only beside this
-// declaration, it stays a narrowing — a Res-returning function written
-// on purpose, like every other.
+// usize is currently 64-bit. u64-to-usize is omitted because it would narrow
+// on a future 32-bit target.
 to_u64* = (self: usize) u64
 to_usize* = (self: u8) usize
 to_usize* = (self: u16) usize
@@ -158,13 +123,8 @@ pow2* = (self: usize) usize {
     power;
 }
 
-// The same matrix as the declarations, so generic code can name a widening:
-// one behavior per target, each impl supplying the intrinsic declared
-// above. Nothing here adds a conversion — the declarations above are
-// still the whole list. A bound travels with the type's impls, so the
-// prelude needs the behavior NAMES, not the impls.
-// Bound fields use `widen_*` so they do not collide with concrete `to_*`
-// functions in an overload set.
+// Behaviors for generic lossless widening. `widen_*` avoids colliding with
+// the concrete `to_*` overload set.
 ToU16* = { widen_u16* = (self: @Self) u16 }
 ToU32* = { widen_u32* = (self: @Self) u32 }
 ToU64* = { widen_u64* = (self: @Self) u64 }
@@ -206,25 +166,8 @@ i32.impl(ToF64, { widen_f64 = to_f64 })
 
 f32.impl(ToF64, { widen_f64 = to_f64 })
 
-// Primitive equality allows numeric types to satisfy `<T: Eq>`. Every
-// integer already compares — `a == b` is C's own operator and stays
-// that way, because `scalar_eq` (sema_bound.zen) and the backend both
-// answer "every primitive but `str` and `()`" before any impl is
-// consulted. These impls add a `.eq` METHOD and change no `==` in the
-// emitted C; what they buy is `b.is_in([' ', '\t'])` and every other
-// `<T: Eq>` bound, which until now rejected `u8` outright.
-//
-// These impls live here rather than std.core.eq because an
-// impl is only ever consulted through the module that DECLARES its
-// target, so `u8.impl(Eq, ..)` is only real in the file that writes
-// `u8* = {..}`. Written next to the trait it would compile clean and be
-// invisible.
-//
-// No float impl: `NaN == NaN` is false, so an `f64` is
-// not equal to itself and `xs.is_in([x])` would answer "no" about a
-// value that IS in the list. That is the wrong-answer-that-compiles
-// shape, and a float wanting membership should say what it means about
-// NaN at the call site rather than inherit a silent law from here.
+// Integer Eq impls support generic equality and membership. Floats do not
+// implement Eq because NaN is not reflexively equal.
 i8.impl(Eq, { eq ::= (self: @Self, other: @Self) bool { self == other } })
 i16.impl(Eq, { eq ::= (self: @Self, other: @Self) bool { self == other } })
 i32.impl(Eq, { eq ::= (self: @Self, other: @Self) bool { self == other } })

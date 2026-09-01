@@ -1,30 +1,13 @@
-// The error every write can produce. Lives in core, not std.text or
-// std.env, because Display's signatures name it and core sits below
-// both — an error type must be reachable from every layer that can fail
-
 IoError* = Closed          // the sink is gone: a closed pipe, a dropped socket
           | Full           // no room: a fixed buffer, a full disk
           | Invalid        // the bytes are not what this sink accepts
           | Interrupted    // retryable; the write made no progress
 
-// Writing formatted text can fail two ways: the sink rejects it, or
-// the buffer can't grow. Neither converts into the other — no From —
-// so the union is the honest type, and .try() merges it for free
+// Formatting may fail in the sink or while growing an intermediate buffer.
 WriteError* = IoError | AllocError
 
-// A sink is anything bytes can be written to — String is one, so is
-// Console, which is why `{}` formatting works into either without the
-// format machinery knowing the difference.
-//
-// `write` speaks WriteError, the union, knowingly: a console never
-// produces AllocError and a String never produces IoError, but there
-// is no From, so a sink can't pretend the two are one error. `.try()`
-// merges it for free, so the cost is paid only where someone matches.
+// Byte-oriented output used by formatting.
 Sink* = {
     write* = (self :: @Self, bytes: str) Res<(), WriteError>
-
-    // one byte. Format writers build a number digit by digit, and a
-    // digit has no `str` to point at — str BORROWS existing bytes, and
-    // making one needs an Alloc, the exact cost this design avoids.
     write_byte* = (self :: @Self, b: u8) Res<(), WriteError>
 }

@@ -1,13 +1,7 @@
-// src/std/lex/lex_literal.zen
 // Strings, characters, escapes and numbers. Invalid spellings are rejected
 // rather than reinterpreted (`010` is not octal and `"\q"` is not `"q"`).
-//
-// A FAULT DOES NOT ALWAYS COST A TOKEN. `"a\qb"` is a well-formed string
-// with one bad escape in it, so it reports the escape AND emits the string —
-// the parser sees the shape it expected and nobody gets a second, worse
-// diagnostic about a missing expression. Where no well-formed token exists —
-// an unterminated string, an integer too wide for any type — nothing is
-// emitted, because there is nothing honest to emit.
+// Recoverable faults may still emit a token; unterminated or unrepresentable
+// literals do not.
 
 Lexer = std.lex.lex_state
 Pos, TokenKind = std.lex.lex_token
@@ -16,13 +10,7 @@ is_escape = std.lex.lex_byte
 AllocError = std.mem
 str = std.text
 
-// ---------------------------------------------------------------------------
-// strings and characters
-// ---------------------------------------------------------------------------
-
-// the cursor is on the opening quote. A string does not span lines, and the
-// newline is the error — but the DIAGNOSTIC points at the opening quote,
-// because that is where the fix goes
+// String line/end faults are anchored at the opening quote.
 string* = (lx :: Lexer) Res<(), AllocError> {
     from = lx.cur.pos();
     lx.cur.bump();
@@ -36,13 +24,7 @@ string* = (lx :: Lexer) Res<(), AllocError> {
                 LexFault.StringSpansLine,
                 from
             ).try(); h.break(); },
-            // the guard asks what `escape` DID, not where the cursor stopped:
-            // "is the cursor done" is also true after a SUCCESSFUL escape that
-            // then hit end of file, and there the missing closing quote is a
-            // fault nobody has named yet. The two coincide only where the
-            // ESCAPE is what ran off the end -- there, and only there, "and
-            // the string never closed" would be a second diagnostic for the
-            // same missing bytes
+            // Avoid reporting the same end-of-file escape twice.
             Ok('\\') => {
                 reported = lx.escape().try();
                 (lx.cur.is_done() && reported).then(() { h.break(); });
@@ -57,9 +39,7 @@ string* = (lx :: Lexer) Res<(), AllocError> {
     Ok(());
 }
 
-// the cursor is on the opening quote. A character literal holds exactly one
-// BYTE — `str` is bytes — so `''` and `'ab'` are both errors, and `'é'` is
-// two bytes and therefore not a character literal
+// Character literals contain exactly one byte, not one Unicode code point.
 character* = (lx :: Lexer) Res<(), AllocError> {
     from = lx.cur.pos();
     lx.cur.bump();
@@ -67,11 +47,7 @@ character* = (lx :: Lexer) Res<(), AllocError> {
         None     => lx.report(LexFault.UnterminatedChar, from),
         Ok('\n') => lx.report(LexFault.CharSpansLine, from),
         Ok('\'') => { lx.cur.bump(); lx.report(LexFault.EmptyChar, from) },
-        // as in `string` above: where the ESCAPE is what ran off the end it
-        // has already reported, and "and the literal never closed" would be a
-        // second diagnostic for the same missing bytes. A successful escape
-        // followed by end of file has said nothing, so the missing closing
-        // quote is still this file's only unnamed fault
+        // Avoid duplicating an end-of-file escape diagnostic.
         Ok('\\') => {
             reported = lx.escape().try();
             (lx.cur.is_done() && reported).match({
@@ -83,7 +59,6 @@ character* = (lx :: Lexer) Res<(), AllocError> {
     });
 }
 
-// one byte has been read, so the literal must close right here
 close_char = (lx :: Lexer, from: Pos) Res<(), AllocError> {
     lx.cur.at_byte('\'').match({
         true  => { lx.cur.bump(); lx.emit(TokenKind.Char, from) },
@@ -91,10 +66,7 @@ close_char = (lx :: Lexer, from: Pos) Res<(), AllocError> {
     });
 }
 
-// it did not close where a one-byte literal must. Say WHICH of the two
-// reasons it is — too many bytes, or never closed at all — rather than
-// "syntax error", and read to the end of the literal so the next token
-// starts somewhere sensible
+// Consume through the literal boundary after an overlong character.
 overlong_char = (lx :: Lexer, from: Pos) Res<(), AllocError> {
     lx.cur.bump_while((b) { (b != '\'') && (b != '\n') });
     lx.cur.peek().match({
@@ -104,12 +76,8 @@ overlong_char = (lx :: Lexer, from: Pos) Res<(), AllocError> {
     });
 }
 
-// the cursor is on the backslash. The escape set is
-// `\n \t \r \v \f \0 \\ \' \"` and nothing else, and the span is the
-// backslash plus the byte it fails to escape — two bytes, which is exactly
-// what has to be changed. The answer says whether the escape itself was the
-// fault — a caller that needs one diagnostic per mistake asks it before
-// adding its own
+// Validate one escape and report whether this operation emitted a diagnostic.
+// Newlines are left for the enclosing literal to diagnose.
 escape* = (lx :: Lexer) Res<bool, AllocError> {
     from = lx.cur.pos();
     lx.cur.bump();
@@ -133,13 +101,7 @@ escape* = (lx :: Lexer) Res<bool, AllocError> {
     });
 }
 
-// ---------------------------------------------------------------------------
-// numbers
-// ---------------------------------------------------------------------------
-
-// the cursor is on a digit. Decimal only: no hex, no exponent, no
-// separators, no type suffixes — a literal's type comes from its context,
-// which is the rule the rest of the language runs on
+// Numbers are decimal, with no exponent, separators, or type suffix.
 number* = (lx :: Lexer) Res<(), AllocError> {
     from = lx.cur.pos();
     lx.cur.bump_while((b) { b.is_digit() });
@@ -161,9 +123,7 @@ number* = (lx :: Lexer) Res<(), AllocError> {
     });
 }
 
-// `12.` is an error: a float has digits on both sides of the point. The gain
-// is that a number literal is never the base of a member access, so nothing
-// downstream needs lookahead to tell `1.max` from a malformed float
+// A decimal point must be followed by a digit.
 fraction = (lx :: Lexer) Res<bool, AllocError> {
     lx.cur.at_byte('.').match({
         true  => lx.after_dot(),
@@ -171,9 +131,6 @@ fraction = (lx :: Lexer) Res<bool, AllocError> {
     });
 }
 
-// the cursor is on the `.`. Both arms answer the same question — is this a
-// float — so both return the same shape, and the caller never has to know
-// which of them reported anything
 after_dot = (lx :: Lexer) Res<bool, AllocError> {
     dot           = lx.cur.pos();
     digit_follows = lx.cur.peek(
@@ -184,15 +141,11 @@ after_dot = (lx :: Lexer) Res<bool, AllocError> {
         false => lx.report(LexFault.FloatNeedsDigit, dot),
         true  => Ok(()),
     }).try();
-    // unconditional, and correct either way: after `12.` the next byte is
-    // not a digit by construction, so this consumes nothing
     lx.cur.bump_while((b) { b.is_digit() });
     Ok(digit_follows);
 }
 
-// `1abc` is an error, not a number beside a name, and `0xFF` is an error and
-// not hex. Hex is deliberately not in v1: adding a token shape later is
-// compatible in a way that removing one is not
+// Reject identifier suffixes, including unsupported hexadecimal notation.
 suffix = (lx :: Lexer) Res<(), AllocError> {
     at = lx.cur.pos();
     lx.cur.bump_while((b) { b.is_ident_cont() });
@@ -202,10 +155,7 @@ suffix = (lx :: Lexer) Res<(), AllocError> {
     });
 }
 
-// u64 is the widest integer type, so a value past it fits nothing at all and
-// no token is emitted — there is no honest value to put in one, and a parser
-// handed `Int` would have to invent a reading of digits the machine cannot
-// hold
+// Values beyond u64 produce a fault and no token.
 emit_int = (lx :: Lexer, whole: str, from: Pos) Res<(), AllocError> {
     digits = digits_of(whole);
     digits.overflow.match({
@@ -216,15 +166,12 @@ emit_int = (lx :: Lexer, whole: str, from: Pos) Res<(), AllocError> {
 
 has_leading_zero = (whole: str) bool { (whole.len > 1) && (whole[0] == '0') }
 
-// the accumulated value, and whether it ran off the end of u64
 Digits* = {
     value*: u64,
     overflow*: bool,
 }
 
-// `+` and `*` TRAP on overflow, which is right for a bug and wrong for user
-// input: a literal too wide for u64 is bad input, not a compiler bug. So the
-// test happens BEFORE the multiply and never lets one fire
+// Detect source overflow before arithmetic can trap.
 digits_of* = (s: str) Digits {
     Range(0, s.len).loop(Digits(value: 0, overflow: false), (h, i, at, acc: Digits) {
         add_digit(acc, s[at])
@@ -234,9 +181,7 @@ digits_of* = (s: str) Digits {
     });
 }
 
-// acc * 10 + d overflows exactly when acc > (u64.MAX - d) / 10. Once it has
-// overflowed it stays overflowed: the value is meaningless from there and
-// continuing to accumulate would only be one more chance to trap
+// `acc * 10 + d` overflows when `acc > (u64.MAX - d) / 10`.
 add_digit = (acc: Digits, b: u8) Digits {
     d = (b - '0').to_u64();
     (acc.overflow || (acc.value > (u64.MAX - d) / 10)).match({

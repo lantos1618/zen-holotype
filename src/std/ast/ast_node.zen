@@ -1,40 +1,17 @@
-// src/std/ast/ast_node.zen
-// What a node is: every declaration, type, expression, pattern and
-// statement form DESIGN.md admits, and nothing else.
-//
-// The node families form one strongly connected model: declarations hold
-// expressions, expressions hold types, types may hold expressions, and
-// blocks and statements refer back to declarations.
-// `ast_span.zen` (where a node is) and `ast_id.zen` (how one is named)
-// sit below this file rather than beside it.
-//
-// THE SHAPE, repeated by every family below:
+// AST declarations, types, expressions, patterns, and statements. Each node
+// family uses the same wrapper-and-kind shape:
 //
 //     Expr = { kind: ExprKind, span, leading, trailing }
 //     ExprKind = Call(Call) | Binary(Binary) | ..
 //
-// A wrapper struct carries what every node has; a kind enum carries
-// what makes it that node — so `e.span` needs no match, and
-// `e.kind.match({ Binary(b) => .. })` binds the typed node in the arm.
-//
-// A CHILD IS NEVER HELD BY VALUE, only as an id into `Ast` (see
-// ast_id.zen for why).
+// Common source data lives on the wrapper; variant data lives in the kind.
+// Child nodes are stored as typed arena ids rather than by value.
 
 Span, Ident, QualifiedName, TriviaRun = std.ast.ast_span
 ExprId, TypeId, PatternId, BlockId, CBindingId = std.ast.ast_id
 Alloc, AllocError = std.mem
 
-// ---------------------------------------------------------------------
-// vocabulary
-//
-// The closed alphabets the nodes are written in. Each one is closed by
-// DESIGN.md, so a new entry in any of them is a language change.
-// ---------------------------------------------------------------------
-
-// `+ - *` trap on overflow; `+% -% *%` wrap. Separate operators, not a
-// flag: trapping and wrapping generate different C, and a flag is one
-// `!` from generating the wrong one. No bitwise operators. `Equal` not
-// `Eq`, since `Eq` is a prelude type a shadowing variant would trap.
+// `+ - *` trap on overflow; `+% -% *%` wrap. Zen has no bitwise operators.
 BinOp* = Add
     | Sub
     | Mul
@@ -52,37 +29,25 @@ BinOp* = Add
     | And
     | Or
 
-// `!`, `-`, and `&` — `&` only ever appears in a diagnostic's
-// counter-example (`p = &c.width`), but it parses, so it has a node.
+// Unary `!`, `-`, and address-of `&`.
 UnOp* = Not | Neg | Addr
 
-// DESIGN.md's method table, verbatim. Export (`*`) is orthogonal, on
-// the member not here.
-//
+// Method forms. Export (`*`) is stored on the member.
 //     Required   `= sig`        impl must provide it
 //     Sealed     `= sig {..}`   provided, cannot be overridden
 //     Default    `::= sig {..}` provided, impl may rebind it
 //     Hook       `::= sig`      optional, impl may provide it
 //
-// A plain top-level function with a body is Sealed — no fifth row for
-// "not a member".
+// A top-level function with a body also uses Sealed.
 Form* = Required | Sealed | Default | Hook
 
 LiteralKind* = Int | Float | Str | Char | Bool
 
-// `text` is the RAW source slice (quotes, escapes, exactly as written)
-// — the formatter reprints byte for byte, so decoding here would make
-// `"\n"` and a literal newline indistinguishable on the way out. The
-// lexer has already rejected bad escapes/leading zero/multi-byte chars,
-// so decoding is total by the time sema wants it.
+// `text` is the raw source slice, including quotes and escapes.
 Literal* = {
     kind*: LiteralKind,
     text*: str,
 }
-
-// ---------------------------------------------------------------------
-// types
-// ---------------------------------------------------------------------
 
 Type* = {
     kind*: TypeKind,
@@ -91,10 +56,8 @@ Type* = {
     trailing*: TriviaRun,
 }
 
-// `Unit` is `()`. `SelfType` is `@Self` — a variant not a `Named`
-// carrying "@Self", since DESIGN.md says it "is not a name you could
-// have written yourself" and a name-shaped one risks shadowing.
-// `Infer` is `_` (as in `Res<Cfg, _>`). `Variadic` is `...`.
+// `Unit` is `()`, `SelfType` is `@Self`, `Infer` is `_`, and `Variadic` is
+// `...`.
 TypeKind* = Named(Named)
     | Union(Union)
     | Fn(FnType)
@@ -104,25 +67,19 @@ TypeKind* = Named(Named)
     | Infer
     | Variadic
 
-// `i32`, `Vec<T>`, `Map<K, V>`, `Res<(), AllocError>`. No qualified
-// type — imports bind locally, so a bare name always suffices; adding
-// `std.core.Res` would be a design change.
+// Named types such as `i32`, `Vec<T>`, and `Res<(), AllocError>`.
 Named* = {
     name*: Ident,
     args*: Vec<TypeId>,
 }
 
-// `A | B` — an anonymous structural enum. FLAT: `A | B | C` is one
-// Union of three members, never a Union of a Union, so error-set
-// merging is concatenation and set equality is not a tree walk.
+// Anonymous structural union. Members are stored flat.
 Union* = {
     members*: Vec<TypeId>,
 }
 
-// A function TYPE — `(a: i32, b: i32) i32`. Parameters must name
-// themselves here too: `(i32, i32) i32` says nothing about which `i32`
-// is which. Names are documentation only — resolution never sees them,
-// so two FnTypes differing only in parameter names are one type.
+// Function type such as `(a: i32, b: i32) i32`. Parameter names do not
+// participate in type identity.
 FnType* = {
     tparams*: Vec<TParam>,
     params*: Vec<Param>,
@@ -180,9 +137,7 @@ Expr* = {
     trailing*: TriviaRun,
 }
 
-// `Access` is `p.x` (DESIGN.md's "member expression"). Not spelled
-// `Member` because that name is taken by what a struct body is made
-// of — one name for two concepts saves nothing.
+// `Access` represents member expressions such as `p.x`.
 ExprKind* = Name(Name)
     | Literal(Literal)
     | Unit
@@ -211,9 +166,7 @@ Name* = {
     text*: str,
 }
 
-// `(n == 0)` is its own node — POSITIONS.md asserts a span for it.
-// Without one the formatter must re-derive every paren pair from
-// precedence, and `(a + b) * c` vs `a + b * c` are not the same program.
+// Parentheses are retained explicitly so formatting preserves grouping.
 Paren* = {
     inner*: ExprId,
 }
@@ -262,11 +215,8 @@ Arg* = {
     trailing*: TriviaRun,
 }
 
-// `(n == 0).match({ true => .., false => .. })`. A kind of its own, not
-// a Call, even though DESIGN.md calls match "a method": its argument is
-// an arm list, not an expression, and exhaustiveness is load-bearing
-// enough that it must not depend on the checker recognizing a callee by
-// spelling.
+// `(n == 0).match({ true => .., false => .. })`. Match carries an arm list
+// and is checked for exhaustiveness, so it is distinct from Call.
 //
 // `name_span` is the `match` token — an "is not exhaustive" diagnostic
 // points there, and the formatter needs it to locate `.match(`.
@@ -317,12 +267,8 @@ Access* = {
     name*: Ident,
 }
 
-// `buf[i]`. Bounds-checked and trapping on a fixed array; `Vec.get`
-// is a call and returns `Res`.
-// `op_span` is the `[`: a trap prints `file:line:col`, DESIGN.md fixes
-// that position at the operator token (same reason `Unary`/`Binary`
-// carry theirs — re-deriving it from the operand gap would be a second
-// source read in the backend).
+// `buf[i]`. Fixed-array indexing traps out of bounds; Vec.get returns Res.
+// `op_span` identifies the `[` for diagnostics.
 Index* = {
     base*: ExprId,
     index*: ExprId,
@@ -392,10 +338,8 @@ ExprStmt* = {
     expr*: ExprId,
 }
 
-// A block is a value too. `value` is the trailing expression written
-// WITHOUT a `;`. DESIGN.md also lets a `;`-terminated tail (`Ok(0);`)
-// be the value, but that's a typing rule not a syntactic one — this
-// records only what was written, and sema decides.
+// `value` is the trailing expression written without a semicolon. Sema may
+// also settle a semicolon-terminated tail as the block value.
 Block* = {
     stmts*: Vec<Stmt>,
     value*: Res<ExprId>,
@@ -471,11 +415,9 @@ Alias* = {
 }
 
 // `area* = (c: Circle) f64 { .. }`, `then* = <T>(b: bool, f: () T) Res<T>`.
-// `form` and `body` are not redundant: `form` records `=` vs `::=`,
-// `body` whether `{ .. }` followed. Required/Hook carry no body;
-// Sealed/Default carry one. `ret` is `Res` because a lambda may omit it
-// (meaning `()`); a declaration must write it — law 6 at the module
-// boundary, D15a inside.
+// `form` records `=` versus `::=`; `body` records whether `{ .. }` followed.
+// Required and Hook carry no body. A lambda may omit `ret`, but a declaration
+// must write one.
 Function* = {
     name*: Ident,
     exported*: bool,
@@ -487,11 +429,8 @@ Function* = {
     body*: Res<BlockId>,
 }
 
-// `Circle.impl(Rect, { width: .., height: .. })`.
-// `target` is `Circle`, `bound` is `Rect` (DESIGN.md's word: "which
-// struct's shape do I need"). `target` is an `Ident` not a type — an
-// impl lives in the module declaring its target, so there's no
-// qualified form to write and no orphan impl to express.
+// `Circle.impl(Rect, { width: .., height: .. })`. The target is local to its
+// declaring module and therefore stored as an Ident.
 Impl* = {
     target*: Ident,
     bound*: TypeId,
@@ -529,10 +468,7 @@ Const* = {
 // ---------------------------------------------------------------------
 // members
 //
-// What a struct body, an impl body and a record literal are all made
-// of — one node for the three, since DESIGN.md gives them one rule: a
-// struct whose fields happen to be functions, used as a bound, is what
-// other languages call a trait; nothing marks it special.
+// Shared member shape for struct bodies, impl bodies, and record literals.
 // ---------------------------------------------------------------------
 
 Member* = {
@@ -541,13 +477,7 @@ Member* = {
     leading*: TriviaRun,
     trailing*: TriviaRun,
 
-    // The head every member shares, read off whichever of the three
-    // kinds it is. Methods, not free functions: no consumer writes this
-    // match (five copies of the name one had grown — sema twice, gen_c
-    // twice, lsp once) and nothing imports a name the type already
-    // carries. The fields stay on the payloads: `Const` and `Function`
-    // also live as `DeclKind` payloads, where no Member is there to
-    // carry the head.
+    // Name shared by all member variants.
     name* = (self: @Self) Ident {
         self.kind.match({
             Field(f)    => f.name,
@@ -669,11 +599,7 @@ Module* = {
     trailing*: TriviaRun,
 }
 
-// The module's function declarations, in source order. DESIGN.md's
-// `build.zen` writes `b.module(Path("src")).functions` and filters it
-// to find tests — change the filter, change what a test is. A
-// function taking `Alloc`, not a field: gathering into a Vec
-// allocates, and storing a second copy beside `decls` duplicates a fact.
+// Gather module functions in source order.
 functions* = (self: Module, a: Alloc) Res<Vec<Function>, AllocError> {
     found ::= a.Vec<Function>();
     self.decls.loop((h, d) {
