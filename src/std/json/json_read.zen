@@ -91,12 +91,17 @@ Reader* = {
     // refuses non-numbers: `01`, `.5`, `1.`, `1e` each rejected at the
     // byte that makes them wrong.
     number = (self :: @Self, tree :: Jsons) Res<JsonId, JsonFault> {
+        tree.add(Json.Num(self.number_text().try()))
+            .replace_err(JsonFault.NoMemory)
+    }
+
+    number_text = (self :: @Self) Res<str, JsonFault> {
         from = self.at;
         self.byte_if('-');
         self.integer_part().try();
         self.fraction_part().try();
         self.exponent_part().try();
-        tree.add(Json.Num(self.text.slice(from, self.at))).replace_err(JsonFault.NoMemory);
+        Ok(self.text.slice(from, self.at))
     }
 
     // A leading zero stands alone: `0` is a number and `01` is two.
@@ -399,6 +404,35 @@ read* = (a: Alloc, tree :: Jsons, text: str) Res<JsonId, JsonFault> {
     (r.at == text.len).match({
         true  => Ok(root),
         false => Err(JsonFault.Trailing(r.at)),
+    })
+}
+
+// Primitive token doors shared with the incremental decoder. They use the
+// same escape and number grammar as `read`, but do not allocate a temporary
+// Jsons arena for every streamed token.
+decode_text_token* = (a: Alloc, raw: str) Res<String, JsonFault> {
+    r ::= Reader(text: raw, a: a, at: 0, depth: 0);
+    value = r.text_at().try();
+    (r.at == raw.len).match({
+        false => Err(JsonFault.Trailing(r.at)),
+        true  => {
+            owned ::= a.String().try(JsonFault.NoMemory);
+            owned.add(value).try(JsonFault.NoMemory);
+            Ok(owned)
+        },
+    })
+}
+
+number_token* = (a: Alloc, raw: str) Res<String, JsonFault> {
+    r ::= Reader(text: raw, a: a, at: 0, depth: 0);
+    value = r.number_text().try();
+    (r.at == raw.len).match({
+        false => Err(JsonFault.Trailing(r.at)),
+        true  => {
+            owned ::= a.String().try(JsonFault.NoMemory);
+            owned.add(value).try(JsonFault.NoMemory);
+            Ok(owned)
+        },
     })
 }
 

@@ -1,0 +1,478 @@
+// Incremental JSON decoding. Feed accepts arbitrary byte boundaries and
+// emits complete values as events; finish distinguishes a complete document
+// from a token or container that is still open.
+
+str, String = std.text
+Vec = std.collections
+Alloc = std.mem
+Range = std.core
+JsonFault, decode_text_token, number_token,
+    MAX_NESTING = std.json.json_read
+
+JsonEvent* = ObjectStart
+    | ObjectEnd
+    | ArrayStart
+    | ArrayEnd
+    | Key(String)
+    | Text(String)
+    | Number(String)
+    | Bool(bool)
+    | Null
+
+Mode = Ready | Quoted | Atom
+
+Phase = ObjectKeyOrEnd
+    | ObjectKey
+    | ObjectColon
+    | ObjectValue
+    | ObjectCommaOrEnd
+    | ArrayValueOrEnd
+    | ArrayValue
+    | ArrayCommaOrEnd
+
+Frame = { phase: Phase }
+
+Decoder* = {
+    a: Alloc,
+    frames :: Vec<Frame>,
+    token :: String,
+    mode :: Mode,
+    key :: bool,
+    slash :: bool,
+    hex_left :: usize,
+    token_at :: usize,
+    at :: usize,
+    root_done :: bool,
+    finished :: bool,
+
+    // A feed may end anywhere, including between the digits of a unicode
+    // escape or number. Only complete events are appended to `events`.
+    feed* = <B: Range<u8>>(
+        self   :: @Self,
+        bytes  : B,
+        events :: Vec<JsonEvent>
+    ) Res<(), JsonFault> {
+        self.finished.match({
+            true  => Err(JsonFault.Trailing(self.at)),
+            false => self.feed_open(bytes, events),
+        })
+    }
+
+    feed_open = <B: Range<u8>>(
+        self   :: @Self,
+        bytes  : B,
+        events :: Vec<JsonEvent>
+    ) Res<(), JsonFault> {
+        bytes.loop((h, i, byte) {
+            self.feed_byte(byte, events).try();
+        });
+        Ok(())
+    }
+
+    // The one-byte door is useful for producers that already own their
+    // iteration. A delimiter may first finish an atom and is then processed
+    // again as structure, so one call always consumes exactly one byte.
+    feed_byte* = (
+        self   :: @Self,
+        byte   : u8,
+        events :: Vec<JsonEvent>
+    ) Res<(), JsonFault> {
+        consumed ::= false;
+        loop(!consumed, (h) {
+            consumed = self.step(byte, events).try();
+        });
+        self.at = self.at + 1;
+        Ok(())
+    }
+
+    step = (
+        self   :: @Self,
+        b      : u8,
+        events :: Vec<JsonEvent>
+    ) Res<bool, JsonFault> {
+        self.mode.match({
+            Ready  => self.ready(b, events),
+            Quoted => self.quoted(b, events),
+            Atom   => self.atom_byte(b, events),
+        })
+    }
+
+    ready = (
+        self   :: @Self,
+        b      : u8,
+        events :: Vec<JsonEvent>
+    ) Res<bool, JsonFault> {
+        json_space(b).match({
+            true  => Ok(true),
+            false => (self.frames.len == 0).match({
+                true  => self.root_ready(b, events),
+                false => self.frame_ready(b, events),
+            }),
+        })
+    }
+
+    root_ready = (
+        self   :: @Self,
+        b      : u8,
+        events :: Vec<JsonEvent>
+    ) Res<bool, JsonFault> {
+        self.root_done.match({
+            true  => Err(JsonFault.Trailing(self.at)),
+            false => self.start_value(b, events),
+        })
+    }
+
+    frame_ready = (
+        self   :: @Self,
+        b      : u8,
+        events :: Vec<JsonEvent>
+    ) Res<bool, JsonFault> {
+        self.phase().match({
+            ObjectKeyOrEnd   => (b == '}').match({
+                true  => self.close_object(events),
+                false => self.start_key(b),
+            }),
+            ObjectKey        => self.start_key(b),
+            ObjectColon      => (b == ':').match({
+                true  => { self.set_phase(Phase.ObjectValue); Ok(true) },
+                false => Err(JsonFault.Unexpected(self.at)),
+            }),
+            ObjectValue      => self.start_value(b, events),
+            ObjectCommaOrEnd => (b == ',').match({
+                true  => { self.set_phase(Phase.ObjectKey); Ok(true) },
+                false => (b == '}').match({
+                    true  => self.close_object(events),
+                    false => Err(JsonFault.Unexpected(self.at)),
+                }),
+            }),
+            ArrayValueOrEnd  => (b == ']').match({
+                true  => self.close_array(events),
+                false => self.start_value(b, events),
+            }),
+            ArrayValue       => self.start_value(b, events),
+            ArrayCommaOrEnd  => (b == ',').match({
+                true  => { self.set_phase(Phase.ArrayValue); Ok(true) },
+                false => (b == ']').match({
+                    true  => self.close_array(events),
+                    false => Err(JsonFault.Unexpected(self.at)),
+                }),
+            }),
+        })
+    }
+
+    start_key = (self :: @Self, b: u8) Res<bool, JsonFault> {
+        (b == '"').match({
+            true  => self.begin_quoted(true),
+            false => Err(JsonFault.Unexpected(self.at)),
+        })
+    }
+
+    start_value = (
+        self   :: @Self,
+        b      : u8,
+        events :: Vec<JsonEvent>
+    ) Res<bool, JsonFault> {
+        b.match({
+            '{' => self.open_object(events),
+            '[' => self.open_array(events),
+            '"' => self.begin_quoted(false),
+            _   => atom_start(b).match({
+                true  => self.begin_atom(b),
+                false => Err(JsonFault.Unexpected(self.at)),
+            }),
+        })
+    }
+
+    open_object = (
+        self   :: @Self,
+        events :: Vec<JsonEvent>
+    ) Res<bool, JsonFault> {
+        self.open(Frame(phase: Phase.ObjectKeyOrEnd)).try();
+        events.add(JsonEvent.ObjectStart).try(JsonFault.NoMemory);
+        Ok(true)
+    }
+
+    open_array = (
+        self   :: @Self,
+        events :: Vec<JsonEvent>
+    ) Res<bool, JsonFault> {
+        self.open(Frame(phase: Phase.ArrayValueOrEnd)).try();
+        events.add(JsonEvent.ArrayStart).try(JsonFault.NoMemory);
+        Ok(true)
+    }
+
+    open = (self :: @Self, frame: Frame) Res<(), JsonFault> {
+        (self.frames.len >= MAX_NESTING).match({
+            true  => Err(JsonFault.TooDeep(self.at)),
+            false => {
+                self.value_done();
+                self.frames.add(frame).try(JsonFault.NoMemory);
+                Ok(())
+            },
+        })
+    }
+
+    close_object = (
+        self   :: @Self,
+        events :: Vec<JsonEvent>
+    ) Res<bool, JsonFault> {
+        self.frames.take(self.frames.len - 1);
+        events.add(JsonEvent.ObjectEnd).try(JsonFault.NoMemory);
+        Ok(true)
+    }
+
+    close_array = (
+        self   :: @Self,
+        events :: Vec<JsonEvent>
+    ) Res<bool, JsonFault> {
+        self.frames.take(self.frames.len - 1);
+        events.add(JsonEvent.ArrayEnd).try(JsonFault.NoMemory);
+        Ok(true)
+    }
+
+    begin_quoted = (self :: @Self, key: bool) Res<bool, JsonFault> {
+        self.token.clear();
+        self.token.add('"').try(JsonFault.NoMemory);
+        self.mode     = Mode.Quoted;
+        self.key      = key;
+        self.slash    = false;
+        self.hex_left = 0;
+        self.token_at = self.at;
+        Ok(true)
+    }
+
+    quoted = (
+        self   :: @Self,
+        b      : u8,
+        events :: Vec<JsonEvent>
+    ) Res<bool, JsonFault> {
+        self.token.add(b).try(JsonFault.NoMemory);
+        (self.hex_left > 0).match({
+            true  => b.hex_value().match({
+                None  => Err(JsonFault.BadEscape(self.at)),
+                Ok(_) => {
+                    self.hex_left = self.hex_left - 1;
+                    Ok(true)
+                },
+            }),
+            false => self.quoted_plain(b, events),
+        })
+    }
+
+    quoted_plain = (
+        self   :: @Self,
+        b      : u8,
+        events :: Vec<JsonEvent>
+    ) Res<bool, JsonFault> {
+        self.slash.match({
+            true  => {
+                self.slash = false;
+                (b == 'u').match({
+                    true  => { self.hex_left = 4; Ok(true) },
+                    false => simple_escape(b).match({
+                        true  => Ok(true),
+                        false => Err(JsonFault.BadEscape(self.at)),
+                    }),
+                })
+            },
+            false => (b == '"').match({
+                true  => self.finish_quoted(events),
+                false => (b == '\\').match({
+                    true  => { self.slash = true; Ok(true) },
+                    false => (b < ' ').match({
+                        true  => Err(JsonFault.Unexpected(self.at)),
+                        false => Ok(true),
+                    }),
+                }),
+            }),
+        })
+    }
+
+    finish_quoted = (
+        self   :: @Self,
+        events :: Vec<JsonEvent>
+    ) Res<bool, JsonFault> {
+        value     = decoded_text(
+            self.a,
+            self.token.view(),
+            self.token_at
+        ).try();
+        self.mode = Mode.Ready;
+        self.key.match({
+            true  => {
+                events.add(JsonEvent.Key(
+                    consume value
+                )).try(JsonFault.NoMemory);
+                self.set_phase(Phase.ObjectColon);
+            },
+            false => {
+                events.add(JsonEvent.Text(
+                    consume value
+                )).try(JsonFault.NoMemory);
+                self.value_done();
+            },
+        });
+        Ok(true)
+    }
+
+    begin_atom = (self :: @Self, b: u8) Res<bool, JsonFault> {
+        self.token.clear();
+        self.token.add(b).try(JsonFault.NoMemory);
+        self.mode     = Mode.Atom;
+        self.token_at = self.at;
+        Ok(true)
+    }
+
+    atom_byte = (
+        self   :: @Self,
+        b      : u8,
+        events :: Vec<JsonEvent>
+    ) Res<bool, JsonFault> {
+        atom_end(b).match({
+            true  => { self.finish_atom(events).try(); Ok(false) },
+            false => { self.token.add(b).try(JsonFault.NoMemory); Ok(true) },
+        })
+    }
+
+    finish_atom = (
+        self   :: @Self,
+        events :: Vec<JsonEvent>
+    ) Res<(), JsonFault> {
+        raw   = self.token.view();
+        event = atom_event(self.a, raw, self.token_at).try();
+        events.add(event).try(JsonFault.NoMemory);
+        self.mode = Mode.Ready;
+        self.value_done();
+        Ok(())
+    }
+
+    value_done = (self :: @Self) () {
+        (self.frames.len == 0).match({
+            true  => { self.root_done = true; },
+            false => self.phase().match({
+                ObjectValue     => self.set_phase(Phase.ObjectCommaOrEnd),
+                ArrayValueOrEnd => self.set_phase(Phase.ArrayCommaOrEnd),
+                ArrayValue      => self.set_phase(Phase.ArrayCommaOrEnd),
+                _               => (),
+            }),
+        });
+        ();
+    }
+
+    phase = (self: @Self) Phase {
+        self.frames.get(self.frames.len - 1)
+            .value_or(Frame(phase: Phase.ArrayValue)).phase
+    }
+
+    set_phase = (self :: @Self, phase: Phase) () {
+        self.frames.set(self.frames.len - 1, Frame(phase: phase));
+        ();
+    }
+
+    // End-of-input is the only point at which an atom is known not to gain
+    // another byte. Strings and containers must already have closed.
+    finish* = (
+        self   :: @Self,
+        events :: Vec<JsonEvent>
+    ) Res<(), JsonFault> {
+        self.finished.match({
+            true  => Err(JsonFault.Trailing(self.at)),
+            false => {
+                self.mode.match({
+                    Atom => self.finish_atom(events).try(),
+                    _    => (),
+                });
+                self.finished = true;
+                incomplete    = self.mode.match({
+                    Quoted => true,
+                    _      => self.frames.len > 0 || !self.root_done,
+                });
+                incomplete.match({
+                    true  => Err(JsonFault.Truncated(self.at)),
+                    false => Ok(()),
+                })
+            },
+        })
+    }
+}
+
+Decoder* = (a: Alloc) Res<Decoder, JsonFault> {
+    Ok(Decoder(
+        a: a,
+        frames: a.Vec<Frame>(),
+        token: a.String().try(JsonFault.NoMemory),
+        mode: Mode.Ready,
+        key: false,
+        slash: false,
+        hex_left: 0,
+        token_at: 0,
+        at: 0,
+        root_done: false,
+        finished: false
+    ))
+}
+
+json_space = (b: u8) bool { b.is_in([' ', '\t', '\n', '\r']) }
+
+atom_start = (b: u8) bool {
+    b == '-' || (b >= '0' && b <= '9') || b.is_in(['t', 'f', 'n'])
+}
+
+atom_end = (b: u8) bool {
+    json_space(b) || b.is_in([',', ']', '}', ':', '{', '[', '"'])
+}
+
+simple_escape = (b: u8) bool {
+    b.is_in(['"', '\\', '/', 'b', 'f', 'n', 'r', 't'])
+}
+
+atom_event = (a: Alloc, raw: str, base: usize) Res<JsonEvent, JsonFault> {
+    raw.eq("true").match({
+        true  => Ok(JsonEvent.Bool(true)),
+        false => raw.eq("false").match({
+            true  => Ok(JsonEvent.Bool(false)),
+            false => raw.eq("null").match({
+                true  => Ok(JsonEvent.Null),
+                false => keyword_start(raw).match({
+                    true  => Err(JsonFault.Unexpected(base)),
+                    false => Ok(JsonEvent.Number(
+                        checked_number(a, raw, base).try()
+                    )),
+                }),
+            }),
+        }),
+    })
+}
+
+keyword_start = (raw: str) bool {
+    raw.get(0).match({
+        Ok(b) => b.is_in(['t', 'f', 'n']),
+        None  => false,
+    })
+}
+
+decoded_text = (a: Alloc, raw: str, base: usize) Res<String, JsonFault> {
+    decode_text_token(a, raw).match({
+        Err(f)    => Err(shift(f, base)),
+        Ok(value) => Ok(value),
+    })
+}
+
+checked_number = (a: Alloc, raw: str, base: usize) Res<String, JsonFault> {
+    number_token(a, raw).match({
+        Err(f)    => Err(shift(f, base)),
+        Ok(value) => Ok(value),
+    })
+}
+
+shift = (f: JsonFault, base: usize) JsonFault {
+    f.match({
+        Unexpected(at) => JsonFault.Unexpected(base + at),
+        Truncated(at)  => JsonFault.Truncated(base + at),
+        BadEscape(at)  => JsonFault.BadEscape(base + at),
+        BadNumber(at)  => JsonFault.BadNumber(base + at),
+        TooDeep(at)    => JsonFault.TooDeep(base + at),
+        Trailing(at)   => JsonFault.Trailing(base + at),
+        NoMemory       => JsonFault.NoMemory,
+    })
+}

@@ -1,0 +1,35 @@
+JsonEvent, JsonFault = std.json
+
+show = (event: JsonEvent) () {
+    event.match({
+        ObjectStart => print("{"),
+        ObjectEnd   => print("}"),
+        ArrayStart  => print("["),
+        ArrayEnd    => print("]"),
+        Key(s)      => print("key={} ", s.view()),
+        Text(s)     => print("text={} ", s.view()),
+        Number(s)   => print("number={} ", s.view()),
+        Bool(v)     => print("bool={} ", v),
+        Null        => print("null "),
+    });
+    ();
+}
+
+main = (env: Env) Res<i32, JsonFault> {
+    a       ::= env.mem.alloc();
+    decoder ::= a.Decoder().try();
+    events  ::= a.Vec<JsonEvent>();
+
+    decoder.feed("{\"na", events).try();
+    decoder.feed("me\":\"A\\uD83D", events).try();
+    decoder.feed("\\uDE00\",\"n\":-1.2", events).try();
+    decoder.feed("5e+2,\"ok\":tr", events).try();
+    decoder.feed("ue,\"xs\":[null]}", events).try();
+    decoder.finish(events).try();
+
+    loop(events.len > 0, (h) {
+        show(events.take(0).ok_or(JsonFault.NoMemory).try());
+    });
+    println("");
+    Ok(0)
+}

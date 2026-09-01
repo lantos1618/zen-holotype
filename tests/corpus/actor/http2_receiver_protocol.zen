@@ -1,6 +1,6 @@
 Actor, ActorError, ActorStartError, Context, Ref = std.actor
 H2Chunk, H2Client, H2Error, H2StreamError, h2_chunk = std.net.http2
-to_json = std.json
+JsonEvent, JsonFault, to_json = std.json
 
 Post = {
     prompt: str,
@@ -28,7 +28,16 @@ stream_call = (
     client.post_stream(alloc, body, receiver)
 }
 
-Error = AllocError | ActorStartError | ActorError | H2Error
+Error = AllocError | ActorStartError | ActorError | H2Error | JsonFault
+
+// The same owned chunk the actor receives is a byte Range, so JSON decoding
+// neither knows about HTTP/2 nor copies the frame through a String first.
+decode_chunk = (a: Alloc, chunk: H2Chunk) Res<(), JsonFault> {
+    decoder ::= a.Decoder().try();
+    events  ::= a.Vec<JsonEvent>();
+    decoder.feed(chunk, events).try();
+    decoder.finish(events)
+}
 
 main = (env: Env) Res<(), Error> {
     alloc ::= env.mem.alloc();
@@ -36,6 +45,7 @@ main = (env: Env) Res<(), Error> {
     post     = Post(prompt: "hello", stream: true);
     body     = post.to_json(alloc).try();
     println("{}", body.view());
+    decode_chunk(alloc, h2_chunk("null").try()).try();
     receiver.receive(h2_chunk("hello").try()).try();
     receiver.stop();
     Ok(())

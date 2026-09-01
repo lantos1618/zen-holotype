@@ -32,6 +32,31 @@ main = (env: Env) Res<i32, Error> {
 - **`Res` is for failure a caller can act on; a trap is for a bug.** Overflow and out-of-bounds abort with a position rather than becoming values nobody checks.
 - **Data races are compile errors**, not deep copies. Only deeply-immutable or uniquely-owned values cross an actor boundary, and the handoff is spelled `consume`.
 
+## Streaming JSON
+
+`std.json.Decoder` accepts any `Range<u8>`, so the same call handles borrowed
+text, an HTTP/2 body chunk, or another byte container. Chunk boundaries do not
+have to align with JSON tokens. Text, keys, and number events own their bytes;
+call `finish` once when the document ends.
+
+```groovy
+JsonEvent, JsonFault = std.json
+
+decode = (alloc: Alloc, first: str, second: str)
+         Res<Vec<JsonEvent>, JsonFault> {
+    decoder ::= alloc.Decoder().try();
+    events  ::= alloc.Vec<JsonEvent>();
+    decoder.feed(first, events).try();
+    decoder.feed(second, events).try();
+    decoder.finish(events).try();
+    Ok(events)
+}
+```
+
+A `Sink` is the synchronous output-side byte capability. Actors are the
+asynchronous ownership boundary; an actor receiving `H2Chunk` can feed that
+owned chunk directly to its decoder without copying it through a `String`.
+
 ## Building
 
 ```sh

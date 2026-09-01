@@ -10,7 +10,8 @@ AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 DeclId, ImplId = sema.sema_id
-TyId, TyNamed, TyArray = sema.sema_ty
+TyId, TyNamed, TyArray, Prim = sema.sema_ty
+Def = sema.sema_def
 Ctx = sema.sema_check
 self_ctx = sema.sema_member
 impl_bound_type = sema.sema_supply
@@ -82,7 +83,26 @@ RangeImpl* = {
 range_impl* = (be :: CBackend, rty: TyId) Res<Res<RangeImpl>, AllocError> {
     be.check.types.at(rty).match({
         Named(n) => be.named_range_impl(n),
+        Prim(p)  => be.primitive_range_impl(p),
         _        => Ok(None),
+    })
+}
+
+// Primitive impls live on the prelude declaration of their spelling, just as
+// ordinary member lookup and bound checking already define. Range lowering
+// must use that same ownership rule: `str.impl(Range<u8>, ..)` is not less of
+// an impl merely because `str` has a built-in C representation.
+primitive_range_impl = (be :: CBackend, p: Prim)
+                       Res<Res<RangeImpl>, AllocError> {
+    defs ::= be.alloc.Vec<Def>();
+    be.check.world.prelude_of(p.name, defs).try();
+    defs.get(0).match({
+        None    => Ok(None),
+        Ok(def) => be.named_range_impl(TyNamed(
+            decl: def.id,
+            name: p.name,
+            args: be.alloc.Vec<TyId>()
+        )),
     })
 }
 

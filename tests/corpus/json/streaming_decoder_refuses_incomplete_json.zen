@@ -1,0 +1,39 @@
+JsonEvent, JsonFault = std.json
+
+at = (fault: JsonFault) usize {
+    fault.match({
+        Unexpected(i) => i,
+        Truncated(i)  => i,
+        BadEscape(i)  => i,
+        BadNumber(i)  => i,
+        TooDeep(i)    => i,
+        Trailing(i)   => i,
+        NoMemory      => 0,
+    })
+}
+
+reject = (a: Alloc, left: str, right: str) Res<(), JsonFault> {
+    decoder ::= a.Decoder().try();
+    events  ::= a.Vec<JsonEvent>();
+    decoder.feed(left, events).match({
+        Err(fault) => println("feed {}", at(fault)),
+        Ok(_)      => decoder.feed(right, events).match({
+            Err(fault) => println("feed {}", at(fault)),
+            Ok(_)      => decoder.finish(events).match({
+                Err(fault) => println("finish {}", at(fault)),
+                Ok(_)      => println("accepted"),
+            }),
+        }),
+    });
+    Ok(())
+}
+
+main = (env: Env) Res<i32, JsonFault> {
+    a ::= env.mem.alloc();
+    reject(a, "[1,", "]").try();
+    reject(a, "\"half", "").try();
+    reject(a, "1", "e").try();
+    reject(a, "{}", "[]").try();
+    reject(a, "\"\\u12", "x4\"").try();
+    Ok(0)
+}
