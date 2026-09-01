@@ -1,16 +1,8 @@
-// Canonical line breaking for calls, parameter lists, unions, enums, and
-// array literals. Lists are first packed innermost-first, then lists wider
-// than WIDTH are broken outermost-first. Re-parsing between rounds keeps
-// offsets and indentation aligned with the rewritten text.
-//
-// Calls, parameters, unions, and enum variants place one item per line.
-// Homogeneous array literals fill each line greedily. A bracketed closer
-// stands alone at the opener's indentation.
-//
-// This pass rewrites whitespace only. It declines lists containing comments,
-// multi-line items, non-trivia in separator gaps, aligned parameter columns,
-// or trailing commas. It also leaves disjoint sibling lists and one-item
-// wrappers alone when breaking them would not solve the over-wide line.
+// Canonical line breaking for calls, declarations, unions, enums, and arrays.
+// Packing runs inside-out; breaking runs outside-in. Each round reparses so
+// spans and indentation describe the current text. The pass changes only
+// whitespace and refuses lists whose comments, layout, or separators cannot
+// be preserved exactly.
 
 Alloc, AllocError = std.mem
 str, String = std.text
@@ -34,26 +26,10 @@ Item = {
     hi: usize,
 }
 
-// A list that COULD break: where it sits, what separates its items,
-// whether brackets close the ends (a call's or a signature's parens) or
-// nothing does (an enum or union, whose first variant stays on the `=`
-// line), and whether it may VETO a neighbour sharing its line.
-//
-// Only a parameter list may not veto. `shares_line` refuses to break
-// either of two disjoint lists on one line because neither break fixes
-// `f(a) || g(b)`, and that argument is about SIBLINGS in an expression.
-// A signature's parens are nobody's sibling: `handle = (r: Req)
-// Res<str, Io | ..> {` is one declaration whose return union is the part
-// worth breaking. So a parameter list still DEFERS to a neighbour and
-// simply never answers the question for one.
-//
-// `params` is separate from `vetoes` although only a parameter list has
-// either answer today: one says what this list does to a NEIGHBOUR, the
-// other what `fmt_decl.zen` writes INSIDE it.
-//
-// `fill` is the ONE field the two halves read differently: nothing to
-// joining (a packed list is a packed list), everything to breaking. Only
-// an array literal answers true; the header says why.
+// A separator-bounded list that may be packed or broken. Parameter lists do
+// not veto a disjoint neighbour on the same line, allowing a wide return
+// union to break independently. `fill` lets arrays pack several items per
+// broken line; other list kinds stack one item per line.
 Cand = {
     lo: usize,
     hi: usize,
@@ -74,15 +50,13 @@ Edit = {
     text: String,
 }
 
-// The pass `fmt.zen`'s `render` wires in after the pads: pack every
-// list in `text` to one line, then break the ones that do not fit.
-// `file` only names the source for diagnostics; the pass speaks offsets.
+// Pack eligible lists, then break those that remain too wide.
 break_lines* = (a: Alloc, file: str, text: str) Res<String, AllocError> {
     packed = rounds(a, file, text, true).try();
     rounds(a, file, packed.view(), false)
 }
 
-// One half of the pass, run until a round moves nothing.
+// Run one direction until a round makes no change.
 rounds = (a: Alloc, file: str, text: str, join: bool)
          Res<String, AllocError> {
     cur   ::= copy_of(a, text).try();
@@ -98,10 +72,8 @@ rounds = (a: Alloc, file: str, text: str, join: bool)
     Ok(cur);
 }
 
-// One round: re-lex and re-parse (the last round's edits moved every
-// offset), re-lay what this text re-lays, hand back the new bytes. The
-// 16-round cap in `rounds` is a belt, not a budget: a round that moves
-// something reached a list no earlier round could, and lists are finite.
+// Re-lexing each round prevents edits from using stale offsets. The cap is a
+// convergence guard; each productive round reaches a previously blocked list.
 one_round = (a: Alloc, file: str, text: str, join: bool)
             Res<String, AllocError> {
     lexed = scan(a, Source(file: file, text: text)).try();
@@ -111,9 +83,7 @@ one_round = (a: Alloc, file: str, text: str, join: bool)
     })
 }
 
-// A clean re-lex should always parse — the input did, and the rounds in
-// between move no token — but a pass that falls back to its input can
-// never eat code, so the unlikely arm is a copy, not a trap.
+// Whitespace edits should preserve parsing. On violation, keep the input.
 round_clean = (a: Alloc, text: str, lexed: Lexed, join: bool)
               Res<String, AllocError> {
     p ::= a.Parser(lexed);
@@ -129,8 +99,7 @@ round_clean = (a: Alloc, text: str, lexed: Lexed, join: bool)
     })
 }
 
-// The input, unchanged: a round's starting text, and the fault arm of a
-// pass that cannot eat code. `fmt_decl.zen`'s fault arms are this copy.
+// Return an owned copy of unchanged input.
 copy_of* = (a: Alloc, text: str) Res<String, AllocError> {
     out ::= a.String().try();
     out.add(text).try();
@@ -141,10 +110,8 @@ copy_of* = (a: Alloc, text: str) Res<String, AllocError> {
 // finding the lists
 // -------------------------------------------------------------------
 
-// Every list in the file, sorted by (start, end reversed): a container
-// comes out before what it holds, two disjoint lists left to right.
-// That is the order breaking needs — outermost first, so a list is
-// asked about its width only once every list AROUND it has answered.
+// Sort by start and then reverse end: containers precede nested lists, while
+// disjoint lists remain left to right.
 collect = (a: Alloc, src: Src, tree: Ast, m: Module)
           Res<Vec<Cand>, AllocError> {
     cands ::= a.Vec<Cand>();
@@ -186,14 +153,10 @@ collect = (a: Alloc, src: Src, tree: Ast, m: Module)
     Ok(cands);
 }
 
-// Nothing to collect here. Allocates nothing but still speaks
-// `Res<(), AllocError>` since its callers match it beside the `add_`
-// functions, and sibling arms must agree on a type (fmt_decl.zen's
-// `unaligned` is the same pattern).
+// The no-op result used beside allocating collector arms.
 no_list = () Res<(), AllocError> { Ok(()) }
 
-// `f(a, b)`, `Point(x: 3, y: 4)`: the parens are the list's ends and
-// the commas its separators. Zero arguments is not a list.
+// Calls and constructors use parenthesized, comma-separated lists.
 add_call = (a: Alloc, src: Src, cands :: Vec<Cand>, c: Call)
            Res<(), AllocError> {
     (c.args.len == 0).match({
@@ -222,12 +185,7 @@ add_call = (a: Alloc, src: Src, cands :: Vec<Cand>, c: Call)
     })
 }
 
-// `[a, b, c]`. The same shape a call's arguments have — which is why
-// `parens` (bracketed at BOTH ends, one byte each) is true and only
-// `fill` sets this form apart. The literal's own `Expr` carries the
-// span, brackets included; an element's span stops before the comma,
-// exactly as an `Arg`'s does. Zero elements is not a list, and `[x]` is
-// one whose gaps are only the brackets'.
+// Arrays share the bracketed-list rules but may fill multiple items per line.
 add_array = (
     a     : Alloc,
     src   : Src,
@@ -263,9 +221,7 @@ add_array = (
     })
 }
 
-// A declaration, wherever it stands: an enum's variants are a list, and
-// so are a function's parameters. Both, because a function declared
-// inside a block is still a declaration.
+// Collect list-bearing declarations at module or block scope.
 add_decl = (a: Alloc, src: Src, cands :: Vec<Cand>, d: Decl)
            Res<(), AllocError> {
     d.kind.match({
@@ -275,10 +231,7 @@ add_decl = (a: Alloc, src: Src, cands :: Vec<Cand>, d: Decl)
     })
 }
 
-// `(a: A, b: B)`. The same shape as a call's arguments — `params_span`
-// is the parens and a `Param`'s span stops before its comma, exactly as
-// `args_span` and `Arg` do — so the two share every rule below and
-// cannot drift apart. Zero parameters is not a list.
+// Parameters use the same parenthesized, comma-separated shape as arguments.
 add_params = (
     a     : Alloc,
     src   : Src,
@@ -312,9 +265,7 @@ add_params = (
     })
 }
 
-// `A | B` in type position. The union's own span is first-member to
-// last-member (parse_type.zen gathers it flat), which is exactly the
-// region this rule re-lays-out.
+// A union span covers its first through last member.
 add_union = (
     a     : Alloc,
     src   : Src,
@@ -342,9 +293,7 @@ add_union = (
     ))
 }
 
-// `Shape = Circle(Circle) | Rect(Rect) | Unit`. One variant has no
-// separator, so it is not a list — `AllocError* = | OutOfMemory` keeps
-// its leading bar alone either way.
+// An enum needs at least two variants to have a separator to rewrite.
 add_enum = (a: Alloc, src: Src, cands :: Vec<Cand>, e: Enum)
            Res<(), AllocError> {
     (e.variants.len < 2).match({
@@ -401,15 +350,9 @@ before = (x: Cand, y: Cand) bool {
 // judging
 // -------------------------------------------------------------------
 
-// Every list, in sorted order: re-lay the ones this round re-lays,
-// leave the rest. `moved` is parallel to `cands` because a Cand carries
-// a Vec and copying one to mark it would copy the handle, not the mark.
-//
-// A JOINING round claims nothing: joins are disjoint by construction (a
-// list rewrites its own gaps, and a list inside it lies wholly inside an
-// ITEM). A BREAKING round claims what it actually moved, and the lists
-// inside a claim are asked again next round, where the text says where
-// they landed.
+// `moved` is parallel to `cands`; copying a candidate would also copy its
+// item-vector handle. Packing edits only gaps and needs no claims. Breaking
+// marks changed containers so their nested lists wait for the next reparse.
 judge = (
     a     : Alloc,
     src   : Src,
@@ -445,9 +388,8 @@ break_and_mark = (
     Ok(());
 }
 
-// Both halves need the gaps rewritable at all. Past that, joining asks
-// only that no comment and no owned column stand in the way; breaking
-// asks the width.
+// Packing requires safe gaps; breaking also excludes lists affected by this
+// round or by a disjoint neighbour and requires an over-wide packed form.
 relaid = (
     src   : Src,
     cands : Vec<Cand>,
@@ -464,10 +406,8 @@ relaid = (
     })
 }
 
-// A list inside one this round broke keeps: the break gave it a new
-// line and a new indent, and only the next round, over the rewritten
-// text, can read the width it lands at. Sorted order means every
-// container was judged before this one, so the marks are the answer.
+// A nested list waits one round after its container moves so its width and
+// indentation are measured from reparsed text.
 inside_moved = (cands: Vec<Cand>, moved: Vec<bool>, c: Cand) bool {
     found ::= false;
     Range(0, cands.len).loop((h, j) {
@@ -481,18 +421,13 @@ inside_moved = (cands: Vec<Cand>, moved: Vec<bool>, c: Cand) bool {
     found;
 }
 
-// A WRAPPER KEEPS AND ITS ONE ITEM BREAKS. `out.add(Sym(..))` over the
-// width has one place worth breaking: the inner list's break brings
-// every line under it, and breaking the wrapper too costs two lines and
-// an indent level for a `)` carrying nothing. Not a rule about calls —
-// `Ok(BuildArgs(..))` and `edits.add(Edit(..))` are the shape.
+// A one-item wrapper stays packed when a nested list ending with that item can
+// solve the width by itself.
 wraps_one_list = (cands: Vec<Cand>, c: Cand) bool {
     (c.items.len == 1) && ends_the_item(cands, c, c.items.ptr().read(0))
 }
 
-// True when some list INSIDE `c` closes exactly where its only item
-// does. A list ends at its closer, so that is what makes the item a
-// list and not merely a thing with a list in it.
+// Whether a nested list closes at the end of the wrapper's only item.
 ends_the_item = (cands: Vec<Cand>, c: Cand, only: Item) bool {
     found ::= false;
     Range(0, cands.len).loop((h, j) {
@@ -505,15 +440,13 @@ ends_the_item = (cands: Vec<Cand>, c: Cand, only: Item) bool {
     found;
 }
 
-// A comment in the span forbids packing outright (the header says why),
-// and so does a parameter list written one per line, whose `:`/`::`
-// column belongs to `fmt_decl.zen`.
+// Comments and already-columnar parameter lists must keep their layout.
 may_join = (src: Src, c: Cand) bool {
     uncommented(src, c.lo, c.hi) && !(c.params && !one_line(src, c.lo, c.hi))
 }
 
-// Bytes and not tokens, so a `//` inside a string literal counts — a
-// list is declined, never mis-packed.
+// This conservative byte scan may decline a string containing `//`; declining
+// is safe because it leaves the source untouched.
 uncommented = (src: Src, from: usize, to: usize) bool {
     clear ::= true;
     Range(from, to).loop((h, i) {
@@ -529,21 +462,13 @@ opens_comment = (src: Src, at: usize, to: usize) bool {
     (at < to) && (src.text.index(at) == '/' || src.text.index(at) == '*')
 }
 
-// The packed line, measured: what precedes the list on its line, the
-// list with every whitespace run collapsed to one space, what follows
-// it. The collapse is a JUDGMENT, not an edit — a multi-line item
-// (refused in `may_relay`) never gets re-laid-out for real.
+// Measure the line as if eligible whitespace runs were collapsed.
 too_wide = (src: Src, c: Cand) bool {
     packed_width(src, c) > WIDTH
 }
 
-// A list SHARING its line with a disjoint one that VETOES keeps: no
-// list's break fixes `f(a) || g(b)` (the over-wide part is the operator
-// chain, which is no list), and breaking one side reads worse than the
-// long line did. Nested lists do not count — a container has already
-// answered for itself. A parameter list does not veto (see `Cand`), so
-// the return union it sits beside still breaks and the parameters,
-// asked next round on a line that got shorter, no longer need to.
+// Do not break one of two disjoint vetoing lists on a shared line: neither
+// break alone fixes the surrounding expression. Nested lists do not count.
 shares_line = (src: Src, cands: Vec<Cand>, c: Cand) bool {
     ls = src.line_at(c.line);
     le = src.after_line(c.line);
@@ -579,10 +504,8 @@ collapsed = (src: Src, from: usize, to: usize) usize {
     n;
 }
 
-// This rule may rewrite a list's gaps, either way, only when every item
-// is on one line as written, the brackets hug nothing but whitespace,
-// and each gap holds exactly its separator in whitespace. The header
-// says why each clause is there.
+// Rewriting is safe only for single-line items, whitespace-only bracket gaps,
+// and gaps containing exactly the expected separator plus whitespace.
 may_relay = (src: Src, c: Cand) bool {
     first = c.items.ptr().read(0);
     last  = c.items.ptr().read(c.items.len - 1);
@@ -614,10 +537,7 @@ one_line = (src: Src, from: usize, to: usize) bool {
     flat;
 }
 
-// The gap between two items: whitespace, the separator, whitespace, and
-// nothing else. The separator is found by walking bytes — safe here and
-// nowhere else, because a gap holds only trivia and the one punctuator:
-// a comment shows up as a byte that is neither, and the gap is refused.
+// Accept whitespace, one separator, then whitespace and nothing else.
 clean_gap = (src: Src, from: usize, to: usize, sep: u8) bool {
     mid = src.skip_space(from, to);
     (mid < to && src.text.index(mid) == sep).match({
@@ -630,11 +550,7 @@ clean_gap = (src: Src, from: usize, to: usize, sep: u8) bool {
 // joining and breaking
 // -------------------------------------------------------------------
 
-// The canonical PACKED form: a bracketed list's `(` hugs its first item
-// and its `)` hugs the last, and every gap between two items is the
-// separator and one space — a comma closing the item before it, a bar
-// standing between two. An item's own bytes are untouched, which is why
-// a list packs only after the lists inside it have packed.
+// Packed form: brackets hug their items and separators carry one space.
 emit_join = (a: Alloc, c: Cand, edits :: Vec<Edit>) Res<(), AllocError> {
     gone ::= a.String().try();
     first = c.items.ptr().read(0);
@@ -664,20 +580,10 @@ emit_join = (a: Alloc, c: Cand, edits :: Vec<Edit>) Res<(), AllocError> {
     Ok(());
 }
 
-// The canonical BROKEN form: head gap (a bracketed list's `(` to its
-// first item) becomes newline+indent, each inter-item gap becomes
-// separator + newline+indent — an enum's separator LEADS the next line,
-// a call's comma closes this one — and the tail gap becomes a newline
-// back at the OPENER'S indent, so `)` stands alone.
-//
-// THE ENDS ARE THE SAME FOR BOTH FORMS and only the inter-item gaps
-// differ, which is the whole of `fill`: an array literal's `[` and `]`
-// land exactly where a call's `(` and `)` would.
-//
-// ANSWERS WHETHER THE LIST ACTUALLY MOVED, which is what makes the
-// rounds converge on more than the outermost break: a list already in
-// this form writes the bytes it has, claims nothing, and so the lists
-// inside it are judged this round where they really sit.
+// Broken form puts bracketed items at +4 indentation and the closer at the
+// opener's indentation. Commas trail items; union and enum bars lead them.
+// The result says whether any emitted edit changed bytes, allowing already
+// broken containers to stop blocking their nested lists.
 emit_break = (a: Alloc, src: Src, c: Cand, edits :: Vec<Edit>)
              Res<bool, AllocError> {
     was    = edits.len;
@@ -704,7 +610,7 @@ emit_break = (a: Alloc, src: Src, c: Cand, edits :: Vec<Edit>)
     Ok(rewrites(src, edits, was));
 }
 
-// One item per line: every gap is the separator and a new line at +4.
+// Stack one item per line.
 stacked_gaps = (a: Alloc, c: Cand, edits :: Vec<Edit>, nl: str)
                Res<(), AllocError> {
     Range(0, c.items.len - 1).loop((h, i) {
@@ -725,17 +631,8 @@ stacked_gaps = (a: Alloc, c: Cand, edits :: Vec<Edit>, nl: str)
     Ok(());
 }
 
-// AS MANY ITEMS TO A LINE AS FIT: a gap is the separator and one space
-// while the next item still lands under the width, the separator and a
-// new line at `indent` when it does not. Greedy and left to right,
-// which makes it a function of the items alone and so the same answer
-// every round — balancing the lines instead would have to see the whole
-// list to place the first gap.
-//
-// A COMMA IS PART OF THE ITEM IT FOLLOWS for this measurement: it is
-// printed hard against the item and cannot move to the next line, so an
-// item that is not the last carries one more column than it spans. An
-// item too wide to fit even alone still gets its own line.
+// Fill greedily from left to right. A non-final item's width includes its
+// comma because the comma cannot move to the next line.
 filled_gaps = (
     a      : Alloc,
     c      : Cand,
@@ -764,9 +661,7 @@ filled_gaps = (
     Ok(());
 }
 
-// The columns item `i` occupies on its line, its own comma included.
-// Every item is one line here — `may_relay` refused the list otherwise
-// — so its span's length IS its width.
+// Width of a single-line item, including its trailing comma when present.
 item_width = (c: Cand, i: usize) usize {
     it = c.items.ptr().read(i);
     (it.hi - it.lo) + (i + 1 < c.items.len).match({
@@ -775,9 +670,7 @@ item_width = (c: Cand, i: usize) usize {
     })
 }
 
-// True when some edit added since `was` says something the bytes do not
-// already say. Texts and not spans, because the whole question is
-// whether re-emitting a list is a no-op.
+// Whether an edit added since `was` differs from the current source bytes.
 rewrites = (src: Src, edits: Vec<Edit>, was: usize) bool {
     found ::= false;
     Range(was, edits.len).loop((h, i) {
@@ -790,11 +683,8 @@ rewrites = (src: Src, edits: Vec<Edit>, was: usize) bool {
     found;
 }
 
-// Insertion sort, by where each edit starts. A joining round has a list
-// rewrite gaps lying AROUND the gaps of the lists inside it, so the
-// candidate order and the byte order differ and `apply` needs the
-// second. Edits never overlap: a list's gaps are its own, and a list
-// inside it lies wholly inside an ITEM.
+// Sort edits by byte position. Candidate nesting order differs from edit order;
+// edits never overlap because each list owns only its gaps.
 in_byte_order = (edits :: Vec<Edit>) () {
     Range(1, edits.len).loop((h, i) {
         j ::= i;
@@ -808,7 +698,7 @@ in_byte_order = (edits :: Vec<Edit>) () {
     });
 }
 
-// The edits, in byte order, over the author's bytes.
+// Apply non-overlapping edits in byte order.
 apply = (a: Alloc, text: str, edits: Vec<Edit>) Res<String, AllocError> {
     out ::= a.String().try();
     at  ::= 0;
