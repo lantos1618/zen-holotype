@@ -17,12 +17,12 @@ The corresponding decisions are in
 | Item | Count |
 | --- | ---: |
 | Zen files | 227 |
-| Top-level declarations | 7138 |
-| Types | 371 |
+| Top-level declarations | 7082 |
+| Types | 376 |
 | Enums | 95 |
 | Aliases | 0 |
 | Implementations | 76 |
-| Functions | 3957 |
+| Functions | 3896 |
 | Constants | 175 |
 | Imports and re-exports | 2464 |
 
@@ -694,7 +694,7 @@ C_STANDARD*, comment* = gen.gen_c.gen_c_runtime
 
 ### `src/gen/gen_c/gen_c_actor.zen`
 
-69 declarations (types: 4, functions: 42, imports and re-exports: 23).
+70 declarations (types: 4, functions: 43, imports and re-exports: 23).
 
 #### Types
 
@@ -795,6 +795,14 @@ emit_actor_globals* = (be :: CBackend, out :: Emit) Res<(), AllocError>
 write_actor_shutdown* = (be :: CBackend, out :: Emit) Res<(), AllocError>
 
 lower_actor_stop* = (
+    be  :: CBackend,
+    a   : Access,
+    rty : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError>
+
+lower_actor_join* = (
     be  :: CBackend,
     a   : Access,
     rty : TyId,
@@ -2582,11 +2590,13 @@ CapabilityKind* = NotCapability
     | EnvVar
     | ActorSpawn
     | ActorStop
+    | ActorJoin
     | ClockRead
     | ThreadsSleep
     | ThreadsSpawn
     | ThreadsJoin
     | ConsolePrint
+    | ConsoleFlush
     | StdinRead
     | ScopeDefer
 ```
@@ -2736,7 +2746,7 @@ lower_stdin_read = gen.gen_c.gen_c_stdin
 
 lower_env_var = gen.gen_c.gen_c_env
 
-lower_console_print, is_console_print = gen.gen_c.gen_c_print
+lower_console_print, lower_console_flush, is_console_print = gen.gen_c.gen_c_print
 
 is_defer, lower_defer = gen.gen_c.gen_c_scope
 
@@ -2746,7 +2756,7 @@ lower_clock_read = gen.gen_c.gen_c_clock
 
 lower_sleep, lower_spawn, lower_join = gen.gen_c.gen_c_threads
 
-lower_actor_spawn, lower_actor_stop = gen.gen_c.gen_c_actor
+lower_actor_spawn, lower_actor_stop, lower_actor_join = gen.gen_c.gen_c_actor
 ```
 
 ### `src/gen/gen_c/gen_c_clock.zen`
@@ -6193,7 +6203,34 @@ compose, settle_params, settled = gen.gen_c.gen_c_settle
 
 ### `src/gen/gen_c/gen_c_json.zen`
 
-39 declarations (functions: 18, constants: 1, imports and re-exports: 20).
+31 declarations (types: 1, functions: 9, constants: 1, imports and re-exports: 20).
+
+#### Types
+
+```zen
+JsonLower = {
+    id: ExprId,
+    buffer: str,
+    ret: TyId,
+    result: str,
+    done: usize,
+    guard_result = (self: @Self, be :: CBackend) Res<(), AllocError>
+    value = (self: @Self, be :: CBackend, ty: TyId, value: str)
+            Res<(), AllocError>
+    primitive = (self: @Self, be :: CBackend, name: str, value: str)
+                Res<(), AllocError>
+    named = (self: @Self, be :: CBackend, named: TyNamed, value: str)
+            Res<(), AllocError>
+    record = (self: @Self, be :: CBackend, named: TyNamed, value: str)
+             Res<(), AllocError>
+    fields = (self: @Self, be :: CBackend, named: TyNamed, record: Struct,
+              value: str) Res<(), AllocError>
+    raw = (self: @Self, be :: CBackend, raw: str) Res<(), AllocError>
+    write = (self: @Self, be :: CBackend, helper: str, value: str)
+            Res<(), AllocError>
+    unsupported = (self: @Self, be :: CBackend) Res<(), AllocError>
+}
+```
 
 #### Functions
 
@@ -6243,99 +6280,9 @@ json_empty_param = (be :: CBackend, empty: Def) Res<TyId, AllocError>
 
 json_empty_def = (be :: CBackend) Res<Res<Def>, AllocError>
 
-json_guard_result = (be :: CBackend, result: str, done: usize)
-                    Res<(), AllocError>
-
-json_value = (
-    be     :: CBackend,
-    id     : ExprId,
-    ty     : TyId,
-    value  : str,
-    buffer : str,
-    ret    : TyId,
-    result : str,
-    done   : usize
-) Res<(), AllocError>
-
-json_primitive = (
-    be     :: CBackend,
-    id     : ExprId,
-    name   : str,
-    value  : str,
-    buffer : str,
-    ret    : TyId,
-    result : str,
-    done   : usize
-) Res<(), AllocError>
-
-json_named = (
-    be     :: CBackend,
-    id     : ExprId,
-    ty     : TyId,
-    named  : TyNamed,
-    value  : str,
-    buffer : str,
-    ret    : TyId,
-    result : str,
-    done   : usize
-) Res<(), AllocError>
-
-json_record = (
-    be     :: CBackend,
-    id     : ExprId,
-    ty     : TyId,
-    named  : TyNamed,
-    value  : str,
-    buffer : str,
-    ret    : TyId,
-    result : str,
-    done   : usize
-) Res<(), AllocError>
-
-json_fields = (
-    be     :: CBackend,
-    id     : ExprId,
-    ty     : TyId,
-    named  : TyNamed,
-    record : Struct,
-    value  : str,
-    buffer : str,
-    ret    : TyId,
-    result : str,
-    done   : usize
-) Res<(), AllocError>
-
-json_raw = (
-    be     :: CBackend,
-    raw    : str,
-    buffer : str,
-    ret    : TyId,
-    result : str,
-    done   : usize
-) Res<(), AllocError>
-
-json_write = (
-    be     :: CBackend,
-    helper : str,
-    buffer : str,
-    value  : str,
-    ret    : TyId,
-    result : str,
-    done   : usize
-) Res<(), AllocError>
-
 json_helper = (be :: CBackend, name: str) Res<Res<Def>, AllocError>
 
 json_helper_ret = (be :: CBackend, d: Def) Res<TyId, AllocError>
-
-json_unsupported = (
-    be     :: CBackend,
-    id     : ExprId,
-    buffer : str,
-    ret    : TyId,
-    result : str,
-    done   : usize
-) Res<(), AllocError>
 ```
 
 #### Constants
@@ -7179,7 +7126,7 @@ plain_ctx, return_type = gen.gen_c.gen_c_decl
 
 ### `src/gen/gen_c/gen_c_member.zen`
 
-102 declarations (types: 2, enums: 1, functions: 52, imports and re-exports: 47).
+101 declarations (types: 3, enums: 1, functions: 50, imports and re-exports: 47).
 
 #### Types
 
@@ -7195,6 +7142,19 @@ Site* = {
     decl*: DeclId,
     qname*: str,
     generic*: bool,
+}
+
+MethodCallSite = {
+    dot: Dot,
+    site: Site,
+    function: Function,
+    inst: Inst,
+    sig: Vec<TyId>,
+    ctx: Ctx,
+    emit = (self: @Self, be :: CBackend, out :: String)
+           Res<(), AllocError>
+    write = (self: @Self, be :: CBackend, out :: String)
+            Res<(), AllocError>
 }
 ```
 
@@ -7409,23 +7369,13 @@ lower_method = (
 )
                Res<(), AllocError>
 
-lower_ordinary_method = (
+settle_method_call = (
     be  :: CBackend,
     d   : Dot,
     s   : Site,
     f   : Function,
-    ctx : Ctx,
-    out :: String
-) Res<(), AllocError>
-
-write_method_call = (
-    be  :: CBackend,
-    d   : Dot,
-    s   : Site,
-    f   : Function,
-    ctx : Ctx,
-    out :: String
-) Res<(), AllocError>
+    ctx : Ctx
+) Res<MethodCallSite, AllocError>
 
 method_call_sig = (
     be   :: CBackend,
@@ -7437,17 +7387,6 @@ method_call_sig = (
 
 method_inst = (be :: CBackend, d: Dot, s: Site, f: Function, ctx: Ctx)
               Res<Inst, AllocError>
-
-emit_method_call = (
-    be   :: CBackend,
-    d    : Dot,
-    s    : Site,
-    f    : Function,
-    sig  : Vec<TyId>,
-    inst : Inst,
-    ctx  : Ctx,
-    out  :: String
-) Res<(), AllocError>
 
 member_symbol* = (
     be   :: CBackend,
@@ -8404,7 +8343,7 @@ Site, site_of, method_sig, member_symbol = gen.gen_c.gen_c_member
 
 ### `src/gen/gen_c/gen_c_print.zen`
 
-68 declarations (types: 1, enums: 1, functions: 49, constants: 3, imports and re-exports: 14).
+69 declarations (types: 1, enums: 1, functions: 50, constants: 3, imports and re-exports: 14).
 
 #### Types
 
@@ -8447,6 +8386,12 @@ lower_console_print* = (
     ret  : TyId,
     ctx  : Ctx,
     out  :: String
+) Res<(), AllocError>
+
+lower_console_flush* = (
+    be  :: CBackend,
+    ret : TyId,
+    out :: String
 ) Res<(), AllocError>
 
 write_pieces = (
@@ -11427,7 +11372,58 @@ settled = gen.gen_c.gen_c_settle
 
 ### `src/gen/gen_c/gen_c_try.zen`
 
-88 declarations (enums: 1, functions: 64, imports and re-exports: 23).
+67 declarations (types: 1, enums: 1, functions: 42, imports and re-exports: 23).
+
+#### Types
+
+```zen
+TryPropagation = {
+    node: Expr,
+    source: TyRes,
+    target: TyRes,
+    tmp: str,
+    ctx: Ctx,
+    unwind: usize,
+    keep: str,
+    map = (self: @Self, be :: CBackend, mapper: ExprId)
+          Res<(), AllocError>
+    lower_mapper = (self: @Self, be :: CBackend, lam: Lambda, mapped: str,
+                    unit: bool) Res<(), AllocError>
+    write_mapped_return = (self: @Self, be :: CBackend, mapped: str,
+                           unit: bool) Res<(), AllocError>
+    unwind_frame = (self: @Self, be :: CBackend) Res<(), AllocError>
+    propagate = (self: @Self, be :: CBackend) Res<(), AllocError>
+    propagate_failure = (self: @Self, be :: CBackend)
+                        Res<(), AllocError>
+    propagate_error = (self: @Self, be :: CBackend)
+                      Res<(), AllocError>
+    propagate_wider = (self: @Self, be :: CBackend)
+                      Res<(), AllocError>
+    widen_or_report = (self: @Self, be :: CBackend)
+                      Res<(), AllocError>
+    widen_into_enum = (self: @Self, be :: CBackend)
+                      Res<(), AllocError>
+    widen_into_set = (self: @Self, be :: CBackend)
+                     Res<(), AllocError>
+    retag_or_report = (self: @Self, be :: CBackend)
+                      Res<(), AllocError>
+    write = (self: @Self, be :: CBackend, into: Carry)
+            Res<(), AllocError>
+    write_built = (self: @Self, be :: CBackend, into: Carry)
+                  Res<(), AllocError>
+    write_copy = (self: @Self, be :: CBackend) Res<(), AllocError>
+    write_retag = (self: @Self, be :: CBackend) Res<(), AllocError>
+    write_carrier_decl = (self: @Self, be :: CBackend, carrier: str)
+                         Res<(), AllocError>
+    failure_tag = (self: @Self, out :: String) Res<(), AllocError>
+    carry_error = (self: @Self, be :: CBackend, into: Carry,
+                   out :: String) Res<(), AllocError>
+    write_err_init = (self: @Self, be :: CBackend, into: Carry,
+                      out :: String) Res<(), AllocError>
+    write_tag_map = (self: @Self, be :: CBackend, carrier: str)
+                    Res<(), AllocError>
+}
+```
 
 #### Enums
 
@@ -11444,19 +11440,6 @@ lower_try* = (
     node    : Expr,
     operand : ExprId,
     error   : Res<ExprId>,
-    ctx     : Ctx,
-    want    : TyId,
-    dst     : Dest
-) Res<(), AllocError>
-
-lower_try_res = (
-    be      :: CBackend,
-    id      : ExprId,
-    node    : Expr,
-    operand : ExprId,
-    error   : Res<ExprId>,
-    r       : TyRes,
-    rt      : TyId,
     ctx     : Ctx,
     want    : TyId,
     dst     : Dest
@@ -11481,116 +11464,15 @@ map_and_propagate = (
     ctx  : Ctx
 ) Res<(), AllocError>
 
-map_error = (
-    be   :: CBackend,
-    node : Expr,
-    map  : ExprId,
-    r    : TyRes,
-    want : TyRes,
-    tmp  : str,
-    ctx  : Ctx
-) Res<(), AllocError>
-
 try_lambda = (be: CBackend, id: ExprId) Res<Lambda>
-
-lower_try_mapper = (
-    be     :: CBackend,
-    l      : Lambda,
-    from   : TyId,
-    into   : TyId,
-    tmp    : str,
-    mapped : str,
-    unit   : bool,
-    ctx    : Ctx
-) Res<(), AllocError>
 
 bind_try_error = (be :: CBackend, p: Param, ty: TyId, tmp: str)
                  Res<(), AllocError>
 
-write_mapped_return = (
-    be     :: CBackend,
-    want   : TyRes,
-    mapped : str,
-    unit   : bool,
-    ctx    : Ctx
-) Res<(), AllocError>
-
 propagate = (be :: CBackend, node: Expr, r: TyRes, tmp: str, ctx: Ctx)
             Res<(), AllocError>
 
-propagate_into = (
-    be   :: CBackend,
-    node : Expr,
-    r    : TyRes,
-    want : TyRes,
-    tmp  : str,
-    ctx  : Ctx
-) Res<(), AllocError>
-
-propagate_failure = (
-    be   :: CBackend,
-    node : Expr,
-    r    : TyRes,
-    want : TyRes,
-    tmp  : str,
-    ctx  : Ctx
-) Res<(), AllocError>
-
-propagate_error = (
-    be   :: CBackend,
-    node : Expr,
-    r    : TyRes,
-    want : TyRes,
-    tmp  : str,
-    ctx  : Ctx
-) Res<(), AllocError>
-
-propagate_wider = (
-    be   :: CBackend,
-    node : Expr,
-    r    : TyRes,
-    want : TyRes,
-    tmp  : str,
-    ctx  : Ctx
-) Res<(), AllocError>
-
 same_set = (be :: CBackend, got: TyId, want: TyId) bool
-
-widen_or_report = (
-    be   :: CBackend,
-    node : Expr,
-    r    : TyRes,
-    want : TyRes,
-    tmp  : str,
-    ctx  : Ctx
-) Res<(), AllocError>
-
-widen_into_enum = (
-    be   :: CBackend,
-    node : Expr,
-    r    : TyRes,
-    want : TyRes,
-    tmp  : str,
-    ctx  : Ctx
-) Res<(), AllocError>
-
-widen_into_set = (
-    be   :: CBackend,
-    node : Expr,
-    r    : TyRes,
-    want : TyRes,
-    tmp  : str,
-    ctx  : Ctx
-) Res<(), AllocError>
-
-retag_or_report = (
-    be   :: CBackend,
-    node : Expr,
-    r    : TyRes,
-    want : TyRes,
-    tmp  : str,
-    ctx  : Ctx
-) Res<(), AllocError>
 
 retaggable = (be :: CBackend, from_set: TyId, to_set: TyId) bool
 
@@ -11639,17 +11521,6 @@ collect_carrier = (
     found    :: Vec<str>
 ) Res<(), AllocError>
 
-keep_carrier = (
-    be    :: CBackend,
-    n     : TyNamed,
-    v     : Variant,
-    err   : TyId,
-    ctx   : Ctx,
-    inst  : Inst,
-    found :: Vec<str>
-)
-               Res<(), AllocError>
-
 carries = (
     be   :: CBackend,
     n    : TyNamed,
@@ -11663,30 +11534,6 @@ forms_agree = (got: ResForm, want: ResForm) bool
 
 report_widening = (be :: CBackend, node: Expr) Res<(), AllocError>
 
-write_propagation = (
-    be   :: CBackend,
-    r    : TyRes,
-    want : TyRes,
-    tmp  : str,
-    ctx  : Ctx,
-    into : Carry
-) Res<(), AllocError>
-
-write_built = (
-    be   :: CBackend,
-    r    : TyRes,
-    want : TyRes,
-    tmp  : str,
-    ctx  : Ctx,
-    into : Carry
-) Res<(), AllocError>
-
-write_copy = (be :: CBackend, r: TyRes, tmp: str, ctx: Ctx)
-             Res<(), AllocError>
-
-write_retag = (be :: CBackend, r: TyRes, want: TyRes, tmp: str, ctx: Ctx)
-              Res<(), AllocError>
-
 write_return = (be :: CBackend, w: str) Res<(), AllocError>
 
 write_payload_copy = (be :: CBackend, w: str, tmp: str) Res<(), AllocError>
@@ -11694,14 +11541,6 @@ write_payload_copy = (be :: CBackend, w: str, tmp: str) Res<(), AllocError>
 read_payload = (v: str, out :: String) Res<(), AllocError>
 
 read_tag = (v: str, out :: String) Res<(), AllocError>
-
-write_tag_map = (
-    be       :: CBackend,
-    from_set : TyId,
-    to_set   : TyId,
-    w        : str,
-    tmp      : str
-) Res<(), AllocError>
 
 open_switch = (be :: CBackend, tmp: str) Res<(), AllocError>
 
@@ -11722,29 +11561,8 @@ write_variant_tag = (be :: CBackend, set: TyId, m: TyId, out :: String)
 write_named_tag = (be :: CBackend, set: TyId, v: str, out :: String)
                   Res<(), AllocError>
 
-write_carrier_decl = (be :: CBackend, r: TyRes, w: str, ctx: Ctx)
-                     Res<(), AllocError>
-
 write_carrier_copy = (be :: CBackend, w: str, tmp: str)
                      Res<(), AllocError>
-
-failure_tag = (be :: CBackend, r: TyRes, out :: String) Res<(), AllocError>
-
-carry_error = (
-    be   :: CBackend,
-    want : TyRes,
-    tmp  : str,
-    into : Carry,
-    out  :: String
-) Res<(), AllocError>
-
-write_err_init = (
-    be   :: CBackend,
-    want : TyRes,
-    tmp  : str,
-    into : Carry,
-    out  :: String
-) Res<(), AllocError>
 
 read_error = (tmp: str, out :: String) Res<(), AllocError>
 
@@ -13307,7 +13125,7 @@ to_json = std.json
 
 ### `src/lsp/lsp_diag.zen`
 
-33 declarations (types: 3, implementations: 1, functions: 15, constants: 1, imports and re-exports: 13).
+34 declarations (types: 4, implementations: 1, functions: 15, constants: 1, imports and re-exports: 13).
 
 #### Types
 
@@ -13322,6 +13140,16 @@ Diagnostic = {
 Shared* = {
     c*: Res<Checker>,
     root*: str,
+}
+
+WorkspaceTurn = {
+    env: Env,
+    workspace: str,
+    uris: Vec<str>,
+    docs: Map<str, str>,
+    temp: Alloc,
+    root = (self: @Self, path: str) str
+    text = (self: @Self, uri: str) str
 }
 
 Diagnostics* = {
@@ -13345,27 +13173,25 @@ Diagnostics* = {
     settled* = (self :: @Self, env: Env, workspace: str, uris: Vec<str>,
                 docs: Map<str, str>, t: Alloc, out :: String)
                Res<(), AllocError>
-    clear_closed = (self :: @Self, env: Env, t: Alloc, uris: Vec<str>,
-                    docs: Map<str, str>, out :: String)
+    clear_closed = (self :: @Self, turn: WorkspaceTurn, out :: String)
                    Res<(), AllocError>
-    build_owed = (self :: @Self, env: Env, workspace: str, uris: Vec<str>,
-                  docs: Map<str, str>, t: Alloc, out :: String)
+    build_owed = (self :: @Self, turn: WorkspaceTurn, out :: String)
                  Res<(), AllocError>
-    told = (self :: @Self, env: Env, root: str, entry: str, uri: str,
-            uris: Vec<str>, docs: Map<str, str>, t: Alloc, out :: String)
+    told = (self :: @Self, turn: WorkspaceTurn, root: str, entry: str,
+            uri: str, out :: String)
            Res<(), AllocError>
-    say_all = (self :: @Self, env: Env, t: Alloc, uri: str, uris: Vec<str>,
-               docs: Map<str, str>, spots: Vec<Spot>, out :: String)
+    say_all = (self :: @Self, turn: WorkspaceTurn, uri: str,
+               spots: Vec<Spot>, out :: String)
               Res<(), AllocError>
     remember_showing = (self :: @Self, now: Vec<str>) Res<(), AllocError>
-    say_one = (self :: @Self, env: Env, t: Alloc, uri: str, uris: Vec<str>,
-               docs: Map<str, str>, spots: Vec<Spot>, out :: String)
+    say_one = (self :: @Self, turn: WorkspaceTurn, uri: str,
+               spots: Vec<Spot>, out :: String)
               Res<(), AllocError>
     send = (self :: @Self, env: Env, uri: str, body: String, out :: String)
            Res<(), AllocError>
-    take_back = (self :: @Self, env: Env, t: Alloc, uri: str, now: Vec<str>,
-                 uris: Vec<str>, docs: Map<str, str>, spots: Vec<Spot>,
-                 out :: String) Res<(), AllocError>
+    take_back = (self :: @Self, turn: WorkspaceTurn, uri: str,
+                 now: Vec<str>, spots: Vec<Spot>, out :: String)
+                Res<(), AllocError>
 }
 ```
 
@@ -18218,7 +18044,7 @@ type_from_ast = sema.sema_denote
 
 ### `src/sema/sema_match.zen`
 
-97 declarations (types: 3, enums: 1, functions: 76, imports and re-exports: 17).
+70 declarations (types: 4, enums: 1, functions: 48, imports and re-exports: 17).
 
 #### Types
 
@@ -18241,9 +18067,6 @@ Pats* = {
     norm_literal = (self :: @Self, node: Pattern, l: Literal)
                    Res<usize, AllocError>
     sub_index = (self :: @Self, head: Pat) Res<usize, AllocError>
-    complete = (self: @Self, has: bool, m: PatMatrix, cases: Vec<Case>) bool
-    all_roots_present = (self: @Self, m: PatMatrix, cases: Vec<Case>) bool
-    root_present = (self: @Self, m: PatMatrix, name: str) bool
 }
 
 PatMatrix* = {
@@ -18253,6 +18076,178 @@ PatMatrix* = {
     alloc: Alloc,
     at* = (self: @Self, r: usize, k: usize) usize
     add_row* = (self :: @Self, row: Vec<usize>) Res<(), AllocError>
+}
+
+MatchCoverage = {
+    pats :: Pats,
+    sty  : TyId,
+    check = (self :: @Self, c :: Checker, node: Expr, rows: Vec<usize>)
+            Res<(), AllocError>
+    run = (self :: @Self, c :: Checker, node: Expr, rows: Vec<usize>)
+          Res<(), AllocError>
+    check_reachable = (self :: @Self, c :: Checker, rows: Vec<usize>)
+                      Res<(), AllocError>
+    arm_reachable = (self :: @Self, c :: Checker, rows: Vec<usize>, i: usize)
+                    Res<(), AllocError>
+    report_unreachable = (
+        self :: @Self,
+        c    :: Checker,
+        rows : Vec<usize>,
+        i    : usize
+    ) Res<(), AllocError>
+    check_exhaustive = (
+        self :: @Self,
+        c    :: Checker,
+        node : Expr,
+        rows : Vec<usize>
+    ) Res<(), AllocError>
+    report_not_exhaustive = (
+        self :: @Self,
+        c    :: Checker,
+        node : Expr,
+        m    : PatMatrix
+    ) Res<(), AllocError>
+    first_uncovered = (
+        self  :: @Self,
+        c     :: Checker,
+        m     : PatMatrix,
+        cases : Vec<Case>
+    ) Res<str, AllocError>
+    case_open = (self :: @Self, c :: Checker, m: PatMatrix, cs: Case)
+                Res<bool, AllocError>
+    case_pattern = (self :: @Self, cs: Case) Res<usize, AllocError>
+    useful = (
+        self  :: @Self,
+        c     :: Checker,
+        m     : PatMatrix,
+        q     : Vec<usize>,
+        types : Vec<TyId>
+    ) Res<bool, AllocError>
+    useful_head = (
+        self  :: @Self,
+        c     :: Checker,
+        m     : PatMatrix,
+        q     : Vec<usize>,
+        types : Vec<TyId>
+    ) Res<bool, AllocError>
+    useful_ctor = (
+        self  :: @Self,
+        c     :: Checker,
+        m     : PatMatrix,
+        q     : Vec<usize>,
+        types : Vec<TyId>,
+        head  : Pat
+    ) Res<bool, AllocError>
+    useful_lit = (
+        self  :: @Self,
+        c     :: Checker,
+        m     : PatMatrix,
+        q     : Vec<usize>,
+        types : Vec<TyId>,
+        head  : Pat
+    ) Res<bool, AllocError>
+    useful_wild = (
+        self  :: @Self,
+        c     :: Checker,
+        m     : PatMatrix,
+        q     : Vec<usize>,
+        types : Vec<TyId>
+    ) Res<bool, AllocError>
+    complete = (self: @Self, has: bool, m: PatMatrix, cases: Vec<Case>) bool
+    all_roots_present = (self: @Self, m: PatMatrix, cases: Vec<Case>) bool
+    root_present = (self: @Self, m: PatMatrix, name: str) bool
+    useful_split = (
+        self  :: @Self,
+        c     :: Checker,
+        m     : PatMatrix,
+        q     : Vec<usize>,
+        types : Vec<TyId>,
+        cases : Vec<Case>
+    ) Res<bool, AllocError>
+    useful_one_case = (
+        self  :: @Self,
+        c     :: Checker,
+        m     : PatMatrix,
+        q     : Vec<usize>,
+        types : Vec<TyId>,
+        cs    : Case
+    ) Res<bool, AllocError>
+    useful_default = (
+        self  :: @Self,
+        c     :: Checker,
+        m     : PatMatrix,
+        q     : Vec<usize>,
+        types : Vec<TyId>
+    ) Res<bool, AllocError>
+    specialise = (
+        self  :: @Self,
+        m     : PatMatrix,
+        name  : str,
+        arity : usize
+    ) Res<PatMatrix, AllocError>
+    spec_row = (
+        self  :: @Self,
+        out   :: PatMatrix,
+        m     : PatMatrix,
+        r     : usize,
+        name  : str,
+        arity : usize
+    ) Res<(), AllocError>
+    spec_wild = (
+        self  :: @Self,
+        out   :: PatMatrix,
+        m     : PatMatrix,
+        r     : usize,
+        arity : usize,
+        head  : Pat
+    ) Res<(), AllocError>
+    spec_ctor = (
+        self  :: @Self,
+        out   :: PatMatrix,
+        m     : PatMatrix,
+        r     : usize,
+        name  : str,
+        arity : usize,
+        head  : Pat
+    ) Res<(), AllocError>
+    spec_keep = (
+        self  :: @Self,
+        out   :: PatMatrix,
+        m     : PatMatrix,
+        r     : usize,
+        arity : usize,
+        head  : Pat
+    ) Res<(), AllocError>
+    specialise_lit = (self :: @Self, m: PatMatrix, text: str)
+                     Res<PatMatrix, AllocError>
+    lit_row = (
+        self :: @Self,
+        out  :: PatMatrix,
+        m    : PatMatrix,
+        r    : usize,
+        text : str
+    ) Res<(), AllocError>
+    default_matrix = (self :: @Self, m: PatMatrix)
+                     Res<PatMatrix, AllocError>
+    default_row = (
+        self :: @Self,
+        out  :: PatMatrix,
+        m    : PatMatrix,
+        r    : usize
+    ) Res<(), AllocError>
+    emit_row = (
+        self   :: @Self,
+        out    :: PatMatrix,
+        m      : PatMatrix,
+        r      : usize,
+        arity  : usize,
+        filler : usize
+    ) Res<(), AllocError>
+    prefix_matrix = (self :: @Self, rows: Vec<usize>, k: usize)
+                    Res<PatMatrix, AllocError>
+    one_row = (self :: @Self, rows: Vec<usize>, i: usize)
+              Res<Vec<usize>, AllocError>
+    one_ty = (self :: @Self) Res<Vec<TyId>, AllocError>
 }
 ```
 
@@ -18378,58 +18373,17 @@ check_coverage = (
 
 checkable* = (c: Checker, sty: TyId) bool
 
-run_coverage = (
-    c    :: Checker,
-    ps   :: Pats,
-    node : Expr,
-    sty  : TyId,
-    rows : Vec<usize>
-) Res<(), AllocError>
-
-check_reachable = (c :: Checker, ps :: Pats, sty: TyId, rows: Vec<usize>)
-                  Res<(), AllocError>
-
-arm_reachable = (
-    c    :: Checker,
-    ps   :: Pats,
-    sty  : TyId,
-    rows : Vec<usize>,
-    i    : usize
-) Res<(), AllocError>
-
-report_unreachable = (c :: Checker, ps :: Pats, rows: Vec<usize>, i: usize)
-                     Res<(), AllocError>
-
-check_exhaustive = (
-    c    :: Checker,
-    ps   :: Pats,
-    node : Expr,
-    sty  : TyId,
-    rows : Vec<usize>
-) Res<(), AllocError>
-
-report_not_exhaustive = (
-    c    :: Checker,
-    ps   :: Pats,
-    node : Expr,
-    sty  : TyId,
-    m    : PatMatrix
-) Res<(), AllocError>
-
-first_uncovered = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    sty   : TyId,
-    cases : Vec<Case>
-) Res<str, AllocError>
-
 pick_name = (take: bool, name: str, so_far: str) str
 
-case_open = (c :: Checker, ps :: Pats, m: PatMatrix, sty: TyId, cs: Case)
-            Res<bool, AllocError>
+head_is_ctor = (p: Pat, name: str) bool
 
-case_pattern = (c :: Checker, ps :: Pats, cs: Case) Res<usize, AllocError>
+payload_arity = (cs: Case) usize
+
+keeps_lit = (p: Pat, text: str) bool
+
+is_wild = (p: Pat) bool
+
+MatchCoverage = (pats :: Pats, sty: TyId) MatchCoverage
 
 useful* = (
     c     :: Checker,
@@ -18438,156 +18392,6 @@ useful* = (
     q     : Vec<usize>,
     types : Vec<TyId>
 ) Res<bool, AllocError>
-
-useful_head = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    q     : Vec<usize>,
-    types : Vec<TyId>
-) Res<bool, AllocError>
-
-useful_ctor = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    q     : Vec<usize>,
-    types : Vec<TyId>,
-    head  : Pat
-) Res<bool, AllocError>
-
-useful_lit = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    q     : Vec<usize>,
-    types : Vec<TyId>,
-    head  : Pat
-) Res<bool, AllocError>
-
-useful_wild = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    q     : Vec<usize>,
-    types : Vec<TyId>
-) Res<bool, AllocError>
-
-head_is_ctor = (p: Pat, name: str) bool
-
-useful_split = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    q     : Vec<usize>,
-    types : Vec<TyId>,
-    cases : Vec<Case>
-) Res<bool, AllocError>
-
-useful_one_case = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    q     : Vec<usize>,
-    types : Vec<TyId>,
-    cs    : Case
-) Res<bool, AllocError>
-
-useful_default = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    q     : Vec<usize>,
-    types : Vec<TyId>
-) Res<bool, AllocError>
-
-payload_arity = (cs: Case) usize
-
-specialise = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    name  : str,
-    arity : usize
-) Res<PatMatrix, AllocError>
-
-spec_row = (
-    c     :: Checker,
-    ps    :: Pats,
-    out   :: PatMatrix,
-    m     : PatMatrix,
-    r     : usize,
-    name  : str,
-    arity : usize
-) Res<(), AllocError>
-
-spec_wild = (
-    c     :: Checker,
-    ps    :: Pats,
-    out   :: PatMatrix,
-    m     : PatMatrix,
-    r     : usize,
-    arity : usize,
-    head  : Pat
-) Res<(), AllocError>
-
-spec_ctor = (
-    c     :: Checker,
-    ps    :: Pats,
-    out   :: PatMatrix,
-    m     : PatMatrix,
-    r     : usize,
-    name  : str,
-    arity : usize,
-    head  : Pat
-)
-            Res<(), AllocError>
-
-spec_keep = (
-    c     :: Checker,
-    ps    :: Pats,
-    out   :: PatMatrix,
-    m     : PatMatrix,
-    r     : usize,
-    arity : usize,
-    head  : Pat
-) Res<(), AllocError>
-
-specialise_lit = (c :: Checker, ps :: Pats, m: PatMatrix, text: str)
-                 Res<PatMatrix, AllocError>
-
-lit_row = (
-    c    :: Checker,
-    ps   :: Pats,
-    out  :: PatMatrix,
-    m    : PatMatrix,
-    r    : usize,
-    text : str
-) Res<(), AllocError>
-
-keeps_lit = (p: Pat, text: str) bool
-
-default_matrix = (c :: Checker, ps :: Pats, m: PatMatrix)
-                 Res<PatMatrix, AllocError>
-
-default_row = (
-    c   :: Checker,
-    ps  :: Pats,
-    out :: PatMatrix,
-    m   : PatMatrix,
-    r   : usize
-) Res<(), AllocError>
-
-is_wild = (p: Pat) bool
-
-emit_row = (
-    c      :: Checker,
-    out    :: PatMatrix,
-    m      : PatMatrix,
-    r      : usize,
-    arity  : usize,
-    filler : usize
-) Res<(), AllocError>
 
 arm_types = (
     c    :: Checker,
@@ -18654,14 +18458,6 @@ lit_pat = (text: str, span: Span) Pat
 row_at = (v: Vec<usize>, i: usize) usize
 
 head_ty = (types: Vec<TyId>) TyId
-
-prefix_matrix = (c :: Checker, rows: Vec<usize>, k: usize)
-                Res<PatMatrix, AllocError>
-
-one_row = (c :: Checker, rows: Vec<usize>, i: usize)
-          Res<Vec<usize>, AllocError>
-
-one_ty = (c :: Checker, sty: TyId) Res<Vec<TyId>, AllocError>
 
 append_tail = (out :: Vec<usize>, src: Vec<usize>) Res<(), AllocError>
 
@@ -21407,6 +21203,7 @@ Alloc = std.mem
 Ref*<A> = {
     id: u64,
     stop* = (self: @Self) ()
+    join* = (self: @Self) ()
 }
 
 Actor* = {}
@@ -23548,6 +23345,7 @@ Res = std.core.result
 ```zen
 Console* = {
     println* = (self: @Self, fmt: str, args: ...) Res<(), IoError>
+    flush* = (self: @Self) Res<(), IoError>
     errorln* = (self: @Self, fmt: str, args: ...) Res<(), IoError>
 }
 
@@ -25052,6 +24850,7 @@ H2Client* = {
     post_stream* = <R: Actor + Receive<H2Chunk>>(
         self     :: @Self,
         a        : Alloc,
+        headers  : Vec<str>,
         body     : str,
         receiver : Ref<R>
     ) Res<(), H2StreamError>
@@ -26443,7 +26242,7 @@ block_expr = std.parse.parse_stmt
 
 ### `src/std/parse/parse_member.zen`
 
-31 declarations (functions: 22, imports and re-exports: 9).
+29 declarations (functions: 20, imports and re-exports: 9).
 
 #### Functions
 
@@ -26527,10 +26326,6 @@ fn_member = (
 ) Res<MemberKind, AllocError>
 
 member_value = (p :: Parser) Res<Res<ExprId>, AllocError>
-
-has_value* = (p: Parser, value: Res<ExprId>) bool
-
-the_value* = (p: Parser, value: Res<ExprId>) ExprId
 
 params_list* = (p :: Parser, out :: Vec<Param>) Res<Span, AllocError>
 
