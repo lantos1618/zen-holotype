@@ -1,5 +1,4 @@
-// src/std/proc/proc.c
-// Process execution and capture floor for std.proc.
+/* Native process execution and capture floor for std.proc. */
 
 #define _GNU_SOURCE
 #include <errno.h>
@@ -12,7 +11,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-/* Matches the Zen runtime's string spelling. */
+/* Must match the generated C representation of `str`. */
 typedef struct zg_str {
     unsigned char *data;
     size_t len;
@@ -214,7 +213,6 @@ run_captured(const char *cwd, const char *file, char *const argv[],
 
     if (posix_spawnp(&pid, file, &fa, NULL, argv, environ) != 0) goto done;
 
-    /* Parent: close write ends and read. */
     close(out_pipe[1]); out_pipe[1] = -1;
     close(err_pipe[1]); err_pipe[1] = -1;
 
@@ -227,7 +225,7 @@ run_captured(const char *cwd, const char *file, char *const argv[],
     close(err_pipe[0]); err_pipe[0] = -1;
 
     if (wait_for(pid, &status) != 0) { ret = 2; goto done; }
-    pid = -1; /* reaped */
+    pid = -1;
 
     *code_out = exit_code(status);
 
@@ -258,7 +256,7 @@ done:
     return ret;
 }
 
-/* 0 = ok, 1 = SpawnFailed, 2 = WaitFailed, 3 = ReadFailed */
+/* Return ordinals match ProcError in src/std/proc/proc.zen. */
 int32_t
 zg_proc_run(zg_str cwd, zg_str cmd,
             int32_t *code_out,

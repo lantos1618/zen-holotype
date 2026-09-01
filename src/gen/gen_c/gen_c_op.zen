@@ -598,24 +598,10 @@ plain_level = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
     })
 }
 
-// A comparison's operands lower at their own types, never at `want`.
-// Up here a comparison's `want` is the bool the comparison produces --
-// the print sugar's argument type, a binding's slot type -- and an
-// operand handed it declared its spill temporary at `bool`. So
-// `true.match({ true => 300, false => 102 }) > 299` stored both arms
-// into one byte, read 1 back, and answered 1 > 299 (issue #724): exit
-// 0, a plausible false, every branch such a comparison picks chosen
-// wrongly. Arithmetic never met this because its result type is its
-// operand type; a comparison's is not.
-// Sema has already agreed the whole program by the time gen_c runs, so
-// an operand's own reading wins -- taken verbatim, literal spelling
-// included: two unsuffixed literals are `int` (`c_prim` spells it
-// int64_t), the same answer `sema_join.arith_type` gives the pair when
-// nothing settles it, and C's usual conversions settle the rest at the
-// operator itself. Only when sema answered nothing (`Unknown`, a call
-// result through std) is `want` still the hint -- and a spilling form
-// standing there is refused as unsettled rather than lowered at it, so
-// this fallback cannot pick a wrong width silently.
+// Comparison operands use their own settled types; `want` describes the bool
+// result and must not determine operand storage. When sema has no operand type,
+// the contextual type is only a fallback, and an unsettled spilling form is
+// refused rather than assigned a guessed width.
 comparison_level = (be :: CBackend, b: Binary, ctx: Ctx, want: TyId)
                    Res<TyId, AllocError> {
     lhs = sub(be, be.check.type_of(b.lhs, ctx).try()).try();
