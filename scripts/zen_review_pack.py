@@ -11,6 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SNAPSHOTS = ROOT / "docs" / "source_health"
+PACKS = ROOT / "build" / "source_health"
 
 
 def source_path(relative: str) -> Path:
@@ -115,11 +116,12 @@ def main() -> int:
         options.ranked_files,
     )
     document = render(options.label, snapshot["revision"], selected)
-    output = SNAPSHOTS / f"{options.label}-context.md"
+    output = PACKS / f"{options.label}-context.md"
     if options.check:
         if not output.is_file() or output.read_text() != document:
             raise SystemExit(f"stale source review pack: {output}")
     else:
+        PACKS.mkdir(parents=True, exist_ok=True)
         output.write_text(document)
     print(
         f"{len(selected)} files, {sum(lines for _, _, lines in selected)} lines"

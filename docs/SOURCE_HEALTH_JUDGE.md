@@ -5,12 +5,13 @@ standard-library cleanup. You did not author this code. Do not reward motion,
 line deletion, lower metrics, or the recommendations from the prior round by
 default.
 
-Read the current exhaustive signature inventory, deterministic health report,
-ownership/style rules, current implementation audit, and previous external
-review when supplied. Rank the next bounded implementation lanes by examining
-the concrete signatures and dependency direction. A bounded source-body pack
-is also supplied: inspect its actual bodies and comments for complexity and
-bugs instead of inferring them from signatures.
+Read the deterministic whole-tree health report, ownership/style rules,
+current implementation audit, and previous external review when supplied.
+Rank the next bounded implementation lanes by examining concrete signatures
+and dependency direction. A bounded source-body pack is supplied for normal
+rounds: inspect its actual bodies and comments for complexity and bugs instead
+of inferring them from signatures. The exhaustive inventory selects this
+partition but is intentionally not repeated in the same context.
 
 For every proposed lane, ask:
 
@@ -56,7 +57,7 @@ count, or moving complexity out of the measured tree.
 
 Return:
 
-1. A ranked list of at most ten next lanes. Each lane must name exact files,
+1. A ranked list of at most six next lanes. Each lane must name exact files,
    signatures or types, the proposed owner, and the smallest safe behavioral
    boundary.
 2. A separate list of likely bugs, with evidence and confidence.
@@ -66,5 +67,8 @@ Return:
    movement, regression, or inconclusive, with reasons.
 5. Three suggested non-overlapping agent assignments for the next wave.
 
-Do not produce generic refactoring advice. If body inspection is required,
-say exactly which function chain must be read before implementation.
+Use exactly those five sections, stay under 1,800 words, and do not spend space
+restating the input documents or constructing a debate between them. Do not
+produce generic refactoring advice. If body inspection is required, say
+exactly which function chain must be read before implementation. An answer
+that truncates before section five is invalid.

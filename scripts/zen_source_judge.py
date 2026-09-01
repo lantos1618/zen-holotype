@@ -15,6 +15,7 @@ STYLE = ROOT / "docs" / "STYLE.md"
 AUDIT = ROOT / "docs" / "SOURCE_OWNERSHIP_AUDIT.md"
 PROMPT = ROOT / "docs" / "SOURCE_HEALTH_JUDGE.md"
 SNAPSHOTS = ROOT / "docs" / "source_health"
+PACKS = ROOT / "build" / "source_health"
 MODEL = "gemini-3.7-flash"
 
 
@@ -31,10 +32,12 @@ def main() -> int:
     args.add_argument("--gemini", default="gemini")
     options = args.parse_args()
 
-    contexts = [INVENTORY, HEALTH, STYLE, AUDIT]
-    body_pack = SNAPSHOTS / f"{options.label}-context.md"
+    contexts = [HEALTH, STYLE, AUDIT]
+    body_pack = PACKS / f"{options.label}-context.md"
     if body_pack.is_file():
         contexts.append(body_pack)
+    else:
+        contexts.append(INVENTORY)
     previous = previous_review(options.label)
     if previous is not None:
         contexts.append(previous)
@@ -46,8 +49,10 @@ def main() -> int:
         options.gemini,
         "-m",
         MODEL,
-        "-r",
-        "judge",
+        "-s",
+        "You are an independent source-architecture judge. Follow the supplied "
+        "review schema exactly, ground every finding in the supplied code, and "
+        "stay under 1800 words.",
         "-t",
         "0.2",
         "--max",

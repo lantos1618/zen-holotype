@@ -17,12 +17,12 @@ The corresponding decisions are in
 | Item | Count |
 | --- | ---: |
 | Zen files | 227 |
-| Top-level declarations | 7198 |
-| Types | 363 |
+| Top-level declarations | 7188 |
+| Types | 366 |
 | Enums | 94 |
 | Aliases | 0 |
 | Implementations | 76 |
-| Functions | 4021 |
+| Functions | 4008 |
 | Constants | 175 |
 | Imports and re-exports | 2469 |
 
@@ -2761,7 +2761,30 @@ call_callee = sema.sema_call
 
 ### `src/gen/gen_c/gen_c_cap.zen`
 
-48 declarations (enums: 1, functions: 23, imports and re-exports: 24).
+45 declarations (types: 1, enums: 1, functions: 19, imports and re-exports: 24).
+
+#### Types
+
+```zen
+CapabilityCall* = {
+    kind: CapabilityKind,
+    id: ExprId,
+    call: Call,
+    access: Access,
+    receiver_ty: TyId,
+    module: usize,
+    function: Function,
+    ctx: Ctx,
+    want: TyId,
+    lower = (self: @Self, be :: CBackend, out :: String)
+            Res<(), AllocError>
+    lower_typed = (self: @Self, be :: CBackend, ret: TyId,
+                   out :: String) Res<(), AllocError>
+    parameter_type = (self: @Self, be :: CBackend)
+                     Res<TyId, AllocError>
+    return_type = (self: @Self, be :: CBackend) Res<TyId, AllocError>
+}
+```
 
 #### Enums
 
@@ -2797,51 +2820,8 @@ owner_of = (be :: CBackend, rty: TyId) str
 
 capability_owner = (be :: CBackend, n: TyNamed) str
 
-lower_capability* = (
-    be   :: CBackend,
-    kind : CapabilityKind,
-    id   : ExprId,
-    c    : Call,
-    a    : Access,
-    rty  : TyId,
-    mi   : usize,
-    f    : Function,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError>
-
-lower_typed_capability = (
-    be   :: CBackend,
-    kind : CapabilityKind,
-    id   : ExprId,
-    c    : Call,
-    a    : Access,
-    rty  : TyId,
-    mi   : usize,
-    f    : Function,
-    ctx  : Ctx,
-    out  :: String
-) Res<(), AllocError>
-
-cap_param = (be :: CBackend, rty: TyId, mi: usize, f: Function)
-            Res<TyId, AllocError>
-
-lower_capability_kind = (
-    be   :: CBackend,
-    kind : CapabilityKind,
-    id   : ExprId,
-    c    : Call,
-    a    : Access,
-    rty  : TyId,
-    ret  : TyId,
-    aty  : TyId,
-    ctx  : Ctx,
-    out  :: String
-) Res<(), AllocError>
-
-cap_ret = (be :: CBackend, rty: TyId, mi: usize, f: Function)
-          Res<TyId, AllocError>
+lower_capability* = (be :: CBackend, call: CapabilityCall, out :: String)
+                    Res<(), AllocError>
 
 lower_alloc = (
     be  :: CBackend,
@@ -6150,7 +6130,34 @@ recv_inst = gen.gen_c.gen_c_mono
 
 ### `src/gen/gen_c/gen_c_inline.zen`
 
-71 declarations (functions: 43, constants: 1, imports and re-exports: 27).
+64 declarations (types: 2, functions: 34, constants: 1, imports and re-exports: 27).
+
+#### Types
+
+```zen
+InlineExpansion = {
+    id: ExprId,
+    f: Function,
+    argv: Vec<ExprId>,
+    ptys: Vec<TyId>,
+    ret: TyId,
+    body_ctx: Ctx,
+    inst: Inst,
+    caller_ctx: Ctx,
+    run = (self: @Self, be :: CBackend, out :: String)
+          Res<(), AllocError>
+}
+
+InlineSite = {
+    param: Param,
+    value: ExprId,
+    ty: TyId,
+    home: usize,
+    check_home: usize,
+    ctx: Ctx,
+    bind = (self: @Self, be :: CBackend) Res<(), AllocError>
+}
+```
 
 #### Functions
 
@@ -6223,44 +6230,6 @@ inline_member = (
 )
                 Res<(), AllocError>
 
-run_called_body = (
-    be   :: CBackend,
-    id   : ExprId,
-    f    : Function,
-    argv : Vec<ExprId>,
-    ptys : Vec<TyId>,
-    ret  : TyId,
-    bctx : Ctx,
-    inst : Inst,
-    ctx  : Ctx,
-    out  :: String
-) Res<(), AllocError>
-
-run_settled = (
-    be   :: CBackend,
-    f    : Function,
-    argv : Vec<ExprId>,
-    ptys : Vec<TyId>,
-    ret  : TyId,
-    bctx : Ctx,
-    inst : Inst,
-    ctx  : Ctx,
-    out  :: String
-) Res<(), AllocError>
-
-run_block = (
-    be   :: CBackend,
-    f    : Function,
-    blk  : BlockId,
-    argv : Vec<ExprId>,
-    ptys : Vec<TyId>,
-    ret  : TyId,
-    bctx : Ctx,
-    inst : Inst,
-    ctx  : Ctx,
-    out  :: String
-) Res<(), AllocError>
-
 write_result = (be :: CBackend, keeps: bool, result: str, out :: String)
                Res<(), AllocError>
 
@@ -6271,67 +6240,10 @@ wants_value = (be :: CBackend, ret: TyId) bool
 open_temp = (be :: CBackend, ret: TyId, result :: String)
             Res<(), AllocError>
 
-bind_params = (
-    be    :: CBackend,
-    f     : Function,
-    argv  : Vec<ExprId>,
-    ptys  : Vec<TyId>,
-    home  : usize,
-    chome : usize,
-    ctx   : Ctx
-)
-              Res<(), AllocError>
-
-bind_param = (
-    be    :: CBackend,
-    f     : Function,
-    argv  : Vec<ExprId>,
-    ptys  : Vec<TyId>,
-    i     : usize,
-    home  : usize,
-    chome : usize,
-    ctx   : Ctx
-) Res<(), AllocError>
-
-bind_valued = (
-    be    :: CBackend,
-    p     : Param,
-    argv  : Vec<ExprId>,
-    ptys  : Vec<TyId>,
-    i     : usize,
-    home  : usize,
-    chome : usize,
-    ctx   : Ctx
-) Res<(), AllocError>
-
-bind_one = (
-    be    :: CBackend,
-    p     : Param,
-    value : ExprId,
-    pty   : TyId,
-    home  : usize,
-    chome : usize,
-    ctx   : Ctx
-) Res<(), AllocError>
-
-bind_closure = (
-    be    :: CBackend,
-    id    : ExprId,
-    p     : Param,
-    l     : Lambda,
-    pty   : TyId,
-    home  : usize,
-    chome : usize,
-    ctx   : Ctx
-) Res<(), AllocError>
-
 fn_parts = (be :: CBackend, pty: TyId, ptys :: Vec<TyId>)
            Res<TyId, AllocError>
 
 copy_fn_types = (ft: TyFn, ptys :: Vec<TyId>) Res<TyId, AllocError>
-
-bind_value = (be :: CBackend, p: Param, value: ExprId, pty: TyId, ctx: Ctx)
-             Res<(), AllocError>
 
 lower_closure_call* = (
     be   :: CBackend,
@@ -7991,7 +7903,7 @@ is_ptr_member, lower_ptr_member = gen.gen_c.gen_c_ptr
 
 lower_create, alloc_raw = gen.gen_c.gen_c_alloc
 
-CapabilityKind, capability_kind, lower_capability = gen.gen_c.gen_c_cap
+CapabilityCall, CapabilityKind, capability_kind, lower_capability = gen.gen_c.gen_c_cap
 
 is_fat = gen.gen_c.gen_c_fat
 
@@ -25376,14 +25288,9 @@ connect_stream* = (parsed: ParsedUrl, a: Alloc) Res<Stream, HttpError>
 
 write* = (self: Stream, bytes: str) Res<(), HttpError>
 
-read* = (
-    self : Stream,
-    a    : Alloc,
-    buf  :: Vec<u8>,
-    n    : usize
-) Res<usize, HttpError>
+read* = (self: Stream, buf :: Vec<u8>, n: usize) Res<usize, HttpError>
 
-read_eof* = (self: Stream, a: Alloc, buf :: Vec<u8>, n: usize)
+read_eof* = (self: Stream, buf :: Vec<u8>, n: usize)
             Res<usize, HttpError>
 
 close* = (self: Stream) ()
@@ -25851,12 +25758,7 @@ from_tls_err = (e: TlsError) H2Error
 
 stream_write* = (s: Stream, bytes: str) Res<(), H2Error>
 
-stream_read* = (
-    s   : Stream,
-    a   : Alloc,
-    buf :: Vec<u8>,
-    n   : usize
-) Res<usize, H2Error>
+stream_read* = (s: Stream, buf :: Vec<u8>, n: usize) Res<usize, H2Error>
 
 stream_close* = (s: Stream) ()
 
@@ -26218,12 +26120,10 @@ TlsStream* = {
     connect* = (a: Alloc, host: str, port: u16) Res<TlsStream, TlsError>
     connect_h2* = (a: Alloc, host: str, port: u16)
                   Res<TlsStream, TlsError>
-    alpn* = (self: @Self, a: Alloc, buf :: Vec<u8>)
-            Res<usize, TlsError>
+    alpn* = (self: @Self, buf :: Vec<u8>) Res<usize, TlsError>
     write* = (self: @Self, bytes: str) Res<(), TlsError>
-    read* = (self: @Self, a: Alloc, buf :: Vec<u8>, n: usize)
-            Res<usize, TlsError>
-    read_nonempty = (self: @Self, a: Alloc, buf :: Vec<u8>, n: usize)
+    read* = (self: @Self, buf :: Vec<u8>, n: usize) Res<usize, TlsError>
+    read_nonempty = (self: @Self, buf :: Vec<u8>, n: usize)
                     Res<usize, TlsError>
     close* = (self :: @Self) ()
 }
