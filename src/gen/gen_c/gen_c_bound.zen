@@ -6,18 +6,17 @@
 // only in the thunk built by `gen_c_fat`.
 
 ExprId = std.ast
-Function, Param, Access, Call, Arg, Impl, Member, TypeId = std.ast
+Function, Param, Access, Call, Arg, Impl, Member = std.ast
 AllocError = std.mem
 Vec = std.collections
 str, String = std.text
-Ast = std.ast
-ImplId = sema.sema_id
 Range = std.core
 TyId, TyNamed, TyRes, is_failure = sema.sema_ty
 Ctx = sema.sema_check
 Inst, has_var = sema.sema_inst
 self_ctx = sema.sema_member
 param_type = sema.sema_denote
+impl_bound_type = sema.sema_supply
 sym_member, sym_variant = gen.gen_name
 qualify = gen.gen_name
 RES_PATH = gen.gen_name
@@ -214,18 +213,9 @@ arm_head = (be :: CBackend, v: str, dst: TyId, out :: String)
     Ok(());
 }
 
-// Calls through the bound record use the implementation stored in the
-// receiver. Concrete receivers continue to call monomorphised functions
-// directly.
-// The value is the bound, so which function runs is decided by the
-// impl behind the receiver and nothing static can say which. Every
-// other call — a concrete-type receiver — is the impl's own function,
-// called directly and monomorphised.
-
-// A dynamic call is valid only when the bound member itself or at least one
-// implementation supplies a body. Otherwise every record would carry a null
-// slot. The check belongs at the call site: slots_of also describes capability
-// shapes whose bodiless members are lowered by another backend path.
+// Calls through a bound record dispatch through the receiver's slot. A call
+// is safe only when the member has a default or every implementation fills
+// that slot; optional hooks may otherwise be NULL for one receiver.
 lower_fat_call* = (
     be  :: CBackend,
     id  : ExprId,
@@ -237,103 +227,89 @@ lower_fat_call* = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    be.member_answered(f, rty, a.name.text).match({
+    be.member_answered(f, rty, a.name.text).try().match({
         false => be.unsupported(
             id,
             "a bodiless member of a bound used as a value",
             out
         ),
-        true  => be.lower_answered_call(id, c, a, rty, s, ctx, out),
+        true  => {
+            slots ::= be.alloc.Vec<Slot>();
+            be.slots_of(rty, slots).try();
+            pick_slot(slots, a.name.text, c.args.len).match({
+                None     => be.unsupported(
+                    id,
+                    "a call through a bound with no such member",
+                    out
+                ),
+                Ok(slot) => {
+                    dispatch = BoundDispatch(
+                        call: c,
+                        receiver: rty,
+                        site: s,
+                        slot: slot,
+                        ctx: ctx,
+                    );
+                    dispatch.lower(be, id, a, out)
+                },
+            })
+        },
     })
 }
 
-// Slot selection begins only after the member is known to have an
-// implementation, preventing a missing body from cascading into type-argument
-// diagnostics.
-lower_answered_call = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    rty : TyId,
-    s   : Site,
-    ctx : Ctx,
-    out :: String
-) Res<(), AllocError> {
-    slots ::= be.alloc.Vec<Slot>();
-    be.slots_of(rty, slots).try();
-    pick_slot(slots, a.name.text, c.args.len).match({
-        None     => be.unsupported(
-            id,
-            "a call through a bound with no such member",
-            out
-        ),
-        Ok(slot) => settle_call(be, id, c, a, rty, s, slot, ctx, out),
-    })
-}
-
-// A member is dispatchable when it carries a body or an impl supplies one.
-member_answered = (be :: CBackend, f: Function, rty: TyId, name: str) bool {
+// A default fills every record. A bodiless member is callable only when every
+// implementation fills it; "some implementation" permits a NULL call for all
+// the others.
+member_answered = (be :: CBackend, f: Function, rty: TyId, name: str)
+                  Res<bool, AllocError> {
     has_body(f).match({
-        true  => true,
+        true  => Ok(true),
         false => be.bound_answered(rty, name),
     })
 }
 
-// Whether any impl of this bound supplies the named member. Orphan impls are
-// forbidden, so the world tables contain every possible slot provider.
-bound_answered = (be :: CBackend, rty: TyId, name: str) bool {
-    b ::= be.owner_name(rty);
-    Range(0, be.check.world.count()).find((mi) {
-        be.table_answered(mi, b, name)
-    }).match({
-        None  => false,
-        Ok(_) => true,
-    })
+// Orphan impls are forbidden, so the world tables contain every possible slot
+// provider. `seen` keeps a bound with no implementations from passing
+// vacuously.
+bound_answered = (be :: CBackend, rty: TyId, name: str)
+                 Res<bool, AllocError> {
+    seen    ::= false;
+    missing ::= false;
+    Range(0, be.check.world.count()).loop((h, mi) {
+        be.check.world.table_at(mi).match({
+            None    => (),
+            Ok(tab) => tab.impls.loop((h, id) {
+                be.check.world.impl_at(be.tree, id).match({
+                    None     => (),
+                    Ok(impl) => be.impl_bound_matches(impl, mi, rty).try()
+                        .then(() {
+                            seen = true;
+                            (supplies_body(impl.members, name) == false)
+                                .then(() { missing = true; h.break(); });
+                        }),
+                });
+            }),
+        });
+        missing.then(() { h.break(); });
+    });
+    Ok(seen && !missing)
 }
 
-table_answered = (be :: CBackend, mi: usize, bound: str, name: str) bool {
-    be.check.world.table_at(mi).match({
-        None  => false,
-        Ok(t) => be.impls_answered(t.impls, bound, name),
-    })
+// Declaration identity distinguishes equally named bounds in different
+// modules without requiring their generic arguments to have settled yet.
+impl_bound_matches = (be :: CBackend, impl: Impl, mi: usize, rty: TyId)
+                     Res<bool, AllocError> {
+    bound = be.check.impl_bound_type(impl, mi).try();
+    Ok(be.same_bound_decl(bound, rty))
 }
 
-impls_answered = (be :: CBackend, ids: Vec<ImplId>, bound: str, name: str)
-                 bool {
-    Range(0, ids.len).find((i) {
-        ids.get(i).match({
-            None   => false,
-            Ok(id) => be.one_impl(id, bound, name),
-        })
-    }).match({
-        None  => false,
-        Ok(_) => true,
-    })
-}
-
-one_impl = (be :: CBackend, id: ImplId, bound: str, name: str) bool {
-    be.check.world.impl_at(be.tree, id).match({
-        None   => false,
-        Ok(im) => impl_supplies(be.tree, im, bound, name),
-    })
-}
-
-impl_supplies = (tree: Ast, im: Impl, bound: str, name: str) bool {
-    bound_of(tree, im.bound).eq(bound).match({
-        false => false,
-        true  => supplies_body(im.members, name),
-    })
-}
-
-// The bound name written at the impl site. An impl names its bound
-// bare (`X.impl(Alloc, ..)`); a parameterised bound would carry type
-// arguments this read ignores, which is right: the slot answers the
-// name, whatever the arguments settle to.
-bound_of = (tree: Ast, tid: TypeId) str {
-    tree.type_at(tid).kind.match({
-        Named(n) => n.name.text,
-        _        => "",
+same_bound_decl = (be: CBackend, a: TyId, b: TyId) bool {
+    be.check.types.at(a).match({
+        Named(x) => be.check.types.at(b).match({
+            Named(y) => x.decl.eq(y.decl),
+            _        => false,
+        }),
+        _        => false,
     })
 }
 
@@ -349,13 +325,6 @@ supplies_body = (members: Vec<Member>, name: str) bool {
     }).match({
         None  => false,
         Ok(_) => true,
-    })
-}
-
-owner_name = (be :: CBackend, rty: TyId) str {
-    be.check.types.at(rty).match({
-        Named(n) => n.name,
-        _        => "",
     })
 }
 
@@ -413,77 +382,161 @@ pick_slot = (slots: Vec<Slot>, name: str, args: usize) Res<Slot> {
     })
 }
 
-// Infer the member's type parameters from the arguments.
-// The slot is erased, so the element size the call hands it comes from
-// here — a parameter nothing settles is a refusal, not a `sizeof` of the
-// wrong thing.
-settle_call = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    a    : Access,
-    rty  : TyId,
-    s    : Site,
-    slot : Slot,
-    ctx  : Ctx,
-    out  :: String
-)
-              Res<(), AllocError> {
-    declared ::= be.alloc.Vec<TyId>();
-    targs    ::= be.alloc.Inst();
-    ret = be.read_slot(c, rty, s, slot, ctx, declared, targs).try();
-    be.targs_settled(slot, targs).match({
-        false => be.unsupported(
-            id,
-            "a call through a bound whose type arguments nothing settles",
-            out
-        ),
-        true  => be.emit_fat_call(
-            c,
-            a,
-            rty,
-            slot,
-            declared,
-            ret,
-            targs,
-            ctx,
-            out
-        ),
-    })
+// Facts fixed by slot selection and shared by type inference and emission.
+BoundDispatch = {
+    call: Call,
+    receiver: TyId,
+    site: Site,
+    slot: Slot,
+    ctx: Ctx,
+
+    settle = (self: @Self, be :: CBackend) Res<BoundCall, AllocError> {
+        owner ::= be.alloc.String().try();
+        qualify(owner, self.site.qname, self.slot.name).try();
+        sctx = be.check.self_ctx(
+            self.site.decl.module.to_usize(),
+            self.receiver
+        ).try();
+        mark = be.enter_struct_tparams(self.site.decl).try();
+        be.enter_tparams(self.slot.f.tparams, owner.view()).try();
+        declared ::= be.alloc.Vec<TyId>();
+        be.declared_params(self.slot.f, sctx, declared).try();
+        ret = be.declared_ret(self.slot.f, sctx).try();
+        targs ::= be.alloc.Inst();
+        infer_targs(be, self.call, declared, self.ctx, targs).try();
+        be.leave_tparams(mark).try();
+        Ok(BoundCall(
+            dispatch: self,
+            declared: declared,
+            ret: ret,
+            targs: targs,
+        ));
+    }
+
+    lower = (self: @Self, be :: CBackend, id: ExprId, a: Access,
+             out :: String) Res<(), AllocError> {
+        call = self.settle(be).try();
+        call.settled(be).match({
+            false => be.unsupported(
+                id,
+                "a call through a bound whose type arguments nothing settles",
+                out
+            ),
+            true  => call.emit(be, a, out),
+        })
+    }
+
+    result_type = (self: @Self, be :: CBackend)
+                  Res<Res<TyId>, AllocError> {
+        call = self.settle(be).try();
+        call.settled(be).match({
+            false => Ok(None),
+            true  => Ok(Ok(call.real_ret(be).try())),
+        })
+    }
 }
 
-// Read a slot using its declaration's parameter and return types.
-// return type as written, and what the arguments make of the member's
-// type parameters. `settle_call` writes the call from these,
-// `fat_ret_type` answers with them, and the two must not disagree — the
-// temporary's declared type and the type the call rebuilds to must
-// match or the C is rejected.
-read_slot = (
-    be       :: CBackend,
-    c        : Call,
-    rty      : TyId,
-    s        : Site,
-    slot     : Slot,
-    ctx      : Ctx,
-    declared :: Vec<TyId>,
-    targs    :: Inst
-)
-            Res<TyId, AllocError> {
-    owner ::= be.alloc.String().try();
-    qualify(owner, s.qname, slot.name).try();
-    sctx = be.check.self_ctx(s.decl.module.to_usize(), rty).try();
-    mark = be.enter_struct_tparams(s.decl).try();
-    be.enter_tparams(slot.f.tparams, owner.view()).try();
-    be.declared_params(slot.f, sctx, declared).try();
-    ret = be.declared_ret(slot.f, sctx).try();
-    infer_targs(be, c, declared, ctx, targs).try();
-    be.leave_tparams(mark).try();
-    Ok(ret);
+// Settlement owns the declared parameter vector, inferred type arguments and
+// declared return together until the call is emitted or its type is answered.
+BoundCall = {
+    dispatch: BoundDispatch,
+    declared: Vec<TyId>,
+    ret: TyId,
+    targs: Inst,
+
+    settled = (self: @Self, be: CBackend) bool {
+        be.targs_settled(self.dispatch.slot, self.targs)
+    }
+
+    real_ret = (self: @Self, be :: CBackend) Res<TyId, AllocError> {
+        be.sub_with(self.ret, self.targs)
+    }
+
+    // The receiver is evaluated once because the slot and `zg_self` both read
+    // it. Arguments are converted from settled declarations to erased slots.
+    emit = (self: @Self, be :: CBackend, a: Access, out :: String)
+           Res<(), AllocError> {
+        recv ::= be.alloc.String().try();
+        expr(be, a.base, self.dispatch.ctx, self.dispatch.receiver, recv).try();
+        r    ::= be.init_temp(self.dispatch.receiver, "t", recv.view()).try();
+        call ::= be.alloc.String().try();
+        call.fmt(
+            "{}.{}({}.zg_self",
+            r.view(),
+            self.dispatch.slot.sym.view(),
+            r.view()
+        ).try();
+        self.args(be, call).try();
+        self.sizes(be, call).try();
+        call.add(")").try();
+        self.result(be, call.view(), out)
+    }
+
+    args = (self: @Self, be :: CBackend, out :: String)
+           Res<(), AllocError> {
+        self.dispatch.call.args.loop((h, i, arg) {
+            hold = be.holds(self.dispatch.call, i + 1, 1);
+            self.arg(be, arg, i, hold, out).try();
+        });
+        Ok(())
+    }
+
+    arg = (self: @Self, be :: CBackend, arg: Arg, i: usize, hold: bool,
+           out :: String) Res<(), AllocError> {
+        want = be.sub_with(
+            self.declared.get(i).value_or(TyId(index: 0)),
+            self.targs
+        ).try();
+        text ::= be.alloc.String().try();
+        be.value_held(arg.value, self.dispatch.ctx, want, hold, text).try();
+        out.add(", ").try();
+        be.convert(
+            text.view(),
+            want,
+            self.dispatch.slot.params.get(i).value_or(TyId(index: 0)),
+            out
+        ).try();
+        Ok(())
+    }
+
+    sizes = (self: @Self, be :: CBackend, out :: String)
+            Res<(), AllocError> {
+        Range(0, self.targs.len()).loop((h, i) {
+            self.size(be, i, out).try();
+        });
+        Ok(())
+    }
+
+    size = (self: @Self, be :: CBackend, i: usize, out :: String)
+           Res<(), AllocError> {
+        self.targs.arg_at(i).match({
+            None  => out.add(", 1"),
+            Ok(t) => be.write_sizeof(t, out),
+        })
+    }
+
+    // Unit slots run for effect. Value slots rebuild the erased result at the
+    // settled return type.
+    result = (self: @Self, be :: CBackend, call: str, out :: String)
+             Res<(), AllocError> {
+        be.is_unit(self.dispatch.slot.ret).match({
+            true  => be.fat_effect(call, out),
+            false => self.value_back(be, call, out),
+        })
+    }
+
+    value_back = (self: @Self, be :: CBackend, call: str, out :: String)
+                 Res<(), AllocError> {
+        real = self.real_ret(be).try();
+        be.request_type(self.dispatch.slot.ret).try();
+        be.request_type(real).try();
+        tmp ::= be.init_temp(self.dispatch.slot.ret, "t", call).try();
+        be.convert(tmp.view(), self.dispatch.slot.ret, real, out)
+    }
 }
 
-// Determine the result type before writing a record call. Bound members are
-// not world declarations, so the type comes from the same read_slot and
-// substitution used when rebuilding the erased result.
+// Bound members are not world declarations. Their type must come from the
+// same settlement that rebuilds the erased result during emission.
 fat_ret_type* = (be :: CBackend, c: Call, a: Access, ctx: Ctx)
                 Res<Res<TyId>, AllocError> {
     unknown = be.check.types.unknown().try();
@@ -492,36 +545,16 @@ fat_ret_type* = (be :: CBackend, c: Call, a: Access, ctx: Ctx)
     be.slots_of(rty, slots).try();
     pick_slot(slots, a.name.text, c.args.len).match({
         None     => Ok(None),
-        Ok(slot) => be.slot_ret_type(c, rty, slot, ctx),
-    })
-}
-
-slot_ret_type = (be :: CBackend, c: Call, rty: TyId, slot: Slot, ctx: Ctx)
-                Res<Res<TyId>, AllocError> {
-    site_of(be, rty).try().match({
-        None  => Ok(None),
-        Ok(s) => be.settled_ret_type(c, rty, s, slot, ctx),
-    })
-}
-
-// An unsettled type argument yields no result type — the same refusal
-// `settle_call` makes one door along: the call it would describe is one
-// this backend goes on to refuse, so answering here would name a type
-// no call is ever written at.
-settled_ret_type = (
-    be   :: CBackend,
-    c    : Call,
-    rty  : TyId,
-    s    : Site,
-    slot : Slot,
-    ctx  : Ctx
-) Res<Res<TyId>, AllocError> {
-    declared ::= be.alloc.Vec<TyId>();
-    targs    ::= be.alloc.Inst();
-    ret = be.read_slot(c, rty, s, slot, ctx, declared, targs).try();
-    be.targs_settled(slot, targs).match({
-        false => Ok(None),
-        true  => Ok(Ok(be.sub_with(ret, targs).try())),
+        Ok(slot) => site_of(be, rty).try().match({
+            None       => Ok(None),
+            Ok(member) => BoundDispatch(
+                call: c,
+                receiver: rty,
+                site: member,
+                slot: slot,
+                ctx: ctx,
+            ).result_type(be),
+        }),
     })
 }
 
@@ -601,92 +634,6 @@ all_closed = (be: CBackend, targs: Inst) bool {
     }).match({ Ok(_) => false, None => true })
 }
 
-// `<r> = <the receiver>; <r>.<slot>(<r>.zg_self, <args>, sizeof(T)..)`
-// The receiver lands in a temporary: it is read twice — the slot and
-// the `void *` behind it — and read twice is evaluated twice.
-emit_fat_call = (
-    be       :: CBackend,
-    c        : Call,
-    a        : Access,
-    rty      : TyId,
-    slot     : Slot,
-    declared : Vec<TyId>,
-    ret      : TyId,
-    targs    : Inst,
-    ctx      : Ctx,
-    out      :: String
-) Res<(), AllocError> {
-    recv ::= be.alloc.String().try();
-    expr(be, a.base, ctx, rty, recv).try();
-    r    ::= be.init_temp(rty, "t", recv.view()).try();
-    call ::= be.alloc.String().try();
-    call.fmt("{}.{}({}.zg_self", r.view(), slot.sym.view(), r.view()).try();
-    be.fat_args(c, slot, declared, targs, ctx, call).try();
-    be.fat_sizes(targs, call).try();
-    call.add(")").try();
-    be.fat_result(slot, ret, targs, call.view(), out)
-}
-
-fat_args = (
-    be       :: CBackend,
-    c        : Call,
-    slot     : Slot,
-    declared : Vec<TyId>,
-    targs    : Inst,
-    ctx      : Ctx,
-    out      :: String
-) Res<(), AllocError> {
-    c.args.loop((h, i, arg) {
-        hold = be.holds(c, i + 1, 1);
-        be.fat_arg(arg, i, hold, slot, declared, targs, ctx, out).try();
-    });
-    Ok(());
-}
-
-// The argument at its declared type — which is what
-// turns an `Arena` into an `Alloc` one level down — then converted to
-// the erased type the slot carries.
-fat_arg = (
-    be       :: CBackend,
-    arg      : Arg,
-    i        : usize,
-    hold     : bool,
-    slot     : Slot,
-    declared : Vec<TyId>,
-    targs    : Inst,
-    ctx      : Ctx,
-    out      :: String
-)
-          Res<(), AllocError> {
-    want = be.sub_with(declared.get(i).value_or(TyId(index: 0)), targs).try();
-    text ::= be.alloc.String().try();
-    be.value_held(arg.value, ctx, want, hold, text).try();
-    out.add(", ").try();
-    be.convert(
-        text.view(),
-        want,
-        slot.params.get(i).value_or(TyId(index: 0)),
-        out
-    ).try();
-    Ok(());
-}
-
-// The element size the slot's erasure dropped, one per parameter, in
-// declaration order.
-fat_sizes = (be :: CBackend, targs: Inst, out :: String)
-            Res<(), AllocError> {
-    Range(0, targs.len()).loop((h, i) { be.fat_size(targs, i, out).try() });
-    Ok(());
-}
-
-fat_size = (be :: CBackend, targs: Inst, i: usize, out :: String)
-           Res<(), AllocError> {
-    targs.arg_at(i).match({
-        None  => out.add(", 1"),
-        Ok(t) => be.write_sizeof(t, out),
-    })
-}
-
 // Let C size concrete layouts; unit has no C object type and occupies one byte.
 write_sizeof* = (be :: CBackend, t: TyId, out :: String)
                Res<(), AllocError> {
@@ -701,38 +648,8 @@ write_sizeof* = (be :: CBackend, t: TyId, out :: String)
     })
 }
 
-// The slot answers at the erased type; the caller asked at its own. A
-// void-returning slot has nothing to rebuild and still has to run.
-fat_result = (
-    be    :: CBackend,
-    slot  : Slot,
-    ret   : TyId,
-    targs : Inst,
-    call  : str,
-    out   :: String
-) Res<(), AllocError> {
-    real = be.sub_with(ret, targs).try();
-    be.is_unit(slot.ret).match({
-        true  => be.fat_effect(call, out),
-        false => be.fat_value_back(slot, real, call, out),
-    })
-}
-
 fat_effect = (be :: CBackend, call: str, out :: String)
              Res<(), AllocError> {
     be.fmt("{call};\n").try();
     out.add("0")
-}
-
-fat_value_back = (
-    be   :: CBackend,
-    slot : Slot,
-    real : TyId,
-    call : str,
-    out  :: String
-) Res<(), AllocError> {
-    be.request_type(slot.ret).try();
-    be.request_type(real).try();
-    tmp ::= be.init_temp(slot.ret, "t", call).try();
-    be.convert(tmp.view(), slot.ret, real, out)
 }
