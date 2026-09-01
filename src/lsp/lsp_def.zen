@@ -336,17 +336,18 @@ found_defn = (c : Checker, a: Alloc, ty: TyId, name: str)
 }
 
 called_decl = (c : Checker, id: ExprId) Res<DeclId> {
-    eid ::= ExprId(index: 0);
-    hit ::= false;
-    did ::= DeclId(module: 0, decl: 0);
-    Range(0, c.tree.expr_ids()).loop((h, i) {
-        callee_of(c, eid, id).match({
-            None  => (),
-            Ok(d) => { hit = true; did = d; },
+    found: Res<DeclId> = loop((done) {
+        eid ::= ExprId(index: 0);
+        Range(0, c.tree.expr_ids()).loop((next, i) {
+            callee_of(c, eid, id).match({
+                None    => (),
+                Ok(did) => done.break(did),
+            });
+            eid = ExprId(index: eid.index + 1);
         });
-        eid = ExprId(index: eid.index + 1);
+        done.break();
     });
-    hit.match({ true => Ok(did), false => None })
+    found
 }
 
 callee_of = (c : Checker, eid: ExprId, id: ExprId) Res<DeclId> {
