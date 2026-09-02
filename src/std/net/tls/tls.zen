@@ -1,5 +1,6 @@
 // Safe TLS stream over OpenSSL. It owns verification, ALPN, IO, and the native
-// lifetime; build.zen supplies the ssl and crypto libraries.
+// lifetime; build.zen supplies the ssl and crypto libraries. Stream is the one
+// shape HTTP clients dial over plain TCP or TLS.
 
 Alloc, AllocError, Ptr, null_ptr = std.mem
 str = std.text
@@ -7,6 +8,7 @@ Res = std.core
 Drop = std.core
 Vec = std.collections
 Socket = std.net.socket
+TcpStream, TcpError = std.net.tcp
 
 SSL_VERIFY_PEER: i32 = 1
 SSL_CTRL_SET_TLSEXT_HOSTNAME: i32 = 55
@@ -154,11 +156,6 @@ TlsStream* = {
         tls_dial(a, host, port, false)
     }
 
-    connect_h2* = (a: Alloc, host: str, port: u16)
-                  Res<TlsStream, TlsError> {
-        tls_dial(a, host, port, true)
-    }
-
     alpn* = (self: @Self, buf :: Vec<u8>) Res<usize, TlsError> {
         self.open.ensure(TlsError.Closed).try();
         selected ::= self.alloc.Vec<Ptr<u8>>();
@@ -257,5 +254,65 @@ TlsStream* = {
 }
 
 TlsStream.impl(Drop, {
+    drop = (self :: @Self) () { self.close() }
+})
+
+// TlsError covers both transports' faults. The union owns the stream it
+// wraps: leaving scope closes it, and a `consume` into close disarms that
+// drop so the fd and SSL context are released once.
+Stream* = Tcp(TcpStream) | Tls(TlsStream)
+
+tls_error = (e: TcpError) TlsError {
+    e.match({
+        ConnectFailed => TlsError.ConnectFailed,
+        WriteFailed   => TlsError.WriteFailed,
+        ReadFailed    => TlsError.ReadFailed,
+        Closed        => TlsError.Closed,
+    })
+}
+
+// `h2` offers ALPN h2 on a secure dial and is ignored on a plain one.
+dial* = (a: Alloc, host: str, port: u16, secure: bool, h2: bool)
+        Res<Stream, TlsError> {
+    secure.match({
+        true  => tls_dial(a, host, port, h2).match({
+            Ok(s)  => Ok(Stream.Tls(s)),
+            Err(e) => Err(e),
+        }),
+        false => TcpStream.connect(a, host, port).match({
+            Ok(s)  => Ok(Stream.Tcp(s)),
+            Err(e) => Err(e.tls_error()),
+        }),
+    })
+}
+
+write* = (self: Stream, bytes: str) Res<(), TlsError> {
+    self.match({
+        Tcp(t) => t.write(bytes).match({
+            Ok(_)  => Ok(()),
+            Err(e) => Err(e.tls_error()),
+        }),
+        Tls(t) => t.write(bytes),
+    })
+}
+
+read* = (self: Stream, buf :: Vec<u8>, n: usize) Res<usize, TlsError> {
+    self.match({
+        Tcp(t) => t.read(buf, n).match({
+            Ok(got) => Ok(got),
+            Err(e)  => Err(e.tls_error()),
+        }),
+        Tls(t) => t.read(buf, n),
+    })
+}
+
+close* = (self: Stream) () {
+    self.match({
+        Tcp(t) => t.close(),
+        Tls(t) => t.close(),
+    })
+}
+
+Stream.impl(Drop, {
     drop = (self :: @Self) () { self.close() }
 })

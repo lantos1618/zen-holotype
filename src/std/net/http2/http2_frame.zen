@@ -1,18 +1,22 @@
-// HTTP/2 frame encoding, decoding, flags, and payload helpers.
+// HTTP/2 frame encoding, decoding, flags, and big-endian payload fields.
 
 Alloc = std.mem
 str, String = std.text
 Res = std.core
 Vec = std.collections
-H2Error, FrameType, FLAG_PADDED, FLAG_PRIORITY, MAX_RECV = std.net.http2.http2_types
-Stream, stream_write, read_n = std.net.http2.http2_transport
+H2Error, h2_error, FrameType, FLAG_PADDED, FLAG_PRIORITY, MAX_RECV = std.net.http2.http2_types
+Stream, read, write = std.net.tls
+
+FRAME_HEADER_LEN: usize = 9
+MAX_FRAME_LEN: usize = 16777215
+STREAM_ID_LIMIT: usize = 2147483648
 
 H2Range* = { from*: usize, len*: usize }
 
 Frame* = {
     ftype*:   FrameType,
     flags*:   u8,
-    sid*:     u32,
+    sid*:     usize,
     payload*: Vec<u8>,
 
     has_flag* = (self: @Self, flag: u8) bool {
@@ -34,34 +38,33 @@ Frame* = {
             }),
             _       => None,
         });
-        (from + pad > self.payload.len).match({
-            true  => Err(H2Error.DecodeFailed),
-            false => Ok(H2Range(
-                from: from,
-                len: self.payload.len - from - pad
-            )),
-        });
+        (from + pad <= self.payload.len).ensure(H2Error.DecodeFailed).try();
+        Ok(H2Range(from: from, len: self.payload.len - from - pad));
     }
+}
+
+read_n = (s: Stream, a: Alloc, buf :: Vec<u8>, n: usize) Res<(), H2Error> {
+    left ::= n;
+    (left > 0).loop((h) {
+        chunk ::= a.Vec<u8>();
+        got = s.read(chunk, left).try((e) { e.h2_error() });
+        (got > 0).ensure(H2Error.RecvFailed).try();
+        at = buf.len;
+        buf.grow_by(got).try(H2Error.RecvFailed);
+        buf.ptr().offset(at).copy_from(chunk.ptr(), got);
+        left = left - got;
+    });
+    Ok(());
 }
 
 read_frame* = (s: Stream, a: Alloc) Res<Frame, H2Error> {
     hdr ::= a.Vec<u8>();
-    s.read_n(a, hdr, 9).try();
+    s.read_n(a, hdr, FRAME_HEADER_LEN).try();
 
-    b0  = hdr.get(0).ok_or(H2Error.RecvFailed).try();
-    b1  = hdr.get(1).ok_or(H2Error.RecvFailed).try();
-    b2  = hdr.get(2).ok_or(H2Error.RecvFailed).try();
-    len = b0.to_usize() * 65536 + b1.to_usize() * 256 + b2.to_usize();
-    (len > MAX_RECV).match({
-        true  => Err(H2Error.ProtocolFailed),
-        false => Ok(()),
-    }).try();
-
-    b5  = hdr.get(5).ok_or(H2Error.RecvFailed).try();
-    b6  = hdr.get(6).ok_or(H2Error.RecvFailed).try();
-    b7  = hdr.get(7).ok_or(H2Error.RecvFailed).try();
-    b8  = hdr.get(8).ok_or(H2Error.RecvFailed).try();
-    sid = (b5.to_u32() % 128) * 16777216 + b6.to_u32() * 65536 + b7.to_u32() * 256 + b8.to_u32();
+    len = hdr.be_of(0, 3).replace_err(H2Error.RecvFailed).try();
+    (len <= MAX_RECV).ensure(H2Error.ProtocolFailed).try();
+    sid = hdr.be_of(5, 4).replace_err(H2Error.RecvFailed).try()
+        % STREAM_ID_LIMIT;
 
     payload ::= a.Vec<u8>();
     s.read_n(a, payload, len).try();
@@ -82,60 +85,57 @@ add_wire_byte = (out :: String, value: usize) Res<(), H2Error> {
     Ok(())
 }
 
+// The low `width` bytes of `value`, most significant first.
+add_be = (out :: String, value: usize, width: usize) Res<(), H2Error> {
+    Range(0, width).loop((h, i) {
+        shift = (width - 1 - i) * 8;
+        out.add_wire_byte((value / shift.pow2()) % 256).try();
+    });
+    Ok(())
+}
+
 write_frame* = (
     s       : Stream,
     a       : Alloc,
     ftype   : FrameType,
     flags   : u8,
-    sid     : u32,
+    sid     : usize,
     payload : str
 ) Res<(), H2Error> {
     len = payload.len;
-    (len > 16777215).match({
-        true  => Err(H2Error.ProtocolFailed),
-        false => Ok(()),
-    }).try();
+    (len <= MAX_FRAME_LEN).ensure(H2Error.ProtocolFailed).try();
 
     hdr ::= a.String().try(H2Error.SendFailed);
-    hdr.add_wire_byte(len / 65536).try();
-    hdr.add_wire_byte((len / 256) % 256).try();
-    hdr.add_wire_byte(len % 256).try();
+    hdr.add_be(len, 3).try();
     hdr.add(ftype.discriminant()).try(H2Error.SendFailed);
     hdr.add(flags).try(H2Error.SendFailed);
-    hdr.add_wire_byte((sid / 16777216).to_usize() % 128).try();
-    hdr.add_wire_byte((sid / 65536).to_usize() % 256).try();
-    hdr.add_wire_byte((sid / 256).to_usize() % 256).try();
-    hdr.add_wire_byte((sid % 256).to_usize()).try();
-    s.stream_write(hdr.view()).try();
+    hdr.add_be(sid % STREAM_ID_LIMIT, 4).try();
+    s.write(hdr.view()).try((e) { e.h2_error() });
     (len > 0).match({
-        true  => s.stream_write(payload),
+        true  => s.write(payload).map_err((e) { e.h2_error() }),
         false => Ok(()),
     });
 }
 
 settings_add* = (blk :: String, id: usize, val: usize) Res<(), H2Error> {
-    blk.add_wire_byte(id / 256).try();
-    blk.add_wire_byte(id % 256).try();
-    blk.add_wire_byte((val / 16777216) % 256).try();
-    blk.add_wire_byte((val / 65536) % 256).try();
-    blk.add_wire_byte((val / 256) % 256).try();
-    blk.add_wire_byte(val % 256).try();
-    Ok(());
+    blk.add_be(id, 2).try();
+    blk.add_be(val, 4)
 }
 
 u32_add* = (blk :: String, val: usize) Res<(), H2Error> {
-    blk.add_wire_byte((val / 16777216) % 256).try();
-    blk.add_wire_byte((val / 65536) % 256).try();
-    blk.add_wire_byte((val / 256) % 256).try();
-    blk.add_wire_byte(val % 256).try();
-    Ok(());
+    blk.add_be(val, 4)
+}
+
+// `width` big-endian bytes at `at`.
+be_of* = (payload: Vec<u8>, at: usize, width: usize) Res<usize, H2Error> {
+    n: usize ::= 0;
+    Range(at, at + width).loop((h, i) {
+        b: u8 = payload.get(i).ok_or(H2Error.DecodeFailed).try();
+        n     = n * 256 + b.to_usize();
+    });
+    Ok(n)
 }
 
 u31_of* = (payload: Vec<u8>, at: usize) Res<usize, H2Error> {
-    b0 = payload.get(at).ok_or(H2Error.DecodeFailed).try();
-    b1 = payload.get(at + 1).ok_or(H2Error.DecodeFailed).try();
-    b2 = payload.get(at + 2).ok_or(H2Error.DecodeFailed).try();
-    b3 = payload.get(at + 3).ok_or(H2Error.DecodeFailed).try();
-    Ok((b0.to_usize() % 128) * 16777216 + b1.to_usize() * 65536
-        + b2.to_usize() * 256 + b3.to_usize());
+    Ok(payload.be_of(at, 4).try() % STREAM_ID_LIMIT)
 }

@@ -5,6 +5,7 @@ Range, Res = std.core
 Sink, WriteError = std.core
 ActorError = std.actor
 Alloc, AllocError = std.mem
+TlsError = std.net.tls
 
 H2Error* = ConnectFailed
     | TlsFailed
@@ -15,14 +16,23 @@ H2Error* = ConnectFailed
     | Closed
     | Status(i32)
 
+h2_error* = (e: TlsError) H2Error {
+    e.match({
+        ConnectFailed => H2Error.ConnectFailed,
+        TlsFailed     => H2Error.TlsFailed,
+        WriteFailed   => H2Error.SendFailed,
+        ReadFailed    => H2Error.RecvFailed,
+        Closed        => H2Error.RecvFailed,
+    })
+}
+
 H2Response* = {
     status*: i32,
     body*:   String,
 }
 
-// Every variant is value-only and can cross a mailbox without borrowing the
-// decoder's arena. Informational responses are visible instead of being
-// silently discarded, and trailers need no sentinel status.
+// Value-only, so a head can cross a mailbox. Informational responses are
+// delivered; Trailers carries no status.
 H2Head* = Informational(i32) | Response(i32) | Trailers
 
 // A streaming request can fail in the connection or at the receiver mailbox.
@@ -31,8 +41,7 @@ H2StreamError* = Http(H2Error) | Receiver(ActorError)
 // The frame size every peer must accept; this client never advertises more.
 MAX_SEND*: usize = 16384
 
-// DATA is copied into the mailbox itself. Its fixed capacity is HTTP/2's
-// default maximum frame size; this client never advertises a larger one.
+// One DATA frame's bytes by value, so a chunk can cross a mailbox.
 H2Chunk* = {
     bytes :: [u8, MAX_SEND],
     len*:  usize,
@@ -54,8 +63,6 @@ H2Chunk* = {
         Ok(())
     }
 
-    // Make actor-owned text when a consumer needs a contiguous view. The
-    // mailbox value itself remains allocation-free and independently owned.
     copy* = (self: @Self, a: Alloc) Res<String, AllocError> {
         out ::= a.String().try();
         self.append_to(out).try();
@@ -77,8 +84,7 @@ h2_chunk* = (src: str) Res<H2Chunk, H2Error> {
     Ok(chunk);
 }
 
-// RFC 7540 §6 frame kinds. Unknown values survive decoding so extensions can
-// be ignored or forwarded without losing their wire byte.
+// RFC 7540 §6 frame kinds. Unknown values keep their wire byte.
 FrameType* =
     | Data = 0x0
         | Headers = 0x1
@@ -92,7 +98,6 @@ FrameType* =
         | Continuation = 0x9
         | Unknown(u8)
 
-// flags
 FLAG_END_STREAM*:  u8 = 1   // DATA, HEADERS
 FLAG_ACK*:         u8 = 1   // SETTINGS, PING
 FLAG_END_HEADERS*: u8 = 4   // HEADERS
@@ -102,14 +107,14 @@ FLAG_PRIORITY*:    u8 = 32  // HEADERS
 SET_HEADER_TABLE*:   usize = 1
 SET_INITIAL_WINDOW*: usize = 4
 
-// the receive window we advertise, per stream and once on the connection
+// The receive window advertised per stream and once on the connection.
 WINDOW*: usize = 16777216
 
-// HTTP/2 flow-control windows are signed in effect but capped here.
+// RFC 7540 §6.9: a window is 31 bits.
 DEFAULT_WINDOW*: usize = 65535
 MAX_WINDOW*: usize = 2147483647
 
-// sanity bound on any inbound frame payload
+// Inbound payloads above this are ProtocolFailed.
 MAX_RECV*: usize = 1048576
 
 PREFACE*: str = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
