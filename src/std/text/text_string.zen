@@ -1,4 +1,3 @@
-// src/std/text/text_string.zen
 // String is owned, growable text backed directly by Vec<u8>.
 //
 // view borrows the current buffer. Any later add or fmt may reallocate and
@@ -127,5 +126,34 @@ replace_once* = (
             replacement,
             self.slice(at + needle.len, self.len)
         ),
+    })
+}
+
+// Duplicate borrowed bytes into an arena. Empty text has no backing run to
+// own, so it can remain the canonical empty borrow.
+dup* = (self: str, a: Alloc) Res<str, AllocError> {
+    self.is_empty().match({
+        true  => Ok(self),
+        false => {
+            out = a.String("{}", self).try();
+            Ok(out.view())
+        },
+    })
+}
+
+// Keep at most `limit` leading bytes and append `suffix` when bytes were
+// removed. `str` is byte text, so this does not claim a UTF-8 boundary.
+truncate_with* = (
+    self   : str,
+    a      : Alloc,
+    limit  : usize,
+    suffix : str
+) Res<str, AllocError> {
+    (self.len <= limit).match({
+        true  => Ok(self),
+        false => {
+            out = a.String("{}{}", self.slice(0, limit), suffix).try();
+            Ok(out.view())
+        },
     })
 }
