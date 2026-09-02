@@ -3,7 +3,7 @@ Import, Impl, Enum = std.ast
 Alloc, AllocError, Ptr = std.mem
 Vec, Map = std.collections
 str, String = std.text
-Range = std.core
+Range, Eq, Hash = std.core
 DeclId, ImplId = sema.sema_id
 
 DefKind* = StructDef | EnumDef | AliasDef | FunctionDef | ConstDef
@@ -28,10 +28,15 @@ ImportBinding* = {
 // it impls. Built once per module by `build`.
 ModuleTable* = {
     name*: str,
-    index*: u32,
     defs* :: Vec<Def>,
     imports* :: Vec<ImportBinding>,
     impls* :: Vec<ImplId>,
+
+    // Whether the module imports `name`, starred or not.
+    imports_name* = (self: @Self, name: str) bool {
+        self.imports.find((b) { b.name.eq(name) })
+            .match({ Ok(_) => true, None => false })
+    }
 }
 
 WorldIndex = {
@@ -57,13 +62,22 @@ World* = {
 
     table_at* = (self: @Self, i: usize) Res<ModuleTable> { self.tables.get(i) }
 
-    // A declaration's owning module name. DeclId already carries the module
-    // index, so callers should not reopen World.tables and repeat the same
-    // missing-row policy merely to qualify a type or validate an intrinsic.
+    // "" for a missing row.
+    name_at* = (self: @Self, mi: usize) str {
+        self.table_at(mi).match({ Ok(t) => t.name, None => "" })
+    }
+
     module_name* = (self: @Self, id: DeclId) str {
-        self.table_at(id.module.to_usize()).match({
-            Ok(t) => t.name,
-            None  => "",
+        self.name_at(id.module.to_usize())
+    }
+
+    // Whether `mi` sees any def under `name`; false when the lookup
+    // cannot allocate.
+    defines* = (self: @Self, mi: usize, name: str) bool {
+        found ::= self.alloc.Vec<Def>();
+        self.defs_of(mi, name, found).match({
+            Err(_) => false,
+            Ok(_)  => found.len > 0,
         })
     }
 
@@ -80,10 +94,6 @@ World* = {
             Ok(by_name) => by_name.get(name),
         })
     }
-
-    // -----------------------------------------------------------------
-    // the queries
-    // -----------------------------------------------------------------
 
     defs_of* = (self: @Self, mi: usize, name: str, out :: Vec<Def>)
                Res<(), AllocError> {
@@ -114,26 +124,10 @@ World* = {
         })
     }
 
-    first_own* = (self: @Self, mi: usize, name: str) Res<Def> {
+    first_own = (self: @Self, mi: usize, name: str) Res<Def> {
         self.tables.get(mi).match({
             None  => None,
-            Ok(t) => Range(0, t.defs.len).find((i) {
-                t.defs.get(i).match({
-                    Ok(d) => d.name.eq(name),
-                    None  => false,
-                })
-            }).match({
-                Ok(i) => t.defs.get(i),
-                None  => None,
-            }),
-        })
-    }
-
-    first_prelude_of* = (self: @Self, name: str)
-                        Res<Res<Def>, AllocError> {
-        self.prelude_index().match({
-            None    => Ok(None),
-            Ok(pre) => self.first_exported(pre, name),
+            Ok(t) => t.defs.find((d) { d.name.eq(name) }),
         })
     }
 
@@ -171,22 +165,14 @@ World* = {
     first_exported_own = (self: @Self, mi: usize, name: str) Res<Def> {
         self.tables.get(mi).match({
             None  => None,
-            Ok(t) => Range(0, t.defs.len).find((i) {
-                t.defs.get(i).match({
-                    Ok(d) => d.exported && d.name.eq(name),
-                    None  => false,
-                })
-            }).match({
-                Ok(i) => t.defs.get(i),
-                None  => None,
-            }),
+            Ok(t) => t.defs.find((d) { d.exported && d.name.eq(name) }),
         })
     }
 
     first_follow = (self: @Self, mi: usize, name: str,
                     seen :: Vec<usize>, reexport: bool)
                    Res<Res<Def>, AllocError> {
-        visited(seen, mi).match({
+        mi.is_in(seen).match({
             true  => Ok(None),
             false => self.first_follow_fresh(mi, name, seen, reexport),
         })
@@ -229,12 +215,10 @@ World* = {
         Ok(hit)
     }
 
-    // Whether `mi` wrote an import binding this name, starred or not: a
-    // star says whether the binding leaves again, not whether it exists.
-    binds_name* = (self: @Self, mi: usize, name: str) bool {
+    binds_name = (self: @Self, mi: usize, name: str) bool {
         self.tables.get(mi).match({
             None  => false,
-            Ok(t) => imports_name(t, name),
+            Ok(t) => t.imports_name(name),
         })
     }
 
@@ -247,7 +231,7 @@ World* = {
         Ok(());
     }
 
-    prelude_index* = (self: @Self) Res<usize> {
+    prelude_index = (self: @Self) Res<usize> {
         self.index_of(PRELUDE).match({
             Ok(p) => Ok(p),
             None  => self.index_of(PRELUDE_FILE),
@@ -263,9 +247,7 @@ World* = {
         Ok(());
     }
 
-    // Everything module `p` lets out under `name`, starting a fresh
-    // cycle guard. The entry point for asking a module that nobody
-    // imported.
+    // Every exported def of `name` in `p`, following re-exports.
     exported_defs* = (self: @Self, p: usize, name: str, out :: Vec<Def>)
                      Res<(), AllocError> {
         seen ::= self.alloc.Vec<usize>();
@@ -285,9 +267,11 @@ World* = {
                        Res<bool, AllocError> {
         defs ::= self.alloc.Vec<Def>();
         self.prelude_of(name, defs).try();
-        hit ::= false;
-        defs.loop((h, def) { def.id.eq(id).then(() { hit = true; }); });
-        Ok(hit)
+        Ok(
+            defs.find(
+                (d) { d.id.eq(id) }
+            ).match({ Ok(_) => true, None => false })
+        )
     }
 
     exported_named* = (self: @Self, name: str, out :: Vec<Def>)
@@ -299,8 +283,7 @@ World* = {
         Ok(());
     }
 
-    // What `mi` declares under `name`, starred or not. Visibility is a
-    // question about crossing a boundary, and this has not crossed one.
+    // What `mi` declares under `name`, starred or not.
     own_defs* = (self: @Self, mi: usize, name: str, out :: Vec<Def>)
                 Res<(), AllocError> {
         self.tables.get(mi).match({
@@ -310,23 +293,21 @@ World* = {
         Ok(());
     }
 
-    imported_defs* = (self: @Self, mi: usize, name: str, out :: Vec<Def>)
+    imported_defs = (self: @Self, mi: usize, name: str, out :: Vec<Def>)
                      Res<(), AllocError> {
         seen ::= self.alloc.Vec<usize>();
         self.follow(mi, name, out, seen, false)
     }
 
     // Every exported declaration of `name` in module `mi`, following
-    // that module's own re-exports. This is what one hop of the chain
-    // asks of the next.
+    // that module's own re-exports.
     exports_of* = (self: @Self, mi: usize, name: str, out :: Vec<Def>,
                    seen :: Vec<usize>) Res<(), AllocError> {
         self.tables.get(mi).match({
             Ok(t) => collect_exported(t.defs, name, out),
             None  => Ok(()),
         }).try();
-        // a folder root declares nothing and re-exports everything, so
-        // an empty answer here is the normal case and not a miss
+        // A folder root declares nothing and re-exports everything.
         (out.len == 0).then(
             () { self.follow(mi, name, out, seen, true).try() }
         );
@@ -335,7 +316,7 @@ World* = {
 
     follow = (self: @Self, mi: usize, name: str, out :: Vec<Def>,
               seen :: Vec<usize>, reexport: bool) Res<(), AllocError> {
-        visited(seen, mi).match({
+        mi.is_in(seen).match({
             false => self.follow_fresh(mi, name, out, seen, reexport),
             true  => Ok(()),
         })
@@ -413,7 +394,7 @@ World* = {
         })
     }
 
-    exports_name* = (self: @Self, tree: Ast, mi: usize, name: str,
+    exports_name = (self: @Self, tree: Ast, mi: usize, name: str,
                      seen :: Vec<usize>) Res<bool, AllocError> {
         defs ::= self.alloc.Vec<Def>();
         self.exported_defs(mi, name, defs).try();
@@ -433,7 +414,7 @@ World* = {
     exports_variant = (self: @Self, tree: Ast, mi: usize, name: str,
                        hits :: Vec<Def>, seen :: Vec<usize>, reexport: bool)
                       Res<(), AllocError> {
-        visited(seen, mi).match({
+        mi.is_in(seen).match({
             true  => Ok(()),
             false => self.variant_walk(tree, mi, name, hits, seen, reexport),
         })
@@ -489,8 +470,7 @@ World* = {
         })
     }
 
-    // The `Impl` node an `ImplId` points at. A projection through the
-    // AST, kept here so no caller has to know an impl is a `DeclKind`.
+    // The `Impl` node an `ImplId` points at.
     impl_at* = (self: @Self, tree: Ast, id: ImplId) Res<Impl> {
         decl_at(tree, id.decl).match({
             None  => None,
@@ -542,7 +522,6 @@ add_module = (
 ) Res<(), AllocError> {
     t            ::= ModuleTable(
         name: m.name,
-        index: 0,
         defs: a.Vec<Def>(),
         imports: a.Vec<ImportBinding>(),
         impls: a.Vec<ImplId>(),
@@ -599,22 +578,12 @@ index_table = (index :: WorldIndex, a: Alloc, tree: Ast, t: ModuleTable)
 
 index_export = (index :: Map<str, Vec<Def>>, a: Alloc, d: Def)
                Res<(), AllocError> {
-    defs ::= index.get(d.name).match({
-        Ok(found) => found,
-        None      => a.Vec<Def>(),
-    });
-    defs.add(d).try();
-    index.set(d.name, defs)
+    push_bucket(index, a, d.name, d)
 }
 
 index_impl = (index :: Map<str, Vec<ImplId>>, a: Alloc, target: str, id: ImplId)
              Res<(), AllocError> {
-    ids ::= index.get(target).match({
-        Ok(found) => found,
-        None      => a.Vec<ImplId>(),
-    });
-    ids.add(id).try();
-    index.set(target, ids)
+    push_bucket(index, a, target, id)
 }
 
 index_members = (
@@ -624,21 +593,20 @@ index_members = (
     members : Vec<Member>
 ) Res<(), AllocError> {
     by_name ::= a.Map<str, Vec<usize>>();
-    Range(0, members.len).loop((h, i) {
-        members.get(i).match({
-            None  => Ok(()),
-            Ok(m) => {
-                name = m.name().text;
-                rows ::= by_name.get(name).match({
-                    Ok(found) => found,
-                    None      => a.Vec<usize>(),
-                });
-                rows.add(i).try();
-                by_name.set(name, rows)
-            },
-        }).try();
+    members.loop((h, i, m) {
+        push_bucket(by_name, a, m.name().text, i).try();
     });
     index.set(id, by_name)
+}
+
+push_bucket = <K: Eq + Hash, T>(index :: Map<K, Vec<T>>, a: Alloc, key: K, v: T)
+              Res<(), AllocError> {
+    bucket ::= index.get(key).match({
+        Ok(found) => found,
+        None      => a.Vec<T>(),
+    });
+    bucket.add(v).try();
+    index.set(key, bucket)
 }
 
 set_first = (index :: Map<str, usize>, name: str, at: usize)
@@ -658,80 +626,71 @@ index_decl = (
     di : u32
 ) Res<(), AllocError> {
     id = DeclId(module: mi, decl: di);
-    d.kind.match({
-        Struct(s)   => add_def(
-            t,
-            a,
-            m,
-            s.name,
-            DefKind.StructDef,
-            s.exported,
-            id,
-            d.span
-        ),
-        Enum(e)     => add_def(
-            t,
-            a,
-            m,
-            e.name,
-            DefKind.EnumDef,
-            e.exported,
-            id,
-            d.span
-        ),
-        Alias(x)    => add_def(
-            t,
-            a,
-            m,
-            x.name,
-            DefKind.AliasDef,
-            x.exported,
-            id,
-            d.span
-        ),
-        Function(f) => add_def(
-            t,
-            a,
-            m,
-            f.name,
-            DefKind.FunctionDef,
-            f.exported,
-            id,
-            d.span
-        ),
-        Const(c)    => add_def(
-            t,
-            a,
-            m,
-            c.name,
-            DefKind.ConstDef,
-            c.exported,
-            id,
-            d.span
-        ),
-        Import(im)  => add_imports(t, a, im),
-        Impl(_)     => t.impls.add(ImplId(decl: id)),
+    head_of(d).match({
+        Ok(hd) => add_def(t, a, m, hd, id, d.span),
+        None   => d.kind.match({
+            Import(im) => add_imports(t, a, im),
+            Impl(_)    => t.impls.add(ImplId(decl: id)),
+            _          => Ok(()),
+        }),
     }).try();
     Ok(());
 }
 
+// What a declaration binds: its name, kind, and star.
+Head = {
+    name: Ident,
+    kind: DefKind,
+    exported: bool,
+}
+
+head_of = (d: Decl) Res<Head> {
+    d.kind.match({
+        Struct(s)   => Ok(Head(
+            name: s.name,
+            kind: DefKind.StructDef,
+            exported: s.exported
+        )),
+        Enum(e)     => Ok(Head(
+            name: e.name,
+            kind: DefKind.EnumDef,
+            exported: e.exported
+        )),
+        Alias(x)    => Ok(Head(
+            name: x.name,
+            kind: DefKind.AliasDef,
+            exported: x.exported
+        )),
+        Function(f) => Ok(Head(
+            name: f.name,
+            kind: DefKind.FunctionDef,
+            exported: f.exported
+        )),
+        Const(c)    => Ok(Head(
+            name: c.name,
+            kind: DefKind.ConstDef,
+            exported: c.exported
+        )),
+        _           => None,
+    })
+}
+
 add_def = (
-    t        :: ModuleTable,
-    a        : Alloc,
-    m        : Module,
-    name     : Ident,
-    kind     : DefKind,
-    exported : bool,
-    id       : DeclId,
-    span     : Span
-) Res<(), AllocError> {
-    q ::= a.String("{}.{}", m.name, name.text).try();
+    t    :: ModuleTable,
+    a    : Alloc,
+    m    : Module,
+    hd   : Head,
+    id   : DeclId,
+    span : Span
+)
+          Res<(), AllocError> {
+    q ::= a.String("{}.{}", m.name, hd.name.text).try();
     t.defs.add(Def(
-        name: name.text,
+        name: hd.name.text,
         qname: q.view(),
-        kind: kind,
+        kind: hd.kind,
         id: id,
-        exported: exported,
+        exported: hd.exported,
         span: span,
     ))
 }
@@ -791,12 +750,6 @@ collect_exported = (defs: Vec<Def>, name: str, out :: Vec<Def>)
     Ok(())
 }
 
-imports_name = (t: ModuleTable, name: str) bool {
-    Range(0, t.imports.len).find((i) {
-        t.imports.get(i).match({ Ok(b) => b.name.eq(name), None => false })
-    }).match({ Ok(_) => true, None => false })
-}
-
 collect_variant = (
     tree  : Ast,
     t     : ModuleTable,
@@ -817,19 +770,15 @@ enum_has_variant = (tree: Ast, d: Def, name: str) bool {
     decl_at(tree, d.id).match({
         None  => false,
         Ok(x) => x.kind.match({
-            Enum(e) => named_variant(e, name),
+            Enum(e) => e.has_variant(name),
             _       => false,
         }),
     })
 }
 
-named_variant = (e: Enum, name: str) bool {
-    Range(0, e.variants.len).find((i) {
-        e.variants.get(i).match({
-            Ok(v) => v.name.text.eq(name),
-            None  => false,
-        })
-    }).match({ Ok(_) => true, None => false })
+has_variant* = (e: Enum, name: str) bool {
+    e.variants.find((v) { v.name.text.eq(name) })
+        .match({ Ok(_) => true, None => false })
 }
 
 module_display* = (name: str) str {
@@ -843,10 +792,4 @@ module_display* = (name: str) str {
             })
         },
     });
-}
-
-visited = (seen: Vec<usize>, mi: usize) bool {
-    Range(0, seen.len).find((i) {
-        seen.get(i).match({ Ok(v) => v == mi, None => false })
-    }).match({ Ok(_) => true, None => false })
 }

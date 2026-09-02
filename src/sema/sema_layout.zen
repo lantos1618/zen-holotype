@@ -1,5 +1,5 @@
 Decl, Struct, Member, Field = std.ast
-Ident, Pos, TypeId = std.ast
+Ident, TypeId = std.ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 Range = std.core
@@ -49,7 +49,7 @@ Layout = {
 
     enter = (self :: @Self, c :: Checker, id: DeclId, s: Struct, site: Ident)
             Res<(), AllocError> {
-        contains(self.done, id).match({
+        id.is_in(self.done).match({
             true  => Ok(()),
             false => self.walk(c, id, s, site),
         })
@@ -99,7 +99,7 @@ Layout = {
         poison = c.types.unknown().try();
         ctx    = Ctx(fr.id.module.to_usize(), poison);
         ty     = c.type_from_ast(t, ctx).try();
-        named_decl(c, ty).match({
+        c.named_decl(ty).match({
             None     => Ok(()),
             Ok(next) => self.step(c, next, site),
         })
@@ -184,20 +184,9 @@ monomorphic_struct = (x: Decl) Res<Struct> {
 }
 
 index_on = (path: Vec<Frame>, id: DeclId) Res<usize> {
-    Range(0, path.len).find((i) { at_is(path, i, id) })
-}
-
-at_is = (path: Vec<Frame>, i: usize, id: DeclId) bool {
-    path.get(i).match({
-        None   => false,
-        Ok(fr) => fr.id.eq(id),
+    Range(0, path.len).find((i) {
+        path.get(i).match({ None => false, Ok(fr) => fr.id.eq(id) })
     })
-}
-
-contains = (done: Vec<DeclId>, id: DeclId) bool {
-    Range(0, done.len).find((i) {
-        done.get(i).match({ None => false, Ok(x) => x.eq(id) })
-    }).match({ Ok(_) => true, None => false })
 }
 
 site_at = (path: Vec<Frame>, i: usize, fallback: Ident) Ident {
@@ -205,9 +194,5 @@ site_at = (path: Vec<Frame>, i: usize, fallback: Ident) Ident {
 }
 
 earlier = (a: Ident, b: Ident) Ident {
-    earlier_pos(b.span.start, a.span.start).match({ true => b, false => a })
-}
-
-earlier_pos = (x: Pos, y: Pos) bool {
-    (x.line < y.line) || ((x.line == y.line) && (x.col < y.col))
+    b.span.start.before(a.span.start).match({ true => b, false => a })
 }

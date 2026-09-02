@@ -1,5 +1,5 @@
-// Static `Type.NAME` resolution. A payload variant denotes its constructor as
-// a callee, but cannot stand alone without the value its union member carries.
+// Static `Type.NAME` resolution. A payload variant denotes its constructor;
+// a union member that carries a value cannot stand alone.
 
 Expr, ExprId, Access = std.ast
 AllocError = std.mem
@@ -15,8 +15,7 @@ module_named_by, module_access = sema.sema_module
 value_access = sema.sema_member
 union_carrier = sema.sema_union
 
-// Reject a bare union member that requires a carried value. Construction is
-// handled by static_access and remains valid.
+// A bare union member that carries a value is refused.
 static_value* = (
     c    :: Checker,
     id   : ExprId,
@@ -32,7 +31,6 @@ static_value* = (
     })
 }
 
-// Diagnose the complete access, which is the smallest invalid expression.
 needs_value = (
     c       :: Checker,
     node    : Expr,
@@ -76,7 +74,7 @@ type_access = (
     ctx  : Ctx
 ) Res<TyId, AllocError> {
     c.is_case(ty, ac.name.text).try().match({
-        true  => variant_type(c, ty, ac.name.text),
+        true  => c.variant_type(ty, ac.name.text),
         false => c.static_member(id, node, ac, ty, ctx),
     })
 }
@@ -84,7 +82,7 @@ type_access = (
 variant_type* = (c :: Checker, ty: TyId, name: str) Res<TyId, AllocError> {
     cases ::= c.alloc.Vec<Case>();
     c.cases_of(ty, cases).try();
-    find_case(cases, name).match({
+    cases.find_case(name).match({
         None   => c.types.unknown(),
         Ok(cs) => c.variant_value(ty, cs),
     })
@@ -103,8 +101,7 @@ variant_ctor = (c :: Checker, ty: TyId, cs: Case) Res<TyId, AllocError> {
     c.types.fn_ty(params, ty)
 }
 
-// `i32.MAX`, `i32.BITS`. Anything else falls through to the ordinary
-// member table, because a struct body may bind a constant too.
+// `i32.MAX`, `i32.BITS`; other names fall through to the member table.
 static_member = (
     c    :: Checker,
     id   : ExprId,
@@ -119,8 +116,8 @@ static_member = (
     })
 }
 
-// Every primitive numeric type carries MIN, MAX, and BITS from the
-// prelude. MIN and MAX are of the type; BITS is a count, so `usize`.
+// Every numeric primitive carries MIN, MAX, and BITS. MIN and MAX are of
+// the type; BITS is a count, so `usize`.
 has_prim_const = (c: Checker, ty: TyId, name: str) bool {
     c.numeric_prim(ty) && name.is_in(["MIN", "MAX", "BITS"])
 }

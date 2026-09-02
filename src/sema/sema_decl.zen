@@ -3,10 +3,10 @@ Struct, Impl, Member, Enum = std.ast
 ExprId, TypeId, Const, Field = std.ast
 AllocError = std.mem
 Vec = std.collections
-str, String = std.text
+str = std.text
 Range = std.core
 TyId = sema.sema_ty
-Def, DefKind, ModuleTable, decl_at = sema.sema_def
+Def, DefKind, ModuleTable = sema.sema_def
 Checker, Ctx = sema.sema_check
 SemaFault, NameFault, PairFault = sema.sema_diag
 check_impl = sema.sema_bound
@@ -16,7 +16,7 @@ check_varargs = sema.sema_vararg
 check_layout = sema.sema_layout
 type_of, block_type = sema.sema_type
 bound_member_type = sema.sema
-type_from_ast, param_type = sema.sema_denote
+type_from_ast, param_type, ret_type, type_decl = sema.sema_denote
 decl_as_type = sema.sema_type
 enter_struct_tvars, member_type = sema.sema_member
 variant_payload = sema.sema_case
@@ -65,7 +65,7 @@ check_overload_sets = (c :: Checker, t: ModuleTable, mi: usize)
 
 one_set = (c :: Checker, d: Def, mi: usize, seen :: Vec<str>)
           Res<(), AllocError> {
-    (is_fn_def(d.kind) && (has_name(seen, d.name) == false)).match({
+    (is_fn_def(d.kind) && (d.name.is_in(seen) == false)).match({
         true  => c.new_set(d.name, mi, seen),
         false => Ok(()),
     })
@@ -82,13 +82,6 @@ is_fn_def = (k: DefKind) bool {
     k.match({ FunctionDef => true, _ => false })
 }
 
-has_name = (seen: Vec<str>, name: str) bool {
-    Range(0, seen.len).find((i) {
-        seen.get(i).match({ Ok(s) => s.eq(name), None => false })
-    }).match({ Ok(_) => true, None => false })
-}
-
-// bodies
 check_bodies = (c :: Checker, mi: usize) Res<(), AllocError> {
     c.tree.module_at(mi).match({
         Ok(m) => c.check_decls(m, mi),
@@ -117,8 +110,8 @@ check_decl = (c :: Checker, d: Decl, m: Module, mi: usize)
     })
 }
 
-// A constant's written type is a typed position. Apply the same family and
-// literal-fit checks as a local written binding.
+// A constant's written type is a typed position: the same family and
+// literal-fit checks as a written local binding.
 const_body = (c :: Checker, k: Const, mi: usize) Res<(), AllocError> {
     ctx = Ctx(mi, c.types.unknown().try());
     got = c.type_of(k.value, ctx).try();
@@ -128,7 +121,6 @@ const_body = (c :: Checker, k: Const, mi: usize) Res<(), AllocError> {
     })
 }
 
-// Without a written type, the value itself determines the constant's type.
 const_fits = (c :: Checker, id: ExprId, t: TypeId, got: TyId, ctx: Ctx)
              Res<(), AllocError> {
     want = c.type_from_ast(t, ctx).try();
@@ -157,15 +149,12 @@ check_members = (c :: Checker, e: Enum, mi: usize)
     Range(0, e.variants.len).loop((h, i) {
         v = e.variants.get(i).ok_or(AllocError.OutOfMemory).try();
         v.payload.match({
-            // a written payload is a variant, never a member name
+            // a variant with a payload cannot be a member name
             Ok(_) => (),
             None  => c.binds_nothing(mi, v.name.text).try().match({
                 true  => {
                     miss_count = miss_count + 1;
-                    (miss_count == 1).match({
-                        true  => { miss_at = i; },
-                        false => (),
-                    });
+                    (miss_count == 1).then(() { miss_at = i; });
                 },
                 false => c.binds_a_type(mi, v.name.text).try().match({
                     true  => { types = types + 1; },
@@ -254,8 +243,8 @@ compare_member_signatures = (
     a.name().text.eq(b.name().text).match({
         false => Ok(()),
         true  => {
-            aty = member_type(c, a, mi, self_ty).try();
-            bty = member_type(c, b, mi, self_ty).try();
+            aty = c.member_type(a, mi, self_ty).try();
+            bty = c.member_type(b, mi, self_ty).try();
             c.same_fn_signature(aty, bty).match({
                 false => Ok(()),
                 true  => c.report(
@@ -344,7 +333,7 @@ field_value = (
                     self_ty
                 ).try();
                 node = c.tree.expr_at(v);
-                data = (c.supplies_fn(got).try() == false);
+                data = (c.supplies_fn(got) == false);
                 data.then(() {
                     c.coerce(node.span.file, node.span, got, want, "").try();
                     c.check_literal(v, want).try();
@@ -358,16 +347,10 @@ field_value = (
     })
 }
 
-supplies_fn = (c :: Checker, ty: TyId) Res<bool, AllocError> {
-    c.types.at(ty).match({
-        Named(n) => decl_at(c.tree, n.decl).match({
-            Ok(d) => d.kind.match({
-                Function(_) => Ok(true),
-                _           => Ok(false),
-            }),
-            None  => Ok(false),
-        }),
-        _        => Ok(false),
+supplies_fn = (c :: Checker, ty: TyId) bool {
+    c.type_decl(ty).match({
+        Ok(d) => d.kind.match({ Function(_) => true, _ => false }),
+        None  => false,
     })
 }
 
@@ -414,37 +397,22 @@ member_body = (
     mi      : usize
 ) Res<(), AllocError> {
     mem.kind.match({
-        Function(f) => c.member_fn_body(f, self_ty, m, mi),
+        Function(f) => c.check_body(f, f.body, Ok(self_ty), m, mi),
         _           => Ok(()),
     })
 }
 
-member_fn_body = (
-    c       :: Checker,
-    f       : Function,
-    self_ty : TyId,
-    m       : Module,
-    mi      : usize
-) Res<(), AllocError> {
-    f.body.match({
-        Ok(b) => c.check_body(f, b, Ok(self_ty), m, mi),
-        None  => c.check_signature(f, Ok(self_ty), m, mi),
-    })
-}
-
-// A `Required` or `Hook` declaration has no body and nothing to check;
-// the other two forms do. A top-level function has no `@Self`.
+// A top-level function has no `@Self`.
 check_function* = (c :: Checker, f: Function, m: Module, mi: usize)
                   Res<(), AllocError> {
-    f.body.match({
-        Ok(b) => c.check_body(f, b, None, m, mi),
-        None  => c.check_signature(f, None, m, mi),
-    })
+    c.check_body(f, f.body, None, m, mi)
 }
 
-check_signature = (
+// A bodiless declaration (`Required`, `Hook`) checks only its signature.
+check_body = (
     c       :: Checker,
     f       : Function,
+    body    : Res<BlockId>,
     self_ty : Res<TyId>,
     m       : Module,
     mi      : usize
@@ -452,66 +420,42 @@ check_signature = (
     smark = c.mark();
     tmark = c.tvar_mark();
     bmark = c.bound_mark();
-    owner = c.qualified(m, f).try();
+    owner = c.owner_of(mi, f.name.text).try();
     c.enter_generics(f, owner, mi).try();
-    bind_params(c, f, body_ctx(c, f, mi, self_ty).try()).try();
+    ctx = c.body_ctx(f, mi, self_ty).try();
+    c.bind_params(f, ctx).try();
+    body.match({
+        Ok(b) => c.check_block(f, b, ctx, owner),
+        None  => Ok(()),
+    }).try();
     c.release_bounds(bmark).try();
     c.release_tvars(tmark).try();
     c.release(smark).try();
     Ok(());
 }
 
-check_body = (
-    c       :: Checker,
-    f       : Function,
-    body    : BlockId,
-    self_ty : Res<TyId>,
-    m       : Module,
-    mi      : usize
-) Res<(), AllocError> {
-    smark = c.mark();
-    tmark = c.tvar_mark();
-    bmark = c.bound_mark();
-    owner = c.qualified(m, f).try();
-    c.enter_generics(f, owner, mi).try();
-    ctx = body_ctx(c, f, mi, self_ty).try();
-    bind_params(c, f, ctx).try();
+check_block = (c :: Checker, f: Function, body: BlockId, ctx: Ctx, owner: str)
+              Res<(), AllocError> {
     rmark = c.raised_mark();
     c.enter_owner(owner);
     got = c.block_type(body, ctx).try();
     c.enter_owner("");
     c.check_return(body, ctx, got).try();
     c.settle_raised(f, ctx, got, rmark).try();
-    c.check_own(f, body, ctx).try();
-    c.release_bounds(bmark).try();
-    c.release_tvars(tmark).try();
-    c.release(smark).try();
-    Ok(());
+    c.check_own(f, body, ctx)
 }
 
 body_ctx = (c :: Checker, f: Function, mi: usize, self_ty: Res<TyId>)
            Res<Ctx, AllocError> {
     poison = c.types.unknown().try();
-    base   = Ctx(mi, poison);
-    ret    = f.ret.match({
-        Ok(r) => c.type_from_ast(r, base),
-        None  => c.types.prim("()"),
-    }).try();
+    ret    = c.ret_type(f, Ctx(mi, poison)).try();
     Ok(Ctx(
         module: mi,
         ret: ret,
-        has_ret: is_res(c, ret),
-        self_ty: self_or_poison(self_ty, poison),
-        has_self: self_ty_given(self_ty)
+        has_ret: c.is_res(ret),
+        self_ty: self_ty.value_or(poison),
+        has_self: self_ty.match({ Ok(_) => true, None => false })
     ));
-}
-
-self_or_poison = (self_ty: Res<TyId>, poison: TyId) TyId {
-    self_ty.match({ Ok(t) => t, None => poison })
-}
-
-self_ty_given = (self_ty: Res<TyId>) bool {
-    self_ty.match({ Ok(_) => true, None => false })
 }
 
 is_res = (c: Checker, ty: TyId) bool {
@@ -545,9 +489,4 @@ bind_params = (c :: Checker, f: Function, ctx: Ctx) Res<(), AllocError> {
         c.bind(text, c.param_type(p, ctx).try(), mutable, true).try();
     });
     Ok(());
-}
-
-qualified = (c :: Checker, m: Module, f: Function) Res<str, AllocError> {
-    out ::= c.alloc.String("{}.{}", m.name, f.name.text).try();
-    Ok(out.view());
 }

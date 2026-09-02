@@ -9,7 +9,7 @@ Def, decl_at, module_display = sema.sema_def
 SemaFault, ExportFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
 def_type, decl_as_type = sema.sema_type
-type_from_ast, param_type = sema.sema_denote
+signature_type = sema.sema_denote
 
 // The module a base names, when the base is an alias for one.
 module_named_by* = (c :: Checker, ty: TyId) Res<usize> {
@@ -44,7 +44,7 @@ alias_target_type = (c :: Checker, t: TypeId, id: DeclId) Res<usize> {
 }
 
 module_for_target = (c :: Checker, n: Named, id: DeclId) Res<usize> {
-    names_a_type(c, n.name.text, id.module.to_usize()).match({
+    c.world.defines(id.module.to_usize(), n.name.text).match({
         true  => None,
         false => c.target_module(n),
     })
@@ -57,16 +57,8 @@ target_module = (c :: Checker, n: Named) Res<usize> {
     })
 }
 
-names_a_type = (c :: Checker, name: str, mi: usize) bool {
-    found ::= c.alloc.Vec<Def>();
-    c.world.defs_of(mi, name, found).match({
-        Err(_) => true,
-        Ok(_)  => found.len > 0,
-    })
-}
-
-// A module has no value. Report a bare use at that use rather than at the
-// binding, because reading the same binding through a qualifier is legal.
+// A module has no value. Reported at the use: the same binding read
+// through a qualifier is legal.
 module_not_a_value* = (c :: Checker, span: Span, name: str, mi: usize)
                      Res<TyId, AllocError> {
     c.report(
@@ -74,7 +66,7 @@ module_not_a_value* = (c :: Checker, span: Span, name: str, mi: usize)
         span,
         SemaFault.ModuleNotAValue(ExportFault(
             name: name,
-            module: module_name(c, mi)
+            module: module_display(c.world.name_at(mi))
         ))
     ).try();
     c.types.unknown()
@@ -116,18 +108,7 @@ module_fn_type = (c :: Checker, d: Def) Res<TyId, AllocError> {
 
 decl_fn_type = (c :: Checker, d: Def, f: Function) Res<TyId, AllocError> {
     poison = c.types.unknown().try();
-    ctx    = Ctx(d.id.module.to_usize(), poison);
-    ptys ::= c.alloc.Vec<TyId>();
-    f.params.loop((h, p) { ptys.add(c.param_type(p, ctx).try()).try() });
-    rty = c.ret_type(f, ctx).try();
-    c.types.fn_ty(ptys, rty)
-}
-
-ret_type = (c :: Checker, f: Function, ctx: Ctx) Res<TyId, AllocError> {
-    f.ret.match({
-        Ok(t) => c.type_from_ast(t, ctx),
-        None  => c.types.prim("()"),
-    })
+    c.signature_type(f, Ctx(d.id.module.to_usize(), poison))
 }
 
 not_exported = (c :: Checker, ac: Access, mi: usize)
@@ -137,15 +118,8 @@ not_exported = (c :: Checker, ac: Access, mi: usize)
         ac.name.span,
         SemaFault.NotExported(ExportFault(
             name: ac.name.text,
-            module: module_name(c, mi)
+            module: module_display(c.world.name_at(mi))
         ))
     ).try();
     c.types.unknown()
-}
-
-module_name = (c :: Checker, mi: usize) str {
-    c.world.table_at(mi).match({
-        Ok(t) => module_display(t.name),
-        None  => "",
-    })
 }

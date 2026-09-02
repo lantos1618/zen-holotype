@@ -1,5 +1,5 @@
-// External integer representations for nominal enums. Internal enum tags stay
-// dense and private; these helpers validate and convert at the language edge.
+// External integer representations for nominal enums; internal tags stay
+// dense and private.
 
 Enum, Variant, Expr, ExprId, TypeId = std.ast
 Call, Access, Span, Decl = std.ast
@@ -28,7 +28,7 @@ RepresentedEnum* = {
 
 check_enum_discriminants* = (c :: Checker, e: Enum, mi: usize)
                             Res<(), AllocError> {
-    enum_has_discriminants(e).match({
+    e.enum_has_discriminants().match({
         false => Ok(()),
         true  => c.check_represented_enum(e, mi),
     })
@@ -69,9 +69,7 @@ check_represented_enum = (
 
 inferred_discriminant_repr = (c :: Checker, e: Enum, ctx: Ctx)
                              Res<TyId, AllocError> {
-    e.variants.find((v) {
-        is_discriminant_catch_all(v)
-    }).match({
+    e.variants.find((v) { v.is_discriminant_catch_all() }).match({
         None  => c.types.prim("u64"),
         Ok(v) => v.payload.match({
             None        => c.types.unknown(),
@@ -92,7 +90,7 @@ check_discriminant_rows = (
     valid  ::= true;
     e.variants.loop((h, i, v) {
         valid = v.discriminant.match({
-            None   => is_discriminant_catch_all(v).match({
+            None   => v.is_discriminant_catch_all().match({
                 true  => c.check_catch_all(e, i, v, repr, ctx),
                 false => c.reject_discriminant(v),
             }),
@@ -137,7 +135,7 @@ check_exact_discriminant = (
         Ok(_) => c.reject_discriminant(v),
         None  => c.const_int(id).match({
             None      => c.reject_discriminant(v),
-            Ok(value) => fits(value, repr).match({
+            Ok(value) => value.fits(repr).match({
                 Ok(true) => c.unique_discriminant(v, value, values, spans),
                 _        => c.reject_discriminant(v),
             }),
@@ -210,7 +208,7 @@ represented_named = (c :: Checker, ty: TyId, n: TyNamed)
     decl_at(c.tree, n.decl).match({
         None    => Ok(None),
         Ok(row) => row.kind.match({
-            Enum(e) => enum_has_discriminants(e).match({
+            Enum(e) => e.enum_has_discriminants().match({
                 false => Ok(None),
                 true  => {
                     ctx  = Ctx(
@@ -232,7 +230,7 @@ represented_named = (c :: Checker, ty: TyId, n: TyNamed)
 }
 
 has_catch_all* = (e: Enum) bool {
-    e.variants.find((v) { is_discriminant_catch_all(v) })
+    e.variants.find((v) { v.is_discriminant_catch_all() })
         .match({ Ok(_) => true, None => false })
 }
 
@@ -241,7 +239,7 @@ catch_all_named* = (c :: Checker, ty: TyId, name: str)
     c.represented_enum(ty).try().match({
         None      => Ok(false),
         Ok(shape) => Ok(shape.value.variants.find((v) {
-            v.name.text.eq(name) && is_discriminant_catch_all(v)
+            v.name.text.eq(name) && v.is_discriminant_catch_all()
         }).match({ Ok(_) => true, None => false })),
     })
 }
@@ -316,7 +314,7 @@ check_decode_call = (
     c.coerce(node.span.file, node.span, got, shape.repr, "").try();
     c.check_literal(arg.value, shape.repr).try();
     c.mark_discriminant_call(id, DiscriminantCall.Decode(shape.ty)).try();
-    ret = has_catch_all(shape.value).match({
+    ret = shape.value.has_catch_all().match({
         true  => Ok(shape.ty),
         false => c.types.res_absence(shape.ty),
     }).try();

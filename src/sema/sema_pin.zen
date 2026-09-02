@@ -1,11 +1,10 @@
 Expr, Span = std.ast
-Range = std.core
 Checker = sema.sema_check
 SemaFault, CaptureFault = sema.sema_diag
-find_var, owned_at, Own = sema.sema_own
+Own = sema.sema_own
 
-// A capture that forbids the moves after it: which binding, and where
-// the use that captured it was written.
+// A capture that forbids every later move of a binding: the binding, and
+// where the capture was written.
 Pin* = {
     root*: usize,
     span*: Span,
@@ -13,40 +12,23 @@ Pin* = {
 
 pin_captured* = (c :: Checker, o :: Own, node: Expr, text: str)
                 Res<(), AllocError> {
-    find_var(o, text).match({
+    o.find_var(text).match({
         None  => Ok(()),
-        Ok(i) => ((i < o.escaped) && owned_at(o, i)).match({
+        Ok(i) => ((i < o.escaped) && o.owned_at(i)).match({
             false => Ok(()),
             true  => o.pinned.add(Pin(root: i, span: node.span)),
         }),
     })
 }
 
-pinned_at* = (o: Own, root: usize) bool {
-    Range(0, o.pinned.len).find((i) {
-        o.pinned.get(i).match({
-            Ok(p) => p.root == root,
-            None  => false,
-        })
-    }).match({ Ok(_) => true, None => false })
+// The first capture is where the binding stopped being movable.
+first_pin = (o: Own, root: usize) Res<Pin> {
+    o.pinned.find((p) { p.root == root })
 }
 
-// The first capture wins: it is where the binding stopped being
-// movable, and every later one repeats it.
-first_pin* = (o: Own, root: usize) Res<Pin> {
-    Range(0, o.pinned.len).find((i) {
-        o.pinned.get(i).match({
-            Ok(p) => p.root == root,
-            None  => false,
-        })
-    }).match({ None => None, Ok(i) => o.pinned.get(i) })
-}
-
-// The consume's sentence names the place; the capture is the second
-// position the reader cannot find without being told.
 refuse_pinned* = (c :: Checker, o :: Own, span: Span, text: str)
                  Res<(), AllocError> {
-    find_var(o, text).match({
+    o.find_var(text).match({
         None  => Ok(()),
         Ok(i) => c.refuse_pinned_at(o, span, i),
     })
@@ -54,20 +36,17 @@ refuse_pinned* = (c :: Checker, o :: Own, span: Span, text: str)
 
 refuse_pinned_at* = (c :: Checker, o :: Own, span: Span, root: usize)
                     Res<(), AllocError> {
-    pinned_at(o, root).match({
-        false => Ok(()),
-        true  => first_pin(o, root).match({
-            None    => Ok(()),
-            Ok(pin) => c.place_name(o, pin.root, "").match({
-                Err(_)    => Ok(()),
-                Ok(place) => c.refuse(
-                    span,
-                    SemaFault.ConsumedByCapture(CaptureFault(
-                        place: place,
-                        at: pin.span
-                    ))
-                ),
-            }),
+    o.first_pin(root).match({
+        None    => Ok(()),
+        Ok(pin) => c.place_name(o, pin.root, "").match({
+            Err(_)    => Ok(()),
+            Ok(place) => c.refuse(
+                span,
+                SemaFault.ConsumedByCapture(CaptureFault(
+                    place: place,
+                    at: pin.span
+                ))
+            ),
         }),
     })
 }

@@ -3,7 +3,7 @@ Unary, Access, Paren, Name, Const = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
-TyId, is_integer = sema.sema_ty
+TyId = sema.sema_ty
 SemaFault, NameFault = sema.sema_diag
 Def, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
@@ -11,8 +11,8 @@ Checker, Ctx = sema.sema_check
 I64_MAX* : i64 = 9223372036854775807
 I64_MIN* : i64 = -9223372036854775807 - 1
 
-// Largest magnitude whose square fits an i64 (two of these multiply to
-// under 4.7e18, well inside 9.2e18) — outside this window, not folded.
+// The largest magnitude whose square fits an i64; products outside it are
+// not folded.
 FOLD_LIMIT* : i64 = 2147483647
 
 counted_array* = (c :: Checker, elem: TyId, id: ExprId, ctx: Ctx)
@@ -85,8 +85,8 @@ const_def* = (c :: Checker, text: str, ctx: Ctx) Res<Res<Def>, AllocError> {
     }));
 }
 
-// `i64` to `usize`, MSD first, ten passes at most. Floors negatives at
-// zero — not a length — so every caller tests the sign first.
+// `i64` to `usize` by decimal digits; there is no narrowing conversion.
+// Negatives floor at zero, so callers test the sign first.
 len_of* = (v: i64) usize {
     (v <= 0).match({
         true  => 0,
@@ -103,8 +103,8 @@ last_digit = (v: i64) usize {
 
 FOLD_DEPTH: usize = 256
 
-// What this expression is, when a literal integer the compiler can see.
-// Absence means "not provably anything" — the answer for every binding.
+// The integer this expression provably is; absence for anything reached
+// through a binding.
 const_int* = (c: Checker, id: ExprId) Res<i64> {
     c.const_within(id, FOLD_DEPTH)
 }
@@ -137,8 +137,7 @@ const_literal* = (l: Literal) Res<i64> {
     })
 }
 
-// Convert a lexer-validated magnitude without a narrowing cast. Recursion is
-// bounded by the 20 decimal digits of u64.
+// `u64` to `i64` by decimal digits; there is no narrowing conversion.
 magnitude_i64 = (value: u64) Res<i64> {
     (value > 9223372036854775807).match({
         true  => None,
@@ -161,8 +160,8 @@ last_magnitude_digit = (value: u64) i64 {
     })
 }
 
-// Whether a positive integer literal fits a fixed-width integer type. This
-// complements `fits(i64, ..)` for the upper half of u64's domain.
+// Whether a positive integer literal fits a fixed-width integer type; the
+// upper half of u64's domain, which `fits(i64, ..)` cannot name.
 fits_magnitude* = (value: u64, name: str) Res<bool> {
     name.match({
         "i8"    => Ok(value <= 127),
@@ -180,7 +179,7 @@ fits_magnitude* = (value: u64, name: str) Res<bool> {
 
 const_unary = (c: Checker, u: Unary, left: usize) Res<i64> {
     u.op.match({
-        Neg => negate(c, u.operand, left),
+        Neg => c.negate(u.operand, left),
         _   => None,
     })
 }
@@ -206,8 +205,8 @@ const_rhs = (c: Checker, b: Binary, x: i64, left: usize) Res<i64> {
     })
 }
 
-// `i32.MAX/MIN/BITS` only: the base must be the primitive's own name,
-// not a binding of that type — else this folds through a binding.
+// `i32.MAX/MIN/BITS` only when the base is the primitive's own name, not
+// a binding of that type.
 const_prim_const = (c: Checker, a: Access) Res<i64> {
     base = c.tree.expr_at(a.base);
     base.kind.match({
@@ -217,41 +216,15 @@ const_prim_const = (c: Checker, a: Access) Res<i64> {
 }
 
 prim_const_value = (type_name: str, member: str) Res<i64> {
-    is_integer(type_name).match({
-        true  => named_const(type_name, member),
-        false => float_bits(type_name, member),
+    member.match({
+        "MAX"  => max_of(type_name),
+        "MIN"  => min_of(type_name),
+        "BITS" => bits_of(type_name),
+        _      => None,
     })
 }
 
-float_bits = (type_name: str, member: str) Res<i64> {
-    member.eq("BITS").match({
-        true  => bits_of(type_name),
-        false => None,
-    })
-}
-
-named_const = (type_name: str, member: str) Res<i64> {
-    member.eq("MAX").match({
-        true  => max_of(type_name),
-        false => min_or_bits(type_name, member),
-    })
-}
-
-min_or_bits = (type_name: str, member: str) Res<i64> {
-    member.eq("MIN").match({
-        true  => min_of(type_name),
-        false => bits_const(type_name, member),
-    })
-}
-
-bits_const = (type_name: str, member: str) Res<i64> {
-    member.eq("BITS").match({
-        true  => bits_of(type_name),
-        false => None,
-    })
-}
-
-// arithmetic that refuses to trap
+// Arithmetic that answers None instead of overflowing.
 fold* = (op: BinOp, x: i64, y: i64) Res<i64> {
     op.match({
         Add => add_i64(x, y),
@@ -277,8 +250,6 @@ sub_i64 = (x: i64, y: i64) Res<i64> {
     safe.match({ true => Ok(x - y), false => None })
 }
 
-// Only where a product can't overflow; outside it "not provably
-// anything" — computing to check would itself be the trap this catches.
 mul_i64 = (x: i64, y: i64) Res<i64> {
     (small(x) && small(y)).match({
         true  => Ok(x * y),
@@ -298,135 +269,50 @@ fits* = (v: i64, name: str) Res<bool> {
     })
 }
 
-signed_of = (name: str) bool {
-    name.is_in(["i8", "i16", "i32", "i64"])
-}
-
-max_of* = (name: str) Res<i64> {
-    signed_of(name).match({
-        true  => signed_max(name),
-        false => unsigned_max(name),
+// u64 and usize ceilings are the folder's own (i64), not the type's.
+max_of = (name: str) Res<i64> {
+    name.match({
+        "i8"    => Ok(127),
+        "i16"   => Ok(32767),
+        "i32"   => Ok(2147483647),
+        "i64"   => Ok(I64_MAX),
+        "u8"    => Ok(255),
+        "u16"   => Ok(65535),
+        "u32"   => Ok(4294967295),
+        "u64"   => Ok(I64_MAX),
+        "usize" => Ok(I64_MAX),
+        _       => None,
     })
 }
 
 min_of* = (name: str) Res<i64> {
-    signed_of(name).match({
-        true  => signed_min(name),
-        false => unsigned_min(name),
+    name.match({
+        "i8"    => Ok(0 - 128),
+        "i16"   => Ok(0 - 32768),
+        "i32"   => Ok(0 - 2147483648),
+        "i64"   => Ok(I64_MIN),
+        "u8"    => Ok(0),
+        "u16"   => Ok(0),
+        "u32"   => Ok(0),
+        "u64"   => Ok(0),
+        "usize" => Ok(0),
+        _       => None,
     })
 }
 
-signed_max = (name: str) Res<i64> {
-    name.eq("i8").match({ true => Ok(127), false => signed_max_16(name) })
-}
-
-signed_max_16 = (name: str) Res<i64> {
-    name.eq("i16").match({ true => Ok(32767), false => signed_max_32(name) })
-}
-
-signed_max_32 = (name: str) Res<i64> {
-    name.eq("i32").match({
-        true  => Ok(2147483647),
-        false => bits_of_i64_max(name),
+bits_of = (name: str) Res<i64> {
+    name.match({
+        "i8"    => Ok(8),
+        "u8"    => Ok(8),
+        "i16"   => Ok(16),
+        "u16"   => Ok(16),
+        "i32"   => Ok(32),
+        "u32"   => Ok(32),
+        "f32"   => Ok(32),
+        "i64"   => Ok(64),
+        "u64"   => Ok(64),
+        "usize" => Ok(64),
+        "f64"   => Ok(64),
+        _       => None,
     })
-}
-
-signed_min = (name: str) Res<i64> {
-    name.eq("i8").match({ true => Ok(0 - 128), false => signed_min_16(name) })
-}
-
-signed_min_16 = (name: str) Res<i64> {
-    name.eq("i16").match({ true => Ok(0 - 32768), false => signed_min_32(name) })
-}
-
-signed_min_32 = (name: str) Res<i64> {
-    name.eq("i32").match({
-        true  => Ok(0 - 2147483648),
-        false => bits_of_i64_min(name),
-    })
-}
-
-// u64/usize hold more than an i64 can name, so these ceilings are the
-// folder's own, not the type's — such values are never folded anyway.
-unsigned_min = (name: str) Res<i64> {
-    name.is_in(["u8", "u16", "u32", "u64", "usize"]).match({
-        true  => Ok(0),
-        false => None,
-    })
-}
-
-unsigned_max = (name: str) Res<i64> {
-    name.eq("u8").match({
-        true  => Ok(255),
-        false => unsigned_max_16(name),
-    })
-}
-
-unsigned_max_16 = (name: str) Res<i64> {
-    name.eq("u16").match({
-        true  => Ok(65535),
-        false => unsigned_max_32(name),
-    })
-}
-
-unsigned_max_32 = (name: str) Res<i64> {
-    name.eq("u32").match({
-        true  => Ok(4294967295),
-        false => bits_of_i64_max(name),
-    })
-}
-
-// The i64 row, named for what it is: the row `bits_of` holds for the
-// Reached only after every narrower integer width declined the value.
-bits_of_i64_max* = (name: str) Res<i64> {
-    name.is_in(["i64", "u64", "usize"]).match({
-        true  => Ok(I64_MAX),
-        false => None,
-    })
-}
-
-bits_of_i64_min* = (name: str) Res<i64> {
-    name.eq("i64").match({
-        true  => Ok(I64_MIN),
-        false => None,
-    })
-}
-
-bits_of* = (name: str) Res<i64> {
-    (name.eq("i8") || name.eq("u8")).match({
-        true  => Ok(8),
-        false => bits_16(name),
-    })
-}
-
-bits_16 = (name: str) Res<i64> {
-    (name.eq("i16") || name.eq("u16")).match({
-        true  => Ok(16),
-        false => bits_32(name),
-    })
-}
-
-bits_32 = (name: str) Res<i64> {
-    (name.eq("i32") || name.eq("u32")).match({
-        true  => Ok(32),
-        false => bits_64(name),
-    })
-}
-
-bits_64 = (name: str) Res<i64> {
-    name.is_in(["i64", "u64", "usize"]).match({
-        true  => Ok(64),
-        false => bits_float(name),
-    })
-}
-
-bits_float = (name: str) Res<i64> {
-    (name.eq("f32") || name.eq("f64")).match({
-        true  => Ok(bits_width(name)),
-        false => None,
-    })
-}
-
-bits_width = (name: str) i64 {
-    name.eq("f32").match({ true => 32, false => 64 })
 }

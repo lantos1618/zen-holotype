@@ -35,7 +35,7 @@ type_of* = (c :: Checker, id: ExprId, ctx: Ctx) Res<TyId, AllocError> {
     c.walk_projection_type(id, ctx).try().match({
         Ok(ty) => Ok(ty),
         None   => c.rechecking().match({
-            // Field-walk bodies are retyped because the projected type changes.
+            // a field-walk body is retyped per field
             true  => c.compute_expr(id, ctx),
             false => c.expr_memo.get(id).match({
                 None    => c.compute_expr(id, ctx),
@@ -45,7 +45,7 @@ type_of* = (c :: Checker, id: ExprId, ctx: Ctx) Res<TyId, AllocError> {
     })
 }
 
-compute_expr* = (c :: Checker, id: ExprId, ctx: Ctx)
+compute_expr = (c :: Checker, id: ExprId, ctx: Ctx)
                Res<TyId, AllocError> {
     poison = c.types.unknown().try();
     c.expr_memo.set(id, poison).try();
@@ -55,11 +55,11 @@ compute_expr* = (c :: Checker, id: ExprId, ctx: Ctx)
     Ok(got);
 }
 
-expr_kind* = (c :: Checker, id: ExprId, node: Expr, ctx: Ctx)
+expr_kind = (c :: Checker, id: ExprId, node: Expr, ctx: Ctx)
              Res<TyId, AllocError> {
     node.kind.match({
         Literal(l)    => c.literal_type(l),
-        Unit          => c.types.prim("()"),
+        Unit          => c.types.unit(),
         SelfType      => c.self_type(ctx),
         Name(n)       => c.name_type(id, node, n.text, ctx),
         Paren(p)      => c.type_of(p.inner, ctx),
@@ -86,7 +86,7 @@ lambda_type* = (c :: Checker, l: Lambda) Res<TyId, AllocError> {
     c.types.fn_ty(params, hole)
 }
 
-array_lit_type* = (c :: Checker, a: ArrayLit, ctx: Ctx)
+array_lit_type = (c :: Checker, a: ArrayLit, ctx: Ctx)
                  Res<TyId, AllocError> {
     elem ::= c.types.infer().try();
     a.elems.loop((h, i, e) {
@@ -96,10 +96,10 @@ array_lit_type* = (c :: Checker, a: ArrayLit, ctx: Ctx)
     c.types.array(elem, a.elems.len)
 }
 
-fixed_array_type* = (c :: Checker, f: FixedArray, ctx: Ctx)
+fixed_array_type = (c :: Checker, f: FixedArray, ctx: Ctx)
                    Res<TyId, AllocError> {
     ty   = c.type_from_ast(f.type, ctx).try();
-    elem = element_of(c, ty);
+    elem = c.element_of(ty);
     f.elems.loop((h, e) {
         c.type_of(e, ctx).try();
         c.element_agrees(e, elem).try();
@@ -113,7 +113,7 @@ element_of = (c: Checker, ty: TyId) TyId {
     c.types.at(ty).match({ Array(a) => a.elem, _ => ty })
 }
 
-index_element_type* = (c :: Checker, node: Expr, x: Index, ctx: Ctx)
+index_element_type = (c :: Checker, node: Expr, x: Index, ctx: Ctx)
                      Res<TyId, AllocError> {
     base = c.type_of(x.base, ctx).try();
     c.type_of(x.index, ctx).try();
@@ -129,7 +129,7 @@ array_element = (c :: Checker, node: Expr, x: Index, a: TyArray)
     Ok(a.elem);
 }
 
-literal_type* = (c :: Checker, l: Literal) Res<TyId, AllocError> {
+literal_type = (c :: Checker, l: Literal) Res<TyId, AllocError> {
     l.kind.match({
         Int   => c.types.prim("int"),
         Float => c.types.prim("float"),
@@ -139,7 +139,7 @@ literal_type* = (c :: Checker, l: Literal) Res<TyId, AllocError> {
     })
 }
 
-name_type* = (c :: Checker, id: ExprId, node: Expr, text: str, ctx: Ctx)
+name_type = (c :: Checker, id: ExprId, node: Expr, text: str, ctx: Ctx)
             Res<TyId, AllocError> {
     c.walk_name(text).match({
         WalkNone => c.lookup(text).match({
@@ -159,7 +159,7 @@ bound_name_type = (c :: Checker, id: ExprId, b: Binding)
     Ok(b.ty);
 }
 
-unbound_name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
+unbound_name_type = (c :: Checker, node: Expr, text: str, ctx: Ctx)
                     Res<TyId, AllocError> {
     text.eq("None").match({
         true  => c.none_type(),
@@ -167,7 +167,7 @@ unbound_name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
     })
 }
 
-none_type* = (c :: Checker) Res<TyId, AllocError> {
+none_type = (c :: Checker) Res<TyId, AllocError> {
     hole = c.types.infer().try();
     c.types.res_absence(hole)
 }
@@ -180,14 +180,14 @@ global_name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
     })
 }
 
-value_def_type* = (c :: Checker, node: Expr, d: Def) Res<TyId, AllocError> {
+value_def_type = (c :: Checker, node: Expr, d: Def) Res<TyId, AllocError> {
     c.alias_module(d.id).match({
         None   => c.def_type(d),
         Ok(mi) => c.module_not_a_value(node.span, d.name, mi),
     })
 }
 
-variant_name_type* = (c :: Checker, node: Expr, text: str, ctx: Ctx)
+variant_name_type = (c :: Checker, node: Expr, text: str, ctx: Ctx)
                     Res<TyId, AllocError> {
     found ::= c.alloc.Vec<Def>();
     c.world.variant_defs(c.tree, ctx.module, text, found).try();
@@ -203,7 +203,7 @@ bare_variant_type = (c :: Checker, d: Def, text: str)
     c.variant_type(ty, text)
 }
 
-unresolved_name* = (c :: Checker, node: Expr, text: str)
+unresolved_name = (c :: Checker, node: Expr, text: str)
                   Res<TyId, AllocError> {
     c.report(
         node.span.file,
@@ -221,7 +221,7 @@ def_type* = (c :: Checker, d: Def) Res<TyId, AllocError> {
     })
 }
 
-def_alias_type* = (c :: Checker, d: Def) Res<TyId, AllocError> {
+def_alias_type = (c :: Checker, d: Def) Res<TyId, AllocError> {
     empty ::= c.alloc.Vec<TyId>();
     c.declared_or_alias(d, empty)
 }
@@ -231,7 +231,7 @@ decl_as_type* = (c :: Checker, d: Def) Res<TyId, AllocError> {
     c.types.named(d.id, d.qname, d.name, empty)
 }
 
-const_type* = (c :: Checker, d: Def) Res<TyId, AllocError> {
+const_type = (c :: Checker, d: Def) Res<TyId, AllocError> {
     decl_at(c.tree, d.id).match({
         Ok(x) => c.const_decl_type(x, d),
         None  => c.types.unknown(),
@@ -267,34 +267,26 @@ binary_type* = (c :: Checker, node: Expr, b: Binary, ctx: Ctx)
         true  => c.types.bool_ty(),
         false => Ok(operand),
     }).try();
-    // a trap the compiler can prove will fire is a compile error, and
-    // the operand types are what decides what fits
     c.check_binary(b, got).try();
-    // `&&`/`||` short-circuit on a truth, so their operands are bools
     c.check_logical(b, lhs, rhs).try();
-    // `==` dispatches to `Eq`, and a type with no impl has nothing to
-    // call — the operand type is what says so, never the result's
     c.check_eq(b, operand).try();
-    // Validate the operands as a pair after their individual checks.
+    // the pair, after each side on its own
     c.operands_agree(b, lhs, rhs).try();
     c.check_arms_agree(b.lhs).try();
     c.check_arms_agree(b.rhs).try();
     Ok(got);
 }
 
-// The wider of the two: a literal takes the other side's type, which
-// is "a literal's type comes from its context" one level in.
-arith_type* = (c :: Checker, lhs: TyId, rhs: TyId) Res<TyId, AllocError> {
-    // the match yields a bare TyId and the `Ok` is outside it: two
-    // arms that are both `Ok(..)` give the match no written type to
-    // take from its first arm.
+// A literal takes the other side's type.
+arith_type = (c :: Checker, lhs: TyId, rhs: TyId) Res<TyId, AllocError> {
+    // `Ok` outside the match: two `Ok(..)` arms leave it no written type
     Ok(c.is_literal_ty(lhs).match({
         true  => rhs,
         false => lhs,
     }));
 }
 
-unary_type* = (c :: Checker, node: Expr, u: Unary, ctx: Ctx)
+unary_type = (c :: Checker, node: Expr, u: Unary, ctx: Ctx)
              Res<TyId, AllocError> {
     inner = c.type_of(u.operand, ctx).try();
     u.op.match({
@@ -304,7 +296,7 @@ unary_type* = (c :: Checker, node: Expr, u: Unary, ctx: Ctx)
     })
 }
 
-addr_type* = (c :: Checker, node: Expr, u: Unary, inner: TyId, ctx: Ctx)
+addr_type = (c :: Checker, node: Expr, u: Unary, inner: TyId, ctx: Ctx)
             Res<TyId, AllocError> {
     operand = c.tree.expr_at(u.operand);
     operand.kind.match({
@@ -313,7 +305,7 @@ addr_type* = (c :: Checker, node: Expr, u: Unary, inner: TyId, ctx: Ctx)
     })
 }
 
-addr_of_access* = (
+addr_of_access = (
     c     :: Checker,
     node  : Expr,
     a     : Access,
@@ -326,7 +318,7 @@ addr_of_access* = (
     })
 }
 
-no_address* = (c :: Checker, node: Expr, a: Access, inner: TyId)
+no_address = (c :: Checker, node: Expr, a: Access, inner: TyId)
              Res<TyId, AllocError> {
     c.report(
         node.span.file,
@@ -336,9 +328,11 @@ no_address* = (c :: Checker, node: Expr, a: Access, inner: TyId)
     Ok(inner);
 }
 
-refuse_handle_tail* = (c :: Checker, block: Block, got: TyId)
+// The block's own tail only: a trailing block statement refused its
+// tail when it was typed, so `sema_hoist.tail_expr` would repeat it.
+refuse_handle_tail = (c :: Checker, block: Block, got: TyId)
                       Res<(), AllocError> {
-    tail_node(block).match({
+    block.own_tail().match({
         None   => Ok(()),
         Ok(id) => c.is_handle_ty(got).match({
             false => Ok(()),
@@ -347,14 +341,14 @@ refuse_handle_tail* = (c :: Checker, block: Block, got: TyId)
     })
 }
 
-tail_node = (block: Block) Res<ExprId> {
+own_tail = (block: Block) Res<ExprId> {
     block.value.match({
         Ok(v) => Ok(v),
-        None  => last_stmt_expr(block),
+        None  => block.last_stmt_value(),
     })
 }
 
-last_stmt_expr = (block: Block) Res<ExprId> {
+last_stmt_value = (block: Block) Res<ExprId> {
     n = block.stmts.len;
     (n > 0).match({
         false => None,
@@ -384,9 +378,9 @@ block_type* = (c :: Checker, id: BlockId, ctx: Ctx)
     Ok(got);
 }
 
-walk_stmts* = (c :: Checker, block: Block, ctx: Ctx)
+walk_stmts = (c :: Checker, block: Block, ctx: Ctx)
              Res<TyId, AllocError> {
-    last ::= c.types.prim("()").try();
+    last ::= c.types.unit().try();
     n = block.stmts.len;
     block.stmts.loop((h, i, s) {
         last = c.stmt_type(s, ctx).try();
@@ -400,6 +394,6 @@ stmt_type* = (c :: Checker, s: Stmt, ctx: Ctx) Res<TyId, AllocError> {
         Expr(e)  => c.type_of(e.expr, ctx),
         Bind(b)  => c.bind_stmt(b, ctx),
         Block(b) => c.block_type(b, ctx),
-        Decl(_)  => c.types.prim("()"),
+        Decl(_)  => c.types.unit(),
     })
 }

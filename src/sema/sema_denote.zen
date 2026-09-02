@@ -1,8 +1,8 @@
-Type, TypeId, Ident, Alias, Enum = std.ast
+Type, TypeId, Ident, Alias, Decl, Function = std.ast
 Param, ArrayType, FnType = std.ast
 AllocError = std.mem
 Vec = std.collections
-TyId, TyNamed, is_prim = sema.sema_ty
+TyId, is_prim = sema.sema_ty
 Def, decl_at = sema.sema_def
 named_or_union = sema.sema_union
 SemaFault, NameFault = sema.sema_diag
@@ -20,7 +20,7 @@ type_from_ast* = (c :: Checker, id: TypeId, ctx: Ctx)
     })
 }
 
-memoized_type* = (c :: Checker, id: TypeId, ctx: Ctx)
+memoized_type = (c :: Checker, id: TypeId, ctx: Ctx)
                  Res<TyId, AllocError> {
     c.type_memo.get(id).match({
         None    => c.compute_type(id, ctx),
@@ -28,11 +28,10 @@ memoized_type* = (c :: Checker, id: TypeId, ctx: Ctx)
     })
 }
 
-compute_type* = (c :: Checker, id: TypeId, ctx: Ctx)
+compute_type = (c :: Checker, id: TypeId, ctx: Ctx)
                Res<TyId, AllocError> {
-    // seed the memo with poison before recursing, so a type that
-    // mentions itself bottoms out instead of looping (`Node = { next:
-    // Ptr<Node> }` is real; the layout question is answered elsewhere).
+    // Poison the memo before recursing so a self-mentioning type
+    // bottoms out; layout rejects the by-value cycles.
     poison = c.types.unknown().try();
     c.type_memo.set(id, poison).try();
     node = c.tree.type_at(id);
@@ -41,9 +40,9 @@ compute_type* = (c :: Checker, id: TypeId, ctx: Ctx)
     Ok(got);
 }
 
-type_kind* = (c :: Checker, node: Type, ctx: Ctx) Res<TyId, AllocError> {
+type_kind = (c :: Checker, node: Type, ctx: Ctx) Res<TyId, AllocError> {
     node.kind.match({
-        Unit     => c.types.prim("()"),
+        Unit     => c.types.unit(),
         SelfType => c.self_type(ctx),
         Infer    => c.types.infer(),
         Variadic => c.types.prim("..."),
@@ -61,7 +60,7 @@ self_type* = (c :: Checker, ctx: Ctx) Res<TyId, AllocError> {
     })
 }
 
-union_type* = (c :: Checker, members: Vec<TypeId>, ctx: Ctx)
+union_type = (c :: Checker, members: Vec<TypeId>, ctx: Ctx)
              Res<TyId, AllocError> {
     parts ::= c.alloc.Vec<TyId>();
     members.loop((h, m) {
@@ -71,9 +70,9 @@ union_type* = (c :: Checker, members: Vec<TypeId>, ctx: Ctx)
 }
 
 // A generic function type binds its own parameters while reading its shape.
-fn_type* = (c :: Checker, f: FnType, ctx: Ctx) Res<TyId, AllocError> {
+fn_type = (c :: Checker, f: FnType, ctx: Ctx) Res<TyId, AllocError> {
     tmark = c.tvar_mark();
-    c.push_tparams(f.tparams, module_name(c, ctx.module)).try();
+    c.push_tparams(f.tparams, c.module_name(ctx.module)).try();
     ptys ::= c.alloc.Vec<TyId>();
     f.params.loop((h, p) {
         ptys.add(c.param_type(p, ctx).try()).try();
@@ -91,13 +90,38 @@ param_type* = (c :: Checker, p: Param, ctx: Ctx) Res<TyId, AllocError> {
     })
 }
 
-array_type* = (c :: Checker, t: ArrayType, ctx: Ctx)
+array_type = (c :: Checker, t: ArrayType, ctx: Ctx)
              Res<TyId, AllocError> {
     e = c.type_from_ast(t.elem, ctx).try();
     c.counted_array(e, t.count, ctx)
 }
 
-named_type* = (
+ret_type* = (c :: Checker, f: Function, ctx: Ctx) Res<TyId, AllocError> {
+    f.ret.match({
+        Ok(t) => c.type_from_ast(t, ctx),
+        None  => c.types.unit(),
+    })
+}
+
+// The written signature as a function type, read in whatever type
+// variables are in scope.
+signature_type* = (c :: Checker, f: Function, ctx: Ctx)
+                  Res<TyId, AllocError> {
+    ptys ::= c.alloc.Vec<TyId>();
+    f.params.loop((h, p) { ptys.add(c.param_type(p, ctx).try()).try() });
+    rty = c.ret_type(f, ctx).try();
+    c.types.fn_ty(ptys, rty)
+}
+
+// The declaration a named type points at.
+type_decl* = (c :: Checker, ty: TyId) Res<Decl> {
+    c.types.at(ty).match({
+        Named(n) => decl_at(c.tree, n.decl),
+        _        => None,
+    })
+}
+
+named_type = (
     c    :: Checker,
     node : Type,
     name : Ident,
@@ -127,7 +151,7 @@ res_sugar* = (c :: Checker, name: str, mi: usize)
     })
 }
 
-res_type* = (c :: Checker, args: Vec<TyId>) Res<TyId, AllocError> {
+res_type = (c :: Checker, args: Vec<TyId>) Res<TyId, AllocError> {
     value = args.get(0).match({ Ok(v) => v, None => UNRESOLVED });
     args.len.match({
         1 => c.types.res_absence(value),
@@ -136,7 +160,7 @@ res_type* = (c :: Checker, args: Vec<TyId>) Res<TyId, AllocError> {
     })
 }
 
-res_failure_of* = (c :: Checker, args: Vec<TyId>, value: TyId)
+res_failure_of = (c :: Checker, args: Vec<TyId>, value: TyId)
                  Res<TyId, AllocError> {
     args.get(1).match({
         None  => c.types.unknown(),
@@ -144,7 +168,7 @@ res_failure_of* = (c :: Checker, args: Vec<TyId>, value: TyId)
     })
 }
 
-declared_type* = (
+declared_type = (
     c    :: Checker,
     node : Type,
     name : Ident,
@@ -157,7 +181,7 @@ declared_type* = (
     })
 }
 
-tvar_or_declared* = (
+tvar_or_declared = (
     c    :: Checker,
     node : Type,
     name : Ident,
@@ -170,7 +194,7 @@ tvar_or_declared* = (
     })
 }
 
-lookup_named* = (
+lookup_named = (
     c    :: Checker,
     node : Type,
     name : Ident,
@@ -191,7 +215,7 @@ declared_or_alias* = (c :: Checker, d: Def, args: Vec<TyId>)
     })
 }
 
-alias_type* = (c :: Checker, d: Def, args: Vec<TyId>)
+alias_type = (c :: Checker, d: Def, args: Vec<TyId>)
              Res<TyId, AllocError> {
     c.alias_module(d.id).match({
         Ok(_) => c.named_or_union(d, args),
@@ -199,7 +223,7 @@ alias_type* = (c :: Checker, d: Def, args: Vec<TyId>)
     })
 }
 
-alias_decl_type* = (c :: Checker, d: Def, args: Vec<TyId>)
+alias_decl_type = (c :: Checker, d: Def, args: Vec<TyId>)
                   Res<TyId, AllocError> {
     decl_at(c.tree, d.id).match({
         None  => c.named_or_union(d, args),
@@ -211,7 +235,7 @@ alias_decl_type* = (c :: Checker, d: Def, args: Vec<TyId>)
 }
 
 // Resolve an alias target in the module that declared it.
-alias_written_type* = (c :: Checker, al: Alias, d: Def, args: Vec<TyId>)
+alias_written_type = (c :: Checker, al: Alias, d: Def, args: Vec<TyId>)
                      Res<TyId, AllocError> {
     (al.tparams.len == 0).match({
         false => c.named_or_union(d, args),
@@ -233,15 +257,8 @@ alias_enum* = (c :: Checker, d: Def) Res<TyId> {
     })
 }
 
-enum_named_by* = (c :: Checker, ty: TyId) Res<TyId> {
-    c.types.at(ty).match({
-        Named(n) => c.enum_decl_of(n, ty),
-        _        => None,
-    })
-}
-
-enum_decl_of* = (c :: Checker, n: TyNamed, ty: TyId) Res<TyId> {
-    decl_at(c.tree, n.decl).match({
+enum_named_by = (c :: Checker, ty: TyId) Res<TyId> {
+    c.type_decl(ty).match({
         None  => None,
         Ok(x) => x.kind.match({
             Enum(_) => Ok(ty),
@@ -250,7 +267,7 @@ enum_decl_of* = (c :: Checker, n: TyNamed, ty: TyId) Res<TyId> {
     })
 }
 
-unresolved_type* = (c :: Checker, node: Type, name: Ident)
+unresolved_type = (c :: Checker, node: Type, name: Ident)
                   Res<TyId, AllocError> {
     c.report(
         node.span.file,
