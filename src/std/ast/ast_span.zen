@@ -17,7 +17,6 @@ Pos* = {
     }
 }
 
-// Display as `line:col`.
 Pos.impl(Display, {
     toString ::= (self: @Self, out :: Sink) Res<(), WriteError> {
         out.fmt("{}:{}", self.line, self.col)
@@ -29,6 +28,18 @@ Span* = {
     file*: str,
     start*: Pos,
     end*: Pos,
+
+    // Whether `p` in `file` lies in this span.
+    covers* = (self: @Self, file: str, p: Pos) bool {
+        self.file.eq(file) && p.at_or_after(self.start) && p.before(self.end)
+    }
+
+    // Strictly inside `outer`: contained, and not the same span.
+    inside* = (self: @Self, outer: @Self) bool {
+        self.start.at_or_after(outer.start)
+            && outer.end.at_or_after(self.end)
+            && (outer.start.before(self.start) || self.end.before(outer.end))
+    }
 }
 
 // Blank represents one or more blank lines between source nodes.
@@ -47,7 +58,6 @@ TriviaRun* = {
     len*: usize,
 }
 
-// Empty trivia run.
 no_trivia* = () TriviaRun { TriviaRun(at: 0, len: 0) }
 
 // Span for generated values with no source position. Line zero is the marker.
@@ -66,17 +76,13 @@ QualifiedName* = {
     segments*: Vec<Ident>,
     span*: Span,
 
-    // A segment's spelling, borrowed from the source. Recovery may leave a
-    // name empty and callers probing a known shape should not have to repeat
-    // Vec's missing arm, so an absent segment has the same spelling as an
-    // empty recovery segment.
+    // A segment's spelling; an absent segment reads as "", the same as one
+    // recovery left empty.
     segment_at* = (self: @Self, i: usize) str {
         self.segments.get(i).match({ Ok(s) => s.text, None => "" })
     }
 
-    // The leaf of a structured name: `result` in `std.core.result`. Keep this
-    // on QualifiedName rather than recovering it from the dotted source span;
-    // segments are the AST's authority and preserve recovery shapes.
+    // The last segment: `result` in `std.core.result`; "" when there are none.
     last_segment* = (self: @Self) str {
         n = self.segments.len;
         (n == 0).match({

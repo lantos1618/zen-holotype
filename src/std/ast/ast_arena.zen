@@ -53,7 +53,7 @@ Ast* = {
     // Comments and blank lines in source order; nodes reference contiguous runs.
     trivia :: Vec<Trivia>,
 
-    // Next typed id; kept in u32 so allocation cannot silently narrow usize.
+    // Next id per family, counted in the id's width.
     expr_count :: u32 = 0,
     type_count :: u32 = 0,
     pattern_count :: u32 = 0,
@@ -159,10 +159,7 @@ Ast* = {
 
     c_type_at* = (self: @Self, module: u32, decl: u32) Res<CTypeBinding> {
         self.module_origin_at(module.to_usize()).match({
-            Ok(ModuleOrigin.CBinding(id)) => self.c_binding_at(id).match({
-                Ok(binding) => binding.c_type_in(decl),
-                None        => None,
-            }),
+            Ok(ModuleOrigin.CBinding(id)) => self.c_binding_at(id).try().c_type_in(decl),
             _                             => None,
         })
     }
@@ -239,15 +236,13 @@ Ast* = {
 }
 
 c_type_in = (binding: CBinding, decl: u32) Res<CTypeBinding> {
-    Range(0, binding.types.len).find((i) {
+    i = Range(0, binding.types.len).find((i) {
         binding.types.get(i).match({
             Ok(row) => row.match({ Opaque(raw) => raw.decl == decl }),
             None    => false,
         })
-    }).match({
-        Ok(i) => binding.types.get(i),
-        None  => None,
-    })
+    }).try();
+    binding.types.get(i)
 }
 
 // Report a stale id before trapping. Ast copies are snapshots, so consumers

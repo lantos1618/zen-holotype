@@ -1,0 +1,35 @@
+// The writer's escape table (`json_write.escaped`) and the reader's
+// (`json_read.unescaped`) are inverses: every byte the writer escapes must
+// read back as itself, and the short escapes it emits are ones the reader
+// knows. The encoded line pins which bytes get a short escape and which
+// get `\u00XX`.
+
+str, String = std.text
+Alloc, AllocError = std.mem
+Jsons, read, write_text = std.json
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    raw ::= a.String().try();
+    b: u8 ::= 0;
+    loop(b < ' ', (h) {
+        raw.add(b).try();
+        b = b + 1;
+    });
+    raw.add("\"\\/ é").try();
+    encoded ::= a.String().try();
+    write_text(raw.view(), encoded).try();
+    println("encoded {}", encoded.view());
+    tree ::= a.Jsons();
+    read(a, tree, encoded.view()).match({
+        Err(_) => println("read refused its own writer's output"),
+        Ok(id) => tree.text(id).match({
+            None      => println("read gave a non-string"),
+            Ok(again) => again.eq(raw.view()).match({
+                true  => println("round trip equal, {} bytes", again.len),
+                false => println("round trip differs"),
+            }),
+        }),
+    });
+    Ok(0)
+}

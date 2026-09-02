@@ -1,7 +1,7 @@
 // Resolve a byte position to the smallest covering AST node. Nodes are scanned
 // from the arena's flat family lists; these queries do not allocate.
 str = std.text
-Pos, Span = std.ast.ast_span
+Pos, Span, nowhere = std.ast.ast_span
 ExprId, TypeId, PatternId, BlockId = std.ast.ast_id
 Ast = std.ast.ast_arena
 
@@ -11,81 +11,48 @@ NodeRef* = ExprNode(ExprId)
     | PatternNode(PatternId)
     | BlockNode(BlockId)
 
-// Whether `p` sits inside `span`, in `file`. Half-open: `end` is past it.
-in_span* = (span: Span, file: str, p: Pos) bool {
-    span.file.eq(file) && !before(p, span.start) && before(p, span.end)
-}
+// The smallest span seen so far that covers the cursor. A later candidate
+// replaces it only when nested strictly inside it.
+Nearest = {
+    file: str,
+    p: Pos,
+    found :: Res<NodeRef> = None,
+    span :: Span,
 
-// Whether `a` is earlier in the file than `b`: line, then byte column.
-before* = (a: Pos, b: Pos) bool {
-    a.before(b)
-}
-
-// Is `inner` strictly inside `outer` — the same span is not.
-inside* = (inner: Span, outer: Span) bool {
-    !before(inner.start, outer.start)
-        && !before(outer.end, inner.end)
-        && (before(outer.start, inner.start) || before(inner.end, outer.end))
+    offer = (self :: @Self, cand: Span, node: NodeRef) () {
+        closer = cand.covers(self.file, self.p) && self.found.match({
+            None  => true,
+            Ok(_) => cand.inside(self.span),
+        });
+        closer.then(() {
+            self.found = Ok(node);
+            self.span  = cand;
+        });
+        ();
+    }
 }
 
 // Smallest node of any family covering `p`; None for trivia or positions
 // outside all nodes.
 node_at* = (tree: Ast, file: str, p: Pos) Res<NodeRef> {
-    best ::= NodeRef.ExprNode(ExprId(index: 0));
-    have ::= false;
-    span ::= empty_span();
-    tree.exprs_each((id, ex) {
-        take(ex.span, file, p, have, span).then(() {
-            best = NodeRef.ExprNode(id);
-            span = ex.span;
-            have = true;
-        });
-    });
-    tree.types_each((id, ty) {
-        take(ty.span, file, p, have, span).then(() {
-            best = NodeRef.TypeNode(id);
-            span = ty.span;
-            have = true;
-        });
-    });
+    best ::= Nearest(file: file, p: p, span: nowhere());
+    tree.exprs_each((id, ex) { best.offer(ex.span, NodeRef.ExprNode(id)); });
+    tree.types_each((id, ty) { best.offer(ty.span, NodeRef.TypeNode(id)); });
     tree.patterns_each((id, pat) {
-        take(pat.span, file, p, have, span).then(() {
-            best = NodeRef.PatternNode(id);
-            span = pat.span;
-            have = true;
-        });
+        best.offer(pat.span, NodeRef.PatternNode(id));
     });
-    tree.blocks_each((id, blk) {
-        take(blk.span, file, p, have, span).then(() {
-            best = NodeRef.BlockNode(id);
-            span = blk.span;
-            have = true;
-        });
-    });
-    have.match({ true => Ok(best), false => None })
+    tree.blocks_each(
+        (id, blk) { best.offer(blk.span, NodeRef.BlockNode(id)); }
+    );
+    best.found
 }
 
 // Smallest expression covering `p`, independent of smaller type nodes.
 expr_node_at* = (tree: Ast, file: str, p: Pos) Res<ExprId> {
-    best ::= ExprId(index: 0);
-    have ::= false;
-    span ::= empty_span();
-    tree.exprs_each((id, ex) {
-        take(ex.span, file, p, have, span).then(() {
-            best = id;
-            span = ex.span;
-            have = true;
-        });
-    });
-    have.match({ true => Ok(best), false => None })
-}
-
-// Prefer the first covering candidate, then any candidate nested inside it.
-take = (cand: Span, file: str, p: Pos, have: bool, best: Span) bool {
-    in_span(cand, file, p) && (!have || inside(cand, best))
-}
-
-// Initial span value, ignored until `have` is true.
-empty_span = () Span {
-    Span(file: "", start: Pos(line: 0, col: 0), end: Pos(line: 0, col: 0))
+    best ::= Nearest(file: file, p: p, span: nowhere());
+    tree.exprs_each((id, ex) { best.offer(ex.span, NodeRef.ExprNode(id)); });
+    best.found.match({
+        Ok(ExprNode(id)) => Ok(id),
+        _                => None,
+    })
 }

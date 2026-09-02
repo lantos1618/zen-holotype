@@ -11,7 +11,7 @@ Span, Ident, QualifiedName, TriviaRun = std.ast.ast_span
 ExprId, TypeId, PatternId, BlockId, CBindingId = std.ast.ast_id
 Alloc, AllocError = std.mem
 
-// `+ - *` trap on overflow; `+% -% *%` wrap. Zen has no bitwise operators.
+// `+ - *` trap on overflow; `+% -% *%` wrap.
 BinOp* = Add
     | Sub
     | Mul
@@ -43,9 +43,8 @@ Form* = Required | Sealed | Default | Hook
 
 LiteralKind* = Int | Float | Str | Char | Bool
 
-// `text` is the raw source slice, including quotes and escapes. Integer
-// magnitude comes from the lexer so later phases do not have to parse the
-// source spelling again (decimal and hexadecimal have the same value).
+// `text` is the raw source slice, including quotes and escapes. `integer`
+// is the lexer's value of an Int literal, decimal or hexadecimal.
 Literal* = {
     kind*: LiteralKind,
     text*: str,
@@ -125,7 +124,6 @@ Expr* = {
     trailing*: TriviaRun,
 }
 
-// `Access` represents member expressions such as `p.x`.
 ExprKind* = Name(Name)
     | Literal(Literal)
     | Unit
@@ -162,9 +160,8 @@ ArrayLit* = {
     elems*: Vec<ExprId>,
 }
 
-// `[i32, 4](2, 3, 5, 7)` — a fixed-array type applied to its elements.
-// Its own kind, not a Call: an array literal is never a callee, and
-// the reading has to be decidable at the `(`.
+// `[i32, 4](2, 3, 5, 7)`: a fixed-array type applied to its elements. Not
+// a Call, so the reading is decided at the `(`.
 FixedArray* = {
     type*: TypeId,
     elems*: Vec<ExprId>,
@@ -197,11 +194,9 @@ Arg* = {
     trailing*: TriviaRun,
 }
 
-// `(n == 0).match({ true => .., false => .. })`. Match carries an arm list
-// and is checked for exhaustiveness, so it is distinct from Call.
-//
-// `name_span` is the `match` token — an "is not exhaustive" diagnostic
-// points there, and the formatter needs it to locate `.match(`.
+// `(n == 0).match({ true => .., false => .. })`. `name_span` is the `match`
+// token: exhaustiveness diagnostics point there and the formatter locates
+// `.match(` by it.
 Match* = {
     scrutinee*: ExprId,
     name_span*: Span,
@@ -209,8 +204,7 @@ Match* = {
     arms_span*: Span,
 }
 
-// `pattern => expr`. `arrow_span` is the `=>`: the formatter aligns
-// arms on it, and it cannot align what it cannot locate.
+// `pattern => expr`. `arrow_span` is the `=>`; the formatter aligns arms on it.
 Arm* = {
     pattern*: PatternId,
     arrow_span*: Span,
@@ -239,8 +233,7 @@ Access* = {
     name*: Ident,
 }
 
-// `buf[i]`. Fixed-array indexing traps out of bounds; Vec.get returns Res.
-// `op_span` identifies the `[` for diagnostics.
+// `buf[i]`. `op_span` identifies the `[` for diagnostics.
 Index* = {
     base*: ExprId,
     index*: ExprId,
@@ -284,10 +277,8 @@ Stmt* = {
 // Declarations may be nested and do not take a semicolon.
 StmtKind* = Bind(Bind) | Expr(ExprStmt) | Decl(Decl) | Block(BlockId)
 
-// `x = e;`, `x ::= e;`, `x: T = e;`, `self.len = self.len + 1;`. The
-// target is an expression, not a name: a member and an index are
-// binding targets too, and narrowing to `Ident` would make
-// `self.len = ..` unrepresentable.
+// `x = e;`, `x ::= e;`, `x: T = e;`, `self.len = self.len + 1;`. The target
+// is an expression: a member and an index are binding targets too.
 Bind* = {
     target*: ExprId,
     type*: Res<TypeId>,
@@ -308,10 +299,6 @@ Block* = {
     leading*: TriviaRun,
     trailing*: TriviaRun,
 }
-
-// ---------------------------------------------------------------------
-// declarations
-// ---------------------------------------------------------------------
 
 Decl* = {
     kind*: DeclKind,
@@ -443,12 +430,10 @@ Member* = {
     }
 }
 
-// The Field/Const split is syntactic: in a struct body,
-// `name: T = value` (immutable) is a constant, `name :: T = value`
-// (mutable) is a field with a default. Const never appears in an impl
-// body or record literal, where `name: value` supplies a field.
-//
-// Immutable fields with defaults are not currently expressible.
+// The Field/Const split is syntactic: in a struct body, `name: T = value`
+// (immutable) is a constant and `name :: T = value` (mutable) is a field
+// with a default. In an impl body or record literal `name: value` supplies
+// a field, so Const does not appear there.
 MemberKind* = Field(Field) | Const(Const) | Function(Function)
 
 // `width: f64`, `len* :: usize = 0`, and — in an impl or record —
@@ -488,7 +473,7 @@ TParam* = {
 }
 
 // The raw headers behind a loader-created C binding module. `system`
-// selects `<path>` over `"path"`; the path itself never carries C syntax.
+// selects `<path>` over `"path"`; the path carries no C syntax.
 CHeader* = {
     path*: str,
     system*: bool,
@@ -508,25 +493,23 @@ CBinding* = {
 
 ModuleOrigin* = Source | CBinding(CBindingId)
 
-// `name` is the dotted module path (`std.core.result`), the module's
-// identity; the source file is `span.file`, already carried by every
-// node in it. `trailing` is where an end-of-file comment lives — it has
-// nowhere else to go, and a formatter dropping it fails its round trip.
+// `name` is the dotted module path (`std.core.result`); the source file is
+// `span.file`. `trailing` holds an end-of-file comment.
 Module* = {
     name*: str,
     decls*: Vec<Decl>,
     span*: Span,
     leading*: TriviaRun,
     trailing*: TriviaRun,
-}
 
-functions* = (self: Module, a: Alloc) Res<Vec<Function>, AllocError> {
-    found ::= a.Vec<Function>();
-    self.decls.loop((h, d) {
-        d.kind.match({
-            Function(f) => found.add(f),
-            _           => Ok(()),
-        }).try();
-    });
-    Ok(found);
+    functions* = (self: @Self, a: Alloc) Res<Vec<Function>, AllocError> {
+        found ::= a.Vec<Function>();
+        self.decls.loop((h, d) {
+            d.kind.match({
+                Function(f) => found.add(f),
+                _           => Ok(()),
+            }).try();
+        });
+        Ok(found);
+    }
 }

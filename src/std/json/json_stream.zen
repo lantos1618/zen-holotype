@@ -6,8 +6,7 @@ str, String = std.text
 Vec = std.collections
 Alloc = std.mem
 Range = std.core
-JsonFault, TextByte, text_byte, simple, decode_text_token, number_token, shifted,
-    MAX_NESTING = std.json.json_read
+JsonFault, TextByte, decode_text_token, number_token, MAX_NESTING = std.json.json_read
 
 JsonEvent* = ObjectStart
     | ObjectEnd
@@ -99,7 +98,7 @@ Decoder* = {
         b      : u8,
         events :: Vec<JsonEvent>
     ) Res<bool, JsonFault> {
-        json_space(b).match({
+        b.is_json_space().match({
             true  => Ok(true),
             false => (self.frames.len == 0).match({
                 true  => self.root_ready(b, events),
@@ -173,7 +172,7 @@ Decoder* = {
             '{' => self.open_object(events),
             '[' => self.open_array(events),
             '"' => self.begin_quoted(false),
-            _   => atom_start(b).match({
+            _   => b.atom_start().match({
                 true  => self.begin_atom(b),
                 false => Err(JsonFault.Unexpected(self.at)),
             }),
@@ -258,13 +257,13 @@ Decoder* = {
                 self.slash = false;
                 (b == 'u').match({
                     true  => { self.hex_left = 4; Ok(true) },
-                    false => simple(b).match({
+                    false => b.unescaped().match({
                         Ok(_) => Ok(true),
                         None  => Err(JsonFault.BadEscape(self.at)),
                     }),
                 })
             },
-            false => text_byte(b, self.at).match({
+            false => b.text_byte(self.at).match({
                 Err(fault)     => Err(fault),
                 Ok(TextEnd)    => self.finish_quoted(events),
                 Ok(TextEscape) => {
@@ -312,7 +311,7 @@ Decoder* = {
         b      : u8,
         events :: Vec<JsonEvent>
     ) Res<bool, JsonFault> {
-        atom_end(b).match({
+        b.atom_end().match({
             true  => { self.finish_atom(events).try(); Ok(false) },
             false => { self.token.add(b).try(JsonFault.NoMemory); Ok(true) },
         })
@@ -346,7 +345,7 @@ Decoder* = {
         });
         literal.match({
             Ok(event) => Ok(event),
-            None      => keyword_start(raw).match({
+            None      => raw.keyword_start().match({
                 true  => Err(JsonFault.Unexpected(self.token_at)),
                 false => number_token(self.a, raw).match({
                     Err(fault) => Err(fault.shifted(self.token_at)),
@@ -422,19 +421,14 @@ Decoder* = (a: Alloc) Res<Decoder, JsonFault> {
     ))
 }
 
-json_space = (b: u8) bool { b.is_in([' ', '\t', '\n', '\r']) }
-
-atom_start = (b: u8) bool {
-    b == '-' || (b >= '0' && b <= '9') || b.is_in(['t', 'f', 'n'])
-}
+atom_start = (b: u8) bool { b == '-' || b.is_digit() || b.starts_keyword() }
 
 atom_end = (b: u8) bool {
-    json_space(b) || b.is_in([',', ']', '}', ':', '{', '[', '"'])
+    b.is_json_space() || b.is_in([',', ']', '}', ':', '{', '[', '"'])
 }
 
+starts_keyword = (b: u8) bool { b.is_in(['t', 'f', 'n']) }
+
 keyword_start = (raw: str) bool {
-    raw.get(0).match({
-        Ok(b) => b.is_in(['t', 'f', 'n']),
-        None  => false,
-    })
+    raw.get(0).match({ Ok(b) => b.starts_keyword(), None => false })
 }
