@@ -36,7 +36,7 @@ Map*<K: Eq + Hash, V> = {
         h     = key.hash(Hasher());
         entry = Entry(hash: h, key: key, value: value);
         self.index_of(h, key).match({
-            Ok(i) => put(self.entries, i, entry),
+            Ok(i) => self.entries.set(i, entry).ok_or(AllocError.OutOfMemory),
             None  => self.insert(entry),
         })
     }
@@ -64,14 +64,14 @@ Map*<K: Eq + Hash, V> = {
     place = (self :: @Self, s: usize, entry: Entry<K, V>) Res<(), AllocError> {
         held = self.slots.get(s).ok_or(AllocError.OutOfMemory).try();
         (held > SLOT_EMPTY).match({
-            true  => put(self.entries, held - 1, entry),
+            true  => self.entries.set(held - 1, entry).ok_or(AllocError.OutOfMemory),
             false => self.append(s, entry),
         });
     }
 
     append = (self :: @Self, s: usize, entry: Entry<K, V>) Res<(), AllocError> {
         self.entries.add(entry).try();
-        put(self.slots, s, self.entries.len);
+        self.slots.set(s, self.entries.len).ok_or(AllocError.OutOfMemory);
     }
 
     insert = (self :: @Self, entry: Entry<K, V>) Res<(), AllocError> {
@@ -151,28 +151,19 @@ Map*<K: Eq + Hash, V> = {
             true  => SLOTS_MIN * 2,
             false => self.slots.len * 2,
         });
-        self.slots = empty_slots(self.alloc, n).try();
+        self.slots = self.alloc.empty_slots(n).try();
         self.refill();
     }
 
     refill = (self :: @Self) Res<(), AllocError> {
-        room ::= true;
-        Range(0, self.entries.len).loop((h, i) {
-            self.relink(i).match({
-                Ok(_)  => (),
-                Err(_) => { room = false; h.break(); },
-            });
-        });
-        room.match({
-            false => Err(AllocError.OutOfMemory),
-            true  => Ok(()),
-        });
+        Range(0, self.entries.len).loop((h, i) { self.relink(i).try(); });
+        Ok(());
     }
 
     relink = (self :: @Self, i: usize) Res<(), AllocError> {
         e = self.entries.get(i).ok_or(AllocError.OutOfMemory).try();
         s = self.settle(e.hash, e.key).ok_or(AllocError.OutOfMemory).try();
-        put(self.slots, s, i + 1);
+        self.slots.set(s, i + 1).ok_or(AllocError.OutOfMemory);
     }
 }
 
@@ -180,24 +171,8 @@ Map*<K: Eq + Hash, V> = {
 // existing one.
 empty_slots = (a: Alloc, n: usize) Res<Vec<usize>, AllocError> {
     fresh ::= a.Vec<usize>();
-    room  ::= true;
-    Range(0, n).loop((h, i) {
-        fresh.add(SLOT_EMPTY).match({
-            Ok(_)  => (),
-            Err(_) => { room = false; h.break(); },
-        });
-    });
-    room.match({
-        false => Err(AllocError.OutOfMemory),
-        true  => Ok(fresh),
-    });
-}
-
-put = <T>(v :: Vec<T>, i: usize, value: T) Res<(), AllocError> {
-    v.set(i, value).match({
-        None  => Err(AllocError.OutOfMemory),
-        Ok(_) => Ok(()),
-    });
+    Range(0, n).loop((h, i) { fresh.add(SLOT_EMPTY).try(); });
+    Ok(fresh);
 }
 
 Map* = <K: Eq + Hash, V>(a: Alloc) Map<K, V> {

@@ -1,9 +1,12 @@
+// UTF-8 decoding out of str bytes and encoding into a String. Overlong forms,
+// surrogates, and values above U+10FFFF are invalid in both directions.
+
 str = std.text.text_str
 String = std.text.text_string
 AllocError = std.mem.mem
 
-// Offset of the first invalid byte.
-Utf8Error* = | Invalid(usize) | InvalidCodepoint(u32)
+Utf8Error* = | Invalid(usize)         // byte offset of the first invalid byte
+             | InvalidCodepoint(u32)  // the scalar that cannot be encoded
 
 Codepoint* = {
     value*: u32,
@@ -19,7 +22,7 @@ Codepoints* = {
 
     // Decode and advance. Call only while not done.
     next* = (self :: @Self) Res<u32, Utf8Error> {
-        c       = codepoint_at(self.bytes, self.at).try();
+        c       = self.bytes.codepoint_at(self.at).try();
         self.at = self.at + c.len;
         Ok(c.value);
     }
@@ -29,7 +32,7 @@ codepoints* = (s: str) Codepoints { Codepoints(bytes: s, at: 0) }
 
 codepoint_at* = (s: str, at: usize) Res<Codepoint, Utf8Error> {
     lead = s.get(at).ok_or(Utf8Error.Invalid(at)).try();
-    sequence_len(lead).match({
+    lead.sequence_len().match({
         1 => Ok(Codepoint(value: lead.to_u32(), len: 1)),
         2 => s.two_byte(at, lead),
         3 => s.three_byte(at, lead),
@@ -55,21 +58,20 @@ count_codepoints* = (s: str) Res<usize, Utf8Error> {
     Ok(n);
 }
 
-UTF8_ASCII_MAX*: u8 = 128       // first byte that is not a codepoint by itself
-UTF8_CONT_MIN*: u8 = 128        // continuation bytes are 128..191
-UTF8_LEAD_MIN*: u8 = 192        // 192 and 193 lead only OVERLONG sequences
-UTF8_LEAD_2_MIN*: u8 = 194      // first lead of a well-formed 2-byte sequence
-UTF8_LEAD_3_MIN*: u8 = 224
-UTF8_LEAD_4_MIN*: u8 = 240
-UTF8_LEAD_MAX*: u8 = 245        // 245 and up cannot reach U+10FFFF
+UTF8_ASCII_MAX: u8 = 128        // first byte that is not a codepoint by itself
+UTF8_CONT_MIN: u8 = 128         // continuation bytes are 128..191
+UTF8_LEAD_MIN: u8 = 192         // 192 and 193 lead only overlong sequences
+UTF8_LEAD_2_MIN: u8 = 194       // first lead of a well-formed 2-byte sequence
+UTF8_LEAD_3_MIN: u8 = 224
+UTF8_LEAD_4_MIN: u8 = 240
+UTF8_LEAD_MAX: u8 = 245         // 245 and up cannot reach U+10FFFF
 
-UTF8_CONT_SCALE*: u32 = 64      // the 6 payload bits of a continuation byte
-UTF8_MIN_3*: u32 = 2048         // below this, 3 bytes is overlong
+UTF8_CONT_SCALE: u32 = 64       // the 6 payload bits of a continuation byte
+UTF8_MIN_3: u32 = 2048          // below this, 3 bytes is overlong
 UTF8_MIN_4*: u32 = 65536        // below this, 4 bytes is overlong
-UTF8_SURROGATE_MIN*: u32 = 55296
-UTF8_SURROGATE_MAX*: u32 = 57343
-UTF8_MAX_CODEPOINT*: u32 = 1114111
-UTF8_MAX_LEN*: usize = 4        // no sequence is longer
+UTF8_SURROGATE_MIN: u32 = 55296
+UTF8_SURROGATE_MAX: u32 = 57343
+UTF8_MAX_CODEPOINT: u32 = 1114111
 
 // UTF-8 byte-order mark for U+FEFF.
 BOM_FIRST*: u8 = 239
@@ -134,16 +136,16 @@ four_byte = (s: str, at: usize, lead: u8) Res<Codepoint, Utf8Error> {
     });
 }
 
-// Append one Unicode scalar value. Surrogates and values above U+10FFFF are
-// not Unicode scalar values and are rejected before any byte is written.
-push_utf8* = (v: u32, out :: String) Res<(), Utf8Error | AllocError> {
-    scalar(v).match({
+// Append one Unicode scalar value; an invalid one is rejected before any byte
+// is written.
+push_utf8* = (out :: String, v: u32) Res<(), Utf8Error | AllocError> {
+    v.scalar().match({
         false => Err(Utf8Error.InvalidCodepoint(v)),
-        true  => encoded_len(v).match({
-            1 => out.add(narrow(v).try()),
-            2 => two_wide(v, out),
-            3 => three_wide(v, out),
-            _ => four_wide(v, out),
+        true  => v.encoded_len().match({
+            1 => out.add(v.narrow().try()),
+            2 => out.two_wide(v),
+            3 => out.three_wide(v),
+            _ => out.four_wide(v),
         }),
     })
 }
@@ -154,43 +156,49 @@ scalar = (v: u32) bool {
 }
 
 encoded_len = (v: u32) usize {
-    1 + past(v, UTF8_ASCII_MAX.to_u32()) + past(v, UTF8_MIN_3) + past(v, UTF8_MIN_4)
+    1 + v.past(UTF8_ASCII_MAX.to_u32()) + v.past(UTF8_MIN_3) + v.past(UTF8_MIN_4)
 }
 
 past = (v: u32, bound: u32) usize {
     (v >= bound).match({ true => 1, false => 0 })
 }
 
-two_wide = (v: u32, out :: String) Res<(), Utf8Error | AllocError> {
-    cont = UTF8_CONT_MIN.to_u32();
-    out.add(narrow(UTF8_LEAD_MIN.to_u32() + v / UTF8_CONT_SCALE).try()).try();
-    out.add(narrow(cont + v % UTF8_CONT_SCALE).try())
-}
-
-three_wide = (v: u32, out :: String) Res<(), Utf8Error | AllocError> {
+two_wide = (out :: String, v: u32) Res<(), Utf8Error | AllocError> {
     cont = UTF8_CONT_MIN.to_u32();
     out.add(
-        narrow(
-            UTF8_LEAD_3_MIN.to_u32() + v / (UTF8_CONT_SCALE * UTF8_CONT_SCALE)
-        ).try()
+        (UTF8_LEAD_MIN.to_u32() + v / UTF8_CONT_SCALE).narrow().try()
     ).try();
-    out.add(narrow(cont + (v / UTF8_CONT_SCALE) % UTF8_CONT_SCALE).try()).try();
-    out.add(narrow(cont + v % UTF8_CONT_SCALE).try())
+    out.add((cont + v % UTF8_CONT_SCALE).narrow().try())
 }
 
-four_wide = (v: u32, out :: String) Res<(), Utf8Error | AllocError> {
+three_wide = (out :: String, v: u32) Res<(), Utf8Error | AllocError> {
     cont = UTF8_CONT_MIN.to_u32();
-    out.add(narrow(
+    out.add(
+        (UTF8_LEAD_3_MIN.to_u32() + v / (UTF8_CONT_SCALE * UTF8_CONT_SCALE))
+            .narrow()
+            .try()
+    ).try();
+    out.add(
+        (cont + (v / UTF8_CONT_SCALE) % UTF8_CONT_SCALE).narrow().try()
+    ).try();
+    out.add((cont + v % UTF8_CONT_SCALE).narrow().try())
+}
+
+four_wide = (out :: String, v: u32) Res<(), Utf8Error | AllocError> {
+    cont = UTF8_CONT_MIN.to_u32();
+    out.add((
         UTF8_LEAD_4_MIN.to_u32()
             + v / (UTF8_CONT_SCALE * UTF8_CONT_SCALE * UTF8_CONT_SCALE)
-    ).try()).try();
+    ).narrow().try()).try();
     out.add(
-        narrow(
-            cont + (v / (UTF8_CONT_SCALE * UTF8_CONT_SCALE)) % UTF8_CONT_SCALE
-        ).try()
+        (cont + (v / (UTF8_CONT_SCALE * UTF8_CONT_SCALE)) % UTF8_CONT_SCALE)
+            .narrow()
+            .try()
     ).try();
-    out.add(narrow(cont + (v / UTF8_CONT_SCALE) % UTF8_CONT_SCALE).try()).try();
-    out.add(narrow(cont + v % UTF8_CONT_SCALE).try())
+    out.add(
+        (cont + (v / UTF8_CONT_SCALE) % UTF8_CONT_SCALE).narrow().try()
+    ).try();
+    out.add((cont + v % UTF8_CONT_SCALE).narrow().try())
 }
 
 narrow = (v: u32) Res<u8, Utf8Error> {

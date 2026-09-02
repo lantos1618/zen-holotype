@@ -3,14 +3,61 @@
 
 Res = std.core.result
 
-Duration* = {
-    ns*: u64,
-}
-
 NS_PER_MICRO*  : u64 = 1000
 NS_PER_MILLI*  : u64 = 1000000
 NS_PER_SECOND* : u64 = 1000000000
 NS_PER_MINUTE* : u64 = 60000000000
+
+// Presentation unit; it is not stored in Duration.
+Unit* = Nano | Micro | Milli | Second | Minute
+
+Duration* = {
+    ns*: u64,
+
+    // Unit accessors truncate.
+    nanos_of*   = (self: @Self) u64 { self.ns }
+    micros_of*  = (self: @Self) u64 { self.ns / NS_PER_MICRO }
+    millis_of*  = (self: @Self) u64 { self.ns / NS_PER_MILLI }
+    seconds_of* = (self: @Self) u64 { self.ns / NS_PER_SECOND }
+    minutes_of* = (self: @Self) u64 { self.ns / NS_PER_MINUTE }
+
+    // Largest unit present at least once; zero uses Nano.
+    unit_of* = (self: @Self) Unit {
+        found: Res<Unit> = loop<Unit>((h) {
+            (self.ns >= NS_PER_MINUTE).then(() { h.break(Unit.Minute) });
+            (self.ns >= NS_PER_SECOND).then(() { h.break(Unit.Second) });
+            (self.ns >= NS_PER_MILLI).then(() { h.break(Unit.Milli) });
+            (self.ns >= NS_PER_MICRO).then(() { h.break(Unit.Micro) });
+            h.break(Unit.Nano);
+        });
+        found.match({
+            Ok(one) => one,
+            None    => Unit.Nano,
+        });
+    }
+
+    count_in* = (self: @Self, u: Unit) u64 {
+        u.match({
+            Nano   => self.nanos_of(),
+            Micro  => self.micros_of(),
+            Milli  => self.millis_of(),
+            Second => self.seconds_of(),
+            Minute => self.minutes_of(),
+        });
+    }
+
+    add* = (self: @Self, other: Duration) Duration {
+        Duration(ns: self.ns + other.ns)
+    }
+
+    // None when subtraction would underflow.
+    sub* = (self: @Self, other: Duration) Res<Duration> {
+        (self.ns >= other.ns).match({
+            true  => Ok(Duration(ns: self.ns - other.ns)),
+            false => None,
+        });
+    }
+}
 
 nanos*   = (n: u64) Duration { Duration(ns: n) }
 micros*  = (n: u64) Duration { Duration(ns: n * NS_PER_MICRO) }
@@ -18,57 +65,9 @@ millis*  = (n: u64) Duration { Duration(ns: n * NS_PER_MILLI) }
 seconds* = (n: u64) Duration { Duration(ns: n * NS_PER_SECOND) }
 minutes* = (n: u64) Duration { Duration(ns: n * NS_PER_MINUTE) }
 
-// Unit accessors truncate rather than round.
-nanos_of*   = (self: Duration) u64 { self.ns }
-micros_of*  = (self: Duration) u64 { self.ns / NS_PER_MICRO }
-millis_of*  = (self: Duration) u64 { self.ns / NS_PER_MILLI }
-seconds_of* = (self: Duration) u64 { self.ns / NS_PER_SECOND }
-minutes_of* = (self: Duration) u64 { self.ns / NS_PER_MINUTE }
-
-// Presentation unit; it is not stored in Duration.
-Unit* = Nano | Micro | Milli | Second | Minute
-
-// Largest unit present at least once; zero uses Nano.
-unit_of* = (self: Duration) Unit {
-    found: Res<Unit> = loop<Unit>((h) {
-        (self.ns >= NS_PER_MINUTE).then(() { h.break(Unit.Minute) });
-        (self.ns >= NS_PER_SECOND).then(() { h.break(Unit.Second) });
-        (self.ns >= NS_PER_MILLI).then(() { h.break(Unit.Milli) });
-        (self.ns >= NS_PER_MICRO).then(() { h.break(Unit.Micro) });
-        h.break(Unit.Nano);
-    });
-    found.match({
-        Ok(one) => one,
-        None    => Unit.Nano,
-    });
-}
-
-// Whole units, truncating any remainder.
-count_in* = (self: Duration, u: Unit) u64 {
-    u.match({
-        Nano   => self.ns,
-        Micro  => self.ns / NS_PER_MICRO,
-        Milli  => self.ns / NS_PER_MILLI,
-        Second => self.ns / NS_PER_SECOND,
-        Minute => self.ns / NS_PER_MINUTE,
-    });
-}
-
 suffix* = (u: Unit) str {
     u.match({
         Nano => "ns", Micro => "us", Milli => "ms",
         Second => "s", Minute => "m",
-    });
-}
-
-add* = (self: Duration, other: Duration) Duration {
-    Duration(ns: self.ns + other.ns)
-}
-
-// None when subtraction would underflow.
-sub* = (self: Duration, other: Duration) Res<Duration> {
-    (self.ns >= other.ns).match({
-        true  => Ok(Duration(ns: self.ns - other.ns)),
-        false => None,
     });
 }

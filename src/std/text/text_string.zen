@@ -1,26 +1,16 @@
-// src/std/text/text_string.zen
-// String is owned, growable text backed directly by Vec<u8>.
-//
-// view borrows the current buffer. Any later add or fmt may reallocate and
-// invalidate that str, so callers must obtain a new view after writing.
-//
-// add appends raw str or u8 bytes and reports AllocError. fmt interprets its
-// format string at the call site and writes into the same buffer, mapping the
-// String-backed formatting path to AllocError. The allocating constructor
-// builds a fresh String through that fmt path.
+// Owned, growable text backed by Vec<u8>. `view` borrows the buffer; any later
+// `add` or `fmt` may reallocate it, so callers take a fresh view after writing.
 
 Vec = std.collections.collections
 Alloc, AllocError = std.mem.mem
 str, str_at = std.text.text_str
 Sink, WriteError = std.core.io
 Range = std.core.range
-digit, hex_digit = std.core.byte
 
 String* = {
     data :: Vec<u8>,
 
-    // Formatting is expanded at the call site and reports this buffer's
-    // allocation floor.
+    // Expanded at the call site; reports this buffer's allocation floor.
     fmt* = (self :: @Self, fmt: str, args: ...) Res<(), AllocError>
 
     // Borrows the buffer until the next potentially growing write.
@@ -33,8 +23,7 @@ String* = {
     // Discard the text while retaining its allocation for the next write.
     clear* = (self :: @Self) () { self.data.clear(); }
 
-    // Raw text append and the floor `fmt` expands into: bytes, verbatim, with
-    // no format meaning. One grow, one memcpy.
+    // Appends bytes verbatim; braces have no format meaning.
     add* = (self :: @Self, s: str) Res<(), AllocError> {
         at = self.data.len;
         self.data.grow_by(s.len).try();
@@ -42,22 +31,16 @@ String* = {
         Ok(());
     }
 
-    // The byte overload avoids a temporary one-byte str.
     add* = (self :: @Self, b: u8) Res<(), AllocError> { self.data.add(b) }
 
-    // Decimal with no separators, most significant digit first. This is the
-    // allocating String-floor counterpart to the Sink formatter's integer
-    // writer: compiler and diagnostic code can spell counts without importing
-    // one another merely to share number rendering.
+    // Decimal, most significant digit first, no separators.
     write_usize* = (self :: @Self, value: usize) Res<(), AllocError> {
         (value >= 10).then(() { self.write_usize(value / 10).try() });
-        self.add(digit(value % 10))
+        self.add((value % 10).digit())
     }
 
     // Exactly `digits` lowercase hexadecimal digits, zero-padded on the left.
-    // More than sixteen digits traps while constructing the divisor: a u64 has
-    // no seventeenth digit, so that request is a caller bug rather than a
-    // truncation policy for this primitive.
+    // More than sixteen digits traps while constructing the divisor.
     write_hex_fixed* = (
         self   :: @Self,
         value  : u64,
@@ -66,19 +49,14 @@ String* = {
         place: u64 ::= 1;
         Range(1, digits).loop((h, i) { place = place * 16; });
         Range(0, digits).loop((h, i) {
-            self.add(hex_digit((value / place) % 16)).try();
+            self.add(((value / place) % 16).hex_digit()).try();
             place = place / 16;
         });
         Ok(())
     }
 }
 
-// String implements Sink by appending bytes to the buffer. This lets
-// `{}` format into a String or a console through one signature, the format
-// machinery never learning which it holds.
-//
-// Sink requires WriteError even though this implementation can produce only
-// its allocation member.
+// Sink for the `{}` door; only the AllocError member of WriteError can occur.
 String.impl(Sink, {
     write = (self :: @Self, bytes: str) Res<(), WriteError> {
         self.add(bytes).try();
@@ -91,17 +69,15 @@ String.impl(Sink, {
     }
 })
 
-// Empty UFCS constructor. text depends on mem; mem does not depend on String.
 String* = (a: Alloc) Res<String, AllocError> { Ok(String(data: a.Vec<u8>())) }
 
-// Allocating format form, `alloc.String("{}", x)`. Declared not
-// defined, like `fmt`: type-directed, expanded where written, into this
-// module's empty form followed by `fmt`'s own expansion
+// Allocating format form, `a.String("{}", x)`; expanded at the call site into
+// the empty form followed by `fmt`.
 String* = (a: Alloc, fmt: str, args: ...) Res<String, AllocError>
 
-// Allocate the bytes expected by a C string parameter: the source bytes
-// followed by one NUL terminator. The returned Vec owns the storage so its
-// pointer remains valid while the caller invokes the foreign function.
+// The bytes a C string parameter expects: the source followed by one NUL.
+// The returned Vec owns the storage, so its pointer stays valid across the
+// foreign call.
 c_text* = (self: str, a: Alloc) Res<Vec<u8>, AllocError> {
     out ::= a.Vec<u8>();
     out.reserve(self.len + 1).try();
