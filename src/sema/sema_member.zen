@@ -4,7 +4,7 @@ Field, Const, Function = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
-DeclId, ImplId = sema.sema_id
+DeclId = sema.sema_id
 TyId, TyNamed, TyFn, Prim = sema.sema_ty
 Def, DefKind, decl_at, module_display = sema.sema_def
 SemaFault, TypeFault, PairFault = sema.sema_diag
@@ -12,8 +12,8 @@ ExportFault = sema.sema_diag
 Checker, Ctx, Binding = sema.sema_check
 Inst, subst, inst_of_named, owner_of, push_tparams = sema.sema_inst
 is_prim = sema.sema_ty
-impl_members, bound_member_types = sema.sema_supply
-impl_bound_type, impl_span = sema.sema_supply
+impl_members, bound_member_types, LocalImpl, local_impls = sema.sema_supply
+impl_bound_type, impl_span, prim_named = sema.sema_supply
 type_of = sema.sema_type
 type_from_ast, param_type = sema.sema_denote
 global_name_type, def_type = sema.sema_type
@@ -28,14 +28,40 @@ Found* = {
     constant*: bool,
     mutable*: bool,
     exported*: bool,  // `*` on the member itself
-    module*: usize,   // the module that DECLARES it, never the one importing
+    module*: usize,   // the declaring module
     bound*: TyId,   // the bound that supplies it; poison when the type owns it
-    span*: Span,    // the declaration, or the impl — where the fix goes
+    span*: Span,    // the declaration or the impl
+
+    // Every member is reachable inside its declaring module.
+    hidden_from* = (self: @Self, mi: usize) bool {
+        (self.exported == false) && (self.module != mi)
+    }
+}
+
+// A member an impl or a bound supplies: computed, and as visible as the
+// bound that required it.
+supplied_found* = (name: str, ty: TyId, bound: TyId, span: Span) Found {
+    Found(
+        name: name,
+        ty: ty,
+        computed: true,
+        constant: false,
+        mutable: false,
+        exported: true,
+        module: 0,
+        bound: bound,
+        span: span,
+    )
 }
 
 Base* = {
     ty*: TyId,
     is_type*: bool,
+}
+
+// Whether `n` is the declaration `name` of module `module`.
+named_as* = (c: Checker, n: TyNamed, name: str, module: str) bool {
+    n.name.eq(name) && c.world.module_name(n.decl).eq(module)
 }
 
 // Resolve the type of `base.name`.
@@ -57,7 +83,7 @@ member_access = (c :: Checker, id: ExprId, node: Expr, ac: Access, ctx: Ctx)
     c.is_count_chain(ac).match({
         true  => c.meta_len_chain(ac, ctx),
         false => {
-            b = base_of(c, ac.base, ctx).try();
+            b = c.base_of(ac.base, ctx).try();
             b.is_type.match({
                 true  => c.static_value(id, node, ac, b.ty, ctx),
                 false => c.value_access(id, node, ac, b.ty, ctx),
@@ -70,13 +96,11 @@ base_of* = (c :: Checker, id: ExprId, ctx: Ctx) Res<Base, AllocError> {
     node = c.tree.expr_at(id);
     node.kind.match({
         Name(n) => c.named_base(id, node, n.text, ctx),
-        _       => c.value_base(id, ctx),
+        _       => {
+            ty = c.type_of(id, ctx).try();
+            Ok(Base(ty: ty, is_type: false))
+        },
     })
-}
-
-value_base = (c :: Checker, id: ExprId, ctx: Ctx) Res<Base, AllocError> {
-    ty = c.type_of(id, ctx).try();
-    Ok(Base(ty: ty, is_type: false));
 }
 
 named_base = (c :: Checker, id: ExprId, node: Expr, text: str, ctx: Ctx)
@@ -102,7 +126,7 @@ bound_base = (c :: Checker, id: ExprId, b: Binding) Res<Base, AllocError> {
 
 global_base = (c :: Checker, node: Expr, text: str, ctx: Ctx)
               Res<Base, AllocError> {
-    is_prim(text).match({
+    text.is_prim().match({
         true  => {
             ty = c.types.prim(text).try();
             Ok(Base(ty: ty, is_type: true));
@@ -116,11 +140,9 @@ decl_base = (c :: Checker, node: Expr, text: str, ctx: Ctx)
     c.world.first_def_of(ctx.module, text).try().match({
         Ok(d) => {
             ty = c.def_type(d).try();
-            Ok(Base(ty: ty, is_type: is_type_def(d.kind)));
+            Ok(Base(ty: ty, is_type: d.kind.is_type_def()));
         },
-        // A name that resolves to nothing at all is left to `type_of`,
-        // the one place "undefined name" is raised. Two places raising
-        // it is two diagnostics for one mistake.
+        // An undefined name is reported by `type_of` alone.
         None  => {
             ty = c.global_name_type(node, text, ctx).try();
             Ok(Base(ty: ty, is_type: false));
@@ -132,7 +154,6 @@ is_type_def* = (k: DefKind) bool {
     k.match({ StructDef => true, EnumDef => true, AliasDef => true, _ => false })
 }
 
-// `value.name`
 value_access* = (
     c    :: Checker,
     id   : ExprId,
@@ -173,20 +194,14 @@ known_access = (
 ) Res<TyId, AllocError> {
     found ::= c.alloc.Vec<Found>();
     c.members_of(ty, ac.name.text, found).try();
-    first_hidden(found, ctx.module).match({
+    found.first_hidden(ctx.module).match({
         Ok(f) => c.hidden_member(ac, f),
-        None  => pick(c, id, node, ac, ty, found, ctx),
+        None  => c.pick(id, node, ac, ty, found, ctx),
     })
 }
 
 first_hidden* = (found: Vec<Found>, mi: usize) Res<Found> {
-    found.find((f) { hidden_from(f, mi) })
-}
-
-// Inside the declaring module every member is reachable — that is what
-// makes `self.grow()` legal in `vec.zen` and `v.grow()` not.
-hidden_from = (f: Found, mi: usize) bool {
-    (f.exported == false) && (f.module != mi)
+    found.find((f) { f.hidden_from(mi) })
 }
 
 hidden_member* = (c :: Checker, ac: Access, f: Found) Res<TyId, AllocError> {
@@ -201,11 +216,10 @@ hidden_member* = (c :: Checker, ac: Access, f: Found) Res<TyId, AllocError> {
     c.types.unknown()
 }
 
-// The name a reader wrote, not the path the compiler walked:
-// `module_display` collapses `vec.vec` back to the `vec` in the import.
+// `module_display` collapses `vec.vec` to the `vec` the import wrote.
 module_of = (c :: Checker, f: Found) str {
     c.world.table_at(f.module).match({
-        Ok(t) => module_display(t.name),
+        Ok(t) => t.name.module_display(),
         None  => "",
     })
 }
@@ -230,7 +244,7 @@ first_type = (c :: Checker, id: ExprId, ty: TyId, found: Vec<Found>)
              Res<TyId, AllocError> {
     found.get(0).match({
         None  => c.types.unknown(),
-        Ok(f) => settled(c, id, ty, f),
+        Ok(f) => c.settled(id, ty, f),
     })
 }
 
@@ -247,8 +261,8 @@ settled = (c :: Checker, id: ExprId, ty: TyId, f: Found)
     })
 }
 
-// Two impls supply this name. The bound in scope selects; with none, it
-// is an error naming both, never file order.
+// Two impls supply the name: the bound in scope selects, otherwise both
+// are reported.
 select = (
     c     :: Checker,
     id    : ExprId,
@@ -263,21 +277,19 @@ select = (
     });
     kept.len.match({
         1 => c.first_type(id, ty, kept),
-        _ => ambiguous(c, node, ac, found),
+        _ => c.ambiguous(node, ac, found),
     })
 }
 
 ambiguous = (c :: Checker, node: Expr, ac: Access, found: Vec<Found>)
             Res<TyId, AllocError> {
-    first  = span_of(found, 0);
-    second = span_of(found, 1);
     c.report(
         ac.name.span.file,
         ac.name.span,
         SemaFault.AmbiguousMember(PairFault(
             name: ac.name.text,
-            first: first,
-            second: second
+            first: found.span_of(0),
+            second: found.span_of(1)
         ))
     ).try();
     c.types.unknown()
@@ -330,14 +342,13 @@ no_such_field = (c :: Checker, node: Expr, ac: Access, ty: TyId)
 }
 
 found_of = (c :: Checker, ac: Access, ctx: Ctx) Res<Res<Found>, AllocError> {
-    b = base_of(c, ac.base, ctx).try();
+    b = c.base_of(ac.base, ctx).try();
     found ::= c.alloc.Vec<Found>();
     c.members_of(b.ty, ac.name.text, found).try();
-    Ok(first_found(found));
+    Ok(found.first_found());
 }
 
-// Whether `base.name` is supplied by an impl — "read-only and
-// non-addressable, no storage, nothing to assign into."
+// A member supplied by an impl has no storage and cannot be assigned.
 computed_member* = (c :: Checker, ac: Access, ctx: Ctx)
                    Res<bool, AllocError> {
     f = c.found_of(ac, ctx).try();
@@ -371,7 +382,6 @@ not_writable = (c :: Checker, ac: Access, f: Found) Res<(), AllocError> {
     )
 }
 
-// Keep the first-result lookup independent of an enclosing expectation.
 first_found* = (found: Vec<Found>) Res<Found> { found.get(0) }
 
 members_of* = (c :: Checker, ty: TyId, name: str, out :: Vec<Found>)
@@ -413,17 +423,8 @@ behavior_bounds = (
     declared ::= c.alloc.Vec<Found>();
     c.bound_reachable(owner, a, name, declared).try();
     declared.loop((h, f) {
-        out.add(Found(
-            name: f.name,
-            ty: c.message_type(f.ty).try(),
-            computed: true,
-            constant: false,
-            mutable: false,
-            exported: f.exported,
-            module: f.module,
-            bound: f.bound,
-            span: f.span,
-        )).try();
+        send = c.message_type(f.ty).try();
+        out.add(supplied_found(f.name, send, f.bound, f.span)).try();
     });
     Ok(())
 }
@@ -435,74 +436,32 @@ behavior_impls = (
     name : str,
     out  :: Vec<Found>
 ) Res<(), AllocError> {
-    ids ::= c.alloc.Vec<ImplId>();
-    c.world.impls_named(c.tree, n.name, ids).try();
-    ids.loop((h, id) { c.behavior_in(n, a, name, id, out).try() });
-    Ok(())
-}
-
-behavior_in = (
-    c    :: Checker,
-    n    : TyNamed,
-    a    : TyId,
-    name : str,
-    id   : ImplId,
-    out  :: Vec<Found>
-) Res<(), AllocError> {
-    (n.decl.module == id.decl.module).match({
-        false => Ok(()),
-        true  => c.world.impl_at(c.tree, id).match({
-            None   => Ok(()),
-            Ok(im) => {
-                bound = c.impl_bound_type(im, n.decl.module.to_usize()).try();
-                c.send_members(im.members, a, name, id, bound, out)
-            },
-        }),
-    })
-}
-
-send_members = (
-    c     :: Checker,
-    ms    : Vec<Member>,
-    a     : TyId,
-    name  : str,
-    id    : ImplId,
-    actor : TyId,
-    out   :: Vec<Found>
-)
-               Res<(), AllocError> {
-    ms.loop((h, m) {
-        m.named(name).then(() { c.send_found(m, a, name, id, actor, out).try() });
+    impls ::= c.alloc.Vec<LocalImpl>();
+    c.local_impls(n, impls).try();
+    impls.loop((h, li) {
+        li.im.members.loop((h2, m) {
+            m.named(name).then(() { c.send_found(m, a, li, out).try() });
+        });
     });
     Ok(())
 }
 
 send_found = (
-    c     :: Checker,
-    m     : Member,
-    a     : TyId,
-    name  : str,
-    id    : ImplId,
-    actor : TyId,
-    out   :: Vec<Found>
+    c   :: Checker,
+    m   : Member,
+    a   : TyId,
+    li  : LocalImpl,
+    out :: Vec<Found>
 ) Res<(), AllocError> {
     m.kind.match({
         Function(f) => f.body.match({
             None  => Ok(()),
             Ok(_) => {
-                full = c.member_type(m, id.decl.module.to_usize(), a).try();
+                mi   = li.id.decl.module.to_usize();
+                full = c.member_type(m, mi, a).try();
                 send = c.message_type(full).try();
-                out.add(Found(
-                    name: name,
-                    ty: send,
-                    computed: true,
-                    constant: false,
-                    mutable: false,
-                    exported: true,
-                    module: 0,
-                    bound: actor,
-                    span: c.impl_span(id),
-                ))
+                span = c.impl_span(li.id);
+                out.add(supplied_found(m.name().text, send, li.bound, span))
             },
         }),
         _           => Ok(()),
@@ -520,7 +479,7 @@ message_fn = (c :: Checker, sig: TyFn) Res<TyId, AllocError> {
     ps ::= c.alloc.Vec<TyId>();
     sig.params.loop((h, i, p) { (i > 1).then(() { ps.add(p).try() }); });
     unit  = c.types.prim("()").try();
-    error = c.actor_error_type().try().match({
+    error = c.actor_named_type("ActorError").try().match({
         None    => c.types.unknown(),
         Ok(err) => Ok(err),
     }).try();
@@ -530,28 +489,12 @@ message_fn = (c :: Checker, sig: TyFn) Res<TyId, AllocError> {
 
 ref_of_actor* = (c :: Checker, ty: TyId) Res<Res<TyId>, AllocError> {
     c.types.at(ty).match({
-        Named(n) => c.actor_ref(n),
+        Named(n) => c.named_as(n, "Ref", "std.actor.actor_core").match({
+            false => Ok(None),
+            true  => Ok(n.args.get(0)),
+        }),
         _        => Ok(None),
     })
-}
-
-actor_ref = (c :: Checker, n: TyNamed) Res<Res<TyId>, AllocError> {
-    ((n.name.eq("Ref"))
-        && c.world.module_name(n.decl).eq("std.actor.actor_core")).match({
-        false => Ok(None),
-        true  => n.args.get(0).match({
-            None  => Ok(None),
-            Ok(a) => Ok(Ok(a)),
-        }),
-    })
-}
-
-actor_type = (c :: Checker) Res<Res<TyId>, AllocError> {
-    c.actor_named_type("Actor")
-}
-
-actor_error_type = (c :: Checker) Res<Res<TyId>, AllocError> {
-    c.actor_named_type("ActorError")
 }
 
 actor_spawn_ret* = (
@@ -561,7 +504,7 @@ actor_spawn_ret* = (
     actor    : TyId,
     ordinary : TyId
 ) Res<TyId, AllocError> {
-    is_actor_spawn(c, recv, name).match({
+    c.is_actor_spawn(recv, name).match({
         false => Ok(ordinary),
         true  => c.spawn_result(actor, ordinary),
     })
@@ -569,49 +512,44 @@ actor_spawn_ret* = (
 
 is_actor_spawn = (c: Checker, recv: TyId, name: str) bool {
     name.eq("spawn") && c.types.at(recv).match({
-        Named(n) => n.name.eq("Env")
-            && c.world.module_name(n.decl).eq("std.env.env"),
+        Named(n) => c.named_as(n, "Env", "std.env.env"),
         _        => false,
     })
 }
 
 spawn_result = (c :: Checker, actor: TyId, ordinary: TyId)
                Res<TyId, AllocError> {
-    defs ::= c.alloc.Vec<Def>();
-    c.world.exported_named("Ref", defs).try();
-    found ::= c.alloc.Vec<TyId>();
-    defs.loop((h, d) {
-        d.qname.eq("std.actor.actor_core.Ref").then(() {
+    c.actor_def("Ref").try().match({
+        None  => Ok(ordinary),
+        Ok(d) => {
             args ::= c.alloc.Vec<TyId>();
             args.add(actor).try();
-            found.add(c.types.named(d.id, d.qname, d.name, args).try()).try();
-            h.break();
-        });
-    });
-    found.get(0).match({
-        None       => Ok(ordinary),
-        Ok(ref_ty) => c.actor_named_type("ActorStartError").try().match({
-            None         => Ok(ordinary),
-            Ok(error_ty) => c.types.res_failure(ref_ty, error_ty),
-        }),
+            ref_ty = c.types.named(d.id, d.qname, d.name, args).try();
+            c.actor_named_type("ActorStartError").try().match({
+                None         => Ok(ordinary),
+                Ok(error_ty) => c.types.res_failure(ref_ty, error_ty),
+            })
+        },
     })
 }
 
 actor_named_type = (c :: Checker, name: str) Res<Res<TyId>, AllocError> {
+    c.actor_def(name).try().match({
+        None  => Ok(None),
+        Ok(d) => Ok(Ok(c.def_type(d).try())),
+    })
+}
+
+// The exported declaration of a `std.actor.actor_core` name.
+actor_def = (c :: Checker, name: str) Res<Res<Def>, AllocError> {
     defs ::= c.alloc.Vec<Def>();
     c.world.exported_named(name, defs).try();
-    found ::= c.alloc.Vec<TyId>();
-    defs.loop((h, d) {
-        (d.name.eq(name) && d.qname.eq(actor_path(name))).then(() {
-            found.add(c.def_type(d).try()).try();
-            h.break();
-        });
-    });
-    Ok(found.get(0))
+    Ok(defs.find((d) { d.qname.eq(name.actor_path()) }))
 }
 
 actor_path = (name: str) str {
     name.match({
+        "Ref"             => "std.actor.actor_core.Ref",
         "Actor"           => "std.actor.actor_core.Actor",
         "ActorError"      => "std.actor.actor_core.ActorError",
         "ActorStartError" => "std.actor.actor_core.ActorStartError",
@@ -626,19 +564,9 @@ prim_members = (
     name : str,
     out  :: Vec<Found>
 ) Res<(), AllocError> {
-    defs ::= c.alloc.Vec<Def>();
-    c.world.prelude_of(p.name, defs).try();
-    defs.get(0).match({
-        None  => Ok(()),
-        Ok(d) => {
-            args ::= c.alloc.Vec<TyId>();
-            c.named_members(
-                TyNamed(decl: d.id, name: p.name, args: args),
-                ty,
-                name,
-                out
-            )
-        },
+    c.prim_named(p).try().match({
+        None   => Ok(()),
+        Ok(pn) => c.named_members(pn, ty, name, out),
     })
 }
 
@@ -667,19 +595,7 @@ bound_member = (
     tys ::= c.alloc.Vec<TyId>();
     c.bound_member_types(bound, name, ty, tys).try();
     span = c.bound_span(bound);
-    tys.loop((h, t) {
-        out.add(Found(
-            name: name,
-            ty: t,
-            computed: true,
-            constant: false,
-            mutable: false,
-            exported: true,
-            module: 0,
-            bound: bound,
-            span: span,
-        )).try();
-    });
+    tys.loop((h, t) { out.add(supplied_found(name, t, bound, span)).try() });
     Ok(());
 }
 
@@ -691,7 +607,7 @@ bound_span = (c: Checker, bound: TyId) Span {
 }
 
 decl_span* = (c: Checker, id: DeclId) Span {
-    decl_at(c.tree, id).match({ Ok(d) => d.span, None => nowhere() })
+    c.tree.decl_at(id).match({ Ok(d) => d.span, None => nowhere() })
 }
 
 named_members = (
@@ -701,9 +617,9 @@ named_members = (
     name : str,
     out  :: Vec<Found>
 ) Res<(), AllocError> {
-    decl_at(c.tree, n.decl).match({
+    c.tree.decl_at(n.decl).match({
         Ok(d) => d.kind.match({
-            Struct(s) => struct_members(c, s, n, ty, name, out),
+            Struct(s) => c.struct_members(s, n, ty, name, out),
             _         => Ok(()),
         }),
         None  => Ok(()),
@@ -740,11 +656,11 @@ struct_members = (
     })
 }
 
-// Enter a struct's type parameters while checking its members. These are
-// owner-qualified Ty.Var values, not the arguments of an instantiation.
+// A struct's type parameters are owner-qualified `Ty.Var`s, not the
+// arguments of an instantiation.
 enter_struct_tvars* = (c :: Checker, s: Struct, mi: usize)
                      Res<(), AllocError> {
-    owner = owner_of(c, mi, s.name.text).try();
+    owner = c.owner_of(mi, s.name.text).try();
     c.push_tparams(s.tparams, owner)
 }
 
@@ -759,7 +675,7 @@ add_own = (
     out    :: Vec<Found>
 )
           Res<(), AllocError> {
-    declared = member_type(c, m, mi, ty).try();
+    declared = c.member_type(m, mi, ty).try();
     out.add(Found(
         name: name,
         ty: c.subst(declared, inst).try(),
@@ -809,7 +725,7 @@ opt_type = (c :: Checker, t: Res<TypeId>, ctx: Ctx) Res<TyId, AllocError> {
 fn_member_type = (c :: Checker, f: Function, ctx: Ctx)
                  Res<TyId, AllocError> {
     tmark = c.tvar_mark();
-    owner = owner_of(c, ctx.module, f.name.text).try();
+    owner = c.owner_of(ctx.module, f.name.text).try();
     c.push_tparams(f.tparams, owner).try();
     ptys ::= c.alloc.Vec<TyId>();
     f.params.loop((h, p) { ptys.add(c.param_type(p, ctx).try()).try() });

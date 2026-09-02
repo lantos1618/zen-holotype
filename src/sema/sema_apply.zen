@@ -9,10 +9,9 @@ TyId, TyNamed, literal_default = sema.sema_ty
 Def, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 Inst, InstEdge, subst, unify, tparam_vars, zip = sema.sema_inst
-has_var, inst_of_named = sema.sema_inst
-Cand, TBound, Actual = sema.sema_call
-ty_at = sema.sema_cand
-impl_bound_type = sema.sema_supply
+has_var, inst_of_named, decl_tparam_vars = sema.sema_inst
+Cand, TBound, Actual, ty_at = sema.sema_cand
+impl_bound_type, LocalImpl, local_impls = sema.sema_supply
 type_of = sema.sema_type
 type_from_ast = sema.sema_denote
 check_literal = sema.sema_trap
@@ -71,7 +70,7 @@ ctor_type_from_args = (
 rebuilt_ctor_type = (c :: Checker, d: Def, vars: Vec<TyId>, inst: Inst)
                     Res<TyId, AllocError> {
     args ::= c.alloc.Vec<TyId>();
-    vars.loop((h, v) { args.add(arg_for(v, inst)).try() });
+    vars.loop((h, v) { args.add(inst.arg_for(v)).try() });
     c.types.named(d.id, d.qname, d.name, args)
 }
 
@@ -100,7 +99,7 @@ unify_ctor_field = (
     c.members_of(applied, name, found).try();
     found.get(0).match({
         None  => Ok(()),
-        Ok(f) => unify(c, f.ty, c.settled_arg_ty(a, ctx).try(), inst),
+        Ok(f) => c.unify(f.ty, c.settled_arg_ty(a, ctx).try(), inst),
     })
 }
 
@@ -117,7 +116,7 @@ variant_call_type* = (
     c.types.at(own).match({
         Named(n) => {
             args ::= c.alloc.Vec<TyId>();
-            c.written_ctor_args(call.targs, ctx, args).try();
+            c.denote_targs(call.targs, ctx, args).try();
             c.zip(n.args, args, inst).try();
             c.types.at(ty).match({
                 Named(r) => c.zip(n.args, r.args, inst),
@@ -128,7 +127,7 @@ variant_call_type* = (
     }).try();
     cases ::= c.alloc.Vec<Case>();
     c.cases_of(ty, cases).try();
-    (find_case(cases, name).match({
+    (cases.find_case(name).match({
         None   => Ok(()),
         Ok(cs) => c.payload_says(call, ty, cs, ctx, inst),
     })).try();
@@ -186,14 +185,7 @@ settle_variant_at* = (
     want : TyId,
     ctx  : Ctx
 ) Res<TyId, AllocError> {
-    same = c.types.at(got).match({
-        Named(g) => c.types.at(want).match({
-            Named(w) => g.decl.eq(w.decl),
-            _        => false,
-        }),
-        _        => false,
-    });
-    (same == false).match({
+    (c.same_head(got, want) == false).match({
         true  => Ok(got),
         false => c.tree.expr_at(id).kind.match({
             Call(call) => (call.targs.len > 0).match({
@@ -202,7 +194,7 @@ settle_variant_at* = (
                     Access(a) => {
                         cases ::= c.alloc.Vec<Case>();
                         c.cases_of(want, cases).try();
-                        find_case(cases, a.name.text).match({
+                        cases.find_case(a.name.text).match({
                             None  => Ok(got),
                             Ok(_) => {
                                 settled = c.variant_call_type(
@@ -228,32 +220,16 @@ settle_variant_at* = (
 // inferred argument binds the same `T` before substitution.
 applied_at_own_vars = (c :: Checker, ty: TyId) Res<TyId, AllocError> {
     c.types.at(ty).match({
-        Named(n) => c.named_with_decl_vars(ty, n),
+        Named(n) => c.tree.decl_at(n.decl).match({
+            None  => Ok(ty),
+            Ok(d) => {
+                owner = c.owner_of(n.decl.module.to_usize(), n.name).try();
+                vars ::= c.alloc.Vec<TyId>();
+                c.decl_tparam_vars(d, owner, vars).try();
+                c.types.named(n.decl, owner, n.name, vars)
+            },
+        }),
         _        => Ok(ty),
-    })
-}
-
-named_with_decl_vars = (c :: Checker, ty: TyId, n: TyNamed)
-                       Res<TyId, AllocError> {
-    decl_at(c.tree, n.decl).match({
-        None  => Ok(ty),
-        Ok(d) => {
-            owner = c.owner_of(n.decl.module.to_usize(), n.name).try();
-            vars ::= c.alloc.Vec<TyId>();
-            c.enum_tparam_vars(d, owner, vars).try();
-            c.types.named(n.decl, owner, n.name, vars)
-        },
-    })
-}
-
-// The declaration's type parameters as `Ty.Var`s. Struct or enum, in
-// declaration order — `decl_tparams_of`'s walk, reached from a `Decl`.
-enum_tparam_vars = (c :: Checker, d: Decl, owner: str, out :: Vec<TyId>)
-                   Res<(), AllocError> {
-    d.kind.match({
-        Struct(s) => c.tparam_vars(s.tparams, owner, out),
-        Enum(e)   => c.tparam_vars(e.tparams, owner, out),
-        _         => Ok(()),
     })
 }
 
@@ -269,8 +245,7 @@ payload_says = (
 ) Res<(), AllocError> {
     call.args.get(0).match({
         None  => Ok(()),
-        Ok(a) => unify(
-            c,
+        Ok(a) => c.unify(
             c.case_payload(ty, cs.name).try(),
             c.settled_arg_ty(a, ctx).try(),
             inst
@@ -282,21 +257,23 @@ settled_arg_ty = (c :: Checker, a: Arg, ctx: Ctx) Res<TyId, AllocError> {
     got = c.type_of(a.value, ctx).try();
     c.is_literal_ty(got).match({
         false => Ok(got),
-        true  => c.types.prim(literal_default(c.prim_name(got))),
+        true  => c.types.prim(c.prim_name(got).literal_default()),
     })
 }
 
 ctor_args = (c :: Checker, call: Call, d: Def, ctx: Ctx, out :: Vec<TyId>)
             Res<(), AllocError> {
     (call.targs.len == 0).match({
-        true  => c.decl_tparams(d, out),
-        false => c.written_ctor_args(call.targs, ctx, out),
+        true  => c.tree.decl_at(d.id).match({
+            None    => Ok(()),
+            Ok(dec) => c.decl_tparam_vars(dec, d.qname, out),
+        }),
+        false => c.denote_targs(call.targs, ctx, out),
     })
 }
 
-// Written arguments mean what they mean at the call site, as
-// `bind_written` says of a generic function's.
-written_ctor_args = (
+// Written type arguments resolve in the caller's module.
+denote_targs = (
     c     :: Checker,
     targs : Vec<TypeId>,
     ctx   : Ctx,
@@ -304,24 +281,6 @@ written_ctor_args = (
 ) Res<(), AllocError> {
     targs.loop((h, t) { out.add(c.type_from_ast(t, ctx).try()).try() });
     Ok(());
-}
-
-decl_tparams = (c :: Checker, d: Def, out :: Vec<TyId>)
-               Res<(), AllocError> {
-    decl_at(c.tree, d.id).match({
-        None    => Ok(()),
-        Ok(dec) => c.decl_tparams_of(d, dec, out),
-    })
-}
-
-// Collect type parameters from generic structs and enums alike.
-decl_tparams_of = (c :: Checker, d: Def, dec: Decl, out :: Vec<TyId>)
-                  Res<(), AllocError> {
-    dec.kind.match({
-        Struct(s) => c.tparam_vars(s.tparams, d.qname, out),
-        Enum(e)   => c.tparam_vars(e.tparams, d.qname, out),
-        _         => Ok(()),
-    })
 }
 
 instantiate* = (
@@ -349,14 +308,14 @@ instantiated_ret = (
                    Res<TyId, AllocError> {
     inst = c.call_inst(call, k, actuals, ctx).try();
     c.resolve_inst(id, inst).try();
-    note_edge(c, id, k, inst).try();
+    c.note_call_edge(id, k, inst).try();
     c.subst(k.ret, inst)
 }
 
-note_edge = (c :: Checker, id: ExprId, k: Cand, inst: Inst)
-            Res<(), AllocError> {
+note_call_edge = (c :: Checker, id: ExprId, k: Cand, inst: Inst)
+                 Res<(), AllocError> {
     args ::= c.alloc.Vec<TyId>();
-    k.tvars.loop((h, v) { args.add(arg_for(v, inst)).try() });
+    k.tvars.loop((h, v) { args.add(inst.arg_for(v)).try() });
     c.note_edge(InstEdge(
         from_owner: c.owner_of_body(),
         to_owner: k.owner,
@@ -367,10 +326,6 @@ note_edge = (c :: Checker, id: ExprId, k: Cand, inst: Inst)
     ))
 }
 
-arg_for = (v: TyId, inst: Inst) TyId {
-    inst.lookup(v).match({ Ok(t) => t, None => v })
-}
-
 call_inst = (
     c       :: Checker,
     call    : Call,
@@ -379,62 +334,28 @@ call_inst = (
     ctx     : Ctx
 ) Res<Inst, AllocError> {
     inst ::= c.alloc.Inst();
-    c.written_targs(call, k, inst, ctx).try();
-    infer_targs(c, k, actuals, inst).try();
+    (call.targs.len > 0).then(() {
+        tys ::= c.alloc.Vec<TyId>();
+        c.denote_targs(call.targs, ctx, tys).try();
+        c.zip(k.tvars, tys, inst).try();
+    });
+    c.infer_targs(k, actuals, inst).try();
     c.infer_from_bounds(k, inst).try();
     Ok(inst);
 }
 
-written_targs = (c :: Checker, call: Call, k: Cand, inst :: Inst, ctx: Ctx)
-                Res<(), AllocError> {
-    (call.targs.len == 0).match({
-        true  => Ok(()),
-        false => c.bind_written(call.targs, k, inst, ctx),
-    })
-}
-
-// Written arguments resolve at the call site, so they
-// resolve in the caller's module and not the callee's.
-bind_written = (
-    c     :: Checker,
-    targs : Vec<TypeId>,
-    k     : Cand,
-    inst  :: Inst,
-    ctx   : Ctx
-) Res<(), AllocError> {
-    tys ::= c.alloc.Vec<TyId>();
-    targs.loop((h, t) { tys.add(c.type_from_ast(t, ctx).try()).try() });
-    c.zip(k.tvars, tys, inst).try();
-    Ok(());
-}
-
 infer_targs = (c :: Checker, k: Cand, actuals: Vec<Actual>, inst :: Inst)
               Res<(), AllocError> {
-    Range(0, k.params.len).loop((h, i) {
-        c.infer_at(k, actuals, i, inst).try();
+    k.params.loop((h, i, p) {
+        actuals.get(i).match({
+            None  => Ok(()),
+            Ok(a) => a.is_lambda.match({
+                true  => Ok(()),
+                false => c.unify(p, a.ty, inst),
+            }),
+        }).try();
     });
     Ok(());
-}
-
-infer_at = (
-    c       :: Checker,
-    k       : Cand,
-    actuals : Vec<Actual>,
-    i       : usize,
-    inst    :: Inst
-) Res<(), AllocError> {
-    actuals.get(i).match({
-        None  => Ok(()),
-        Ok(a) => c.infer_from(ty_at(k.params, i), a, inst),
-    })
-}
-
-infer_from = (c :: Checker, param: TyId, a: Actual, inst :: Inst)
-             Res<(), AllocError> {
-    a.is_lambda.match({
-        true  => Ok(()),
-        false => unify(c, param, a.ty, inst),
-    })
 }
 
 infer_from_bounds = (c :: Checker, k: Cand, inst :: Inst)
@@ -448,27 +369,21 @@ infer_one_bound = (c :: Checker, k: Cand, tb: TBound, inst :: Inst)
     v = c.types.var(tb.name, k.owner).try();
     inst.lookup(v).match({
         None  => Ok(()),
-        Ok(g) => c.infer_through_bound(tb.bound, g, inst),
-    })
-}
-
-infer_through_bound = (c :: Checker, bound: TyId, g: TyId, inst :: Inst)
-                      Res<(), AllocError> {
-    c.same_head(bound, g).match({
-        true  => c.infer_own_bound(bound, g, inst),
-        false => c.infer_impl_bound(bound, g, inst),
+        Ok(g) => c.same_head(tb.bound, g).match({
+            true  => c.infer_own_bound(tb.bound, g, inst),
+            false => c.infer_impl_bound(tb.bound, g, inst),
+        }),
     })
 }
 
 same_head = (c: Checker, a: TyId, b: TyId) bool {
     c.types.at(a).match({
-        Named(x) => c.head_is(x, b),
+        Named(x) => c.types.at(b).match({
+            Named(y) => x.decl.eq(y.decl),
+            _        => false,
+        }),
         _        => false,
     })
-}
-
-head_is = (c: Checker, x: TyNamed, b: TyId) bool {
-    c.types.at(b).match({ Named(y) => x.decl.eq(y.decl), _ => false })
 }
 
 infer_own_bound = (c :: Checker, bound: TyId, g: TyId, inst :: Inst)
@@ -478,21 +393,10 @@ infer_own_bound = (c :: Checker, bound: TyId, g: TyId, inst :: Inst)
     gs ::= c.alloc.Vec<TyId>();
     c.named_args(bound, bs).try();
     c.named_args(g, gs).try();
-    (bs.len == gs.len).match({
-        false => Ok(()),
-        true  => c.unify_index_space(bs, gs, usize_ty, inst),
-    })
-}
-
-unify_index_space = (
-    c        :: Checker,
-    bs       : Vec<TyId>,
-    gs       : Vec<TyId>,
-    usize_ty : TyId,
-    inst     :: Inst
-) Res<(), AllocError> {
-    bs.loop((h, i, b) {
-        unify(c, b, c.settled_or_index(ty_at(gs, i), usize_ty), inst).try();
+    (bs.len == gs.len).then(() {
+        bs.loop((h, i, b) {
+            c.unify(b, c.settled_or_index(gs.ty_at(i), usize_ty), inst).try();
+        });
     });
     Ok(());
 }
@@ -523,17 +427,14 @@ infer_array_bound = (c :: Checker, bound: TyId, elem: TyId, inst :: Inst)
                     Res<(), AllocError> {
     c.array_range_shape(bound).match({
         false => Ok(()),
-        true  => c.unify_array_elem(bound, elem, inst),
-    })
-}
-
-unify_array_elem = (c :: Checker, bound: TyId, elem: TyId, inst :: Inst)
-                   Res<(), AllocError> {
-    bs ::= c.alloc.Vec<TyId>();
-    c.named_args(bound, bs).try();
-    bs.get(0).match({
-        None  => Ok(()),
-        Ok(b) => unify(c, b, elem, inst),
+        true  => {
+            bs ::= c.alloc.Vec<TyId>();
+            c.named_args(bound, bs).try();
+            bs.get(0).match({
+                None  => Ok(()),
+                Ok(b) => c.unify(b, elem, inst),
+            })
+        },
     })
 }
 
@@ -541,72 +442,21 @@ infer_named_impl = (c :: Checker, bound: TyId, n: TyNamed, inst :: Inst)
                    Res<(), AllocError> {
     c.impl_bound_at(bound, n).try().match({
         None   => Ok(()),
-        Ok(gb) => unify(c, bound, gb, inst),
+        Ok(gb) => c.unify(bound, gb, inst),
     })
 }
 
+// The first local impl whose bound shares `bound`'s head, applied at the
+// receiver's own arguments.
 impl_bound_at = (c :: Checker, bound: TyId, n: TyNamed)
                 Res<Res<TyId>, AllocError> {
-    ids ::= c.alloc.Vec<ImplId>();
-    c.world.impls_named(c.tree, n.name, ids).try();
-    c.impl_bound_from(ids, 0, bound, n)
-}
-
-impl_bound_from = (
-    c     :: Checker,
-    ids   : Vec<ImplId>,
-    i     : usize,
-    bound : TyId,
-    n     : TyNamed
-) Res<Res<TyId>, AllocError> {
-    ids.get(i).match({
+    impls ::= c.alloc.Vec<LocalImpl>();
+    c.local_impls(n, impls).try();
+    impls.find((li) { c.same_head(li.bound, bound) }).match({
         None   => Ok(None),
-        Ok(id) => c.impl_bound_or_next(ids, i, id, bound, n),
+        Ok(li) => {
+            recv = c.inst_of_named(n).try();
+            Ok(Ok(c.subst(li.bound, recv).try()))
+        },
     })
-}
-
-impl_bound_or_next = (
-    c     :: Checker,
-    ids   : Vec<ImplId>,
-    i     : usize,
-    id    : ImplId,
-    bound : TyId,
-    n     : TyNamed
-) Res<Res<TyId>, AllocError> {
-    c.impl_applied(id, bound, n).try().match({
-        Ok(t) => Ok(Ok(t)),
-        None  => c.impl_bound_from(ids, i + 1, bound, n),
-    })
-}
-
-impl_applied = (c :: Checker, id: ImplId, bound: TyId, n: TyNamed)
-               Res<Res<TyId>, AllocError> {
-    (n.decl.module == id.decl.module).match({
-        false => Ok(None),
-        true  => c.impl_applied_local(id, bound, n),
-    })
-}
-
-impl_applied_local = (c :: Checker, id: ImplId, bound: TyId, n: TyNamed)
-                     Res<Res<TyId>, AllocError> {
-    c.world.impl_at(c.tree, id).match({
-        None   => Ok(None),
-        Ok(im) => c.impl_applied_of(im, bound, n),
-    })
-}
-
-impl_applied_of = (c :: Checker, im: Impl, bound: TyId, n: TyNamed)
-                  Res<Res<TyId>, AllocError> {
-    mi  = n.decl.module.to_usize();
-    got = c.impl_bound_type(im, mi).try();
-    c.same_head(got, bound).match({
-        false => Ok(None),
-        true  => c.applied_at_recv(got, n),
-    })
-}
-
-applied_at_recv = (c :: Checker, got: TyId, n: TyNamed)
-                  Res<Res<TyId>, AllocError> {
-    recv = c.inst_of_named(n).try();
-    Ok(Ok(c.subst(got, recv).try()));
 }

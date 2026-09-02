@@ -1,4 +1,4 @@
-Decl, Function, TParam = std.ast
+Decl, Function, TParam, Span = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
@@ -7,11 +7,40 @@ DeclId = sema.sema_id
 TyId = sema.sema_ty
 Def, decl_at = sema.sema_def
 Checker, Ctx, UNRESOLVED = sema.sema_check
-tparam_vars = sema.sema_inst
-Cand, TBound, Actual = sema.sema_call
+tparam_vars, push_tparams = sema.sema_inst
 satisfies_bound = sema.sema_bound
 type_from_ast, param_type = sema.sema_denote
 pack_elem, pack_slot = sema.sema_vararg
+
+// A free-function candidate for a call, with its signature resolved in
+// its declaring module.
+Cand* = {
+    id*: DeclId,
+    name*: str,
+    owner*: str,
+    params*: Vec<TyId>,
+    ret*: TyId,
+    tvars*: Vec<TyId>,
+    tbounds*: Vec<TBound>,
+    generic*: bool,
+    span*: Span,
+}
+
+// One bound on one type parameter; `<K: Eq + Hash>` yields two.
+TBound* = {
+    name*: str,
+    bound*: TyId,
+}
+
+// One argument as resolution sees it. A lambda's `ty` is poison until a
+// signature settles it; only its arity takes part in the pick.
+Actual* = {
+    ty*: TyId,
+    is_lambda*: bool,
+    arity*: usize,
+    named*: bool,
+    span*: Span,
+}
 
 // Candidate collection.
 
@@ -39,7 +68,7 @@ travelled_of = (c :: Checker, name: str, rty: TyId, out :: Vec<Cand>)
 
 travelled_def = (c :: Checker, d: Def, rty: TyId, out :: Vec<Cand>)
                 Res<(), AllocError> {
-    decl_at(c.tree, d.id).match({
+    c.tree.decl_at(d.id).match({
         None    => Ok(()),
         Ok(dec) => dec.kind.match({
             Function(f) => c.keep_travelled(
@@ -55,8 +84,8 @@ travelled_def = (c :: Checker, d: Def, rty: TyId, out :: Vec<Cand>)
 
 keep_travelled = (c :: Checker, k: Cand, rty: TyId, out :: Vec<Cand>)
                  Res<(), AllocError> {
-    takes = takes_receiver(c, k, rty).try();
-    (takes && (has_cand(out, k.id) == false)).match({
+    takes = c.takes_receiver(k, rty).try();
+    (takes && (out.has_cand(k.id) == false)).match({
         true  => out.add(k),
         false => Ok(()),
     })
@@ -73,9 +102,7 @@ takes_receiver = (c :: Checker, k: Cand, rty: TyId) Res<bool, AllocError> {
 }
 
 has_cand = (out: Vec<Cand>, id: DeclId) bool {
-    Range(0, out.len).find((i) {
-        out.get(i).match({ Ok(k) => k.id.eq(id), None => false })
-    }).match({ Ok(_) => true, None => false })
+    out.find((k) { k.id.eq(id) }).match({ Ok(_) => true, None => false })
 }
 
 cands_of* = (c :: Checker, mi: usize, name: str, out :: Vec<Cand>)
@@ -87,33 +114,24 @@ cands_of* = (c :: Checker, mi: usize, name: str, out :: Vec<Cand>)
 }
 
 cand_of = (c :: Checker, d: Def, out :: Vec<Cand>) Res<(), AllocError> {
-    decl_at(c.tree, d.id).match({
-        Ok(dec) => c.cand_from_decl(d, dec, out),
+    c.tree.decl_at(d.id).match({
+        Ok(dec) => dec.kind.match({
+            Function(f) => out.add(c.make_cand(d, dec, f).try()),
+            _           => Ok(()),
+        }),
         None    => Ok(()),
     }).try();
     Ok(());
 }
 
-cand_from_decl = (c :: Checker, d: Def, dec: Decl, out :: Vec<Cand>)
-                 Res<(), AllocError> {
-    dec.kind.match({
-        Function(f) => c.add_cand(d, dec, f, out),
-        _           => Ok(()),
-    })
-}
-
-// Resolve a signature in its declaring module.
-add_cand = (c :: Checker, d: Def, dec: Decl, f: Function, out :: Vec<Cand>)
-           Res<(), AllocError> {
-    out.add(c.make_cand(d, dec, f).try())
-}
-
+// The signature resolves in its declaring module, under its own type
+// parameters.
 make_cand = (c :: Checker, d: Def, dec: Decl, f: Function)
             Res<Cand, AllocError> {
     mark   = c.tvar_mark();
     poison = c.types.unknown().try();
     ctx    = Ctx(d.id.module.to_usize(), poison);
-    c.push_fn_tparams(f, d.qname).try();
+    c.push_tparams(f.tparams, d.qname).try();
     tvs ::= c.alloc.Vec<TyId>();
     c.tparam_vars(f.tparams, d.qname, tvs).try();
     ptys ::= c.alloc.Vec<TyId>();
@@ -138,15 +156,6 @@ make_cand = (c :: Checker, d: Def, dec: Decl, f: Function)
     ))
 }
 
-// Push a function's type parameters into candidate-resolution scope.
-push_fn_tparams = (c :: Checker, f: Function, owner: str) Res<(), AllocError> {
-    f.tparams.loop((h, tp) {
-        text = tp.name.text;
-        c.push_tvar(text, c.types.var(text, owner).try()).try();
-    });
-    Ok(());
-}
-
 collect_bounds = (c :: Checker, f: Function, ctx: Ctx, out :: Vec<TBound>)
                  Res<(), AllocError> {
     f.tparams.loop((h, tp) { c.tparam_bounds(tp, ctx, out).try() });
@@ -168,16 +177,10 @@ tparam_bounds = (c :: Checker, tp: TParam, ctx: Ctx, out :: Vec<TBound>)
 // positional, so a named actual matches no function candidate.
 matches* = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
            Res<bool, AllocError> {
-    any_named(actuals).match({
-        true  => Ok(false),
-        false => by_arity(c, cand, actuals),
+    actuals.find((a) { a.named }).match({
+        Ok(_) => Ok(false),
+        None  => c.by_arity(cand, actuals),
     })
-}
-
-any_named = (actuals: Vec<Actual>) bool {
-    Range(0, actuals.len).find((i) {
-        actuals.get(i).match({ Ok(a) => a.named, None => false })
-    }).match({ Ok(_) => true, None => false })
 }
 
 by_arity = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
@@ -192,7 +195,7 @@ fixed_matches = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
                 Res<bool, AllocError> {
     (cand.params.len == actuals.len).match({
         false => Ok(false),
-        true  => c.all_fit(cand, actuals, actuals.len),
+        true  => c.each_fits(cand.params, actuals, actuals.len, 0),
     })
 }
 
@@ -200,7 +203,7 @@ fixed_matches = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
 // vararg<T> tail additionally checks every swallowed actual against T.
 variadic_matches = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
                    Res<bool, AllocError> {
-    pack_slot(c.types, cand.params).match({
+    c.types.pack_slot(cand.params).match({
         None     => c.marker_matches(cand, actuals),
         Ok(slot) => c.pack_sig_fits(cand.params, actuals, 0, slot),
     })
@@ -211,13 +214,13 @@ marker_matches = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
     fixed = cand.params.len - 1;
     (actuals.len >= fixed).match({
         false => Ok(false),
-        true  => c.all_fit(cand, actuals, fixed),
+        true  => c.each_fits(cand.params, actuals, fixed, 0),
     })
 }
 
 // Shared pack matching. off is zero for free calls and one when parameter zero
 // is a receiver. A receiver path cannot fit a signature containing only a pack.
-pack_sig_fits* = (
+pack_sig_fits = (
     c       :: Checker,
     ps      : Vec<TyId>,
     actuals : Vec<Actual>,
@@ -250,13 +253,9 @@ prefix_then_pack = (
     off     : usize,
     fixed   : usize
 ) Res<bool, AllocError> {
-    ok ::= true;
-    Range(0, fixed).loop((h, i) {
-        got = c.fits_at_ty(actuals, i, ty_at(ps, i + off)).try();
-        ok  = ok && got;
-    });
-    tail = c.pack_tail_fits(actuals, fixed, ty_at(ps, fixed + off)).try();
-    Ok(ok && tail);
+    prefix = c.each_fits(ps, actuals, fixed, off).try();
+    tail   = c.pack_tail_fits(actuals, fixed, ps.ty_at(fixed + off)).try();
+    Ok(prefix && tail);
 }
 
 // A vararg slot accepts a run of elements or one compatible vararg forwarded
@@ -292,50 +291,44 @@ spread_fits = (c :: Checker, actuals: Vec<Actual>, fixed: usize, elem: TyId)
 }
 
 pack_element_of = (c: Checker, pack: TyId) TyId {
-    pack_elem(c.types, pack).match({ Ok(e) => e, None => pack })
+    c.types.pack_elem(pack).value_or(pack)
 }
 
 fits_at_ty = (c :: Checker, actuals: Vec<Actual>, i: usize, want: TyId)
              Res<bool, AllocError> {
     actuals.get(i).match({
-        Ok(a) => fits(c, a, want),
+        Ok(a) => c.fits(a, want),
         None  => Ok(false),
     })
 }
 
 is_variadic = (c: Checker, cand: Cand) bool {
-    (cand.params.len > 0).match({
-        false => false,
-        true  => c.tail_swallows(ty_at(cand.params, cand.params.len - 1)),
-    })
+    (cand.params.len > 0)
+        && c.tail_swallows(cand.params.ty_at(cand.params.len - 1))
 }
 
 tail_swallows* = (c: Checker, tail: TyId) bool {
     c.prim_name(tail).eq("...")
-        || pack_elem(c.types, tail).match({ Ok(_) => true, None => false })
+        || c.types.pack_elem(tail).match({ Ok(_) => true, None => false })
 }
 
-all_fit = (c :: Checker, cand: Cand, actuals: Vec<Actual>, n: usize)
-          Res<bool, AllocError> {
+// Actual `i` against parameter `i + off` for every `i` below `n`. `find`
+// takes a `bool` predicate and `fits` can fail, so every pair is checked.
+each_fits = (
+    c       :: Checker,
+    ps      : Vec<TyId>,
+    actuals : Vec<Actual>,
+    n       : usize,
+    off     : usize
+) Res<bool, AllocError> {
     ok ::= true;
     Range(0, n).loop((h, i) {
-        got = c.fits_at(cand, actuals, i).try();
+        got = c.fits_at_ty(actuals, i, ps.ty_at(i + off)).try();
         ok  = ok && got;
     });
     Ok(ok);
 }
 
-fits_at = (c :: Checker, cand: Cand, actuals: Vec<Actual>, i: usize)
-          Res<bool, AllocError> {
-    p = ty_at(cand.params, i);
-    actuals.get(i).match({
-        Ok(a) => fits(c, a, p),
-        None  => Ok(false),
-    })
-}
-
-// A closure's type is its full signature, and its arity is the part a
-// call site can see without inferring anything.
 fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError> {
     a.is_lambda.match({
         true  => Ok(c.closure_fits(p, a.arity)),
@@ -343,7 +336,6 @@ fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError> {
     })
 }
 
-// Try direct assignability before the more expensive bound-impl search.
 value_fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError> {
     c.assignable(a.ty, p).match({
         true  => Ok(true),
@@ -352,39 +344,15 @@ value_fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError> {
 }
 
 // Methods use the same signature fit as UFCS candidates, offset by receiver
-// parameter zero. Pack tails retain minimum-arity behavior.
+// parameter zero.
 recv_sig_fits* = (c :: Checker, ps: Vec<TyId>, actuals: Vec<Actual>)
                  Res<bool, AllocError> {
-    pack_slot(c.types, ps).match({
-        None     => c.recv_fixed_fits(ps, actuals),
+    c.types.pack_slot(ps).match({
+        None     => (ps.len == actuals.len + 1).match({
+            false => Ok(false),
+            true  => c.each_fits(ps, actuals, actuals.len, 1),
+        }),
         Ok(slot) => c.pack_sig_fits(ps, actuals, 1, slot),
-    })
-}
-
-recv_fixed_fits = (c :: Checker, ps: Vec<TyId>, actuals: Vec<Actual>)
-                  Res<bool, AllocError> {
-    (ps.len == actuals.len + 1).match({
-        false => Ok(false),
-        true  => c.args_fit(ps, actuals),
-    })
-}
-
-// No early exit, for `all_fit`'s reason.
-args_fit = (c :: Checker, ps: Vec<TyId>, actuals: Vec<Actual>)
-           Res<bool, AllocError> {
-    ok ::= true;
-    Range(0, actuals.len).loop((h, i) {
-        got = c.arg_fits_at(ps, actuals, i).try();
-        ok  = ok && got;
-    });
-    Ok(ok);
-}
-
-arg_fits_at = (c :: Checker, ps: Vec<TyId>, actuals: Vec<Actual>, i: usize)
-              Res<bool, AllocError> {
-    actuals.get(i).match({
-        Ok(a) => fits(c, a, ty_at(ps, i + 1)),
-        None  => Ok(false),
     })
 }
 
@@ -399,5 +367,5 @@ closure_fits = (c: Checker, p: TyId, arity: usize) bool {
 is_tvar* = (c: Checker, id: TyId) bool { c.is_var(id) }
 
 ty_at* = (v: Vec<TyId>, i: usize) TyId {
-    v.get(i).match({ Ok(t) => t, None => UNRESOLVED })
+    v.get(i).value_or(UNRESOLVED)
 }
