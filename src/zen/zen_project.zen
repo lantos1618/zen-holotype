@@ -9,13 +9,12 @@ Map, Vec = std.collections
 BuildArgs, ProjectArgs, Emission, Target, Os, Arch, Abi, Dep = std.build
 Build = zen.zen_build
 run_once = zen.zen_run
-entry_of = zen.zen_path
+entry_of, holds_build_zen = zen.zen_path
 BuildPlan, ExeNode, plan = zen.zen_build_plan
 
 project* = (env: Env, a: Alloc, job: ProjectArgs, execute: bool)
            Res<i32, AllocError> {
-    marker = join_path(a, job.root, "build.zen").try();
-    env.fs.exists(marker.view()).match({
+    holds_build_zen(env, a, job.root).match({
         false => { println("zen: no build.zen in `{}`", job.root); Ok(1) },
         true  => project_present(env, a, job, execute),
     })
@@ -38,29 +37,13 @@ project_present = (env: Env, a: Alloc, job: ProjectArgs, execute: bool)
                 println("zen: build.zen uses an unsupported build expression");
                 Ok(1)
             },
-            Ok(planned) => execute_plan(env, a, job, planned, execute),
+            Ok(planned) => Project(env: env, a: a, job: job, planned: planned).execute(execute),
         }),
     })
 }
 
 host_target = () Target {
     Target(os: Os.Linux, arch: Arch.X86_64, abi: Abi.Gnu)
-}
-
-execute_plan = (
-    env     : Env,
-    a       : Alloc,
-    job     : ProjectArgs,
-    planned : BuildPlan,
-    execute : bool
-) Res<i32, AllocError> {
-    select_exe(planned, job.target, execute).match({
-        Err(message) => { println("zen: {}", message); Ok(1) },
-        Ok(selected) => execute.match({
-            true  => build_and_run(env, a, job, planned, selected),
-            false => build_selected(env, a, job, planned, selected),
-        }),
-    })
 }
 
 // An empty selection means `zen build` builds every executable. `zen run`
@@ -87,315 +70,269 @@ select_exe = (planned: BuildPlan, named: str, execute: bool)
     })
 }
 
-build_selected = (
-    env      : Env,
-    a        : Alloc,
-    job      : ProjectArgs,
-    planned  : BuildPlan,
-    selected : Res<ExeNode>
-) Res<i32, AllocError> {
-    code ::= 0;
-    planned.exes.loop((h, exe) {
-        wanted = selected.match({
-            None       => true,
-            Ok(chosen) => chosen.name.eq(exe.name),
-        });
-        wanted.then(() {
-            build_exe(env, a, job, planned, exe).try().match({
-                None  => { code = 1; h.break(); },
-                Ok(_) => {},
+// One planned project: what every compile, link, and run step shares.
+Project = {
+    env: Env,
+    a: Alloc,
+    job: ProjectArgs,
+    planned: BuildPlan,
+
+    execute = (self: @Self, run: bool) Res<i32, AllocError> {
+        self.planned.select_exe(self.job.target, run).match({
+            Err(message) => { println("zen: {}", message); Ok(1) },
+            Ok(selected) => run.match({
+                true  => self.build_and_run(selected),
+                false => self.build_selected(selected),
+            }),
+        })
+    }
+
+    build_selected = (self: @Self, selected: Res<ExeNode>)
+                     Res<i32, AllocError> {
+        code ::= 0;
+        self.planned.exes.loop((h, exe) {
+            wanted = selected.match({
+                None       => true,
+                Ok(chosen) => chosen.name.eq(exe.name),
+            });
+            wanted.then(() {
+                self.build_exe(exe).try().match({
+                    None  => { code = 1; h.break(); },
+                    Ok(_) => {},
+                });
             });
         });
-    });
-    (planned.exes.len == 0).then(() {
-        println("zen: build.zen declared no executable target");
-        code = 1;
-    });
-    Ok(code)
-}
+        (self.planned.exes.len == 0).then(() {
+            println("zen: build.zen declared no executable target");
+            code = 1;
+        });
+        Ok(code)
+    }
 
-build_and_run = (
-    env      : Env,
-    a        : Alloc,
-    job      : ProjectArgs,
-    planned  : BuildPlan,
-    selected : Res<ExeNode>
-) Res<i32, AllocError> {
-    selected.match({
-        None       => Ok(1),
-        Ok(target) => build_exe(env, a, job, planned, target).try().match({
-            None           => Ok(1),
-            Ok(executable) => run_program(env, a, job, executable.view()),
-        }),
-    })
-}
+    build_and_run = (self: @Self, selected: Res<ExeNode>)
+                    Res<i32, AllocError> {
+        selected.match({
+            None       => Ok(1),
+            Ok(target) => self.build_exe(target).try().match({
+                None           => Ok(1),
+                Ok(executable) => self.run_program(executable.view()),
+            }),
+        })
+    }
 
-build_exe = (
-    env     : Env,
-    a       : Alloc,
-    job     : ProjectArgs,
-    planned : BuildPlan,
-    exe     : ExeNode
-) Res<Res<String>, AllocError> {
-    output    = output_path(a, job.root, planned.target, exe.name, exe.spec.out)
-        .try();
-    generated = a.String("{}.c", output.view()).try();
-    ensure_parent(env, a, generated.view()).try().match({
-        false => Ok(None),
-        true  => compile_exe(env, a, job, exe, generated.view()).try().match({
+    build_exe = (self: @Self, exe: ExeNode) Res<Res<String>, AllocError> {
+        output    = self.output_path(exe).try();
+        generated = self.a.String("{}.c", output.view()).try();
+        self.ensure_parent(generated.view()).try().match({
             false => Ok(None),
-            true  => ensure_parent(env, a, output.view()).try().match({
+            true  => self.compile_exe(exe, generated.view()).try().match({
                 false => Ok(None),
-                true  => link_exe(
-                    env,
-                    a,
-                    job,
-                    planned,
-                    exe.spec.deps,
-                    exe.spec.optimize,
-                    exe.spec.strip,
-                    generated.view(),
-                    output.view()
-                ).try().match({
-                    true  => Ok(Ok(output)),
+                true  => self.ensure_parent(output.view()).try().match({
                     false => Ok(None),
+                    true  => self.link_exe(exe, generated.view(), output.view())
+                        .try().match({
+                        true  => Ok(Ok(output)),
+                        false => Ok(None),
+                    }),
                 }),
             }),
-        }),
-    })
-}
+        })
+    }
 
-compile_exe = (
-    env       : Env,
-    a         : Alloc,
-    job       : ProjectArgs,
-    exe       : ExeNode,
-    generated : str
-) Res<bool, AllocError> {
-    source = project_path(a, job.root, exe.spec.src.text).try();
-    parent = Path(source.view()).parent().value_or(Path(job.root));
-    root  ::= parent.text;
-    entry ::= Path(source.view()).name();
+    compile_exe = (self: @Self, exe: ExeNode, generated: str)
+                  Res<bool, AllocError> {
+        source = self.project_path(exe.spec.src.text).try();
+        parent = Path(source.view()).parent().value_or(Path(self.job.root));
+        root  ::= parent.text;
+        entry ::= Path(source.view()).name();
 
-    // A conventional src/ tree is one module namespace. Starting at the
-    // entry's immediate directory would make sibling modules unreachable.
-    src_root = project_path(a, job.root, "src").try();
-    prefix   = a.String("{}/", src_root.view()).try();
-    source.view().starts_with(prefix.view()).then(() {
-        root  = src_root.view();
-        entry = source.view().slice(prefix.view().len, source.view().len);
-    });
-    args = BuildArgs(
-        root: root,
-        emission: Emission.CFile(generated),
-        entry: entry,
-        std_root: job.std_root,
-        ffi: true
-    );
-    Ok(run_once(env, a, args).try() == 0)
-}
-
-link_exe = (
-    env       : Env,
-    a         : Alloc,
-    job       : ProjectArgs,
-    planned   : BuildPlan,
-    deps      : Vec<Dep>,
-    optimize  : str,
-    strip     : bool,
-    generated : str,
-    output    : str
-)
-            Res<bool, AllocError> {
-    argv ::= a.Vec<str>();
-    argv.add("cc").try();
-    argv.add(optimize.match({
-        "size"  => "-Oz",
-        "debug" => "-O0",
-        _       => "-O2",
-    })).try();
-    argv.add("-std=c99").try();
-    optimize.eq("size").then(() {
-        argv.add("-ffunction-sections").try();
-        argv.add("-fdata-sections").try();
-        // Zen faults are values, not C++ stack unwinding. These tables add
-        // roughly ten percent to small release binaries without serving the
-        // language runtime.
-        argv.add("-fno-asynchronous-unwind-tables").try();
-        argv.add("-fno-unwind-tables").try();
-        // Resolve external calls through the GOT without per-symbol PLT code.
-        argv.add("-fno-plt").try();
-        argv.add("-Wl,--gc-sections").try();
-    });
-    strip.then(() { argv.add("-s").try(); });
-    argv.add(generated).try();
-    deps.loop((h, dep) {
-        add_dep(a, job.root, planned, dep.name, argv).try();
-    });
-    add_std_floors(env, a, job.std_root, generated, argv).try();
-    argv.add("-o").try();
-    argv.add(output).try();
-    run_captured(env, a, argv)
-}
-
-add_dep = (
-    a       : Alloc,
-    root    : str,
-    planned : BuildPlan,
-    name    : str,
-    argv    :: Vec<str>
-) Res<(), AllocError> {
-    planned.libs.find((node) { node.name.eq(name) }).match({
-        None       => {},
-        Ok(native) => add_link_options(
-            a,
-            root,
-            native.spec.paths,
-            native.spec.libs,
-            argv
-        ).try(),
-    });
-    planned.externs.find((node) { node.name.eq(name) }).match({
-        None         => {},
-        Ok(external) => {
-            source = project_path(a, root, external.spec.src.text).try();
-            argv.add(source.view()).try();
-            add_link_options(
-                a,
-                root,
-                external.spec.paths,
-                external.spec.libs,
-                argv
-            ).try();
-        },
-    });
-    planned.imports.find((node) { node.name.eq(name) }).match({
-        None         => {},
-        Ok(imported) => imported.spec.libraries.loop((h, lib) {
-            option = a.String("-l{}", lib).try();
-            argv.add(option.view()).try();
-        }),
-    });
-    Ok(())
-}
-
-add_link_options = (
-    a     : Alloc,
-    root  : str,
-    paths : Vec<str>,
-    libs  : Vec<str>,
-    argv  :: Vec<str>
-) Res<(), AllocError> {
-    paths.loop((h, path) {
-        resolved = project_path(a, root, path).try();
-        option   = a.String("-L{}", resolved.view()).try();
-        argv.add(option.view()).try();
-    });
-    libs.loop((h, lib) {
-        option = a.String("-l{}", lib).try();
-        argv.add(option.view()).try();
-    });
-    Ok(())
-}
-
-// Native implementations used by std travel with the toolchain, not each
-// project's build file. Generated calls identify the floors that survived
-// reachability, matching the compiler test harness's link contract.
-add_std_floors = (
-    env       : Env,
-    a         : Alloc,
-    std_root  : str,
-    generated : str,
-    argv      :: Vec<str>
-) Res<(), AllocError> {
-    env.fs.read(a, generated).match({
-        Err(_)     => Ok(()),
-        Ok(source) => {
-            source.view().contains("zg_proc_").then(() {
-                proc_c = join_path(a, std_root, "std/proc/proc.c").try();
-                argv.add(proc_c.view()).try();
-            });
-            source.view().contains("SSL_").then(() {
-                argv.add("-lssl").try();
-                argv.add("-lcrypto").try();
-            });
-            Ok(())
-        },
-    })
-}
-
-run_captured = (env: Env, a: Alloc, argv: Vec<str>)
-               Res<bool, AllocError> {
-    env.proc.run_argv(a, "", argv).match({
-        Err(_)     => {
-            println("zen: could not start `{}`", argv.get(0).match({
-                Ok(value) => value, None => "process",
-            }));
-            Ok(false)
-        },
-        Ok(result) => {
-            (!result.out.view().is_empty()).then(
-                () { println("{}", result.out.view()); }
-            );
-            (!result.err.view().is_empty()).then(
-                () { println("{}", result.err.view()); }
-            );
-            Ok(result.code == 0)
-        },
-    })
-}
-
-ensure_parent = (env: Env, a: Alloc, path: str) Res<bool, AllocError> {
-    Path(path).parent().match({
-        None       => Ok(true),
-        Ok(parent) => {
-            argv ::= a.Vec<str>();
-            argv.add("mkdir").try();
-            argv.add("-p").try();
-            argv.add(parent.text).try();
-            run_captured(env, a, argv)
-        },
-    })
-}
-
-run_program = (env: Env, a: Alloc, job: ProjectArgs, program: str)
-              Res<i32, AllocError> {
-    argv ::= a.Vec<str>();
-    argv.add(program).try();
-    Range(job.args_at, job.argv.len).loop((h, i) {
-        job.argv.get(i).match({
-            Ok(arg) => argv.add(arg).try(),
-            None    => {},
+        // A conventional src/ tree is one module namespace. Starting at the
+        // entry's immediate directory would make sibling modules unreachable.
+        src_root = self.project_path("src").try();
+        prefix   = self.a.String("{}/", src_root.view()).try();
+        source.view().starts_with(prefix.view()).then(() {
+            root  = src_root.view();
+            entry = source.view().slice(prefix.view().len, source.view().len);
         });
-    });
-    env.proc.run_argv_inherit(a, "", argv).match({
-        Err(_)   => { println("zen: could not run `{}`", program); Ok(1) },
-        Ok(code) => Ok(code),
-    })
-}
+        args = BuildArgs(
+            root: root,
+            emission: Emission.CFile(generated),
+            entry: entry,
+            std_root: self.job.std_root,
+            ffi: true
+        );
+        Ok(run_once(self.env, self.a, args).try() == 0)
+    }
 
-output_path = (
-    a      : Alloc,
-    root   : str,
-    target : Target,
-    name   : str,
-    chosen : Res<Path>
-) Res<String, AllocError> {
-    chosen.match({
-        Ok(path) => project_path(a, root, path.text),
-        None     => a.String(
-            "{}/build/{}-{}/{}",
-            root,
-            target.os.stable_name(),
-            target.arch.stable_name(),
-            name
-        ),
-    })
-}
+    link_exe = (self: @Self, exe: ExeNode, generated: str, output: str)
+               Res<bool, AllocError> {
+        argv ::= self.a.Vec<str>();
+        argv.add("cc").try();
+        argv.add(exe.spec.optimize.match({
+            "size"  => "-Oz",
+            "debug" => "-O0",
+            _       => "-O2",
+        })).try();
+        argv.add("-std=c99").try();
+        exe.spec.optimize.eq("size").then(() {
+            argv.add("-ffunction-sections").try();
+            argv.add("-fdata-sections").try();
+            // Zen faults are values; unwind tables only cost size.
+            argv.add("-fno-asynchronous-unwind-tables").try();
+            argv.add("-fno-unwind-tables").try();
+            // Resolve external calls through the GOT without per-symbol PLT code.
+            argv.add("-fno-plt").try();
+            argv.add("-Wl,--gc-sections").try();
+        });
+        exe.spec.strip.then(() { argv.add("-s").try(); });
+        argv.add(generated).try();
+        exe.spec.deps.loop((h, dep) { self.add_dep(dep.name, argv).try(); });
+        self.add_std_floors(generated, argv).try();
+        argv.add("-o").try();
+        argv.add(output).try();
+        self.run_captured(argv)
+    }
 
-project_path = (a: Alloc, root: str, path: str) Res<String, AllocError> {
-    (path.len > 0 && path.index(0) == '/').match({
-        true  => a.String(path),
-        false => join_path(a, root, path),
-    })
+    add_dep = (self: @Self, name: str, argv :: Vec<str>)
+              Res<(), AllocError> {
+        self.planned.libs.find((node) { node.name.eq(name) }).match({
+            None       => {},
+            Ok(native) => self.add_link_options(
+                native.spec.paths,
+                native.spec.libs,
+                argv
+            ).try(),
+        });
+        self.planned.externs.find((node) { node.name.eq(name) }).match({
+            None         => {},
+            Ok(external) => {
+                source = self.project_path(external.spec.src.text).try();
+                argv.add(source.view()).try();
+                self.add_link_options(
+                    external.spec.paths,
+                    external.spec.libs,
+                    argv
+                ).try();
+            },
+        });
+        self.planned.imports.find((node) { node.name.eq(name) }).match({
+            None         => {},
+            Ok(imported) => imported.spec.libraries.loop((h, lib) {
+                option = self.a.String("-l{}", lib).try();
+                argv.add(option.view()).try();
+            }),
+        });
+        Ok(())
+    }
+
+    add_link_options = (
+        self  : @Self,
+        paths : Vec<str>,
+        libs  : Vec<str>,
+        argv  :: Vec<str>
+    ) Res<(), AllocError> {
+        paths.loop((h, path) {
+            resolved = self.project_path(path).try();
+            option   = self.a.String("-L{}", resolved.view()).try();
+            argv.add(option.view()).try();
+        });
+        libs.loop((h, lib) {
+            option = self.a.String("-l{}", lib).try();
+            argv.add(option.view()).try();
+        });
+        Ok(())
+    }
+
+    // Native implementations used by std travel with the toolchain, not each
+    // project's build file. Generated calls identify the floors that survived
+    // reachability, matching the compiler test harness's link contract.
+    add_std_floors = (self: @Self, generated: str, argv :: Vec<str>)
+                     Res<(), AllocError> {
+        self.env.fs.read(self.a, generated).match({
+            Err(_)     => Ok(()),
+            Ok(source) => {
+                source.view().contains("zg_proc_").then(() {
+                    proc_c = join_path(
+                        self.a,
+                        self.job.std_root,
+                        "std/proc/proc.c"
+                    ).try();
+                    argv.add(proc_c.view()).try();
+                });
+                source.view().contains("SSL_").then(() {
+                    argv.add("-lssl").try();
+                    argv.add("-lcrypto").try();
+                });
+                Ok(())
+            },
+        })
+    }
+
+    run_captured = (self: @Self, argv: Vec<str>) Res<bool, AllocError> {
+        self.env.proc.run_argv(self.a, "", argv).match({
+            Err(_)     => {
+                println("zen: could not start `{}`", argv.get(0).match({
+                    Ok(value) => value, None => "process",
+                }));
+                Ok(false)
+            },
+            Ok(result) => {
+                (!result.out.view().is_empty()).then(
+                    () { println("{}", result.out.view()); }
+                );
+                (!result.err.view().is_empty()).then(
+                    () { println("{}", result.err.view()); }
+                );
+                Ok(result.code == 0)
+            },
+        })
+    }
+
+    ensure_parent = (self: @Self, path: str) Res<bool, AllocError> {
+        Path(path).parent().match({
+            None       => Ok(true),
+            Ok(parent) => {
+                argv ::= self.a.Vec<str>();
+                argv.add("mkdir").try();
+                argv.add("-p").try();
+                argv.add(parent.text).try();
+                self.run_captured(argv)
+            },
+        })
+    }
+
+    run_program = (self: @Self, program: str) Res<i32, AllocError> {
+        argv ::= self.a.Vec<str>();
+        argv.add(program).try();
+        Range(self.job.args_at, self.job.argv.len).loop((h, i) {
+            self.job.argv.get(i).match({
+                Ok(arg) => argv.add(arg).try(),
+                None    => {},
+            });
+        });
+        self.env.proc.run_argv_inherit(self.a, "", argv).match({
+            Err(_)   => { println("zen: could not run `{}`", program); Ok(1) },
+            Ok(code) => Ok(code),
+        })
+    }
+
+    output_path = (self: @Self, exe: ExeNode) Res<String, AllocError> {
+        exe.spec.out.match({
+            Ok(path) => self.project_path(path.text),
+            None     => self.a.String(
+                "{}/build/{}-{}/{}",
+                self.job.root,
+                self.planned.target.os.stable_name(),
+                self.planned.target.arch.stable_name(),
+                exe.name
+            ),
+        })
+    }
+
+    project_path = (self: @Self, path: str) Res<String, AllocError> {
+        (path.len > 0 && path.index(0) == '/').match({
+            true  => self.a.String(path),
+            false => join_path(self.a, self.job.root, path),
+        })
+    }
 }

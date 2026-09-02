@@ -4,7 +4,7 @@ Alloc, AllocError = std.mem
 str, String = std.text
 FsError, fs_message = std.env
 
-scan, Source, Lexed, message = std.lex.lex
+scan, Source, Lexed = std.lex.lex
 Render, render = fmt.fmt
 
 FmtJob = zen.zen_cli
@@ -12,7 +12,7 @@ FmtJob = zen.zen_cli
 // A file can fail to format, or differ when running in check mode.
 Outcome = Same | Wrote | Differs | Failed
 
-// One run, and the tally the exit code is.
+// One run; the tallies become the exit code.
 Fmt = {
     env: Env,
     alloc: Alloc,
@@ -52,12 +52,12 @@ Fmt = {
 
     bytes_of = (self :: @Self, path: str) Res<Outcome, AllocError> {
         self.env.fs.read(self.alloc, path).match({
-            Err(e)   => self.unreadable(path, e),
+            Err(e)   => self.fs_fault(path, e),
             Ok(text) => self.scan_it(path, text),
         })
     }
 
-    unreadable = (self :: @Self, path: str, e: FsError) Res<Outcome, AllocError> {
+    fs_fault = (self :: @Self, path: str, e: FsError) Res<Outcome, AllocError> {
         println("{}: {}", path, fs_message(e));
         Ok(Outcome.Failed);
     }
@@ -72,9 +72,7 @@ Fmt = {
     }
 
     lex_diags = (self :: @Self, lexed: Lexed) Res<Outcome, AllocError> {
-        lexed.diags.loop((h, d) {
-            println("{}:{}: {}", d.file, d.span.start, message(d.fault));
-        });
+        lexed.diags.loop((h, d) { d.say(); });
         Ok(Outcome.Failed);
     }
 
@@ -88,9 +86,7 @@ Fmt = {
     }
 
     syntax_diags = (self :: @Self, out: Render) Res<Outcome, AllocError> {
-        out.diags.loop((h, d) {
-            println("{}:{}: {}", d.span.file, d.span.start, d.message);
-        });
+        out.diags.loop((h, d) { d.say(); });
         Ok(Outcome.Failed);
     }
 
@@ -136,7 +132,7 @@ Fmt = {
     write_it = (self :: @Self, path: str, out: Render) Res<Outcome, AllocError> {
         self.env.fs.write(path, out.text.view()).match({
             Ok(_)  => Ok(Outcome.Wrote),
-            Err(e) => self.unreadable(path, e),
+            Err(e) => self.fs_fault(path, e),
         })
     }
 

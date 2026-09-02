@@ -86,7 +86,7 @@ root_for* = (env: Env, a: Alloc, floor: str, path: str) str {
 source_root = (a: Alloc, project: str, path: str) str {
     join_path(a, project, "src").match({
         Err(_)  => project,
-        Ok(src) => under(src.view(), path).match({
+        Ok(src) => path.under(src.view()).match({
             true  => src.view(),
             false => project,
         }),
@@ -103,7 +103,7 @@ holds_its_own_name = (env: Env, a: Alloc, dir: str) bool {
 }
 
 // Test for a project marker. Allocation failure stops the climb.
-holds_build_zen = (env: Env, a: Alloc, dir: str) bool {
+holds_build_zen* = (env: Env, a: Alloc, dir: str) bool {
     join_path(a, dir, "build.zen").match({
         Err(_) => false,
         Ok(f)  => env.fs.exists(f.view()),
@@ -112,13 +112,14 @@ holds_build_zen = (env: Env, a: Alloc, dir: str) bool {
 
 // Return a root-relative path, or the original path when it is outside root.
 relative_to* = (root: str, path: str) str {
-    under(root, path).match({
+    path.under(root).match({
         true  => path.slice(root.len + 1, path.len),
         false => path,
     });
 }
 
-under = (root: str, path: str) bool {
+// `path` names something strictly inside the directory `root`.
+under* = (path: str, root: str) bool {
     path.len > root.len + 1
         && path.slice(0, root.len).eq(root)
         && path.index(root.len) == '/'
@@ -138,8 +139,8 @@ slash_for* = (b: u8) u8 {
 // A module's canonical name, source path, and root-relative source path.
 Unit* = {
     name*: str,     // the dotted module name: `std.core.result`
-    path*: str,     // where the bytes are, to open them: as given
-    rel*:  str,     // the same file, relative to the compilation ROOT
+    path*: str,     // the file to open, as given
+    rel*:  str,     // the same file, relative to the compilation root
 }
 
 // Build a Unit from a path rather than the import spelling that found it.
@@ -199,16 +200,7 @@ entry_after_main = (env: Env, a: Alloc, root: str) Res<Unit, AllocError> {
     })
 }
 
-// Resolve a qualified import to its flat or folder-module source path.
-file_of* = (env: Env, a: Alloc, root: str, q: QualifiedName)
-           Res<str, AllocError> {
-    flat = joined(a, root, q, false).try();
-    env.fs.exists(flat).match({
-        true  => Ok(flat),
-        false => joined(a, root, q, true),
-    })
-}
-
+// The flat or folder-module source path of a qualified import under `root`.
 joined* = (a: Alloc, root: str, q: QualifiedName, folder: bool)
           Res<str, AllocError> {
     out ::= a.String("{}", root).try();
