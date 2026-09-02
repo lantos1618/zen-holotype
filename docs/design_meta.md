@@ -14,17 +14,23 @@ typed and value forms. Sema currently supports:
 @meta(name: T).fields().loop((h, field) {
     out.fmt(" {}: {},", field.name, value.at(field));
 })
+
+value.variant_name()
 ```
 
 Type-name reads preserve the written nominal name, including aliases. A field
 walk checks its body once per declared field. `field.name` is compile-time text;
 `value.at(field)` is a residual expression whose concrete member changes per
-pass.
+pass. `variant_name()` is available on nominal enum values and returns the
+active variant's name exactly as declared as borrowed `str`; payload and generic
+enum variants use the same declaration name. Lowercase protocol spelling can
+therefore live directly in the enum declaration without a conversion table or
+case-folding allocation.
 
-Unsupported forms meet one `MetaNotImplemented` diagnostic at the `@meta`
-token. Current refusals include standalone/value reflection, nested field
-walks, field binders used as ordinary values, walks over unresolved type
-parameters, and projections onto a receiver without the selected field.
+Unsupported `@meta` forms meet one `MetaNotImplemented` diagnostic at the
+`@meta` token. Current refusals include standalone `@meta` value reflection,
+nested field walks, field binders used as ordinary values, walks over unresolved
+type parameters, and projections onto a receiver without the selected field.
 
 ## Implementation ownership
 
@@ -36,6 +42,11 @@ distinct aliases; instantiation-sensitive memo identity remains a milestone.
 and rewrites each projection using sema's facts. The backend does not invent a
 second checker or reflection representation. Formatter input remains the
 parser's original AST.
+
+`src/sema/sema_variant_name.zen` recognizes and records the enum-only
+`variant_name()` intrinsic. `src/gen/gen_c/gen_c_variant_name.zen` evaluates its
+receiver once and selects static string literals using the enum's private dense
+tag. It adds no runtime name table and performs no allocation.
 
 ## Seed order
 

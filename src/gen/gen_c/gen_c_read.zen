@@ -42,10 +42,7 @@ lower_access* = (
     })
 }
 
-// `usize.BITS` — A CONSTANT DECLARED ON A TYPE, the header's second
-// reading: a value of the declaration and never of a receiver, since
-// there is nothing to read it out of. Read exactly as a module-level
-// constant is.
+// Type constants have no receiver storage and lower like module constants.
 lower_type_or_field = (
     be   :: CBackend,
     id   : ExprId,
@@ -60,14 +57,8 @@ lower_type_or_field = (
     })
 }
 
-// `j.WIDTH`, where `WIDTH` is a constant and `j` is a value.
-// A constant is one value per type and there is nothing in a receiver
-// to read it out of — so which side of the dot the TYPE arrives on
-// cannot change the answer. Ask after `type_const` and before the field
-// path. A name that is
-// both is not possible — grammar R4 makes `NAME: T = value` a constant
-// and `name :: T = value` a field, one member each way — and a constant
-// is the reading that has no storage to fall back on.
+// Receiver syntax may name a type constant (`value.WIDTH`), so resolve it
+// before attempting a stored or computed field read.
 lower_recv_const_or_field = (
     be   :: CBackend,
     id   : ExprId,
@@ -82,10 +73,7 @@ lower_recv_const_or_field = (
     })
 }
 
-// The constant a RECEIVER'S type declares under this name. The
-// receiver's type is the frame's answer, and its declaration is read in
-// the module that wrote it — a member's value names what that module
-// can see and never what the reader can.
+// Resolve a constant in the defining module of the receiver's nominal type.
 recv_const = (be :: CBackend, a: Access, ctx: Ctx)
              Res<Res<TypeConst>, AllocError> {
     unknown = be.check.types.unknown().try();
@@ -109,15 +97,12 @@ named_recv_const = (be :: CBackend, n: TyNamed, name: str)
     Ok(hits.get(0));
 }
 
-// The def this type WAS interned from, and not merely one of that name:
-// a module may bind two declarations to one name and only one of them
-// is the receiver's.
+// Compare declaration identity; names need not be unique within a module.
 same_decl = (d: Def, n: TyNamed) bool {
     d.id.module == n.decl.module && d.id.decl == n.decl.decl
 }
 
-// A constant member, and the declaration it was found on — the second
-// half is what says which module its value is read in.
+// The declaration fixes the module used to lower the constant value.
 TypeConst* = {
     k: Const,
     d: Def,
@@ -199,8 +184,6 @@ keep_named_const = (k: Const, d: Def, name: str, out :: Vec<TypeConst>)
     })
 }
 
-// The enum a base names, when the base is a bare name that resolves to
-// an enum declaration rather than to a local.
 base_decl* = (be :: CBackend, base: ExprId, ctx: Ctx) Res<TyId> {
     be.tree.expr_at(base).kind.match({
         Name(n) => be.enum_named(n.text, ctx),
@@ -230,9 +213,7 @@ first_enum = (be :: CBackend, found: Vec<Def>) Res<TyId> {
     })
 }
 
-// AN ALIAS IS THE TYPE, so `Alias.Circle` is `Shape.Circle` and the base
-// names Shape's enum. Which enum is sema's answer and not a second walk
-// from here — `sema_denote.alias_enum`.
+// Enum aliases use sema's resolved target rather than repeating alias lookup.
 enum_type_of = (be :: CBackend, d: Def) Res<TyId> {
     d.kind.match({
         EnumDef  => intern_named(be, d),
@@ -248,20 +229,8 @@ intern_named* = (be :: CBackend, d: Def) Res<TyId> {
     })
 }
 
-// A nullary variant is a value of its enum: the tag, and no payload.
-// A variant WITH a payload written as a bare access is a value that
-// has not been constructed, and sema is the one that says so.
-// THE LITERAL IS SPELLED AT WHAT THE CONTEXT EXPECTED, falling back to
-// what sema answered for the ACCESS node and then to the declaration's
-// own reading. `none: Opt<i32> = Opt.None;` declares its local at the
-// annotation — `gen_c_stmt.binding_type`, the destination's type wins —
-// but this path spelled the tag literal from the DECLARATION alone
-// (`constructed`: the enum at its own free parameters), so a generic
-// enum minted `Opt<Var>` (`_q` in the mangled name) beside the
-// `Opt<i32>` slot the assignment stores into: C that names two structs
-// for one value, refused by cc. The three readings spell the same layout
-// whenever they can differ only in name; the expected type is asked
-// FIRST because it is what the value must land as.
+// A nullary variant contains only its enum tag. Spell generic variants at the
+// destination's settled type so the literal and its storage share one C type.
 write_variant_value* = (
     be      :: CBackend,
     id      : ExprId,
@@ -280,21 +249,8 @@ write_variant_value* = (
     out.fmt("({}){ .zg_tag = {} }", cty.view(), tag.view())
 }
 
-// WHICH ENUM THE NULLARY LITERAL NAMES: the context's expectation when
-// it settled to an application of the same declaration (an annotation,
-// or the position a return hands down), else what sema answered for this
-// very node when that answer has a C spelling, else the declaration
-// reading the caller resolved. The three spell the same layout whenever
-// they can differ only in name; the expected type is asked FIRST because
-// it is what the value must land as. An expectation naming a DIFFERENT
-// declaration is not this access's type — the mismatch, if it is one,
-// belongs to assignability.
-// A BARE HEAD SETTLES AT THE POSITION THAT WROTE ITS ARGUMENTS: sema's
-// `nullary_settles` accepted `none: Opt<i32> = Opt.None` by the same
-// question, and the C has to answer with the struct the slot carries —
-// `zu_t2_5..OptI1_b3i32`, not the bare `zu_t2_5..Opt` beside it (issue
-// 738). Same declaration both sides is checked first; a different one
-// stays assignability's business.
+// Prefer a concrete expected application of the same enum declaration.
+// Otherwise let sema settle a bare generic head at its use site.
 nullary_ty* = (be :: CBackend, ty: TyId, want: TyId) TyId {
     be.expected_enum(ty, want).match({
         None  => be.check.nullary_settles(ty, want).match({
@@ -306,10 +262,26 @@ nullary_ty* = (be :: CBackend, ty: TyId, want: TyId) TyId {
 }
 
 expected_enum = (be :: CBackend, ty: TyId, want: TyId) Res<TyId> {
-    same = be.check.same_type(ty, want);
+    same = be.same_enum_decl(ty, want);
     (same && be.check.has_var(want) == false).match({
         true  => Ok(want),
         false => None,
+    })
+}
+
+// Variant literals name declarations, not applications. Res is the built-in
+// enum shape; user enums carry nominal declaration identity in TyNamed.
+same_enum_decl = (be: CBackend, a: TyId, b: TyId) bool {
+    be.check.types.at(a).match({
+        Res(_) => be.check.types.at(b).match({
+            Res(_) => true,
+            _      => false,
+        }),
+        Named(x) => be.check.types.at(b).match({
+            Named(y) => x.decl.eq(y.decl),
+            _        => false,
+        }),
+        _ => false,
     })
 }
 
@@ -320,39 +292,9 @@ enum_qname = (be :: CBackend, ty: TyId, out :: String) Res<(), AllocError> {
     })
 }
 
-// a field the type declares, and a field an IMPL supplies
-// "You satisfy requirements, you never impl storage." A field the
-// DECLARATION writes is storage and is read out of the receiver's
-// bytes. A field an IMPL supplies is COMPUTED: there is nothing in the
-// receiver to read, so what is emitted is the impl's own expression
-// with `self` bound to the receiver — re-evaluated on every read, which
-// is the whole of "it can never go stale".
-// THE TYPE'S OWN MEMBER WINS OUTRIGHT, the order `sema_supply.zen`
-// states and for its reason: layout is fixed at declaration and cannot
-// depend on which impls are linked.
-// TWO IMPLS SUPPLYING ONE NAME IS SEMA'S ANSWER READ BACK, NOT GUESSED.
-// "The bound in scope selects which is in view — never file order", and
-// nothing pushes bounds during lowering: monomorphisation has already
-// replaced `T` with the concrete type, so the bound that would select
-// is gone by the time this runs. Picking the first would compile, and
-// would read the other impl's field — valid C with the wrong value and
-// no diagnostic, which is why a bound stack HERE would be a second,
-// worse copy of a rule `sema_member.zen` already applies. It records
-// what it chose under the access's `ExprId`; this asks.
-
-// WHAT A FIELD READ EVALUATES TO, when the frame cannot say.
-// `gen_c_expr.zen` walks a dot chain through the FRAME — the frame is
-// the authority on a binding's type — and that walk stops at the first
-// node that is not a name or a field. `p.read(0).value` has a CALL
-// under the dot, so the walk gives up one node short, and sema has
-// nothing either: `alloc.create<T>()` is a bodyless generic member, so
-// the whole chain hanging off `p` is unknown to it.
-// The answer is the same two facts `write_field_access` below already
-// reads — the receiver's type, and the field on its declaration — asked
-// as a question instead of written as C. Without it the chain types as
-// the expectation, and an expectation is exactly what a `println`
-// argument does not have: `p.read(0).next` came back unknown and the
-// `read` on it had no receiver to resolve against.
+// Recover a field type from its receiver when a call in the dot chain prevents
+// the frame from carrying the answer. Declared fields take precedence over
+// impl-supplied computed fields; sema selects among multiple supplying impls.
 access_field_type* = (be :: CBackend, a: Access, ctx: Ctx, want: TyId)
                      Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
@@ -381,9 +323,7 @@ write_field_access = (
     })
 }
 
-// WHICHEVER IMPL SEMA'S BOUND NAMED. A miss leaves `kept` empty and the
-// refusal stands: an answer nothing recorded is not an answer, and the
-// one thing this must never do is pick.
+// Use sema's selected bound; never choose an ambiguous supplying impl by order.
 write_selected_field = (
     be    :: CBackend,
     id    : ExprId,
@@ -411,8 +351,7 @@ keep_supplied_by = (found: Vec<Computed>, b: TyId, kept :: Vec<Computed>)
     Ok(());
 }
 
-// A named helper rather than a `.then` inside the loop body: a loop
-// binding read inside a nested closure does not resolve.
+// Kept separate because loop bindings do not resolve inside nested closures.
 keep_if_bound = (cf: Computed, b: TyId, kept :: Vec<Computed>)
                 Res<(), AllocError> {
     cf.bound.eq(b).match({ true => kept.add(cf), false => Ok(()) })
@@ -444,12 +383,7 @@ write_stored_field = (
     })
 }
 
-// What an impl wrote for a field, and the four things reading it back
-// needs: the TARGET's declaration, whose type parameters the expression
-// names; the module it was written in; the type the BOUND declared
-// — "`width: self.radius * 2.0` is an f64 because `Rect` said f64" —
-// and the bound itself, which is what sema's answer is matched against
-// when two impls supply the name.
+// Context required to lower an impl-supplied computed field.
 Computed = {
     value: ExprId,
     decl: DeclId,
@@ -496,8 +430,7 @@ struct_has_member = (s: Struct, name: str) bool {
     got
 }
 
-// "An impl lives with the type, not with the trait", so the search is
-// over the impls declared in the TARGET's own module.
+// Supplying impls must be declared with the target type.
 impls_supplying = (
     be   :: CBackend,
     n    : TyNamed,
@@ -569,11 +502,8 @@ add_computed = (
     out.add(Computed(value: v, decl: n.decl, mi: mi, ty: ty, bound: bound))
 }
 
-// The receiver is lowered FIRST and into a binding of its own: the
-// impl's expression names it once per mention, and `self` inside it is
-// the impl's `self` and not an enclosing method's. Bound around the
-// impl's own expression and nothing wider, which is the rule
-// `gen_c_range.zen` pays for in the other direction.
+// Evaluate the receiver once and bind it as `self` only while lowering the
+// supplied expression.
 write_computed_field = (
     be    :: CBackend,
     a     : Access,
@@ -622,14 +552,7 @@ write_supplied_value = (
     Ok(());
 }
 
-// `str` IS THE ONE TYPE WHOSE C REPRESENTATION IS THE RUNTIME FLOOR'S
-// rather than its declaration's. `gen_c_runtime.emit_floor` writes
-// `struct zg_str { unsigned char *data; size_t len; }` and every string
-// literal, every `zg_print_str` and every C caller already agrees on
-// those two names — so a read of `text_str.zen`'s `data` or `len` is
-// spelled the floor's way and not the mangler's. Everything else in the
-// language is mangled, which is what keeps two modules' `len` two
-// members.
+// `str` fields use the runtime ABI names; declared fields remain mangled.
 field_name = (be :: CBackend, rty: TyId, name: str, out :: String)
              Res<(), AllocError> {
     be.is_str(rty).match({

@@ -26,12 +26,8 @@ enter_block, leave_block, note_drop, displace = gen.gen_c.gen_c_own
 
 Dest* = Discard | Return | Into(str)
 
-// blocks and statements
-
-// "A block is a value too." Its value is the trailing expression
-// written without a `;`; DESIGN.md also lets a `;`-terminated tail be
-// the value, so a block with no `value` node hands its last expression
-// statement to `dst` instead.
+// A block yields its explicit trailing value, or its last expression statement
+// when the parser represents a semicolon-terminated tail that way.
 block* = (be :: CBackend, id: BlockId, ctx: Ctx, want: TyId, dst: Dest)
          Res<(), AllocError> {
     blk   = be.tree.block_at(id);
@@ -48,9 +44,7 @@ block* = (be :: CBackend, id: BlockId, ctx: Ctx, want: TyId, dst: Dest)
     Ok(());
 }
 
-// How many statements are lowered as statements. All of them when the
-// value is written without a `;` or discarded; all but the last when
-// the last one IS the value.
+// Exclude the final expression statement when it supplies the block value.
 tail_index = (blk: Block, dst: Dest) usize {
     blk.value.match({
         Ok(_) => blk.stmts.len,
@@ -129,10 +123,7 @@ plain_close = (
     be.leave_block(be.keep_name(blk, tail))
 }
 
-// A `Discard` evaluates in place and an `Into` writes to storage the
-// block does not own, so both are already in the right order: the value
-// lands, then the cleanup runs. A `Return` is the one that is not —
-// control would have left before the cleanup was reached.
+// Discard and Into remain in scope through cleanup; Return must be spilled.
 cleaned_close = (
     be   :: CBackend,
     blk  : Block,
@@ -147,9 +138,7 @@ cleaned_close = (
     })
 }
 
-// THE BLOCK'S VALUE IS READ BEFORE ITS BINDINGS DIE. It is spilled to a
-// temporary, the cleanup runs against that, and the temporary is what
-// returns.
+// Spill a returned block value before running cleanup for its bindings.
 returning_close = (
     be   :: CBackend,
     blk  : Block,
@@ -214,9 +203,7 @@ stmt_at_name = (be :: CBackend, blk: Block, tail: usize) str {
     })
 }
 
-// A nested block hands out whatever IT hands out, so the name travels
-// one frame up with the value: the outer block must spare the same
-// binding, or it frees what it just gave away.
+// Propagate a nested block's escaped binding to the enclosing cleanup frame.
 stmt_value_name = (be :: CBackend, s: Stmt) str {
     s.kind.match({
         Expr(e)  => be.bare_name(e.expr),
@@ -295,10 +282,7 @@ deliver_expr_stmt = (
     })
 }
 
-// A block that produces nothing where something was wanted. `return;`
-// is legal in a `void` function and is what a unit-returning body ends
-// with; an `Into` with no value is a hole and stays empty rather than
-// being filled with a guess.
+// A unit return emits `return;`; an absent value for Into remains unwritten.
 close_valueless = (be :: CBackend, dst: Dest) Res<(), AllocError> {
     dst.match({
         Return  => be.writeln("return;"),
@@ -317,8 +301,7 @@ deliver* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId, dst: Dest)
     })
 }
 
-// A spilling form lowers STRAIGHT into the destination — no temporary,
-// because the destination is already one.
+// Spilling forms lower directly into their destination.
 deliver_spilling = (
     be   :: CBackend,
     id   : ExprId,
@@ -337,9 +320,7 @@ deliver_spilling = (
     })
 }
 
-// THE DESTINATION'S TYPE WINS (see the header): the type of the place
-// a value is written to, rather than whatever join a `.match`'s arms
-// happened to produce.
+// A destination's storage type overrides an inferred expression join.
 destination_type* = (be :: CBackend, id: ExprId, ctx: Ctx, want: TyId)
                     Res<TyId, AllocError> {
     be.check.is_unknown(want).match({
@@ -380,8 +361,6 @@ discard_line = (be :: CBackend, text: str) Res<(), AllocError> {
     be.fmt("(void)({text});\n")
 }
 
-// One statement. Sema is asked first, for the reason the header gives,
-// and the answer is read back off the memo while emitting.
 stmt* = (be :: CBackend, s: Stmt, ctx: Ctx) Res<(), AllocError> {
     s.kind.match({
         Bind(b)  => be.lower_bind(s, b, ctx),
@@ -411,10 +390,7 @@ lower_expr_stmt = (be :: CBackend, s: Stmt, id: ExprId, ctx: Ctx)
     be.deliver(id, ctx, be.check.types.unknown().try(), Dest.Discard)
 }
 
-// `x = e;`, `x: T ::= e;`, `self.len = ..;`. Only a bare name
-// introduces a binding — "a member access and an index are binding
-// targets too" — so a target that is not a name is an assignment to
-// something that already exists.
+// Only a bare name can declare a binding; member and index targets assign.
 lower_bind = (be :: CBackend, s: Stmt, b: Bind, ctx: Ctx)
              Res<(), AllocError> {
     be.check.stmt_type(s, ctx).try();
@@ -443,11 +419,7 @@ is_store = (be :: CBackend, name: str, b: Bind) bool {
     (b.mutable == false) && (written == false) && be.bound_in_frame(name)
 }
 
-// A STORE TAKES THE PLACE'S OWN TYPE. `i = i + 1` into a `usize` slot is
-// a `usize`, whatever width the value's own reading would have picked —
-// which is "the destination's type wins" said about a name. Sema records a
-// generic body's type once, so the backend substitutes that answer at the
-// method instantiation before it declares or publishes the local.
+// Stores use the place's instantiated type, including within generic methods.
 binding_type = (be :: CBackend, b: Bind, ctx: Ctx) Res<TyId, AllocError> {
     unknown = be.check.types.unknown().try();
     raw     = b.type.match({
@@ -461,14 +433,14 @@ inferred_type = (be :: CBackend, b: Bind, ctx: Ctx, unknown: TyId)
                 Res<TyId, AllocError> {
     be.slot_type(b).match({
         Ok(t) => Ok(t),
-        None  => be.settled_value_type(b, ctx, unknown),
+        None  => be.tree.expr_at(b.target).kind.match({
+            Name(_) => be.settled_value_type(b, ctx, unknown),
+            _       => be.ty_of(b.target, ctx, unknown),
+        }),
     })
 }
 
-// `sema_place.place_want`'s rule, at the statement it is about: a
-// binding with no written type freezes what the value is worth, and
-// `zg_a3_b3int` is a different struct from `zg_a3_b3i32`. One function,
-// called from the two places that answer what a binding's type is.
+// An unannotated binding freezes the initializer's settled value type.
 settled_value_type = (be :: CBackend, b: Bind, ctx: Ctx, unknown: TyId)
                      Res<TyId, AllocError> {
     got = be.ty_of(b.value, ctx, unknown).try();
