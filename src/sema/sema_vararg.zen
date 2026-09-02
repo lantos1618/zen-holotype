@@ -1,4 +1,4 @@
-Ast, Module, Decl, Function, Struct, Impl, Member, Type, TypeId = std.ast
+Ast, Module, Decl, Function, Param, Struct, Impl, Member, Type, TypeId = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
@@ -7,59 +7,47 @@ TyId, Types, TyNamed = sema.sema_ty
 Checker = sema.sema_check
 SemaFault, NameFault = sema.sema_diag
 
-VARARG*: str = "vararg"
+VARARG: str = "vararg"
 
-// what a call site asks
 // The `T` of a resolved `vararg<T>`, and `None` for every other type.
 pack_elem* = (types: Types, t: TyId) Res<TyId> {
     types.at(t).match({
-        Named(n) => named_pack_elem(n),
+        Named(n) => n.name.eq(VARARG).match({
+            true  => n.args.get(0),
+            false => None,
+        }),
         _        => None,
-    })
-}
-
-named_pack_elem = (n: TyNamed) Res<TyId> {
-    n.name.eq(VARARG).match({
-        true  => n.args.get(0),
-        false => None,
     })
 }
 
 pack_slot* = (types: Types, params: Vec<TyId>) Res<usize> {
     (params.len == 0).match({
         true  => None,
-        false => tail_slot(types, params, params.len - 1),
+        false => types.tail_slot(params, params.len - 1),
     })
 }
 
 tail_slot = (types: Types, params: Vec<TyId>, i: usize) Res<usize> {
     params.get(i).match({
         None  => None,
-        Ok(t) => slot_of(types, t, i),
-    })
-}
-
-slot_of = (types: Types, t: TyId, i: usize) Res<usize> {
-    pack_elem(types, t).match({
-        Ok(_) => Ok(i),
-        None  => None,
+        Ok(t) => types.pack_elem(t).match({ Ok(_) => Ok(i), None => None }),
     })
 }
 
 tail_is_pack* = (tree: Ast, f: Function) bool {
-    (f.params.len == 0).match({
-        true  => false,
-        false => param_is_pack(tree, f, f.params.len - 1),
-    })
-}
-
-param_is_pack = (tree: Ast, f: Function, i: usize) bool {
-    f.params.get(i).match({
+    f.last_param().match({
         None  => false,
         Ok(p) => p.type.match({
             None  => false,
-            Ok(t) => written_pack(tree.type_at(t)),
+            Ok(t) => tree.type_at(t).written_pack(),
         }),
+    })
+}
+
+last_param = (f: Function) Res<Param> {
+    (f.params.len == 0).match({
+        true  => None,
+        false => f.params.get(f.params.len - 1),
     })
 }
 
@@ -68,14 +56,14 @@ param_is_pack = (tree: Ast, f: Function, i: usize) bool {
 
 check_varargs* = (c :: Checker) Res<(), AllocError> {
     found ::= c.alloc.Vec<TypeId>();
-    c.tree.types_where((node) { written_pack(node) }, found).try();
+    c.tree.types_where((node) { node.written_pack() }, found).try();
     (found.len == 0).match({
         true  => Ok(()),
-        false => check_mentions(c, found),
+        false => c.check_mentions(found),
     })
 }
 
-written_pack* = (node: Type) bool {
+written_pack = (node: Type) bool {
     node.kind.match({
         Named(n) => n.name.text.eq(VARARG),
         _        => false,
@@ -84,17 +72,16 @@ written_pack* = (node: Type) bool {
 
 check_mentions = (c :: Checker, found: Vec<TypeId>) Res<(), AllocError> {
     tails ::= c.alloc.Vec<TypeId>();
-    collect_tails(c, tails).try();
-    found.loop((h, t) { check_mention(c, t, tails).try() });
+    c.collect_tails(tails).try();
+    found.loop((h, t) { c.check_mention(t, tails).try() });
     Ok(());
 }
 
 check_mention = (c :: Checker, t: TypeId, tails: Vec<TypeId>)
                 Res<(), AllocError> {
-    has_id(tails, t).match({
-        true  => check_element(c, t),
-        false => report_pack(
-            c,
+    tails.find((tail) { tail.index == t.index }).match({
+        Ok(_) => c.check_element(t),
+        None  => c.report_pack(
             t,
             SemaFault.VarargNotLast(NameFault(name: VARARG))
         ),
@@ -103,10 +90,9 @@ check_mention = (c :: Checker, t: TypeId, tails: Vec<TypeId>)
 
 // A pack has exactly one element argument, which cannot itself be a pack.
 check_element = (c :: Checker, t: TypeId) Res<(), AllocError> {
-    element_ok(c, t).match({
+    c.element_ok(t).match({
         true  => Ok(()),
-        false => report_pack(
-            c,
+        false => c.report_pack(
             t,
             SemaFault.VarargElement(NameFault(name: VARARG))
         ),
@@ -115,7 +101,7 @@ check_element = (c :: Checker, t: TypeId) Res<(), AllocError> {
 
 element_ok = (c: Checker, t: TypeId) bool {
     c.tree.type_at(t).kind.match({
-        Named(n) => (n.args.len == 1) && !element_is_pack(c, n.args),
+        Named(n) => (n.args.len == 1) && !c.element_is_pack(n.args),
         _        => false,
     })
 }
@@ -123,7 +109,7 @@ element_ok = (c: Checker, t: TypeId) bool {
 element_is_pack = (c: Checker, args: Vec<TypeId>) bool {
     args.get(0).match({
         None  => false,
-        Ok(a) => written_pack(c.tree.type_at(a)),
+        Ok(a) => c.tree.type_at(a).written_pack(),
     })
 }
 
@@ -135,7 +121,7 @@ report_pack = (c :: Checker, t: TypeId, fault: SemaFault) Res<(), AllocError> {
 collect_tails = (c :: Checker, out :: Vec<TypeId>) Res<(), AllocError> {
     Range(0, c.tree.module_count()).loop((h, mi) {
         c.tree.module_at(mi).match({
-            Ok(m) => module_tails(m, out),
+            Ok(m) => m.module_tails(out),
             None  => Ok(()),
         }).try();
     });
@@ -143,15 +129,15 @@ collect_tails = (c :: Checker, out :: Vec<TypeId>) Res<(), AllocError> {
 }
 
 module_tails = (m: Module, out :: Vec<TypeId>) Res<(), AllocError> {
-    m.decls.loop((h, d) { decl_tails(d, out).try() });
+    m.decls.loop((h, d) { d.decl_tails(out).try() });
     Ok(());
 }
 
 decl_tails = (d: Decl, out :: Vec<TypeId>) Res<(), AllocError> {
     d.kind.match({
-        Function(f) => fn_tail(f, out),
-        Struct(s)   => member_tails(s.members, out),
-        Impl(im)    => member_tails(im.members, out),
+        Function(f) => f.fn_tail(out),
+        Struct(s)   => s.members.member_tails(out),
+        Impl(im)    => im.members.member_tails(out),
         _           => Ok(()),
     })
 }
@@ -160,7 +146,7 @@ member_tails = (members: Vec<Member>, out :: Vec<TypeId>)
                Res<(), AllocError> {
     members.loop((h, mem) {
         mem.kind.match({
-            Function(f) => fn_tail(f, out),
+            Function(f) => f.fn_tail(out),
             _           => Ok(()),
         }).try();
     });
@@ -168,25 +154,11 @@ member_tails = (members: Vec<Member>, out :: Vec<TypeId>)
 }
 
 fn_tail = (f: Function, out :: Vec<TypeId>) Res<(), AllocError> {
-    (f.params.len == 0).match({
-        true  => Ok(()),
-        false => tail_param(f, f.params.len - 1, out),
-    })
-}
-
-tail_param = (f: Function, i: usize, out :: Vec<TypeId>)
-             Res<(), AllocError> {
-    f.params.get(i).match({
+    f.last_param().match({
         None  => Ok(()),
         Ok(p) => p.type.match({
             None  => Ok(()),
             Ok(t) => out.add(t),
         }),
     })
-}
-
-has_id = (ids: Vec<TypeId>, want: TypeId) bool {
-    Range(0, ids.len).find((i) {
-        ids.get(i).match({ Ok(t) => t.index == want.index, None => false })
-    }).match({ Ok(_) => true, None => false })
 }

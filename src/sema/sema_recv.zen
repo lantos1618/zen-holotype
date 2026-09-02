@@ -13,41 +13,26 @@ place_type, refuse = sema.sema_own
 check_receiver* = (c :: Checker, o :: Own, k: Call, ctx: Ctx)
                   Res<(), AllocError> {
     c.tree.expr_at(k.callee).kind.match({
-        Access(a) => c.check_method_call(o, a, ctx),
-        _         => Ok(()),
-    }).try();
-    c.tree.expr_at(k.callee).kind.match({
-        Access(a) => c.wants_mutable(c.place_type(o, a.base), a.name.text)
-            .match({
-                true  => Ok(()),
-                false => c.path_root(o, a.base).match({
-                    None  => Ok(()),
-                    Ok(i) => c.check_snapshotted(o, k, i),
-                }),
-            }),
+        Access(a) => c.check_method_call(o, a, k),
         _         => Ok(()),
     })
 }
 
-check_method_call = (c :: Checker, o :: Own, a: Access, ctx: Ctx)
+check_method_call = (c :: Checker, o :: Own, a: Access, k: Call)
                     Res<(), AllocError> {
     c.path_root(o, a.base).match({
-        None  => Ok(()),
-        Ok(_) => c.check_receiver_path(o, a, ctx),
+        None     => Ok(()),
+        Ok(root) => c.wants_mutable(
+            c.place_type(o, a.base),
+            a.name.text
+        ).match({
+            true  => c.require_mutable(o, a),
+            false => c.check_snapshotted(o, k, root),
+        }),
     })
 }
 
-check_receiver_path = (c :: Checker, o :: Own, a: Access, ctx: Ctx)
-                      Res<(), AllocError> {
-    ty = c.place_type(o, a.base);
-    c.wants_mutable(ty, a.name.text).match({
-        false => Ok(()),
-        true  => c.require_mutable(o, a),
-    })
-}
-
-// The receiver is what is wrong, so the diagnostic points at the base
-// of the dot, never at the correctly-declared method name.
+// The diagnostic points at the receiver, not the method name.
 require_mutable = (c :: Checker, o :: Own, a: Access) Res<(), AllocError> {
     c.place_mutable(o, a.base).match({
         true  => Ok(()),
@@ -58,55 +43,46 @@ require_mutable = (c :: Checker, o :: Own, a: Access) Res<(), AllocError> {
     })
 }
 
-snapshotted = (c :: Checker, o :: Own, arg: ExprId, root: usize) bool {
-    c.tree.expr_at(arg).kind.match({
-        Call(k) => c.tree.expr_at(k.callee).kind.match({
-            Access(a) => c.path_root(o, a.base).match({
-                None  => false,
-                Ok(i) => (i == root)
-                    && c.wants_mutable(c.place_type(o, a.base), a.name.text),
-            }),
-            _         => false,
-        }),
-        _       => false,
-    })
-}
-
+// A by-value receiver is copied before an argument call writes its root.
 check_snapshotted = (c :: Checker, o :: Own, k: Call, root: usize)
                     Res<(), AllocError> {
     k.args.loop((h, arg) {
         c.snapshotted(o, arg.value, root).match({
-            true  => c.tree.expr_at(arg.value).kind.match({
-                Call(snap) => c.tree.expr_at(snap.callee).kind.match({
-                    Access(a) => c.refuse(
-                        c.tree.expr_at(arg.value).span,
-                        SemaFault.SnapshottedReceiver(NameFault(
-                            name: a.name.text
-                        ))
-                    ),
-                    _         => Ok(()),
-                }),
-                _          => Ok(()),
-            }),
-            false => Ok(()),
+            None     => Ok(()),
+            Ok(name) => c.refuse(
+                c.tree.expr_at(arg.value).span,
+                SemaFault.SnapshottedReceiver(NameFault(name: name))
+            ),
         }).try()
     });
     Ok(());
 }
 
-place_mutable = (c :: Checker, o :: Own, id: ExprId) bool {
-    node = c.tree.expr_at(id);
-    node.kind.match({
-        Name(n)   => var_mutable(o, n.text),
-        Paren(p)  => c.place_mutable(o, p.inner),
-        Access(a) => c.link_mutable(o, a),
-        _         => true,
+// The method name when `arg` is a mutating call on `root`.
+snapshotted = (c :: Checker, o :: Own, arg: ExprId, root: usize) Res<str> {
+    c.tree.expr_at(arg).kind.match({
+        Call(k) => c.tree.expr_at(k.callee).kind.match({
+            Access(a) => c.path_root(o, a.base).match({
+                None  => None,
+                Ok(i) => ((i == root)
+                    && c.wants_mutable(c.place_type(o, a.base), a.name.text))
+                    .match({ true => Ok(a.name.text), false => None }),
+            }),
+            _         => None,
+        }),
+        _       => None,
     })
 }
 
-link_mutable = (c :: Checker, o :: Own, a: Access) bool {
-    c.place_mutable(o, a.base)
-        && c.field_mutable(c.place_type(o, a.base), a.name.text)
+place_mutable = (c :: Checker, o :: Own, id: ExprId) bool {
+    node = c.tree.expr_at(id);
+    node.kind.match({
+        Name(n)   => o.var_mutable(n.text),
+        Paren(p)  => c.place_mutable(o, p.inner),
+        Access(a) => c.place_mutable(o, a.base)
+            && c.field_mutable(c.place_type(o, a.base), a.name.text),
+        _         => true,
+    })
 }
 
 check_write_place* = (c :: Checker, o :: Own, id: ExprId)
@@ -141,25 +117,18 @@ refuse_link = (c :: Checker, o :: Own, node: Expr, nm: str)
     })
 }
 
+// The first immutable link on the path to `id`, named.
 immutable_link = (c :: Checker, o :: Own, id: ExprId) Res<str> {
     node = c.tree.expr_at(id);
     node.kind.match({
-        Name(n)   => name_link(o, n.text),
+        Name(n)   => o.var_mutable(n.text).match({ true => None, false => Ok(n.text) }),
         Paren(p)  => c.immutable_link(o, p.inner),
         Index(x)  => c.immutable_link(o, x.base),
-        Access(a) => c.access_link(o, a),
+        Access(a) => c.immutable_link(o, a.base).match({
+            Ok(nm) => Ok(nm),
+            None   => c.field_link(c.place_type(o, a.base), a.name.text),
+        }),
         _         => None,
-    })
-}
-
-name_link = (o: Own, text: str) Res<str> {
-    var_mutable(o, text).match({ true => None, false => Ok(text) })
-}
-
-access_link = (c :: Checker, o :: Own, a: Access) Res<str> {
-    c.immutable_link(o, a.base).match({
-        Ok(nm) => Ok(nm),
-        None   => c.field_link(c.place_type(o, a.base), a.name.text),
     })
 }
 
@@ -170,36 +139,28 @@ field_link = (c: Checker, ty: TyId, name: str) Res<str> {
 wants_mutable = (c: Checker, ty: TyId, name: str) bool {
     c.own_member(ty, name).match({
         None  => false,
-        Ok(m) => receiver_is_mutable(m),
+        Ok(m) => m.receiver_is_mutable(),
     })
 }
 
-receiver_is_mutable* = (m: Member) bool {
+receiver_is_mutable = (m: Member) bool {
     m.kind.match({
-        Function(f) => first_param_mutable(f),
+        Function(f) => f.params.get(0).match({
+            None  => false,
+            Ok(p) => p.name.text.eq("self") && p.mutable,
+        }),
         _           => false,
-    })
-}
-
-first_param_mutable = (f: Function) bool {
-    f.params.get(0).match({
-        None  => false,
-        Ok(p) => p.name.text.eq("self") && p.mutable,
     })
 }
 
 field_mutable = (c: Checker, ty: TyId, name: str) bool {
     c.own_member(ty, name).match({
         None  => true,
-        Ok(m) => member_is_mutable(m),
-    })
-}
-
-member_is_mutable = (m: Member) bool {
-    m.kind.match({
-        Field(f)    => f.mutable,
-        Const(k)    => k.mutable,
-        Function(_) => true,
+        Ok(m) => m.kind.match({
+            Field(f)    => f.mutable,
+            Const(k)    => k.mutable,
+            Function(_) => true,
+        }),
     })
 }
 
@@ -213,7 +174,7 @@ own_member* = (c: Checker, ty: TyId, name: str) Res<Member> {
 named_member = (c: Checker, n: TyNamed, name: str) Res<Member> {
     c.world.member_rows(n.decl, name).match({
         None     => None,
-        Ok(rows) => decl_at(c.tree, n.decl).match({
+        Ok(rows) => c.tree.decl_at(n.decl).match({
             None  => None,
             Ok(d) => d.kind.match({
                 Struct(st) => rows.get(0).match({

@@ -9,12 +9,54 @@ ImplId = sema.sema_id
 TyId, TyNamed, Prim = sema.sema_ty
 Def, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
-Found, member_type = sema.sema_member
+Found, member_type, supplied_found = sema.sema_member
 enter_struct_tvars, decl_span = sema.sema_member
 type_from_ast = sema.sema_denote
 
-// An impl lives with the type, not the trait, so the module index is
-// part of the match — a same-named type elsewhere is never confused.
+// One impl declared beside its target type, with its bound resolved.
+LocalImpl* = {
+    id*: ImplId,
+    im*: Impl,
+    bound*: TyId,
+}
+
+// Impls are matched by type name and declaring module; a same-named type
+// elsewhere has its own impls.
+local_impls* = (c :: Checker, n: TyNamed, out :: Vec<LocalImpl>)
+               Res<(), AllocError> {
+    ids ::= c.alloc.Vec<ImplId>();
+    c.world.impls_named(c.tree, n.name, ids).try();
+    mi = n.decl.module.to_usize();
+    ids.loop((h, id) {
+        (n.decl.module == id.decl.module).then(() {
+            c.world.impl_at(c.tree, id).match({
+                None   => Ok(()),
+                Ok(im) => out.add(LocalImpl(
+                    id: id,
+                    im: im,
+                    bound: c.impl_bound_type(im, mi).try()
+                )),
+            }).try();
+        });
+    });
+    Ok(());
+}
+
+// The prelude declaration of a primitive's name, as the type its impls
+// attach to.
+prim_named* = (c :: Checker, p: Prim) Res<Res<TyNamed>, AllocError> {
+    defs ::= c.alloc.Vec<Def>();
+    c.world.prelude_of(p.name, defs).try();
+    Ok(defs.get(0).match({
+        None  => None,
+        Ok(d) => Ok(TyNamed(
+            decl: d.id,
+            name: p.name,
+            args: c.alloc.Vec<TyId>()
+        )),
+    }))
+}
+
 impl_members* = (
     c    :: Checker,
     n    : TyNamed,
@@ -22,55 +64,18 @@ impl_members* = (
     name : str,
     out  :: Vec<Found>
 ) Res<(), AllocError> {
-    ids ::= c.alloc.Vec<ImplId>();
-    c.world.impls_named(c.tree, n.name, ids).try();
-    ids.loop((h, id) { c.local_impl(n, ty, name, id, out).try() });
+    impls ::= c.alloc.Vec<LocalImpl>();
+    c.local_impls(n, impls).try();
+    impls.loop((h, li) { c.supplied(li, ty, name, out).try() });
     Ok(());
 }
 
-local_impl = (
-    c    :: Checker,
-    n    : TyNamed,
-    ty   : TyId,
-    name : str,
-    id   : ImplId,
-    out  :: Vec<Found>
-) Res<(), AllocError> {
-    (n.decl.module == id.decl.module).match({
-        true  => c.impl_supplies(n, ty, name, id, out),
-        false => Ok(()),
-    })
-}
-
-impl_supplies = (
-    c    :: Checker,
-    n    : TyNamed,
-    ty   : TyId,
-    name : str,
-    id   : ImplId,
-    out  :: Vec<Found>
-) Res<(), AllocError> {
-    c.world.impl_at(c.tree, id).match({
-        Ok(im) => c.supplied(n, ty, name, id, im, out),
-        None   => Ok(()),
-    }).try();
-    Ok(());
-}
-
-supplied = (
-    c    :: Checker,
-    n    : TyNamed,
-    ty   : TyId,
-    name : str,
-    id   : ImplId,
-    im   : Impl,
-    out  :: Vec<Found>
-) Res<(), AllocError> {
-    mi    = n.decl.module.to_usize();
-    bound = c.impl_bound_type(im, mi).try();
+supplied = (c :: Checker, li: LocalImpl, ty: TyId, name: str, out :: Vec<Found>)
+           Res<(), AllocError> {
     tys ::= c.alloc.Vec<TyId>();
-    c.supplied_types(im, bound, name, ty, tys).try();
-    tys.loop((h, t) { c.add_supplied(t, bound, name, id, out).try() });
+    c.supplied_types(li.im, li.bound, name, ty, tys).try();
+    span = c.impl_span(li.id);
+    tys.loop((h, t) { out.add(supplied_found(name, t, li.bound, span)).try() });
     Ok(());
 }
 
@@ -82,11 +87,11 @@ supplied_types = (
     self_ty : TyId,
     out     :: Vec<TyId>
 ) Res<(), AllocError> {
-    supplied_here = has_member(im.members, name);
+    supplied_here = im.members.has_member(name);
     all ::= c.alloc.Vec<Member>();
     c.bound_members(bound, all).try();
     kept ::= c.alloc.Vec<Member>();
-    all.loop((h, m) { keep_reachable(m, name, supplied_here, kept).try() });
+    all.loop((h, m) { m.keep_reachable(name, supplied_here, kept).try() });
     c.member_types(bound, kept, self_ty, out)
 }
 
@@ -96,7 +101,7 @@ keep_reachable = (
     supplied_here : bool,
     kept          :: Vec<Member>
 ) Res<(), AllocError> {
-    (m.named(name) && (has_body(m) || supplied_here)).match({
+    (m.named(name) && (m.has_body() || supplied_here)).match({
         true  => kept.add(m),
         false => Ok(()),
     })
@@ -118,17 +123,11 @@ enter_impl_target_tvars = (c :: Checker, target: str, mi: usize)
     c.world.own_defs(mi, target, defs).try();
     defs.get(0).match({
         None  => Ok(()),
-        Ok(d) => c.enter_def_tvars(d, mi),
-    }).try();
-    Ok(());
-}
-
-enter_def_tvars = (c :: Checker, d: Def, mi: usize) Res<(), AllocError> {
-    decl_at(c.tree, d.id).match({
-        Ok(x) => c.enter_decl_tvars(x, mi),
-        None  => Ok(()),
-    }).try();
-    Ok(());
+        Ok(d) => c.tree.decl_at(d.id).match({
+            Ok(x) => c.enter_decl_tvars(x, mi),
+            None  => Ok(()),
+        }),
+    })
 }
 
 enter_decl_tvars = (c :: Checker, d: Decl, mi: usize) Res<(), AllocError> {
@@ -144,27 +143,6 @@ has_body = (m: Member) bool {
         Function(f) => f.body.match({ Ok(_) => true, None => false }),
         _           => false,
     })
-}
-
-add_supplied = (
-    c     :: Checker,
-    ty    : TyId,
-    bound : TyId,
-    name  : str,
-    id    : ImplId,
-    out   :: Vec<Found>
-) Res<(), AllocError> {
-    out.add(Found(
-        name: name,
-        ty: ty,
-        computed: true,
-        constant: false,
-        mutable: false,
-        exported: true,  // an impl supplies what a bound REQUIRED; the star
-        module: 0,       // that let the bound out already answered law 6
-        bound: bound,
-        span: c.impl_span(id),
-    ))
 }
 
 bound_member_type* = (c :: Checker, bound: TyId, name: str, self_ty: TyId)
@@ -185,12 +163,11 @@ bound_member_types* = (
     all ::= c.alloc.Vec<Member>();
     c.bound_members(bound, all).try();
     kept ::= c.alloc.Vec<Member>();
-    all.loop((h, m) { keep_reachable(m, name, true, kept).try() });
+    all.loop((h, m) { m.keep_reachable(name, true, kept).try() });
     c.member_types(bound, kept, self_ty, out)
 }
 
-// Types of members already chosen, resolved in the bound's own scope —
-// the `tvar` pair that makes `Slot<T> = { held*: T }` readable.
+// Member types resolve in the bound's own type-parameter scope.
 member_types = (
     c       :: Checker,
     bound   : TyId,
@@ -201,7 +178,7 @@ member_types = (
     mi    = c.bound_module(bound);
     tmark = c.tvar_mark();
     c.enter_bound_tvars(bound, mi).try();
-    ms.loop((h, m) { out.add(member_type(c, m, mi, self_ty).try()).try() });
+    ms.loop((h, m) { out.add(c.member_type(m, mi, self_ty).try()).try() });
     c.release_tvars(tmark).try();
     Ok(());
 }
@@ -209,28 +186,30 @@ member_types = (
 enter_bound_tvars = (c :: Checker, bound: TyId, mi: usize)
                     Res<(), AllocError> {
     c.types.at(bound).match({
-        Named(n) => c.enter_named_tvars(n, mi),
+        Named(n) => c.tree.decl_at(n.decl).match({
+            Ok(d) => c.enter_decl_tvars(d, mi),
+            None  => Ok(()),
+        }),
         _        => Ok(()),
     })
-}
-
-enter_named_tvars = (c :: Checker, n: TyNamed, mi: usize)
-                    Res<(), AllocError> {
-    decl_at(c.tree, n.decl).match({
-        Ok(d) => c.enter_decl_tvars(d, mi),
-        None  => Ok(()),
-    }).try();
-    Ok(());
 }
 
 // The members a bound declares, in source order.
 bound_members* = (c :: Checker, bound: TyId, out :: Vec<Member>)
                  Res<(), AllocError> {
     c.types.at(bound).match({
-        Named(n) => c.bound_decl_members(n, out),
+        Named(n) => c.tree.decl_at(n.decl).match({
+            Ok(d) => d.kind.match({
+                Struct(s) => {
+                    s.members.loop((h, m) { out.add(m).try() });
+                    Ok(())
+                },
+                _         => Ok(()),
+            }),
+            None  => Ok(()),
+        }),
         _        => Ok(()),
-    }).try();
-    Ok(());
+    })
 }
 
 // The i-th field a positional constructor argument supplies. Methods
@@ -242,7 +221,7 @@ storage_seat_name* = (c :: Checker, ty: TyId, i: usize)
     members ::= c.alloc.Vec<Member>();
     c.bound_members(ty, members).try();
     members.loop((h, m) {
-        storage_member(m).then(() {
+        m.storage_member().then(() {
             (seen == i).then(() { name = m.name().text; });
             seen = seen + 1;
         });
@@ -257,27 +236,6 @@ storage_member = (m: Member) bool {
     })
 }
 
-bound_decl_members = (c :: Checker, n: TyNamed, out :: Vec<Member>)
-                     Res<(), AllocError> {
-    decl_at(c.tree, n.decl).match({
-        Ok(d) => copy_struct_members(d, out),
-        None  => Ok(()),
-    }).try();
-    Ok(());
-}
-
-copy_struct_members = (d: Decl, out :: Vec<Member>) Res<(), AllocError> {
-    d.kind.match({
-        Struct(s) => add_all_members(s, out),
-        _         => Ok(()),
-    })
-}
-
-add_all_members = (s: Struct, out :: Vec<Member>) Res<(), AllocError> {
-    s.members.loop((h, m) { out.add(m).try() });
-    Ok(());
-}
-
 bound_module = (c: Checker, bound: TyId) usize {
     c.types.at(bound).match({
         Named(n) => n.decl.module.to_usize(),
@@ -289,9 +247,11 @@ bound_declares* = (c :: Checker, ty: TyId, name: str)
                   Res<bool, AllocError> {
     c.types.at(ty).match({
         Named(n) => c.impls_declare(n, name),
-        Prim(p)  => c.prim_impls_declare(p, name),
-        // a type parameter promises what its bounds promise, and what
-        // it stands for is not settled here
+        Prim(p)  => c.prim_named(p).try().match({
+            None   => Ok(false),
+            Ok(pn) => c.impls_declare(pn, name),
+        }),
+        // a type parameter's members are settled at instantiation
         Var(_)   => Ok(true),
         _        => Ok(false),
     })
@@ -299,61 +259,19 @@ bound_declares* = (c :: Checker, ty: TyId, name: str)
 
 impls_declare = (c :: Checker, n: TyNamed, name: str)
                 Res<bool, AllocError> {
-    ids ::= c.alloc.Vec<ImplId>();
-    c.world.impls_named(c.tree, n.name, ids).try();
+    impls ::= c.alloc.Vec<LocalImpl>();
+    c.local_impls(n, impls).try();
     hit ::= false;
-    ids.loop((h, id) {
-        c.impl_declares(n, name, id).try().then(() { hit = true; });
+    impls.loop((h, li) {
+        all ::= c.alloc.Vec<Member>();
+        c.bound_members(li.bound, all).try();
+        all.has_member(name).then(() { hit = true; });
     });
     Ok(hit);
 }
 
-impl_declares = (c :: Checker, n: TyNamed, name: str, id: ImplId)
-                Res<bool, AllocError> {
-    (n.decl.module == id.decl.module).match({
-        false => Ok(false),
-        true  => c.impl_bound_declares(n, name, id),
-    })
-}
-
-impl_bound_declares = (c :: Checker, n: TyNamed, name: str, id: ImplId)
-                      Res<bool, AllocError> {
-    c.world.impl_at(c.tree, id).match({
-        Ok(im) => c.bound_of_impl_declares(n, name, im),
-        None   => Ok(false),
-    })
-}
-
-bound_of_impl_declares = (c :: Checker, n: TyNamed, name: str, im: Impl)
-                         Res<bool, AllocError> {
-    bound = c.impl_bound_type(im, n.decl.module.to_usize()).try();
-    all ::= c.alloc.Vec<Member>();
-    c.bound_members(bound, all).try();
-    Ok(has_member(all, name));
-}
-
-// A prelude declaration of a primitive's name IS that primitive, so
-// impls on `str` are impls on the decl the prelude exports it as.
-prim_impls_declare = (c :: Checker, p: Prim, name: str)
-                     Res<bool, AllocError> {
-    defs ::= c.alloc.Vec<Def>();
-    c.world.prelude_of(p.name, defs).try();
-    defs.get(0).match({
-        None  => Ok(false),
-        Ok(d) => c.impls_declare(
-            TyNamed(decl: d.id, name: p.name, args: c.alloc.Vec<TyId>()),
-            name
-        ),
-    })
-}
-
 has_member* = (members: Vec<Member>, name: str) bool {
-    Range(0, members.len).find((i) {
-        members.get(i).match({
-            Ok(m) => m.named(name),
-            None  => false,
-        })
-    }).match({ Ok(_) => true, None => false })
+    members.find((m) { m.named(name) }).match({ Ok(_) => true, None => false })
 }
 
 impl_span* = (c: Checker, id: ImplId) Span {
