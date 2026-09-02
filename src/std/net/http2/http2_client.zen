@@ -5,14 +5,18 @@ str, String = std.text
 Res = std.core
 Sink = std.core
 Vec = std.collections
-ParsedUrl = std.net.url
+parse_url = std.net.url
+Stream, dial, write, close = std.net.tls
 Actor, ActorError, Receive, Ref = std.actor
-H2Error, H2StreamError, H2Response, H2Head, H2Chunk, h2_chunk, FrameType, FLAG_END_STREAM, FLAG_ACK, FLAG_END_HEADERS, SET_HEADER_TABLE, SET_INITIAL_WINDOW, MAX_SEND, WINDOW, DEFAULT_WINDOW, MAX_WINDOW, PREFACE = std.net.http2.http2_types
-Stream, http_url, stream_write, stream_close, dial, alpn_check = std.net.http2.http2_transport
-Frame, read_frame, write_frame, settings_add, u32_add, u31_of = std.net.http2.http2_frame
+H2Error, h2_error, H2StreamError, H2Response, H2Head, H2Chunk, h2_chunk, FrameType, FLAG_END_STREAM, FLAG_ACK, FLAG_END_HEADERS, SET_HEADER_TABLE, SET_INITIAL_WINDOW, MAX_SEND, WINDOW, DEFAULT_WINDOW, MAX_WINDOW, PREFACE = std.net.http2.http2_types
+Frame, read_frame, write_frame, settings_add, u32_add, u31_of, be_of = std.net.http2.http2_frame
 hpack_response_headers, hpack_trailer_headers, block_add_header, block_add_user_header = std.net.http2.http2_hpack
 
-H2ReadState = { status :: i32, got_final :: bool, done :: bool }
+H2ReadState = {
+    status    :: i32 = 0,
+    got_final :: bool = false,
+    done      :: bool = false,
+}
 
 H2Data = {
     bytes:       H2Chunk,
@@ -24,7 +28,7 @@ H2Event = Headers(H2Head) | Data(H2Data)
 
 H2Client* = {
     stream   :: Stream,
-    sid      :: u32,     // next stream id: 1, 3, 5...
+    sid      :: usize,   // next stream id: 1, 3, 5...
     open     :: bool,    // false once the peer's GOAWAY lands
     secure   :  bool,
     host     :  String,  // the :authority we send
@@ -33,21 +37,20 @@ H2Client* = {
     send_win :: usize,   // in-flight stream's remaining send credit
     send_debt :: usize,  // amount below zero after SETTINGS reduces the window
     conn_win :: usize,   // connection-level remaining send credit
-    active   :: u32,     // the one stream currently being sent or received
+    active   :: usize,   // the one stream currently being sent or received
     got_peer_settings :: bool,
     got_goaway :: bool,
     peer_last :: usize,   // GOAWAY's last-stream-id; zero is a real value
 
     // Connect and run the preface/SETTINGS handshake. https offers ALPN
-    // "h2" only and refuses a peer that doesn't answer it; http is
-    // prior-knowledge h2c (no upgrade dance).
+    // "h2" only and refuses a peer that does not answer it; http is
+    // prior-knowledge h2c.
     connect* = (a: Alloc, url: str) Res<H2Client, H2Error> {
-        parsed = http_url(url).try();
+        parsed = url.parse_url().replace_err(H2Error.DecodeFailed).try();
         secure = parsed.scheme.eq_ignore_case("https");
-        stream = parsed.dial(a).try();
-        secure.then(() {
-            stream.alpn_check(a).try();
-        });
+        stream = dial(a, parsed.host, parsed.port, secure, true)
+            .try((e) { e.h2_error() });
+        secure.then(() { stream.alpn_check(a).try(); });
 
         host ::= a.String().try(H2Error.ConnectFailed);
         host.add(parsed.host).try(H2Error.ConnectFailed);
@@ -62,7 +65,7 @@ H2Client* = {
             got_peer_settings: false, got_goaway: false, peer_last: 0,
         );
 
-        stream.stream_write(PREFACE).try();
+        stream.write(PREFACE).try((e) { e.h2_error() });
 
         // No dynamic HPACK table; receive credit is replenished only after
         // the response consumer accepts DATA.
@@ -91,7 +94,7 @@ H2Client* = {
     // Open one POST stream and send its request. next_response_event owns all
     // response parsing for both buffered and actor consumers.
     send_post = (self :: @Self, a: Alloc, headers: Vec<str>, body: str)
-                Res<u32, H2Error> {
+                Res<usize, H2Error> {
         self.open.ensure(H2Error.Closed).try();
 
         sid            = self.sid;
@@ -114,10 +117,7 @@ H2Client* = {
         lenstr.fmt("{}", body.len).try(H2Error.SendFailed);
         blk.block_add_header("content-length", lenstr.view()).try();
 
-        (blk.len() > MAX_SEND).match({
-            true  => Err(H2Error.SendFailed),
-            false => Ok(()),
-        }).try();
+        (blk.len() <= MAX_SEND).ensure(H2Error.SendFailed).try();
 
         hflags = body.len == 0;
         self.stream.write_frame(
@@ -138,10 +138,8 @@ H2Client* = {
                 (self.conn_win < avail).then(() { avail = self.conn_win; });
                 (avail > 0).then(() { h2.break(); });
                 f = self.stream.read_frame(a).try();
-                self.control(a, f).try().match({
-                    true  => (),
-                    false => Err(H2Error.ProtocolFailed).try(),
-                });
+                self.control(a, f).try()
+                    .ensure(H2Error.ProtocolFailed).try();
             });
 
             avail = self.send_win;
@@ -185,10 +183,10 @@ H2Client* = {
     stream_response = <R: Actor + Receive<H2Chunk>>(
         self     :: @Self,
         a        : Alloc,
-        sid      : u32,
+        sid      : usize,
         receiver : Ref<R>
     ) Res<(), H2StreamError> {
-        state ::= H2ReadState(status: 0, got_final: false, done: false);
+        state ::= H2ReadState();
 
         loop((h) {
             state.done.then(() { h.break(); });
@@ -242,10 +240,10 @@ H2Client* = {
         Err(H2StreamError.Receiver(error))
     }
 
-    // Shared response event stream for buffered and actor consumers.
-    read_response_into = (self :: @Self, a: Alloc, sid: u32, out :: Sink)
+    // Buffered consumer of next_response_event.
+    read_response_into = (self :: @Self, a: Alloc, sid: usize, out :: Sink)
                          Res<i32, H2Error> {
-        state ::= H2ReadState(status: 0, got_final: false, done: false);
+        state ::= H2ReadState();
 
         loop((h) {
             state.done.then(() { h.break(); });
@@ -271,7 +269,7 @@ H2Client* = {
     next_response_event = (
         self  :: @Self,
         a     : Alloc,
-        sid   : u32,
+        sid   : usize,
         state :: H2ReadState
     ) Res<H2Event, H2Error> {
         event: Res<H2Event> ::= None;
@@ -280,8 +278,7 @@ H2Client* = {
 
             self.control(a, f).try().then(() {
                 f.ftype.match({
-                    GoAway => (!(self.got_goaway
-                        && sid.to_usize() > self.peer_last))
+                    GoAway => (!(self.got_goaway && sid > self.peer_last))
                         .ensure(H2Error.Closed).try(),
                     _      => (),
                 });
@@ -320,7 +317,7 @@ H2Client* = {
         f     : Frame,
         state :: H2ReadState
     ) Res<H2Head, H2Error> {
-        // CONTINUATION is deliberately unsupported, so every block ends here.
+        // CONTINUATION is not supported: a header block ends in its frame.
         f.has_flag(FLAG_END_HEADERS)
             .ensure(H2Error.ProtocolFailed).try();
         range = f.content_range().try();
@@ -374,14 +371,13 @@ H2Client* = {
         )));
     }
 
-    // Credit is returned only after the consumer accepts the frame. For an
-    // actor that means mailbox admission; for post() it means a successful
-    // body append. Padding consumes credit too, hence payload_len rather than
-    // content length.
+    // Credit is returned only after the consumer accepts the frame: mailbox
+    // admission for an actor, a completed sink write for post_into. Padding
+    // consumes credit too, so the whole payload length is returned.
     restore_recv_window = (
         self        :: @Self,
         a           : Alloc,
-        sid         : u32,
+        sid         : usize,
         payload_len : usize,
         stream_open : bool
     ) Res<(), H2Error> {
@@ -434,9 +430,9 @@ H2Client* = {
 
     // GOAWAY is best-effort; the transport always closes.
     close* = (self :: @Self, a: Alloc) () {
-        last: usize = (self.sid >= 3).match({ true => self.sid.to_usize() - 2, false => 0 });
+        last: usize = (self.sid >= 3).match({ true => self.sid - 2, false => 0 });
         self.write_goaway(a, last).match({ Ok(_) => (), Err(_) => () });
-        self.stream.stream_close();
+        self.stream.close();
     }
 
     write_goaway = (self: @Self, a: Alloc, last: usize)
@@ -448,10 +444,11 @@ H2Client* = {
     }
 
     add_conn_credit = (self :: @Self, inc: usize) Res<(), H2Error> {
-        (inc > MAX_WINDOW - self.conn_win).match({
-            true  => Err(H2Error.ProtocolFailed),
-            false => { self.conn_win = self.conn_win + inc; Ok(()) },
-        });
+        (inc <= MAX_WINDOW - self.conn_win).ensure(
+            H2Error.ProtocolFailed
+        ).try();
+        self.conn_win = self.conn_win + inc;
+        Ok(())
     }
 
     add_stream_credit = (self :: @Self, inc: usize) Res<(), H2Error> {
@@ -469,10 +466,11 @@ H2Client* = {
             }),
             false => (),
         });
-        (left > MAX_WINDOW - self.send_win).match({
-            true  => Err(H2Error.ProtocolFailed),
-            false => { self.send_win = self.send_win + left; Ok(()) },
-        });
+        (left <= MAX_WINDOW - self.send_win).ensure(
+            H2Error.ProtocolFailed
+        ).try();
+        self.send_win = self.send_win + left;
+        Ok(())
     }
 
     // Returns true when a control frame was consumed.
@@ -533,26 +531,13 @@ H2Client* = {
 
     // INITIAL_WINDOW_SIZE changes existing stream send credit.
     apply_settings = (self :: @Self, f: Frame) Res<(), H2Error> {
-        (f.payload.len % 6 == 0).match({
-            true  => Ok(()),
-            false => Err(H2Error.ProtocolFailed),
-        }).try();
+        (f.payload.len % 6 == 0).ensure(H2Error.ProtocolFailed).try();
         Range(0, f.payload.len / 6).loop((h, i) {
             base = i * 6;
-            b0   = f.payload.get(base).ok_or(H2Error.DecodeFailed).try();
-            b1   = f.payload.get(base + 1).ok_or(H2Error.DecodeFailed).try();
-            id   = b0.to_usize() * 256 + b1.to_usize();
-            v2   = f.payload.get(base + 2).ok_or(H2Error.DecodeFailed).try();
-            v3   = f.payload.get(base + 3).ok_or(H2Error.DecodeFailed).try();
-            v4   = f.payload.get(base + 4).ok_or(H2Error.DecodeFailed).try();
-            v5   = f.payload.get(base + 5).ok_or(H2Error.DecodeFailed).try();
-            val  = v2.to_usize() * 16777216 + v3.to_usize() * 65536
-                + v4.to_usize() * 256 + v5.to_usize();
+            id   = f.payload.be_of(base, 2).try();
+            val  = f.payload.be_of(base + 2, 4).try();
             (id == SET_INITIAL_WINDOW).then(() {
-                (val > MAX_WINDOW).match({
-                    true  => Err(H2Error.ProtocolFailed).try(),
-                    false => (),
-                });
+                (val <= MAX_WINDOW).ensure(H2Error.ProtocolFailed).try();
                 (val >= self.init_win).match({
                     true  => self.add_stream_credit(val - self.init_win).try(),
                     false => {
@@ -572,6 +557,18 @@ H2Client* = {
         });
         Ok(());
     }
+}
+
+// A TLS peer must have negotiated ALPN h2.
+alpn_check = (s: Stream, a: Alloc) Res<(), H2Error> {
+    s.match({
+        Tcp(_) => Ok(()),
+        Tls(t) => {
+            buf ::= a.Vec<u8>();
+            n = t.alpn(buf).try((e) { e.h2_error() });
+            str_at(buf.ptr(), n).eq("h2").ensure(H2Error.ProtocolFailed)
+        },
+    })
 }
 
 // Single-request convenience API.
