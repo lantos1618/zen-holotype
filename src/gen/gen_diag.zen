@@ -6,7 +6,6 @@ Span = std.ast.ast_span
 str, String = std.text
 AllocError = std.mem
 
-// Payloads stay unformatted until render_gen builds the diagnostic text.
 GenFault* = Unsupported(str)     // a node form this backend does not lower yet
           | Unresolved(str)      // a name with no declaration behind it
           | Ambiguous(str)       // a name with more than one, and no overload rule
@@ -14,22 +13,26 @@ GenFault* = Unsupported(str)     // a node form this backend does not lower yet
           | Unspellable(str)     // a type with no C spelling yet
           | Overrun(usize)       // more functions reachable than the backend's bound
 
-// A fault and its source location.
 GenDiag* = {
     file*: str,
     span*: Span,
     fault*: GenFault,
+
+    // Writes `file:line:col: message` and the detail, without a trailing
+    // newline.
+    render* = (self: @Self, out :: String) Res<(), AllocError> {
+        out.fmt(
+            "{}:{}: {}",
+            self.file,
+            self.span.start,
+            self.fault.message()
+        ).try();
+        self.fault.detail(out)
+    }
 }
 
-// Writes one `file:line:col: message` without a trailing newline.
-render_gen* = (d: GenDiag, out :: String) Res<(), AllocError> {
-    out.fmt("{}:{}: {}", d.file, d.span.start, message(d.fault)).try();
-    detail(d.fault, out).try();
-    Ok(());
-}
-
-// The fixed sentence prefix for a fault.
-message* = (fault: GenFault) str {
+// The fixed sentence prefix; `detail` writes the payload after it.
+message = (fault: GenFault) str {
     fault.match({
         Unsupported(_) => "codegen does not lower this yet:",
         Unresolved(_)  => "codegen cannot resolve",
@@ -40,25 +43,22 @@ message* = (fault: GenFault) str {
     })
 }
 
-// Writes the fault-specific detail.
-detail* = (fault: GenFault, out :: String) Res<(), AllocError> {
+detail = (fault: GenFault, out :: String) Res<(), AllocError> {
     fault.match({
-        Unsupported(w) => write_quoted(out, w),
-        Unresolved(w)  => write_quoted(out, w),
-        Ambiguous(w)   => write_quoted(out, w),
-        Untyped(w)     => write_quoted(out, w),
-        Unspellable(w) => write_quoted(out, w),
-        Overrun(n)     => write_bound(out, n),
+        Unsupported(w) => out.write_quoted(w),
+        Unresolved(w)  => out.write_quoted(w),
+        Ambiguous(w)   => out.write_quoted(w),
+        Untyped(w)     => out.write_quoted(w),
+        Unspellable(w) => out.write_quoted(w),
+        Overrun(n)     => out.write_bound(n),
     })
 }
 
 write_quoted = (out :: String, w: str) Res<(), AllocError> {
-    out.fmt(" `{w}`").try();
-    Ok(());
+    out.fmt(" `{w}`")
 }
 
 write_bound = (out :: String, n: usize) Res<(), AllocError> {
     out.add(" gen_c_decl.MAX_FUNCTIONS = ").try();
-    out.write_usize(n).try();
-    Ok(());
+    out.write_usize(n)
 }
