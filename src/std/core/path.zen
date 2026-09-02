@@ -11,12 +11,7 @@ Path* = {
         })
     }
 
-    name* = (self: @Self) str {
-        self.text.rfind('/').match({
-            None      => self.text,
-            Ok(slash) => self.text.slice(slash + 1, self.text.len),
-        })
-    }
+    name* = (self: @Self) str { self.text.after_last('/') }
 
     ext* = (self: @Self) Res<str> {
         name = self.name();
@@ -34,16 +29,11 @@ Path* = {
 Path* = (text: str) Path { Path(text: text) }
 Path* = (a: Alloc, fmt: str, args: ...) Res<Path, AllocError>
 
-// Join two path fragments with exactly the separator the boundary needs.
-// This is the string form for callers that pass paths directly to Fs;
-// Path.join below is the typed form used by build descriptions.
+// Join two path fragments, adding `/` only when a non-empty `dir` lacks one.
 join_path* = (a: Alloc, dir: str, file: str) Res<String, AllocError> {
     out ::= a.String().try();
     out.add(dir).try();
-    (out.len() > 0 && out.view().index(out.len() - 1) != '/')
-        .then(() { out.add('/').try(); });
+    (out.len() > 0 && !out.view().ends_with("/")).then(() { out.add('/').try(); });
     out.add(file).try();
     Ok(out)
 }
-
-join* = (a: Alloc, base: Path, rest: str) Res<Path, AllocError>

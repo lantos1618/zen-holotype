@@ -1,46 +1,37 @@
-// Deterministic output buffering and stable collection ordering.
-// `Emit` owns its `String`; callers read or transfer the completed buffer
-// From the emitter so later growth cannot diverge from a copied header.
+// Output buffering and stable ordering for backends. `Emit` owns its
+// `String`: read it through `view`, or take it with `into_string`.
 
 Alloc, AllocError = std.mem
 str, String = std.text
 Vec = std.collections
 Range = std.core
-before = std.text
 
-// Four spaces, once. A backend asking for an indent should not also be
-// deciding how wide one is.
 INDENT* : usize = 4
 
 Emit* = {
     text :: String,
     depth :: usize,
 
-    // A newline was just written; the next byte starts a line and must
-    // indent first. Tracked here, not per call site, so a blank line
-    // stays blank — nothing on it, no indent.
+    // The last byte written was `\n`: the next non-empty write indents
+    // first, and a blank line gets no indent.
     fresh :: bool,
 
     // writing
 
-    // A `\n` ends a line wherever it arrives. `fresh` was set in `line`
-    // alone, so a run carrying its own newline left everything after it
-    // hard against the margin — nothing in the tree wrote one until a
-    // format door began handing whole multi-line runs through here.
+    // Every `\n` in `s` ends a line, so a multi-line run indents each line.
     bytes* = (self :: @Self, s: str) Res<(), AllocError> {
-        start ::= 0;
-        Range(0, s.len).loop((h, i) {
-            (s[i] == '\n').then(() {
-                self.run(s.slice(start, i)).try();
-                self.line().try();
-                start = i + 1;
+        lines ::= s.split('\n');
+        self.run(lines.next().value_or("")).try();
+        loop((h) {
+            lines.next().match({
+                None     => h.break(),
+                Ok(rest) => { self.line().try(); self.run(rest).try(); },
             });
         });
-        self.run(s.slice(start, s.len))
+        Ok(())
     }
 
-    // A run with no line ending in it: one indent, one append. Empty
-    // writes nothing, so a blank line stays blank.
+    // `s` holds no `\n`. Empty writes nothing, so a blank line stays blank.
     run = (self :: @Self, s: str) Res<(), AllocError> {
         (s.len == 0).match({
             true  => Ok(()),
@@ -65,8 +56,6 @@ Emit* = {
         self.text.add(b)
     }
 
-    // A decimal, no separators, most significant digit first. String owns
-    // the AllocError-only writer; Emit owns only opening the indented line.
     number* = (self :: @Self, v: usize) Res<(), AllocError> {
         self.open_line().try();
         self.text.write_usize(v)
@@ -79,7 +68,6 @@ Emit* = {
         Ok(());
     }
 
-    // `s`, then the newline. The shape almost every emission has.
     say* = (self :: @Self, s: str) Res<(), AllocError> {
         self.bytes(s).try();
         self.line()
@@ -102,8 +90,8 @@ Emit* = {
 
     indent* = (self :: @Self) () { self.depth = self.depth + 1; }
 
-    // Saturating: an unbalanced backend should produce ugly, readable C,
-    // not an aborted compilation.
+    // Saturates at zero: an unbalanced backend gets misindented C, not an
+    // aborted compilation.
     dedent* = (self :: @Self) () {
         (self.depth > 0).then(() { self.depth = self.depth - 1; });
     }
@@ -114,68 +102,49 @@ Emit* = {
 
     len* = (self: @Self) usize { self.text.len() }
 
-    // Transfer the finished buffer to a longer-lived owner. The Emit is not
-    // written again after this; returning its String header avoids copying
-    // every byte of a completed function body into a second arena buffer.
+    // Takes the buffer; the Emit is not written again after this.
     into_string* = (self: @Self) String { self.text }
 }
 
-// `alloc.Emit()` — ufcs constructor beside the type it builds, like
-// `Vec`, `Map`, `Ast`, `Types`. Allocates its buffer up front.
 Emit* = (a: Alloc) Res<Emit, AllocError> {
     Ok(Emit(text: a.String().try(), depth: 0, fresh: true));
 }
 
-// The one ordering primitive. The positions of `keys`, rearranged so
-// reading them in the returned order reads `keys` in lexicographic byte
-// order.
-//
-// A permutation, not a sorted copy, so the caller keeps whatever the
-// keys belong to (a declaration, a type, a function) without this file
-// needing to know what that is.
-//
-// Bottom-up merge sort, stable: equal keys keep input order, so a duplicate
-// name (a backend should report that, not silently reorder it) doesn't move
-// under shuffled input. The compiler has thousands of long mangled keys;
-// insertion sort made ordering quadratic in both comparisons and bytes.
+// The positions of `keys` in lexicographic byte order: a permutation, so
+// the caller keeps whatever the keys name. Stable, so equal keys keep
+// input order.
 order* = (a: Alloc, keys: Vec<String>) Res<Vec<usize>, AllocError> {
     out ::= a.Vec<usize>();
     tmp ::= a.Vec<usize>();
-    Range(0, keys.len).loop((h, i) {
-        out.add(i).try();
-        tmp.add(i).try();
-    });
-    width         ::= 1;
-    source_is_out ::= true;
-    loop(() { width < out.len }, (h) {
-        source_is_out.match({
-            true  => merge_pass(out, tmp, keys, width),
-            false => merge_pass(tmp, out, keys, width),
+    Range(0, keys.len).loop((h, i) { out.add(i).try() });
+    width    ::= 1;
+    from_out ::= true;
+    loop(() { width < keys.len }, (h) {
+        from_out.match({
+            true  => out.merge_into(tmp, keys, width),
+            false => tmp.merge_into(out, keys, width),
         }).try();
-        source_is_out = !source_is_out;
-        (width > out.len / 2).match({
-            true  => h.break(),
-            false => { width = width * 2; },
-        });
+        from_out = !from_out;
+        width    = width * 2;
     });
-    (!source_is_out).then(() { copy_order(tmp, out).try() });
-    Ok(out);
+    Ok(from_out.match({ true => out, false => tmp }))
 }
 
-merge_pass = (
+// One pass: every `width`-long sorted run of `src`, merged pairwise into `dst`.
+merge_into = (
     src   : Vec<usize>,
     dst   :: Vec<usize>,
     keys  : Vec<String>,
     width : usize
 )
              Res<(), AllocError> {
+    dst.clear();
     start ::= 0;
     loop(() { start < src.len }, (h) {
-        left  = smaller(width, src.len - start);
-        mid   = start + left;
-        right = smaller(width, src.len - mid);
-        merge_run(src, dst, keys, start, mid, mid + right).try();
-        start = mid + right;
+        mid = smaller(start + width, src.len);
+        end = smaller(mid + width, src.len);
+        src.merge_run(dst, keys, start, mid, end).try();
+        start = end;
     });
     Ok(())
 }
@@ -194,11 +163,12 @@ merge_run = (
 ) Res<(), AllocError> {
     left  ::= start;
     right ::= mid;
-    Range(start, end).loop((h, at) {
-        take_right = right_first(src, keys, left, mid, right, end);
-        from       = take_right.match({ true => right, false => left });
-        put(dst, at, src.get(from).value_or(0)).try();
-        take_right.match({
+    Range(start, end).loop((h, i) {
+        right_wins = (right < end) && src.earlier(keys, right, left);
+        from_right = (left == mid) || right_wins;
+        from       = from_right.match({ true => right, false => left });
+        dst.add(src.get(from).value_or(0)).try();
+        from_right.match({
             true  => { right = right + 1; },
             false => { left = left + 1; },
         });
@@ -206,52 +176,12 @@ merge_run = (
     Ok(())
 }
 
-right_first = (
-    src   : Vec<usize>,
-    keys  : Vec<String>,
-    left  : usize,
-    mid   : usize,
-    right : usize,
-    end   : usize
-) bool {
-    (left == mid).match({
-        true  => true,
-        false => (right == end).match({
-            true  => false,
-            false => earlier(
-                keys,
-                src.get(right).value_or(0),
-                src.get(left).value_or(0)
-            ),
-        }),
-    })
+// The key at `src[i]` is strictly before the key at `src[j]`; strict, so
+// equal keys never swap.
+earlier = (src: Vec<usize>, keys: Vec<String>, i: usize, j: usize) bool {
+    src.key(keys, i).before(src.key(keys, j))
 }
 
-copy_order = (src: Vec<usize>, dst :: Vec<usize>) Res<(), AllocError> {
-    Range(0, src.len).loop((h, i) {
-        put(dst, i, src.get(i).value_or(0)).try();
-    });
-    Ok(())
-}
-
-// `keys[i]` strictly before `keys[j]` — strict, so equal keys never
-// swap and the sort stays stable. Ordering itself is `std.text`'s,
-// beside `str.eq`, not here.
-earlier = (keys: Vec<String>, i: usize, j: usize) bool {
-    view_at(keys, i).before(view_at(keys, j))
-}
-
-view_at = (keys: Vec<String>, i: usize) str {
-    keys.get(i).match({ Ok(s) => s.view(), None => "" })
-}
-
-// `Vec.set` refuses an out-of-range index with a bare `Res<()>` (no
-// reason), and `.try()` won't lift a `None` into `Res<_, AllocError>`.
-// Both indices here are in range by construction; `sema_ty.zen` carries
-// the same five lines for the same reason.
-put = (out :: Vec<usize>, i: usize, v: usize) Res<(), AllocError> {
-    out.set(i, v).match({
-        None  => Err(AllocError.OutOfMemory),
-        Ok(_) => Ok(()),
-    })
+key = (src: Vec<usize>, keys: Vec<String>, i: usize) str {
+    keys.get(src.get(i).value_or(0)).match({ Ok(s) => s.view(), None => "" })
 }

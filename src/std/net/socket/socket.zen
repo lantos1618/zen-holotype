@@ -11,7 +11,7 @@ AF_INET6: i32 = 10
 SOCK_STREAM: i32 = 1
 IPPROTO_TCP: i32 = 6
 MSG_NOSIGNAL: i32 = 16384
-NI_MAXHOST: usize = 1025
+NI_MAXHOST: u32 = 1025
 NI_NUMERICHOST: i32 = 1
 
 // Linux/POSIX addrinfo ABI used by getaddrinfo, connect, and getnameinfo.
@@ -55,15 +55,14 @@ ResolvedAddr* = {
     is_v6*: bool,
 }
 
-// A borrowed descriptor, not an owner. Socket alone closes it; this type
-// gives raw IO a nominal receiver so socket operations do not attach to every
-// i32 through UFCS.
+// A borrowed descriptor; Socket alone closes it. Raw IO takes this receiver
+// rather than attaching to every i32.
 SocketFd* = {
     raw: i32,
 
     raw_handle* = (self: @Self) i32 { self.raw }
 
-    // Performs one OS send; write_all repeats until the complete input is sent.
+    // One OS send; send(bytes) repeats it until every byte is sent.
     send* = (
         self  : @Self,
         bytes : Ptr<u8>,
@@ -93,7 +92,6 @@ SocketFd* = {
         Ok(())
     }
 
-    // Performs one OS receive.
     recv* = (
         self  : @Self,
         bytes : Ptr<u8>,
@@ -162,12 +160,12 @@ resolve_addr* = (a: Alloc, host: str) Res<ResolvedAddr, SocketFault> {
 
     info = head.read(0);
     bytes ::= a.Vec<u8>();
-    bytes.reserve(NI_MAXHOST).try(SocketFault.ReadFault);
+    bytes.reserve(NI_MAXHOST.to_usize()).try(SocketFault.ReadFault);
     rc = getnameinfo(
         info.address,
         info.address_len,
         bytes.ptr(),
-        1025,
+        NI_MAXHOST,
         null_ptr<u8>(),
         0,
         NI_NUMERICHOST
@@ -176,7 +174,9 @@ resolve_addr* = (a: Alloc, host: str) Res<ResolvedAddr, SocketFault> {
         false => Err(SocketFault.ReadFault),
         true  => {
             n ::= 0;
-            loop(() { n < NI_MAXHOST && bytes.ptr().read(n) != 0 }, (h) {
+            loop(() { n < NI_MAXHOST.to_usize() && bytes.ptr().read(
+                n
+            ) != 0 }, (h) {
                 n = n + 1;
             });
             ip ::= a.String().try(SocketFault.ReadFault);

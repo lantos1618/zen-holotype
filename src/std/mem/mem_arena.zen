@@ -37,8 +37,8 @@ Arena* = {
 
     bump = (self: @Self, s: ArenaState, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
         page  = s.head.read(0);
-        slot  = align_up(s.next, HEADER_BYTES);
-        start = align_up(slot + HEADER_BYTES, align);
+        slot  = s.next.align_up(HEADER_BYTES);
+        start = (slot + HEADER_BYTES).align_up(align);
         (start + size <= page.size).match({
             true  => {
                 self.state.write(
@@ -67,10 +67,7 @@ Arena* = {
 
     // Grow only the most recent run in place.
     extend_latest = (self: @Self, src: Ptr<u8>, old: usize, want: usize) bool {
-        (old > 0 && want > old).match({
-            true  => self.extend_nonempty(src, old, want),
-            false => false,
-        })
+        old > 0 && want > old && self.extend_nonempty(src, old, want)
     }
 
     extend_nonempty = (self: @Self, src: Ptr<u8>, old: usize, want: usize) bool {
@@ -100,8 +97,7 @@ Arena.impl(Alloc, {
 
     // Grow the latest run in place when possible. Otherwise allocate and copy;
     // a null source is a fresh allocation and must not be passed to memcpy,
-    // even when the requested copy length is zero. This guard belongs here
-    // because realloc owns both the null-source and old-length invariants.
+    // even when the requested copy length is zero.
     realloc = <T>(self: @Self, p: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
         src  = p.to<u8>();
         want = p.bytes(count);
@@ -132,8 +128,7 @@ Arena.impl(Drop, {
         s = self.state.read(0);
         page ::= s.head;
         loop(!page.is_null(), (h) {
-            // Read the link before releasing: the header lives in the
-            // region about to go away
+            // Read the link before releasing: the header lives in the page.
             prev = page.read(0).prev;
             s.mem.release(page);
             page = prev;

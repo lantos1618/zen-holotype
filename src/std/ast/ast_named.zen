@@ -3,12 +3,10 @@
 
 str = std.text
 Range = std.core
-Pos, Span = std.ast.ast_span
+Pos, Span, Ident = std.ast.ast_span
 ExprId, TypeId = std.ast.ast_id
 Ast = std.ast.ast_arena
-Decl, Function, Param, Member, Const, Bind, Stmt = std.ast.ast_node
-Ident, Import = std.ast
-node_at, in_span = std.ast.ast_find
+Decl, Function, Param, Member, Import, Bind = std.ast.ast_node
 
 TypeAt* = {
     span*: Span,
@@ -28,15 +26,21 @@ Tell* = Nothing
     | Imported(Ident)
 
 told_at* = (tree: Ast, file: str, p: Pos) Tell {
-    named = named_at(tree, file, p);
-    is_nothing(named).match({
+    probe = Probe(tree: tree, file: file, p: p);
+    named = probe.named();
+    named.is_nothing().match({
         false => named,
-        true  => node_told(tree, file, p),
+        true  => probe.node(),
     })
 }
 
 is_nothing* = (t: Tell) bool {
     t.match({ Nothing => true, _ => false })
+}
+
+// The first answer that is not Nothing.
+or = (have: Tell, cand: Tell) Tell {
+    have.is_nothing().match({ true => cand, false => have })
 }
 
 module_index_of* = (tree: Ast, file: str) Res<usize> {
@@ -48,184 +52,142 @@ module_index_of* = (tree: Ast, file: str) Res<usize> {
     })
 }
 
-pick = (have: Tell, cand: Tell) Tell {
-    is_nothing(have).match({ true => cand, false => have })
-}
-
-named_at = (tree: Ast, file: str, p: Pos) Tell {
-    found ::= Tell.Nothing;
-    Range(0, tree.module_count()).loop((h, i) {
-        tree.module_at(i).match({
-            None  => (),
-            Ok(m) => m.decls.loop((h2, d) {
-                found = pick(found, decl_told(d, file, p));
-            }),
-        });
-    });
-    tree.blocks_each((bid, block) {
-        block.stmts.loop((h2, s) {
-            found = pick(found, stmt_named(s, file, p));
-        });
-    });
-    found;
-}
-
-stmt_named = (s: Stmt, file: str, p: Pos) Tell {
-    s.kind.match({
-        Decl(d) => decl_told(d, file, p),
-        _       => Tell.Nothing,
-    })
-}
-
-// Struct and enum declaration names have no written TypeId; uses still resolve
-// through their type nodes.
-decl_told = (d: Decl, file: str, p: Pos) Tell {
-    d.kind.match({
-        Function(f) => fn_told(f, file, p),
-        Const(cn)   => const_told(cn, file, p),
-        Alias(al)   => at_type(
-            al.name.span,
-            al.target,
-            in_span(al.name.span, file, p)
-        ),
-        Struct(st)  => members_told(st.members, file, p),
-        Impl(im)    => members_told(im.members, file, p),
-        Enum(_)     => Tell.Nothing,
-        Import(im)  => import_told(im, file, p),
-    })
-}
-
-// Each imported binding has its own cursor span.
-import_told = (im: Import, file: str, p: Pos) Tell {
-    found ::= Tell.Nothing;
-    im.names.loop((h, n) {
-        found = pick(found, imported_told(n.name, file, p));
-    });
-    found;
-}
-
-imported_told = (name: Ident, file: str, p: Pos) Tell {
-    in_span(name.span, file, p).match({
-        true  => Tell.Imported(name),
-        false => Tell.Nothing,
-    })
-}
-
-// A function name resolves to its signature; parameters resolve to their types.
-fn_told = (f: Function, file: str, p: Pos) Tell {
-    in_span(f.name.span, file, p).match({
-        true  => Tell.Sig(f),
-        false => params_told(f.params, file, p),
-    })
-}
-
-params_told = (ps: Vec<Param>, file: str, p: Pos) Tell {
-    found ::= Tell.Nothing;
-    ps.loop((h, prm) { found = pick(found, param_told(prm, file, p)); });
-    found;
-}
-
-// Parameters without written types have no AST-level type answer.
-param_told = (prm: Param, file: str, p: Pos) Tell {
-    hit = in_span(prm.name.span, file, p);
-    prm.type.match({
-        None  => Tell.Nothing,
-        Ok(t) => at_type(prm.name.span, t, hit),
-    })
-}
-
-// `X: i32 = 5` answers from the annotation, `X = 5` from the value — the
-// same rule a `Bind` gets below; the annotation wins where both exist.
-const_told = (cn: Const, file: str, p: Pos) Tell {
-    hit = in_span(cn.name.span, file, p);
-    cn.type.match({
-        Ok(t) => at_type(cn.name.span, t, hit),
-        None  => at_value(cn.name.span, cn.value, hit),
-    })
-}
-
-members_told = (ms: Vec<Member>, file: str, p: Pos) Tell {
-    found ::= Tell.Nothing;
-    ms.loop((h, m) { found = pick(found, member_told(m, file, p)); });
-    found;
-}
-
-member_told = (m: Member, file: str, p: Pos) Tell {
-    m.kind.match({
-        Function(f) => fn_told(f, file, p),
-        Const(cn)   => const_told(cn, file, p),
-        Field(fl)   => field_told(
-            fl.name.span,
-            fl.type,
-            fl.value,
-            in_span(fl.name.span, file, p)
-        ),
-    })
-}
-
-// Supplied members resolve through their value; declared fields use their type.
-field_told = (span: Span, t: Res<TypeId>, v: Res<ExprId>, hit: bool) Tell {
+// The written type wins over the value where both exist: `X: i32 = 5`
+// answers from the annotation, `X = 5` from the value.
+told = (span: Span, t: Res<TypeId>, v: Res<ExprId>) Tell {
     t.match({
-        Ok(id) => at_type(span, id, hit),
+        Ok(id) => Tell.OfType(TypeAt(span: span, id: id)),
         None   => v.match({
-            Ok(e) => at_value(span, e, hit),
+            Ok(e) => Tell.OfValue(ValueAt(span: span, id: e)),
             None  => Tell.Nothing,
         }),
     })
 }
 
-// Pattern nodes have no checked type memo; written type nodes do.
-node_told = (tree: Ast, file: str, p: Pos) Tell {
-    node_at(tree, file, p).match({
-        None  => Tell.Nothing,
-        Ok(n) => n.match({
-            ExprNode(e)    => expr_told(tree, e),
-            TypeNode(t)    => at_type(tree.type_at(t).span, t, true),
-            PatternNode(_) => Tell.Nothing,
-            BlockNode(_)   => Tell.Nothing,
-        }),
-    })
-}
+// One cursor position, asked of every declaration in the tree.
+Probe = {
+    tree: Ast,
+    file: str,
+    p: Pos,
 
-// Binding targets resolve through their annotation or value because they are
-// not checked as standalone expressions.
-expr_told = (tree: Ast, e: ExprId) Tell {
-    found ::= at_value(tree.expr_at(e).span, e, true);
-    tree.blocks_each((bid, block) {
-        block.stmts.loop((h2, s) {
-            found = pick_bound(found, s, tree.expr_at(e).span, e);
+    hit = (self: @Self, span: Span) bool { span.covers(self.file, self.p) }
+
+    named = (self: @Self) Tell {
+        found ::= Tell.Nothing;
+        Range(0, self.tree.module_count()).loop((h, i) {
+            self.tree.module_at(i).match({
+                None  => (),
+                Ok(m) => m.decls.loop(
+                    (h2, d) { found = found.or(self.decl(d)); }
+                ),
+            });
         });
-    });
-    found;
-}
+        self.tree.blocks_each((bid, block) {
+            block.stmts.loop((h2, s) {
+                s.kind.match({
+                    Decl(d) => { found = found.or(self.decl(d)); },
+                    _       => (),
+                });
+            });
+        });
+        found;
+    }
 
-pick_bound = (have: Tell, s: Stmt, span: Span, e: ExprId) Tell {
-    s.kind.match({
-        Bind(b) => bind_told(have, b, span, e),
-        _       => have,
-    })
-}
+    // Struct and enum declaration names have no written TypeId; uses still
+    // resolve through their type nodes.
+    decl = (self: @Self, d: Decl) Tell {
+        d.kind.match({
+            Function(f) => self.function(f),
+            Const(cn)   => self.answer(cn.name.span, cn.type, Ok(cn.value)),
+            Alias(al)   => self.answer(al.name.span, Ok(al.target), None),
+            Struct(st)  => self.members(st.members),
+            Impl(im)    => self.members(im.members),
+            Enum(_)     => Tell.Nothing,
+            Import(im)  => self.import(im),
+        })
+    }
 
-bind_told = (have: Tell, b: Bind, span: Span, e: ExprId) Tell {
-    (b.target.index == e.index).match({
-        false => have,
-        true  => b.type.match({
-            Ok(t) => at_type(span, t, true),
-            None  => at_value(span, b.value, true),
-        }),
-    })
-}
+    // Each imported binding has its own cursor span.
+    import = (self: @Self, im: Import) Tell {
+        found ::= Tell.Nothing;
+        im.names.loop((h, n) {
+            self.hit(n.name.span).then(() {
+                found = found.or(Tell.Imported(n.name));
+            });
+        });
+        found;
+    }
 
-at_type = (span: Span, id: TypeId, hit: bool) Tell {
-    hit.match({
-        true  => Tell.OfType(TypeAt(span: span, id: id)),
-        false => Tell.Nothing,
-    })
-}
+    // A function name resolves to its signature; parameters to their types.
+    function = (self: @Self, f: Function) Tell {
+        self.hit(f.name.span).match({
+            true  => Tell.Sig(f),
+            false => self.params(f.params),
+        })
+    }
 
-at_value = (span: Span, id: ExprId, hit: bool) Tell {
-    hit.match({
-        true  => Tell.OfValue(ValueAt(span: span, id: id)),
-        false => Tell.Nothing,
-    })
+    // Parameters without written types have no AST-level type answer.
+    params = (self: @Self, ps: Vec<Param>) Tell {
+        found ::= Tell.Nothing;
+        ps.loop((h, prm) {
+            found = found.or(self.answer(prm.name.span, prm.type, None));
+        });
+        found;
+    }
+
+    members = (self: @Self, ms: Vec<Member>) Tell {
+        found ::= Tell.Nothing;
+        ms.loop((h, m) { found = found.or(self.member(m)); });
+        found;
+    }
+
+    // Supplied members resolve through their value; declared fields use
+    // their type.
+    member = (self: @Self, m: Member) Tell {
+        m.kind.match({
+            Function(f) => self.function(f),
+            Const(cn)   => self.answer(cn.name.span, cn.type, Ok(cn.value)),
+            Field(fl)   => self.answer(fl.name.span, fl.type, fl.value),
+        })
+    }
+
+    answer = (self: @Self, span: Span, t: Res<TypeId>, v: Res<ExprId>) Tell {
+        self.hit(span).match({
+            false => Tell.Nothing,
+            true  => told(span, t, v),
+        })
+    }
+
+    // Pattern nodes have no checked type memo; written type nodes do.
+    node = (self: @Self) Tell {
+        self.tree.node_at(self.file, self.p).match({
+            None  => Tell.Nothing,
+            Ok(n) => n.match({
+                ExprNode(e)    => self.expr(e),
+                TypeNode(t)    => told(self.tree.type_at(t).span, Ok(t), None),
+                PatternNode(_) => Tell.Nothing,
+                BlockNode(_)   => Tell.Nothing,
+            }),
+        })
+    }
+
+    // A binding target is not checked as a standalone expression; it
+    // resolves through the bind's annotation or value.
+    expr = (self: @Self, e: ExprId) Tell {
+        span = self.tree.expr_at(e).span;
+        found ::= told(span, None, Ok(e));
+        self.tree.blocks_each((bid, block) {
+            block.stmts.loop((h2, s) {
+                s.kind.match({
+                    Bind(b) => {
+                        (b.target.index == e.index).then(() {
+                            found = told(span, b.type, Ok(b.value));
+                        });
+                    },
+                    _       => (),
+                });
+            });
+        });
+        found;
+    }
 }

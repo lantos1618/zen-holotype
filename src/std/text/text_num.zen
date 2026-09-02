@@ -1,7 +1,12 @@
 // Non-allocating complete-decimal integer parsing. Empty, malformed,
 // plus-prefixed, or out-of-range input returns None. Signed parsing accumulates
 // a negative value so i64.MIN is representable without overflow.
-DIGIT_ZERO, digit_value = std.core.byte
+DIGIT_ZERO = std.core.byte
+
+// Unchecked C casts; every caller range-checks first.
+to_u16   = (self: u64) u16
+to_usize = (self: u64) usize
+to_i32   = (self: i64) i32
 
 parse_i64* = (self: str) Res<i64> {
     parsed: Res<i64> = loop<i64>((h) {
@@ -53,59 +58,39 @@ parse_i64* = (self: str) Res<i64> {
     parsed;
 }
 
-parse_usize* = (self: str) Res<usize> {
-    n  ::= 0;
-    ok ::= !self.is_empty();
+parse_i32* = (self: str) Res<i32> {
+    n = self.parse_i64().try();
+    (n >= i32.MIN.to_i64() && n <= i32.MAX.to_i64()).then(() { n.to_i32() })
+}
+
+// Complete unsigned integer in `base`, 2 through 16, digits `0-9a-fA-F`.
+parse_u64_radix* = (self: str, base: u64) Res<u64> {
+    n: u64 ::= 0;
+    ok     ::= !self.is_empty();
     Range(0, self.len).loop((h, i) {
-        digit_value(self[i]).match({
+        digit: Res<u8> = self[i].hex_value();
+        digit.match({
             None  => { ok = false; h.break(); },
-            Ok(d) => (n > (usize.MAX - d.to_usize()) / 10).match({
-                true  => { ok = false; h.break(); },
-                false => { n = n * 10 + d.to_usize(); },
-            }),
+            Ok(d) => {
+                v: u64 = d.to_u64();
+                (v >= base || n > (u64.MAX - v) / base).match({
+                    true  => { ok = false; h.break(); },
+                    false => { n = n * base + v; },
+                });
+            },
         });
     });
     ok.match({ true => Ok(n), false => None })
+}
+
+parse_u64* = (self: str) Res<u64> { self.parse_u64_radix(10) }
+
+parse_usize* = (self: str) Res<usize> {
+    n = self.parse_u64().try();
+    (n <= usize.MAX.to_u64()).then(() { n.to_usize() })
 }
 
 parse_u16* = (self: str) Res<u16> {
-    n: u16 ::= 0;
-    ok     ::= !self.is_empty();
-    Range(0, self.len).loop((h, i) {
-        digit_value(self[i]).match({
-            None  => { ok = false; h.break(); },
-            Ok(d) => (n > (u16.MAX - d.to_u16()) / 10).match({
-                true  => { ok = false; h.break(); },
-                false => { n = n * 10 + d.to_u16(); },
-            }),
-        });
-    });
-    ok.match({ true => Ok(n), false => None })
-}
-
-parse_i32* = (self: str) Res<i32> {
-    parsed: Res<i32> = loop<i32>((h) {
-        self.is_empty().then(() { h.break() });
-        negative ::= self[0] == '-';
-        first    ::= negative.match({ true => 1, false => 0 });
-        (first == self.len).then(() { h.break() });
-
-        edge ::= i32.MAX / 10;
-        limit: u8 = negative.match({ true => 8, false => 7 });
-        n: i32 ::= 0;
-        ok     ::= true;
-        Range(first, self.len).loop((hh, i) {
-            digit_value(self[i]).match({
-                None  => { ok = false; hh.break(); },
-                Ok(d) => (n < 0 - edge || (n == 0 - edge && d > limit))
-                    .match({
-                        true  => { ok = false; hh.break(); },
-                        false => { n = n * 10 - d.to_i32(); },
-                    }),
-            });
-        });
-        (!ok).then(() { h.break() });
-        h.break(negative.match({ true => n, false => 0 - n }));
-    });
-    parsed
+    n = self.parse_u64().try();
+    (n <= u16.MAX.to_u64()).then(() { n.to_u16() })
 }

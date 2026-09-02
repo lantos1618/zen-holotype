@@ -24,7 +24,6 @@ string* = (lx :: Lexer) Res<(), AllocError> {
                 LexFault.StringSpansLine,
                 from
             ).try(); h.break(); },
-            // Avoid reporting the same end-of-file escape twice.
             Ok('\\') => {
                 reported = lx.escape().try();
                 (lx.cur.is_done() && reported).then(() { h.break(); });
@@ -47,7 +46,6 @@ character* = (lx :: Lexer) Res<(), AllocError> {
         None     => lx.report(LexFault.UnterminatedChar, from),
         Ok('\n') => lx.report(LexFault.CharSpansLine, from),
         Ok('\'') => { lx.cur.bump(); lx.report(LexFault.EmptyChar, from) },
-        // Avoid duplicating an end-of-file escape diagnostic.
         Ok('\\') => {
             reported = lx.escape().try();
             (lx.cur.is_done() && reported).match({
@@ -66,7 +64,7 @@ close_char = (lx :: Lexer, from: Pos) Res<(), AllocError> {
     });
 }
 
-// Consume through the literal boundary after an overlong character.
+// Resynchronize at the closing quote or the end of the line.
 overlong_char = (lx :: Lexer, from: Pos) Res<(), AllocError> {
     lx.cur.bump_while((b) { (b != '\'') && (b != '\n') });
     lx.cur.peek().match({
@@ -76,9 +74,10 @@ overlong_char = (lx :: Lexer, from: Pos) Res<(), AllocError> {
     });
 }
 
-// Validate one escape and report whether this operation emitted a diagnostic.
-// Newlines are left for the enclosing literal to diagnose.
-escape* = (lx :: Lexer) Res<bool, AllocError> {
+// Consume one escape. Returns true when a fault was reported; at end of input
+// the caller must then not report its own. Newlines are left for the
+// enclosing literal to diagnose.
+escape = (lx :: Lexer) Res<bool, AllocError> {
     from = lx.cur.pos();
     lx.cur.bump();
     lx.cur.peek().match({
@@ -105,7 +104,7 @@ escape* = (lx :: Lexer) Res<bool, AllocError> {
 // accepts separators or type suffixes.
 number* = (lx :: Lexer) Res<(), AllocError> {
     from = lx.cur.pos();
-    is_hex_prefix(lx).match({
+    lx.is_hex_prefix().match({
         true  => lx.hex_number(from),
         false => lx.decimal_number(from),
     })
@@ -129,7 +128,7 @@ hex_number = (lx :: Lexer, from: Pos) Res<(), AllocError> {
         },
         true  => {
             lx.suffix().try();
-            lx.emit_int(hex_digits_of(digits), from)
+            lx.emit_int(digits.parse_u64_radix(16), from)
         },
     })
 }
@@ -138,7 +137,6 @@ decimal_number = (lx :: Lexer, from: Pos) Res<(), AllocError> {
     lx.cur.bump_while((b) { b.is_digit() });
     whole = lx.since(from);
 
-    // Zen has no octal, so a leading zero is rejected rather than re-read.
     has_leading_zero(whole).match({
         true  => lx.report(LexFault.LeadingZero, from),
         false => Ok(()),
@@ -150,11 +148,11 @@ decimal_number = (lx :: Lexer, from: Pos) Res<(), AllocError> {
 
     is_float.match({
         true  => lx.emit(TokenKind.Float, from),
-        false => lx.emit_int(digits_of(whole), from),
+        false => lx.emit_int(whole.parse_u64(), from),
     });
 }
 
-// A decimal point must be followed by a digit.
+// `1.` and `1.x` are faults; a number is never an Int followed by Dot.
 fraction = (lx :: Lexer) Res<bool, AllocError> {
     lx.cur.at_byte('.').match({
         true  => lx.after_dot(),
@@ -176,7 +174,7 @@ after_dot = (lx :: Lexer) Res<bool, AllocError> {
     Ok(digit_follows);
 }
 
-// Reject identifier suffixes, including unsupported hexadecimal notation.
+// Identifier bytes glued to a number (`1abc`, `0xffg`) are a fault.
 suffix = (lx :: Lexer) Res<(), AllocError> {
     at = lx.cur.pos();
     lx.cur.bump_while((b) { b.is_ident_cont() });
@@ -187,48 +185,11 @@ suffix = (lx :: Lexer) Res<(), AllocError> {
 }
 
 // Values beyond u64 produce a fault and no token.
-emit_int = (lx :: Lexer, digits: Digits, from: Pos) Res<(), AllocError> {
-    digits.overflow.match({
-        true  => lx.report(LexFault.IntegerOutOfRange, from),
-        false => lx.emit(TokenKind.Int(digits.value), from),
+emit_int = (lx :: Lexer, value: Res<u64>, from: Pos) Res<(), AllocError> {
+    value.match({
+        Ok(v) => lx.emit(TokenKind.Int(v), from),
+        None  => lx.report(LexFault.IntegerOutOfRange, from),
     });
 }
 
 has_leading_zero = (whole: str) bool { (whole.len > 1) && (whole[0] == '0') }
-
-Digits* = {
-    value*: u64,
-    overflow*: bool,
-}
-
-// Detect source overflow before arithmetic can trap.
-digits_of* = (s: str) Digits {
-    Range(0, s.len).loop(Digits(value: 0, overflow: false), (h, i, at, acc: Digits) {
-        add_digit(acc, (s[at] - '0').to_u64(), 10)
-    }).match({
-        Ok(digits) => digits,
-        None       => Digits(value: 0, overflow: false),
-    });
-}
-
-hex_digits_of = (s: str) Digits {
-    Range(0, s.len).loop(Digits(value: 0, overflow: false), (h, i, at, acc: Digits) {
-        add_digit(acc, hex_digit_value(s[at]), 16)
-    }).match({
-        Ok(digits) => digits,
-        None       => Digits(value: 0, overflow: false),
-    });
-}
-
-hex_digit_value = (b: u8) u64 {
-    digit: Res<u8> = b.hex_value();
-    digit.match({ Ok(value) => value.to_u64(), None => 0 })
-}
-
-// `acc * base + d` overflows when `acc > (u64.MAX - d) / base`.
-add_digit = (acc: Digits, d: u64, base: u64) Digits {
-    (acc.overflow || (acc.value > (u64.MAX - d) / base)).match({
-        true  => Digits(value: 0, overflow: true),
-        false => Digits(value: acc.value * base + d, overflow: false),
-    });
-}

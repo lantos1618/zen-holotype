@@ -16,12 +16,8 @@ Ast = std.ast.ast_arena
 Module, Alias, Named = std.ast.ast_node
 Pos, Span, QualifiedName = std.ast.ast_span
 
-// Import the lexical diagnostic renderer directly; multiple phases export
-// types and helpers with the same short names.
 message = std.lex.lex
-
-// Shared compiler diagnostic representation.
-Diag, diag, say = std.parse.parse_diag
+Diag, diag = std.parse.parse_diag
 
 scan, Source, Lexed = std.lex.lex
 Parser, module = std.parse.parse
@@ -33,22 +29,15 @@ Emit, CBackend, emit_program = gen.gen
 
 BuildArgs, Emission, Permutation = std.build
 
-// Module path construction and lookup.
-slash_for = zen.zen_path
+slash_for, under = zen.zen_path
 unit_at, candidate, joined, relative_to = zen.zen_path
 root_for, std_root_for = zen.zen_path
-
-// Entry module naming and lookup.
 ENTRY, entry_of = zen.zen_path
+Unit = zen.zen_path
 
-Unit* = zen.zen_path
-
-// where the bytes go, and why one would not
 emit_units, write_symbol_map = zen.zen_write
 
-// One build. It holds the authority the phases need and the tally of
-// what went wrong, because the exit code is that tally and the corpus
-// and self-host build both read it.
+// One build: the phase inputs and the fault tally that becomes the exit code.
 Build* = {
     env*: Env,
     alloc*: Alloc,
@@ -67,11 +56,8 @@ Build* = {
     // on Checker because rendering them requires its type store.
     diags* :: Vec<Diag>,
 
-    // Which deterministic order the module walk uses.
     permute* :: Permutation = Permutation.Natural,
 
-    // Mutation of an exported field goes through an exported method —
-    // the order is a DEBUG flag a command line decides.
     walk_order* = (self :: @Self, order: Permutation) () {
         self.permute = order;
     }
@@ -90,11 +76,7 @@ Build* = {
 
     // Keep an external stdlib's module identity rooted at `std`.
     root_for_path = (self: @Self, path: str) str {
-        under_std = self.std_root.len > 0
-            && path.len > self.std_root.len
-            && path.slice(0, self.std_root.len).eq(self.std_root)
-            && path.index(self.std_root.len) == '/';
-        under_std.match({
+        (self.std_root.len > 0 && path.under(self.std_root)).match({
             true  => self.std_root,
             false => self.root,
         })
@@ -106,9 +88,7 @@ Build* = {
     // Language-server builds collect diagnostics without writing to stdout.
     speaking* :: bool = true,
 
-    // The entry's path relative to the root, kept for the one
-    // diagnostic about the root itself rather than a span — see
-    // `missing_main`.
+    // Root-relative entry path, for the `missing_main` diagnostic.
     entry_rel* :: str = "",
 
     // One program-wide tree. Finish parsing before constructing Checker,
@@ -119,9 +99,8 @@ Build* = {
     // the walk
     // -----------------------------------------------------------------
 
-    // The whole program, breadth first from the entry. `seen` is both
-    // queue and set: a module reached twice is added once, and the index
-    // walks a still-growing list — a worklist as a Vec, not a recursion.
+    // Breadth first from the entry. `seen` is queue and set; the index walks
+    // it while it grows.
     walk* = (self :: @Self, entry: Unit) Res<(), AllocError> {
         seen ::= self.alloc.Vec<Unit>();
         self.entry_rel = entry.rel;
@@ -224,9 +203,7 @@ Build* = {
     // Files with lexical faults are reported without invoking the parser.
     lex_it = (self :: @Self, u: Unit, text: str, seen :: Vec<Unit>)
              Res<(), AllocError> {
-        // Tokens live only through this parse. Keeping their geometric
-        // growth in the whole-build arena retained every old run through
-        // sema and emission; this arena returns all of them after the module.
+        // Tokens live only through this parse; a per-module arena returns them.
         scratch ::= self.env.mem.alloc();
         lexed = scan(scratch, Source(file: u.rel, text: text)).try();
         lexed.is_clean().match({
@@ -235,7 +212,9 @@ Build* = {
         })
     }
 
-    // Convert lexer faults into the shared compiler diagnostic shape.
+    // Lexer faults become parse diagnostics so `diags` has one shape. The
+    // span is rebuilt by hand: no file can name both `lex.Span` and
+    // `ast.Span` (`parser.zen:span_of` is the same conversion).
     lex_faults = (self :: @Self, lexed: Lexed) Res<(), AllocError> {
         lexed.diags.loop((h, d) {
             at = Span(
@@ -253,7 +232,6 @@ Build* = {
                Res<(), AllocError> {
         p ::= self.alloc.Parser(lexed, self.tree);
         m = p.module(u.name).try();
-        // Parser diagnostics already use the shared representation.
         p.diags.loop((h, d) { self.report(d).try(); });
         p.tree.add_module(m).try();
         self.tree  = p.tree;
@@ -356,9 +334,8 @@ Build* = {
         })
     }
 
-    // Probed, not required, like the entry probe: a folder with no root
-    // file is one the module graph would reject on its own terms;
-    // reporting it here would blame the import living next to it.
+    // Probed, not required: a folder with no root file is the module
+    // graph's diagnostic, not this import's.
     queue_folder_root = (self :: @Self, dir: str, path: str, seen :: Vec<Unit>)
                         Res<(), AllocError> {
         root_file ::= self.alloc.String(
@@ -431,7 +408,6 @@ Build* = {
         self.checked()
     }
 
-    // Construct and return the single Checker used by later phases.
     checked* = (self :: @Self) Res<Checker, AllocError> {
         c ::= self.alloc.Checker(self.tree).try();
         c.check_all().try();
@@ -492,7 +468,7 @@ Build* = {
         })
     }
 
-    // 1:1, because the mistake is the file and not a place in it.
+    // Reported at 1:1: the fault is the file, not a place in it.
     no_main = (self :: @Self) Res<usize, AllocError> {
         println(
             "{}:1:1: no `{}`: law 2 makes `main = (env: Env) Res<i32, E>` where a program starts, and this root declares none",
@@ -516,8 +492,6 @@ Build* = {
         })
     }
 
-    // File and stdout modes emit one translation unit. Directory mode emits
-    // one C file per module through emit_many.
     emit_one = (self :: @Self, c :: Checker, job: BuildArgs) Res<(), AllocError> {
         be ::= self.alloc.CBackend(self.tree, c).try();
         (self.ffi).then(() { be.enable_ffi(); });
@@ -590,14 +564,11 @@ Build* = {
         );
     }
 
-    // Collected build diagnostics.
     diag_count* = (self: @Self) usize { self.diags.len }
 
     diag_at* = (self: @Self, i: usize) Res<Diag> { self.diags.get(i) }
 
-    // 0 when clean, 1 when anything went wrong. One code, not one per
-    // phase: a caller acts on "did this produce a program", and the
-    // corpus and self-host build both read exactly that.
+    // 0 when clean, 1 otherwise: one code answers "did this produce a program".
     code* = (self: @Self) i32 {
         (self.faults == 0).match({
             true  => 0,

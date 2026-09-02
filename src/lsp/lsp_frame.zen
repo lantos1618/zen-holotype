@@ -1,10 +1,8 @@
 // Reads and writes byte-counted `Content-Length` envelopes. Header names are
 // case-insensitive; `Envelope.next` identifies the next frame in the buffer.
 
-str, String, parse_usize = std.text
-Range = std.core
+str, String = std.text
 AllocError = std.mem
-to_lower = std.core.byte
 
 Envelope* = {
     body*: str,
@@ -31,6 +29,7 @@ why* = (f: FrameFault) str {
     })
 }
 
+// True when more input could complete the frame.
 partial* = (f: FrameFault) bool {
     f.match({
         NoBlank(_)   => true,
@@ -40,10 +39,18 @@ partial* = (f: FrameFault) bool {
     })
 }
 
+write_fault* = (f: FrameFault, out :: String) Res<(), AllocError> {
+    out.add("lsp: bad frame at byte ").try();
+    out.write_usize(f.byte()).try();
+    out.add(" (").try();
+    out.add(f.why()).try();
+    out.add(")")
+}
+
 frame_at* = (bytes: str, at: usize) Res<Envelope, FrameFault> {
-    blank = blank_at(bytes, at).try();
-    len   = length_in(bytes, at, blank).try();
-    body  = blank + BLANK_LEN;
+    blank = bytes.blank_at(at).try();
+    len   = bytes.length_in(at, blank).try();
+    body  = blank + BLANK.len;
     (body + len <= bytes.len).match({
         false => Err(FrameFault.Short(body)),
         true  => Ok(Envelope(
@@ -53,12 +60,14 @@ frame_at* = (bytes: str, at: usize) Res<Envelope, FrameFault> {
     })
 }
 
+// Bytes still missing from the frame at `at`; 0 when its headers are
+// incomplete or malformed.
 short_by* = (bytes: str, at: usize) usize {
-    blank_at(bytes, at).match({
+    bytes.blank_at(at).match({
         Err(_)    => 0,
-        Ok(blank) => length_in(bytes, at, blank).match({
+        Ok(blank) => bytes.length_in(at, blank).match({
             Err(_) => 0,
-            Ok(n)  => missing(bytes, blank + BLANK_LEN + n),
+            Ok(n)  => bytes.missing(blank + BLANK.len + n),
         }),
     })
 }
@@ -86,15 +95,16 @@ length_in = (bytes: str, at: usize, blank: usize) Res<usize, FrameFault> {
     value ::= 0;
     bad   ::= false;
     loop(() { !found && !bad && from < blank }, (h) {
-        stop = line_end(bytes, from, blank);
-        is_length(bytes, from, stop).then(() {
+        stop = bytes.line_end(from, blank);
+        bytes.is_length(from, stop).then(() {
             found = true;
-            parse_usize(trimmed(bytes, from + NAME.len, stop)).match({
+            given = bytes.slice(from + NAME.len, stop).trim().value_or("");
+            given.parse_usize().match({
                 Ok(n) => { value = n; },
                 None  => { bad = true; found = false; },
             });
         });
-        from = stop + CRLF_LEN;
+        from = stop + CRLF.len;
     });
     bad.match({
         true  => Err(FrameFault.BadLength(at)),
@@ -106,39 +116,24 @@ length_in = (bytes: str, at: usize, blank: usize) Res<usize, FrameFault> {
 }
 
 line_end = (bytes: str, from: usize, blank: usize) usize {
-    Range(from, blank).find((i) { bytes.index(i) == '\r' }).match({
-        Ok(i) => i,
+    bytes.slice(from, blank).find('\r').match({
+        Ok(i) => from + i,
         None  => blank,
     })
 }
 
 is_length = (bytes: str, from: usize, stop: usize) bool {
-    fits = from + NAME.len <= stop;
-    same ::= fits;
-    Range(0, NAME.len).loop((h, i) {
-        same = same && to_lower(bytes.index(from + i)) == NAME.index(i);
-    });
-    same;
+    from + NAME.len <= stop
+        && bytes.slice(from, from + NAME.len).eq_ignore_case(NAME)
 }
-
-trimmed = (bytes: str, from: usize, stop: usize) str {
-    lo ::= from;
-    hi ::= stop;
-    loop(() { lo < hi && blankish(bytes.index(lo)) }, (h) { lo = lo + 1; });
-    loop(() { hi > lo && blankish(bytes.index(hi - 1)) }, (h) { hi = hi - 1; });
-    bytes.slice(lo, hi);
-}
-
-blankish = (b: u8) bool { b == ' ' || b == '\t' }
 
 write_frame* = (body: str, out :: String) Res<(), AllocError> {
     out.add("Content-Length: ").try();
     out.write_usize(body.len).try();
-    out.add("\r\n\r\n").try();
+    out.add(BLANK).try();
     out.add(body)
 }
 
 NAME*: str = "content-length:"
-BLANK*: str = "\r\n\r\n"
-BLANK_LEN*: usize = 4
-CRLF_LEN*: usize = 2
+BLANK: str = "\r\n\r\n"
+CRLF: str = "\r\n"

@@ -52,17 +52,13 @@ Jsons* = {
 
     add_items* = (self :: @Self, ids: Vec<JsonId>) Res<Run, AllocError> {
         run = Run(at: self.items.len, len: ids.len);
-        Range(0, ids.len).loop((h, i) {
-            self.items.add(ids.get(i).value_or(JsonId(index: 0))).try();
-        });
+        ids.loop((h, id) { self.items.add(id).try(); });
         Ok(run);
     }
 
     add_pairs* = (self :: @Self, ps: Vec<Pair>) Res<Run, AllocError> {
         run = Run(at: self.pairs.len, len: ps.len);
-        Range(0, ps.len).loop((h, i) {
-            self.pairs.add(ps.get(i).value_or(Pair(key: "", value: JsonId(index: 0)))).try();
-        });
+        ps.loop((h, p) { self.pairs.add(p).try(); });
         Ok(run);
     }
 
@@ -195,13 +191,12 @@ arr* = (out :: String) Res<Nest, AllocError> {
 write_text* = (s: str, out :: String) Res<(), AllocError> {
     out.add('"').try();
     Range(0, s.len).loop((h, i) {
-        escaped(s.index(i), out).try();
+        s.index(i).escaped(out).try();
     });
     out.add('"')
 }
 
-// Named escapes cover common controls; every other byte below 32 uses
-// `\u00XX`.
+// Controls without a short escape are written `\u00XX`.
 escaped = (b: u8, out :: String) Res<(), AllocError> {
     b.match({
         '"'  => out.add("\\\""),
@@ -209,8 +204,8 @@ escaped = (b: u8, out :: String) Res<(), AllocError> {
         '\n' => out.add("\\n"),
         '\r' => out.add("\\r"),
         '\t' => out.add("\\t"),
-        _    => (b < SPACE).match({
-            true  => hex_escape(b, out),
+        _    => (b < ' ').match({
+            true  => b.hex_escape(out),
             false => out.add(b),
         }),
     })
@@ -221,5 +216,3 @@ hex_escape = (b: u8, out :: String) Res<(), AllocError> {
     out.add(hex_digit(b / HEX_BASE)).try();
     out.add(hex_digit(b % HEX_BASE))
 }
-
-SPACE*: u8 = ' '

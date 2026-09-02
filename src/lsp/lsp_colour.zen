@@ -1,13 +1,13 @@
-// LSP semantic tokens use UTF-16 lengths and positions relative to the
-// preceding token. The order in `write_legend` must match `index_of`.
+// Writes LSP semantic tokens: UTF-16 lengths, positions relative to the
+// preceding token. The legend order in `write_legend` must match `index_of`.
+// A name the checker classified overrides the lexer's colour for an `Ident`.
 
 str, String = std.text
 Vec, Ordered = std.collections
 Alloc, AllocError = std.mem
-Range = std.core
 scan, Source, Token, TokenKind = std.lex
 write_text, written, obj, arr, Nest = std.json
-step_at, units_of = lsp.lsp_pos
+step_at, units_of, newline_in, zero_based = lsp.lsp_pos
 
 Colour* = Keyword
     | Text
@@ -51,15 +51,15 @@ write_legend* = (out :: String) Res<(), AllocError> {
     legend ::= obj(out).try();
     legend.key("tokenTypes", out).try();
     types ::= arr(out).try();
-    listed(Colour.Keyword, types, out).try();
-    listed(Colour.Text, types, out).try();
-    listed(Colour.Number, types, out).try();
-    listed(Colour.Comment, types, out).try();
-    listed(Colour.Operator, types, out).try();
-    listed(Colour.Variable, types, out).try();
-    listed(Colour.Type, types, out).try();
-    listed(Colour.Function, types, out).try();
-    listed(Colour.Parameter, types, out).try();
+    Colour.Keyword.listed(types, out).try();
+    Colour.Text.listed(types, out).try();
+    Colour.Number.listed(types, out).try();
+    Colour.Comment.listed(types, out).try();
+    Colour.Operator.listed(types, out).try();
+    Colour.Variable.listed(types, out).try();
+    Colour.Type.listed(types, out).try();
+    Colour.Function.listed(types, out).try();
+    Colour.Parameter.listed(types, out).try();
     types.close(out).try();
     legend.key("tokenModifiers", out).try();
     modifiers ::= arr(out).try();
@@ -70,7 +70,7 @@ write_legend* = (out :: String) Res<(), AllocError> {
 listed = (colour: Colour, types :: Nest, out :: String)
          Res<(), AllocError> {
     types.next(out).try();
-    write_text(name_of(colour), out)
+    write_text(colour.name_of(), out)
 }
 
 colour_of* = (kind: TokenKind) Res<Colour> {
@@ -147,7 +147,7 @@ Painter = {
         out.add(",").try();
         out.write_usize(length).try();
         out.add(",").try();
-        out.write_usize(index_of(colour)).try();
+        out.write_usize(colour.index_of()).try();
         out.add(",0").try();
         self.line      = line;
         self.character = character;
@@ -158,10 +158,10 @@ Painter = {
              runs :: Nest, out :: String) Res<(), AllocError> {
         stop = token.span.end.offset;
         from      ::= token.span.start.offset;
-        line      ::= zero_based(token.span.start.line);
+        line      ::= token.span.start.line.zero_based();
         character ::= self.character_at(text, from);
         loop(from < stop, (h) {
-            upto = break_in(text, from, stop);
+            upto = text.newline_in(from, stop);
             self.run(text, line, character, from, upto, colour, runs, out)
                 .try();
             from      = upto + 1;
@@ -206,17 +206,18 @@ Painter = {
     }
 }
 
-break_in = (text: str, from: usize, stop: usize) usize {
-    Range(from, stop).find((i) { text.index(i) == '\n' }).match({
-        Ok(i) => i,
-        None  => stop,
-    })
-}
-
 Classed* = {
     line*: usize,
     col*: usize,
     colour*: Colour,
+
+    starts_before = (self: @Self, line: usize, col: usize) bool {
+        self.line < line || (self.line == line && self.col < col)
+    }
+
+    starts_at = (self: @Self, line: usize, col: usize) bool {
+        self.line == line && self.col == col
+    }
 }
 
 Classed.impl(Ordered, {
@@ -226,6 +227,7 @@ Classed.impl(Ordered, {
     }
 })
 
+// `names` is sorted; binary search for the entry starting at `line:col`.
 classed_at = (names: Vec<Classed>, line: usize, col: usize) Res<Classed> {
     lo ::= 0;
     hi ::= names.len;
@@ -233,7 +235,7 @@ classed_at = (names: Vec<Classed>, line: usize, col: usize) Res<Classed> {
         mid = (lo + hi) / 2;
         names.get(mid).match({
             None   => (),
-            Ok(cl) => before_start(cl, line, col).match({
+            Ok(cl) => cl.starts_before(line, col).match({
                 true  => { lo = mid + 1; },
                 false => { hi = mid; },
             }),
@@ -241,23 +243,11 @@ classed_at = (names: Vec<Classed>, line: usize, col: usize) Res<Classed> {
     });
     names.get(lo).match({
         None   => None,
-        Ok(cl) => is_start(cl, line, col).match({
+        Ok(cl) => cl.starts_at(line, col).match({
             true  => Ok(cl),
             false => None,
         }),
     })
-}
-
-before_start = (cl: Classed, line: usize, col: usize) bool {
-    cl.line < line || (cl.line == line && cl.col < col)
-}
-
-is_start = (cl: Classed, line: usize, col: usize) bool {
-    cl.line == line && cl.col == col
-}
-
-sort_classes* = (names :: Vec<Classed>) () {
-    names.sort()
 }
 
 write_tokens* = (
@@ -273,12 +263,12 @@ write_tokens* = (
     answer.key("data", out).try();
     data ::= arr(out).try();
     lexed.tokens.loop((h, token) {
-        colour_of(token.kind).match({
+        token.kind.colour_of().match({
             None    => written(),
             Ok(one) => painter.paint(
                 text,
                 token,
-                settled(token, one, names),
+                token.settled(one, names),
                 data,
                 out
             ),
@@ -290,8 +280,7 @@ write_tokens* = (
 
 settled = (token: Token, lexical: Colour, names: Vec<Classed>) Colour {
     token.kind.match({
-        Ident => classed_at(
-            names,
+        Ident => names.classed_at(
             token.span.start.line,
             token.span.start.col
         ).match({
@@ -300,8 +289,4 @@ settled = (token: Token, lexical: Colour, names: Vec<Classed>) Colour {
         }),
         _     => lexical,
     })
-}
-
-zero_based = (line: usize) usize {
-    (line == 0).match({ true => 0, false => line - 1 })
 }

@@ -5,6 +5,7 @@ str, String, push_utf8 = std.text
 Vec = std.collections
 Alloc = std.mem
 Range = std.core
+HEX_BASE = std.core.byte
 Jsons, Json, JsonId, Pair = std.json.json_write
 
 JsonFault* = Unexpected(usize)   // a byte that cannot begin what is expected here
@@ -23,48 +24,36 @@ MAX_NESTING*: usize = 64
 Reader* = {
     text: str,
     a: Alloc,
-    at :: usize,
-    depth :: usize,
+    at :: usize = 0,
+    depth :: usize = 0,
 
     value* = (self :: @Self, tree :: Jsons) Res<JsonId, JsonFault> {
         self.spaces();
         b = self.peek().try();
-        (b == '{').match({
-            true  => self.object(tree),
-            false => (b == '[').match({
-                true  => self.array(tree),
-                false => (b == '"').match({
-                    true  => self.string(tree),
-                    false => self.atom(tree, b),
-                }),
-            }),
+        b.match({
+            '{' => self.object(tree),
+            '[' => self.array(tree),
+            '"' => self.string(tree),
+            _   => self.atom(tree, b),
         })
     }
 
     atom = (self :: @Self, tree :: Jsons, b: u8) Res<JsonId, JsonFault> {
-        (b == 't').match({
-            true  => self.word(tree, "true", Json.Bool(true)),
-            false => (b == 'f').match({
-                true  => self.word(tree, "false", Json.Bool(false)),
-                false => (b == 'n').match({
-                    true  => self.word(tree, "null", Json.Null),
-                    false => self.number(tree),
-                }),
-            }),
+        b.match({
+            't' => self.word(tree, "true", Json.Bool(true)),
+            'f' => self.word(tree, "false", Json.Bool(false)),
+            'n' => self.word(tree, "null", Json.Null),
+            _   => self.number(tree),
         })
     }
 
     word = (self :: @Self, tree :: Jsons, spelling: str, v: Json)
            Res<JsonId, JsonFault> {
-        from = self.at;
-        matched ::= self.at + spelling.len <= self.text.len;
-        Range(0, spelling.len).loop((h, i) {
-            matched = matched && self.text.index(from + i) == spelling.index(i);
-        });
-        matched.match({
-            false => Err(JsonFault.Unexpected(from)),
+        rest = self.text.slice(self.at, self.text.len);
+        rest.starts_with(spelling).match({
+            false => Err(JsonFault.Unexpected(self.at)),
             true  => {
-                self.at = from + spelling.len;
+                self.at = self.at + spelling.len;
                 tree.add(v).replace_err(JsonFault.NoMemory)
             },
         })
@@ -74,8 +63,7 @@ Reader* = {
     //
     //     -? ( 0 | [1-9][0-9]* ) ( . [0-9]+ )? ( [eE] [+-]? [0-9]+ )?
     //
-    // The original lexeme is stored after validation rather than converted to
-    // a machine number.
+    // The lexeme is stored after validation, not converted.
     number = (self :: @Self, tree :: Jsons) Res<JsonId, JsonFault> {
         tree.add(Json.Num(self.number_text().try()))
             .replace_err(JsonFault.NoMemory)
@@ -95,15 +83,14 @@ Reader* = {
         b = self.peek().try();
         (b == '0').match({
             true  => { self.at = self.at + 1; Ok(()) },
-            false => (b >= '1' && b <= '9').match({
+            false => b.is_digit().match({
                 false => Err(JsonFault.BadNumber(self.at)),
                 true  => { self.digits(); Ok(()) },
             }),
         })
     }
 
-    // A point must be followed by at least one digit — `1.` is not a
-    // JSON number.
+    // `1.` is not a JSON number.
     fraction_part = (self :: @Self) Res<(), JsonFault> {
         self.byte_if('.').match({
             false => Ok(()),
@@ -137,7 +124,7 @@ Reader* = {
 
     digit_here = (self: @Self) bool {
         self.text.get(self.at).match({
-            Ok(b) => b >= '0' && b <= '9',
+            Ok(b) => b.is_digit(),
             None  => false,
         })
     }
@@ -217,7 +204,7 @@ Reader* = {
         plain ::= true;
         done  ::= false;
         loop(!done, (h) {
-            text_byte(self.peek().try(), self.at).try().match({
+            self.peek().try().text_byte(self.at).try().match({
                 TextEnd    => { done = true; },
                 TextEscape => { plain = false; done = true; },
                 TextPlain  => { self.at = self.at + 1; },
@@ -239,7 +226,7 @@ Reader* = {
         done ::= false;
         loop(!done, (h) {
             b       = self.peek().try();
-            kind    = text_byte(b, self.at).try();
+            kind    = b.text_byte(self.at).try();
             self.at = self.at + 1;
             kind.match({
                 TextEnd    => { done = true; },
@@ -252,12 +239,11 @@ Reader* = {
         Ok(out.view());
     }
 
-    // The eight escapes JSON has. `self.at` is on the byte after the
-    // backslash.
+    // `self.at` is on the byte after the backslash.
     escape = (self :: @Self, out :: String) Res<(), JsonFault> {
         b       = self.peek().try();
         self.at = self.at + 1;
-        simple(b).match({
+        b.unescaped().match({
             Ok(x) => out.add(x).replace_err(JsonFault.NoMemory),
             None  => (b == 'u').match({
                 true  => self.unicode(out),
@@ -267,13 +253,13 @@ Reader* = {
     }
 
     // Decode `\uXXXX`, combining a high and low surrogate when present. A
-    // lone surrogate is invalid rather than silently replaced with U+FFFD.
+    // lone surrogate is BadEscape.
     unicode = (self :: @Self, out :: String) Res<(), JsonFault> {
         hi = self.four_hex().try();
         (hi >= SURROGATE_HI_MIN && hi <= SURROGATE_HI_MAX).match({
             false => (hi >= SURROGATE_LO_MIN && hi <= SURROGATE_LO_MAX).match({
                 true  => Err(JsonFault.BadEscape(self.at - 4)),
-                false => push_utf8(hi, out).replace_err(JsonFault.NoMemory),
+                false => out.push_utf8(hi).replace_err(JsonFault.NoMemory),
             }),
             true  => self.low_half(hi, out),
         })
@@ -286,11 +272,11 @@ Reader* = {
                 lo = self.four_hex().try();
                 (lo >= SURROGATE_LO_MIN && lo <= SURROGATE_LO_MAX).match({
                     false => Err(JsonFault.BadEscape(self.at - 4)),
-                    true  => push_utf8(
+                    true  => out.push_utf8(
                         ASTRAL_BASE
                             + (hi - SURROGATE_HI_MIN) * SURROGATE_SPAN
-                            + (lo - SURROGATE_LO_MIN),
-                        out).replace_err(JsonFault.NoMemory),
+                            + (lo - SURROGATE_LO_MIN)
+                    ).replace_err(JsonFault.NoMemory),
                 })
             },
         })
@@ -298,12 +284,12 @@ Reader* = {
 
     four_hex = (self :: @Self) Res<u32, JsonFault> {
         from = self.at;
-        v  ::= ZERO_U32;
-        ok ::= self.at + 4 <= self.text.len;
+        v: u32 ::= 0;
+        ok     ::= self.at + 4 <= self.text.len;
         Range(0, 4).loop((h, i) {
             ok.then(() {
                 self.text.index(from + i).hex_value().match({
-                    Ok(d) => { v = v * HEX_BASE_U32 + d.to_u32(); },
+                    Ok(d) => { v = v * HEX_BASE.to_u32() + d.to_u32(); },
                     None  => { ok = false; },
                 });
             });
@@ -314,9 +300,7 @@ Reader* = {
         })
     }
 
-    // The byte under the cursor. `Truncated` and not `Unexpected`: a
-    // client can act on the difference between running out and a wrong
-    // byte.
+    // The byte under the cursor; past the end is Truncated, not Unexpected.
     peek = (self: @Self) Res<u8, JsonFault> {
         self.text.get(self.at).match({
             Ok(b) => Ok(b),
@@ -334,8 +318,6 @@ Reader* = {
         found;
     }
 
-    // JSON's whitespace is exactly these four — not `is_space`, this
-    // language's set, which includes a vertical tab JSON does not allow.
     spaces = (self :: @Self) () {
         loop(self.space_here(), (h) { self.at = self.at + 1; });
         ();
@@ -343,9 +325,23 @@ Reader* = {
 
     space_here = (self: @Self) bool {
         self.text.get(self.at).match({
-            Ok(b) => b.is_in([' ', '\t', '\n', '\r']),
+            Ok(b) => b.is_json_space(),
             None  => false,
         })
+    }
+
+    // Bytes after a complete value are Trailing.
+    at_end = (self: @Self) Res<(), JsonFault> {
+        (self.at == self.text.len).match({
+            true  => Ok(()),
+            false => Err(JsonFault.Trailing(self.at)),
+        })
+    }
+
+    owned = (self: @Self, value: str) Res<String, JsonFault> {
+        out ::= self.a.String().try(JsonFault.NoMemory);
+        out.add(value).try(JsonFault.NoMemory);
+        Ok(out)
     }
 
     down = (self :: @Self) Res<(), JsonFault> {
@@ -361,42 +357,34 @@ Reader* = {
 
 // Read one complete value. Non-whitespace after it is a trailing-data fault.
 read* = (a: Alloc, tree :: Jsons, text: str) Res<JsonId, JsonFault> {
-    r ::= Reader(text: text, a: a, at: 0, depth: 0);
+    r ::= Reader(text: text, a: a);
     root = r.value(tree).try();
     r.spaces();
-    (r.at == text.len).match({
-        true  => Ok(root),
-        false => Err(JsonFault.Trailing(r.at)),
-    })
+    r.at_end().try();
+    Ok(root)
 }
 
+// One quoted string token, decoded into an owned String.
 decode_text_token* = (a: Alloc, raw: str) Res<String, JsonFault> {
-    r ::= Reader(text: raw, a: a, at: 0, depth: 0);
+    r ::= Reader(text: raw, a: a);
     value = r.text_at().try();
-    (r.at == raw.len).match({
-        false => Err(JsonFault.Trailing(r.at)),
-        true  => {
-            owned ::= a.String().try(JsonFault.NoMemory);
-            owned.add(value).try(JsonFault.NoMemory);
-            Ok(owned)
-        },
-    })
+    r.at_end().try();
+    r.owned(value)
 }
 
+// One number token, validated and copied.
 number_token* = (a: Alloc, raw: str) Res<String, JsonFault> {
-    r ::= Reader(text: raw, a: a, at: 0, depth: 0);
+    r ::= Reader(text: raw, a: a);
     value = r.number_text().try();
-    (r.at == raw.len).match({
-        false => Err(JsonFault.Trailing(r.at)),
-        true  => {
-            owned ::= a.String().try(JsonFault.NoMemory);
-            owned.add(value).try(JsonFault.NoMemory);
-            Ok(owned)
-        },
-    })
+    r.at_end().try();
+    r.owned(value)
 }
 
-simple* = (b: u8) Res<u8> {
+// JSON whitespace; `is_space` also admits `\v` and `\f`.
+is_json_space* = (b: u8) bool { b.is_in([' ', '\t', '\n', '\r']) }
+
+// The byte a one-letter escape stands for.
+unescaped* = (b: u8) Res<u8> {
     b.match({
         '"'  => Ok('"'),
         '\\' => Ok('\\'),
@@ -412,6 +400,7 @@ simple* = (b: u8) Res<u8> {
 
 TextByte* = TextEnd | TextEscape | TextPlain
 
+// A byte inside a quoted string; raw controls are Unexpected.
 text_byte* = (b: u8, at: usize) Res<TextByte, JsonFault> {
     b.match({
         '"'  => Ok(TextByte.TextEnd),
@@ -423,6 +412,7 @@ text_byte* = (b: u8, at: usize) Res<TextByte, JsonFault> {
     })
 }
 
+// The same fault with its offset rebased into an enclosing document.
 shifted* = (self: JsonFault, base: usize) JsonFault {
     self.match({
         Unexpected(at) => JsonFault.Unexpected(base + at),
@@ -435,14 +425,12 @@ shifted* = (self: JsonFault, base: usize) JsonFault {
     })
 }
 
-BACKSPACE*: u8 = 8
-FORM_FEED*: u8 = 12
-ZERO_U32*: u32 = 0
-HEX_BASE_U32*: u32 = 16
+BACKSPACE: u8 = 8
+FORM_FEED: u8 = 12
 
-SURROGATE_HI_MIN*: u32 = 55296     // D800
-SURROGATE_HI_MAX*: u32 = 56319     // DBFF
-SURROGATE_LO_MIN*: u32 = 56320     // DC00
-SURROGATE_LO_MAX*: u32 = 57343     // DFFF
-SURROGATE_SPAN*: u32 = 1024
-ASTRAL_BASE*: u32 = 65536
+SURROGATE_HI_MIN: u32 = 0xD800
+SURROGATE_HI_MAX: u32 = 0xDBFF
+SURROGATE_LO_MIN: u32 = 0xDC00
+SURROGATE_LO_MAX: u32 = 0xDFFF
+SURROGATE_SPAN: u32 = 0x400
+ASTRAL_BASE: u32 = 0x10000

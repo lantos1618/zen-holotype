@@ -1,4 +1,4 @@
-// Members, parameters, and type parameters.
+// Members, parameters, type parameters, and the function value they compose.
 //
 // Member nodes are shared by struct, impl, and record bodies. Struct bodies
 // write member types; impl and record bodies supply values. The binder and
@@ -6,13 +6,14 @@
 
 AllocError = std.mem
 Span, Ident = std.ast.ast_span
-TypeId, ExprId = std.ast.ast_id
-Member, MemberKind, Field, Const, Param, TParam = std.ast.ast_node
+TypeId, ExprId, BlockId = std.ast.ast_id
+Member, MemberKind, Field, Const, Param, TParam, Function, Form = std.ast.ast_node
 TokenKind = std.parse.parse_token
 Parser = std.parse.parser
 expr = std.parse.parse_expr
 type, written_type = std.parse.parse_type
-fn_value = std.parse.parse_decl
+ret_ahead = std.parse.parse_lookahead
+body_block = std.parse.parse_stmt
 
 // Commas between body members are optional.
 struct_members* = (p :: Parser, out :: Vec<Member>) Res<Span, AllocError> {
@@ -53,10 +54,7 @@ one_member = (p :: Parser, typed: bool) Res<Member, AllocError> {
     name     = p.ident("expected a member name").try();
     exported = p.eat(TokenKind.Star).try();
     tparams ::= p.alloc.Vec<TParam>();
-    p.at_kind(TokenKind.Lt).match({
-        true  => p.type_params(tparams),
-        false => p.nothing(),
-    }).try();
+    p.at_kind(TokenKind.Lt).then(() { p.type_params(tparams).try(); });
     kind = p.member_kind(name, exported, tparams, typed).try();
     end  = p.prev_end;
     span = p.span_from(m.start);
@@ -125,10 +123,10 @@ typed_member = (
         true  => p.member_value(),
         false => Ok(None),
     }).try();
-    p.split_r4(name, exported, mutable, t, value);
+    p.field_or_const(name, exported, mutable, t, value);
 }
 
-split_r4 = (
+field_or_const = (
     p        :: Parser,
     name     : Ident,
     exported : bool,
@@ -193,8 +191,7 @@ after_assign = (
     });
 }
 
-// `x = value` belongs to records; every struct member writes a type.
-// Consume the value to keep recovery at the next member.
+// Consume the value so recovery resumes at the next member.
 no_type_member = (
     p          :: Parser,
     name       : Ident,
@@ -233,6 +230,73 @@ fn_member = (
 member_value = (p :: Parser) Res<Res<ExprId>, AllocError> {
     v = p.expr().try();
     Ok(Ok(v));
+}
+
+// `Name<T> = (..)` and `Name = <T>(..)` both place `T` on the function.
+fn_value* = (
+    p          :: Parser,
+    name       : Ident,
+    exported   : bool,
+    tparams    : Vec<TParam>,
+    rebindable : bool
+) Res<Function, AllocError> {
+    own ::= p.alloc.Vec<TParam>();
+    p.at_kind(TokenKind.Lt).then(() { p.type_params(own).try(); });
+    ps ::= p.alloc.Vec<Param>();
+    span = p.params_list(ps).try();
+    p.typed_params(ps).try();
+    ret  = p.ret_ahead().match({
+        true  => p.written_type(),
+        false => Ok(None),
+    }).try();
+    body = p.at_kind(TokenKind.BraceOpen).match({
+        true  => p.fn_body(),
+        false => Ok(None),
+    }).try();
+    Ok(Function(
+        name: name,
+        exported: exported,
+        form: form_of(rebindable, body),
+        tparams: (tparams.len == 0).match({
+            true  => own,
+            false => tparams,
+        }),
+        params: ps,
+        params_span: span,
+        ret: ret,
+        body: body,
+    ));
+}
+
+typed_params = (p :: Parser, ps: Vec<Param>) Res<(), AllocError> {
+    ps.loop((h, param) {
+        param.type.match({
+            Ok(_) => (),
+            None  => p.error_at(
+                "a declaration's parameter needs a type: only a closure infers its parameter types",
+                param.span
+            ).try(),
+        });
+    });
+    Ok(());
+}
+
+fn_body = (p :: Parser) Res<Res<BlockId>, AllocError> {
+    b = p.body_block().try();
+    Ok(Ok(b));
+}
+
+form_of = (rebindable: bool, body: Res<BlockId>) Form {
+    rebindable.match({
+        true  => body.match({
+            Ok(_) => Form.Default,
+            None  => Form.Hook,
+        }),
+        false => body.match({
+            Ok(_) => Form.Sealed,
+            None  => Form.Required,
+        }),
+    });
 }
 
 // The parameter-list span includes both parentheses.
@@ -308,10 +372,7 @@ one_tparam = (p :: Parser) Res<TParam, AllocError> {
     m    = p.open();
     name = p.ident("expected a type parameter name").try();
     bounds ::= p.alloc.Vec<TypeId>();
-    p.eat(TokenKind.Colon).try().match({
-        true  => p.type_bounds(bounds),
-        false => p.nothing(),
-    }).try();
+    p.eat(TokenKind.Colon).try().then(() { p.type_bounds(bounds).try(); });
     end  = p.prev_end;
     span = p.span_from(m.start);
     p.eat(TokenKind.Comma).try();

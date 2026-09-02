@@ -5,8 +5,8 @@ str, String = std.text
 Vec, Map = std.collections
 Alloc, AllocError = std.mem
 Range = std.core
-ExprId, TypeId, Span, Pos, Access, Function, QualifiedName = std.ast
-in_span, nowhere = std.ast
+ExprId, TypeId, Span, Pos, Access, QualifiedName = std.ast
+nowhere = std.ast
 Checker = sema.sema_check
 TyId = sema.sema_ty
 Def, decl_at, dotted = sema.sema_def
@@ -14,7 +14,7 @@ def_type = sema.sema_type
 DeclId = sema.sema_id
 Found, members_of, first_found = sema.sema_member
 to_pos, to_wire, WirePos, WireRange = lsp.lsp_pos
-path_of, uri_at = lsp.lsp_uri
+path_of, uri_at, doc_text, disk_text = lsp.lsp_uri
 told_at, module_index_of = std.ast.ast_named
 check_standalone = lsp.lsp_query
 check_build = zen.zen_build
@@ -25,6 +25,17 @@ Target* = {
     uri*: str,
     start*: WirePos,
     end*: WirePos,
+
+    // `null` when nothing was found, else a Location.
+    write* = (self: @Self, a: Alloc, out :: String) Res<(), AllocError> {
+        self.found.match({
+            false => out.add("null"),
+            true  => {
+                encoded ::= Location(uri: self.uri, range: WireRange(start: self.start, end: self.end)).to_json(a).try();
+                out.add(encoded.view())
+            },
+        })
+    }
 }
 
 Location = {
@@ -45,8 +56,8 @@ definition_at* = (
     character : usize
 ) Res<Target, AllocError> {
     c ::= check_standalone(a, uri, text).try();
-    pos = to_pos(text, line, character);
-    d   = sought(c, a, uri, pos).try();
+    seek = Seek(c: c, a: a, file: uri);
+    d    = seek.sought(to_pos(text, line, character)).try();
     Ok(Target(
         found: d.found,
         uri: uri,
@@ -67,8 +78,8 @@ definition_in* = (
 )
                  Res<Target, AllocError> {
     checked = check_build(env, a, workspace, path, text).try();
-    pos     = to_pos(text, line, character);
-    d       = sought(checked.c, a, checked.rel, pos).try();
+    seek    = Seek(c: checked.c, a: a, file: checked.rel);
+    d       = seek.sought(to_pos(text, line, character)).try();
     placed(env, a, checked.root, None, uri, text, checked.rel, d)
 }
 
@@ -85,8 +96,8 @@ definition_with* = (
     character : usize
 )
                    Res<Target, AllocError> {
-    pos = to_pos(text, line, character);
-    d   = sought(c, a, rel, pos).try();
+    seek = Seek(c: c, a: a, file: rel);
+    d    = seek.sought(to_pos(text, line, character)).try();
     placed(env, a, root, Ok(docs), uri, text, rel, d)
 }
 
@@ -106,6 +117,8 @@ placed = (
     })
 }
 
+// A span in another file is positioned against that file's open buffer
+// when the client holds one, else against the disk.
 wired_target = (
     env  : Env,
     a    : Alloc,
@@ -125,11 +138,8 @@ wired_target = (
     bytes = same.match({
         true  => text,
         false => docs.match({
-            None       => disk_text(env, a, path_of(at)),
-            Ok(opened) => opened.get(at).match({
-                None        => disk_text(env, a, path_of(at)),
-                Ok(current) => current,
-            }),
+            None        => disk_text(env, a, path_of(at)),
+            Ok(overlay) => doc_text(env, a, overlay, at),
         }),
     });
     Ok(Target(
@@ -140,242 +150,203 @@ wired_target = (
     ));
 }
 
-disk_text = (env: Env, a: Alloc, path: str) str {
-    env.fs.read(a, path).match({
-        Ok(text) => text.view(),
-        Err(_)   => "",
-    })
-}
-
-sought = (c : Checker, a: Alloc, file: str, p: Pos) Res<Defn, AllocError> {
-    module = import_module_defn(c, a, file, p).try();
-    module.found.match({
-        true  => Ok(module),
-        false => told_at(c.tree, file, p).match({
-            Nothing     => no_defn(),
-            Sig(f)      => defn_of(f.name.span),
-            OfType(ta)  => type_defn(c, a, ta.id, file),
-            OfValue(v)  => value_defn(c, a, v.id, file, p),
-            Imported(n) => global_defn(c, a, n.text, file),
-        }),
-    })
-}
-
-import_module_defn = (c : Checker, a: Alloc, file: str, p: Pos)
-                     Res<Defn, AllocError> {
-    found ::= no_defn().try();
-    module_index(c, file).match({
-        None     => (),
-        Ok(from) => c.tree.module_at(from).match({
-            None    => (),
-            Ok(src) => src.decls.loop((h, d) {
-                d.kind.match({
-                    Import(im) => in_span(im.module.span, file, p).then(() {
-                        found = module_defn(c, a, im.module).try();
-                    }),
-                    _          => (),
-                });
-            }),
-        }),
-    });
-    Ok(found)
-}
-
-module_defn = (c : Checker, a: Alloc, q: QualifiedName)
-              Res<Defn, AllocError> {
-    name = dotted(a, q).try();
-    c.world.index_of(name).match({
-        None     => no_defn(),
-        Ok(into) => c.tree.module_at(into).match({
-            None    => no_defn(),
-            Ok(dst) => defn_of(Span(
-                file: dst.span.file,
-                start: dst.span.start,
-                end: dst.span.start
-            )),
-        }),
-    })
-}
-
-type_defn = (c : Checker, a: Alloc, id: TypeId, file: str)
-            Res<Defn, AllocError> {
-    c.type_memo.get(id).match({
-        None     => no_defn(),
-        Ok(memo) => c.types.at(memo).match({
-            Named(n) => decl_defn(c, n.decl),
-            Res(_)   => global_defn(c, a, "Res", file),
-            _        => no_defn(),
-        }),
-    })
-}
-
-value_defn = (c : Checker, a: Alloc, id: ExprId, file: str, p: Pos)
-             Res<Defn, AllocError> {
-    e = c.tree.expr_at(id);
-    in_span(e.span, file, p).match({
-        false => no_defn(),
-        true  => e.kind.match({
-            Name(n)    => name_defn(c, a, id, n.text, file),
-            Access(ac) => access_defn(c, a, id, ac, file, p),
-            _          => no_defn(),
-        }),
-    })
-}
-
-name_defn = (c : Checker, a: Alloc, id: ExprId, text: str, file: str)
-            Res<Defn, AllocError> {
-    called_decl(c, id).match({
-        Ok(did) => decl_defn(c, did),
-        None    => global_defn(c, a, text, file),
-    })
-}
-
-global_defn = (c : Checker, a: Alloc, text: str, file: str)
-              Res<Defn, AllocError> {
-    module_index(c, file).match({
-        None   => no_defn(),
-        Ok(mi) => {
-            found ::= a.Vec<Def>();
-            c.world.defs_of(mi, text, found).try();
-            found.get(0).match({
-                None  => no_defn(),
-                Ok(d) => decl_defn(c, d.id),
-            })
-        },
-    })
-}
-
-access_defn = (
+// One definition lookup: the checker, the allocator for scratch, and the
+// file the position is in.
+Seek = {
     c    : Checker,
     a    : Alloc,
-    id   : ExprId,
-    ac   : Access,
     file : str,
-    p    : Pos
-) Res<Defn, AllocError> {
-    in_span(ac.name.span, file, p).match({
-        false => no_defn(),
-        true  => called_decl(c, id).match({
-            Ok(did) => decl_defn(c, did),
-            None    => member_defn(c, a, ac, file),
-        }),
-    })
-}
 
-member_defn = (c : Checker, a: Alloc, ac: Access, file: str)
-              Res<Defn, AllocError> {
-    c.expr_memo.get(ac.base).match({
-        Ok(ty) => found_defn(c, a, ty, ac.name.text),
-        None   => static_defn(c, a, ac, file),
-    })
-}
+    sought = (self: @Self, p: Pos) Res<Defn, AllocError> {
+        module = self.import_module_defn(p).try();
+        module.found.match({
+            true  => Ok(module),
+            false => told_at(self.c.tree, self.file, p).match({
+                Nothing     => no_defn(),
+                Sig(f)      => defn_of(f.name.span),
+                OfType(ta)  => self.type_defn(ta.id),
+                OfValue(v)  => self.value_defn(v.id, p),
+                Imported(n) => self.global_defn(n.text),
+            }),
+        })
+    }
 
-static_defn = (c : Checker, a: Alloc, ac: Access, file: str)
-              Res<Defn, AllocError> {
-    c.tree.expr_at(ac.base).kind.match({
-        Name(n) => typed_base_defn(c, a, n.text, ac.name.text, file),
-        _       => no_defn(),
-    })
-}
+    module_index = (self: @Self) Res<usize> {
+        module_index_of(self.c.tree, self.file)
+    }
 
-typed_base_defn = (c : Checker, a: Alloc, base: str, name: str, file: str)
+    import_module_defn = (self: @Self, p: Pos) Res<Defn, AllocError> {
+        found ::= no_defn().try();
+        self.module_index().match({
+            None     => (),
+            Ok(from) => self.c.tree.module_at(from).match({
+                None    => (),
+                Ok(src) => src.decls.loop((h, d) {
+                    d.kind.match({
+                        Import(im) => im.module.span.covers(self.file, p).then(() {
+                            found = self.module_defn(im.module).try();
+                        }),
+                        _          => (),
+                    });
+                }),
+            }),
+        });
+        Ok(found)
+    }
+
+    module_defn = (self: @Self, q: QualifiedName) Res<Defn, AllocError> {
+        name = dotted(self.a, q).try();
+        self.c.world.index_of(name).match({
+            None     => no_defn(),
+            Ok(into) => self.c.tree.module_at(into).match({
+                None    => no_defn(),
+                Ok(dst) => defn_of(Span(
+                    file: dst.span.file,
+                    start: dst.span.start,
+                    end: dst.span.start
+                )),
+            }),
+        })
+    }
+
+    type_defn = (self: @Self, id: TypeId) Res<Defn, AllocError> {
+        self.c.type_memo.get(id).match({
+            None     => no_defn(),
+            Ok(memo) => self.c.types.at(memo).match({
+                Named(n) => self.decl_defn(n.decl),
+                Res(_)   => self.global_defn("Res"),
+                _        => no_defn(),
+            }),
+        })
+    }
+
+    value_defn = (self: @Self, id: ExprId, p: Pos) Res<Defn, AllocError> {
+        e = self.c.tree.expr_at(id);
+        e.span.covers(self.file, p).match({
+            false => no_defn(),
+            true  => e.kind.match({
+                Name(n)    => self.called_decl(id).match({
+                    Ok(did) => self.decl_defn(did),
+                    None    => self.global_defn(n.text),
+                }),
+                Access(ac) => self.access_defn(id, ac, p),
+                _          => no_defn(),
+            }),
+        })
+    }
+
+    global_defn = (self: @Self, text: str) Res<Defn, AllocError> {
+        self.first_def(text).try().match({
+            None  => no_defn(),
+            Ok(d) => self.decl_defn(d.id),
+        })
+    }
+
+    // The first definition `name` resolves to from this file.
+    first_def = (self: @Self, name: str) Res<Res<Def>, AllocError> {
+        self.module_index().match({
+            None   => Ok(None),
+            Ok(mi) => {
+                found ::= self.a.Vec<Def>();
+                self.c.world.defs_of(mi, name, found).try();
+                Ok(found.get(0))
+            },
+        })
+    }
+
+    access_defn = (self: @Self, id: ExprId, ac: Access, p: Pos)
                   Res<Defn, AllocError> {
-    module_index(c, file).match({
-        None   => no_defn(),
-        Ok(mi) => {
-            defs ::= a.Vec<Def>();
-            c.world.defs_of(mi, base, defs).try();
-            defs.get(0).match({
-                None  => no_defn(),
-                Ok(d) => variant_or_member(c, a, d, name),
-            })
-        },
-    })
-}
+        ac.name.span.covers(self.file, p).match({
+            false => no_defn(),
+            true  => self.called_decl(id).match({
+                Ok(did) => self.decl_defn(did),
+                None    => self.member_defn(ac),
+            }),
+        })
+    }
 
-variant_or_member = (c : Checker, a: Alloc, d: Def, name: str)
-                    Res<Defn, AllocError> {
-    variant_defn(c, d, name).match({
-        Ok(span) => defn_of(span),
-        None     => {
-            ty = c.def_type(d).try();
-            found_defn(c, a, ty, name)
-        },
-    })
-}
+    member_defn = (self: @Self, ac: Access) Res<Defn, AllocError> {
+        self.c.expr_memo.get(ac.base).match({
+            Ok(ty) => self.found_defn(ty, ac.name.text),
+            None   => self.c.tree.expr_at(ac.base).kind.match({
+                Name(n) => self.typed_base_defn(n.text, ac.name.text),
+                _       => no_defn(),
+            }),
+        })
+    }
 
-variant_defn = (c : Checker, d: Def, name: str) Res<Span> {
-    decl_at(c.tree, d.id).match({
-        None   => None,
-        Ok(dd) => dd.kind.match({
-            Enum(e) => Range(0, e.variants.len).find((i) {
-                e.variants.get(i).match({
-                    None  => false,
-                    Ok(v) => v.name.text.eq(name),
-                })
-            }).match({
-                None  => None,
-                Ok(i) => e.variants.get(i).match({
+    typed_base_defn = (self: @Self, base: str, name: str)
+                      Res<Defn, AllocError> {
+        self.first_def(base).try().match({
+            None  => no_defn(),
+            Ok(d) => self.variant_defn(d, name).match({
+                Ok(span) => defn_of(span),
+                None     => self.found_defn(self.c.def_type(d).try(), name),
+            }),
+        })
+    }
+
+    variant_defn = (self: @Self, d: Def, name: str) Res<Span> {
+        decl_at(self.c.tree, d.id).match({
+            None   => None,
+            Ok(dd) => dd.kind.match({
+                Enum(e) => e.variants.find((v) { v.name.text.eq(name) }).match({
                     None  => None,
                     Ok(v) => Ok(v.name.span),
                 }),
+                _       => None,
+            }),
+        })
+    }
+
+    found_defn = (self: @Self, ty: TyId, name: str) Res<Defn, AllocError> {
+        found ::= self.a.Vec<Found>();
+        self.c.members_of(ty, name, found).try();
+        first_found(found).match({
+            None  => no_defn(),
+            Ok(f) => defn_of(f.span),
+        })
+    }
+
+    // The declaration a call through expression `id` resolved to.
+    called_decl = (self: @Self, id: ExprId) Res<DeclId> {
+        found: Res<DeclId> = loop((done) {
+            eid ::= ExprId(index: 0);
+            Range(0, self.c.tree.expr_ids()).loop((next, i) {
+                self.callee_of(eid, id).match({
+                    None    => (),
+                    Ok(did) => done.break(did),
+                });
+                eid = ExprId(index: eid.index + 1);
+            });
+            done.break();
+        });
+        found
+    }
+
+    callee_of = (self: @Self, eid: ExprId, id: ExprId) Res<DeclId> {
+        self.c.tree.expr_at(eid).kind.match({
+            Call(k) => (k.callee.index == id.index).match({
+                true  => self.c.call_memo.get(eid),
+                false => None,
             }),
             _       => None,
-        }),
-    })
-}
+        })
+    }
 
-found_defn = (c : Checker, a: Alloc, ty: TyId, name: str)
-             Res<Defn, AllocError> {
-    found ::= a.Vec<Found>();
-    c.members_of(ty, name, found).try();
-    first_found(found).match({
-        None  => no_defn(),
-        Ok(f) => defn_of(f.span),
-    })
-}
-
-called_decl = (c : Checker, id: ExprId) Res<DeclId> {
-    found: Res<DeclId> = loop((done) {
-        eid ::= ExprId(index: 0);
-        Range(0, c.tree.expr_ids()).loop((next, i) {
-            callee_of(c, eid, id).match({
-                None    => (),
-                Ok(did) => done.break(did),
-            });
-            eid = ExprId(index: eid.index + 1);
-        });
-        done.break();
-    });
-    found
-}
-
-callee_of = (c : Checker, eid: ExprId, id: ExprId) Res<DeclId> {
-    c.tree.expr_at(eid).kind.match({
-        Call(k) => (k.callee.index == id.index).match({
-            true  => c.call_memo.get(eid),
-            false => None,
-        }),
-        _       => None,
-    })
-}
-
-decl_defn = (c : Checker, id: DeclId) Res<Defn, AllocError> {
-    decl_at(c.tree, id).match({
-        None  => no_defn(),
-        Ok(d) => d.kind.match({
-            Struct(s)   => defn_of(s.name.span),
-            Enum(e)     => defn_of(e.name.span),
-            Alias(x)    => defn_of(x.name.span),
-            Function(f) => defn_of(f.name.span),
-            Const(k)    => defn_of(k.name.span),
-            _           => no_defn(),
-        }),
-    })
-}
-
-module_index = (c : Checker, file: str) Res<usize> {
-    module_index_of(c.tree, file)
+    decl_defn = (self: @Self, id: DeclId) Res<Defn, AllocError> {
+        decl_at(self.c.tree, id).match({
+            None  => no_defn(),
+            Ok(d) => d.kind.match({
+                Struct(s)   => defn_of(s.name.span),
+                Enum(e)     => defn_of(e.name.span),
+                Alias(x)    => defn_of(x.name.span),
+                Function(f) => defn_of(f.name.span),
+                Const(k)    => defn_of(k.name.span),
+                _           => no_defn(),
+            }),
+        })
+    }
 }
 
 defn_of = (span: Span) Res<Defn, AllocError> {
@@ -386,16 +357,11 @@ no_defn = () Res<Defn, AllocError> {
     Ok(Defn(found: false, span: nowhere()))
 }
 
-no_target* = () Target {
+no_target = () Target {
     Target(
         found: false,
         uri: "",
         start: WirePos(line: 0, character: 0),
         end: WirePos(line: 0, character: 0)
     )
-}
-
-write_location* = (a: Alloc, t: Target, out :: String) Res<(), AllocError> {
-    encoded ::= Location(uri: t.uri, range: WireRange(start: t.start, end: t.end)).to_json(a).try();
-    out.add(encoded.view())
 }

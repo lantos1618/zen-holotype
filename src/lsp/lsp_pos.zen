@@ -21,6 +21,12 @@ WireRange* = {
 LineRun* = {
     start*: usize,
     end*: usize,
+
+    // Byte offset of 1-based `col`, clamped to the run.
+    target_of = (self: @Self, col: usize) usize {
+        at = (col == 0).match({ true => self.start, false => self.start + col - 1 });
+        (at > self.end).match({ true => self.end, false => at })
+    }
 }
 
 run_of* = (text: str, line: usize) LineRun {
@@ -38,15 +44,20 @@ run_of* = (text: str, line: usize) LineRun {
     });
     (seen < line).match({
         true  => LineRun(start: text.len, end: text.len),
-        false => LineRun(start: at, end: end_of(text, at)),
+        false => LineRun(start: at, end: text.newline_in(at, text.len)),
     })
 }
 
-end_of = (text: str, from: usize) usize {
-    Range(from, text.len).find((i) { text.index(i) == '\n' }).match({
-        Ok(i) => i,
-        None  => text.len,
+// Offset of the first newline in `[from, stop)`, or `stop`.
+newline_in* = (text: str, from: usize, stop: usize) usize {
+    text.slice(from, stop).find('\n').match({
+        Ok(i) => from + i,
+        None  => stop,
     })
+}
+
+zero_based* = (line: usize) usize {
+    (line == 0).match({ true => 0, false => line - 1 })
 }
 
 Step* = {
@@ -80,9 +91,9 @@ to_pos* = (text: str, line: usize, character: usize) Pos {
 }
 
 to_wire* = (text: str, p: Pos) WirePos {
-    line   = (p.line == 0).match({ true => 0, false => p.line - 1 });
+    line   = zero_based(p.line);
     run    = run_of(text, line);
-    target = target_of(run, p.col);
+    target = run.target_of(p.col);
     at    ::= run.start;
     units ::= 0;
     done  ::= false;
@@ -96,10 +107,6 @@ to_wire* = (text: str, p: Pos) WirePos {
     WirePos(line: line, character: units);
 }
 
-wire_at* = (text: str, line: usize, col: usize) WirePos {
-    to_wire(text, Pos(line: line, col: col))
-}
-
 wire_range* = (text: str, span: Span) WireRange {
     WireRange(start: to_wire(text, span.start), end: to_wire(text, span.end))
 }
@@ -107,7 +114,7 @@ wire_range* = (text: str, span: Span) WireRange {
 whole_range* = (text: str) WireRange {
     WireRange(
         start: WirePos(line: 0, character: 0),
-        end: WirePos(line: past_last_line(text), character: 0)
+        end: WirePos(line: text.count("\n") + 1, character: 0)
     )
 }
 
@@ -120,29 +127,6 @@ units_of* = (text: str, from: usize, upto: usize) usize {
         units = units + step.units;
     });
     units;
-}
-
-target_of = (run: LineRun, col: usize) usize {
-    at = (col == 0).match({ true => run.start, false => run.start + col - 1 });
-    (at > run.end).match({ true => run.end, false => at })
-}
-
-write_wire* = (a: Alloc, p: WirePos, out :: String) Res<(), AllocError> {
-    encoded ::= p.to_json(a).try();
-    out.add(encoded.view())
-}
-
-write_whole* = (a: Alloc, text: str, out :: String) Res<(), AllocError> {
-    encoded ::= whole_range(text).to_json(a).try();
-    out.add(encoded.view())
-}
-
-past_last_line = (text: str) usize {
-    n ::= 1;
-    Range(0, text.len).loop((h, i) {
-        (text.index(i) == '\n').then(() { n = n + 1; });
-    });
-    n;
 }
 
 write_range* = (a: Alloc, text: str, span: Span, out :: String)

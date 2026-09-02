@@ -1,18 +1,14 @@
-// The program as one C file per module, and what to say when a write
-// will not go.
-//
-// `emit_units` writes one translation unit per module so compilation can run
-// in parallel and compiler caches can reuse unchanged modules. The single-file
-// `--emit-c` path remains in `zen_build.zen` for seed generation.
-//
-// Units select from the already lowered, sorted function list; partitioning
-// does not lower bodies again.
+// One `.c` file per used module beside a shared `zen.h`, so compilation can
+// run in parallel and compiler caches can reuse unchanged units. Units select
+// from the already lowered, sorted function list; partitioning lowers nothing
+// again. The single-file `--emit-c` path stays in `zen_build.zen` for seed
+// generation.
 
 Alloc, AllocError = std.mem
 str, String = std.text
 Vec = std.collections
 Range = std.core
-FsError, fs_message = std.env
+fs_message = std.env
 
 Ast = std.ast.ast_arena
 
@@ -20,9 +16,8 @@ Checker = sema.sema
 Emit, CBackend, order, render_symbol_map = gen.gen
 lower_program, emit_header, emit_unit, unit_used = gen.gen
 
-// Emit one `.c` file per used module beside a shared `zen.h`. The destination
-// directory must exist. Diagnostics are collected before any file is written;
-// the result is the number of write or lowering faults.
+// Emit into `dir`, which must exist. Diagnostics are collected before any file
+// is written; the result is the number of write or lowering faults.
 emit_units* = (
     a          : Alloc,
     env        : Env,
@@ -45,102 +40,95 @@ emit_units* = (
     (n > 0).then(() { println("{}", report.view()); });
     (n == 0).match({
         false => Ok(n),
-        true  => write_units(a, env, tree, be, dir, hdr, symbol_map),
+        true  => {
+            units ::= Units(
+                a: a,
+                env: env,
+                tree: tree,
+                be: be,
+                dir: dir,
+                seq: order(a, be.fn_names).try()
+            );
+            units.write_all(hdr, symbol_map)
+        },
     })
 }
 
-write_units = (
-    a          : Alloc,
-    env        : Env,
-    tree       : Ast,
-    be         :: CBackend,
-    dir        : str,
-    hdr        : Emit,
-    symbol_map : str
-) Res<usize, AllocError> {
-    bad ::= write_at(a, env, dir, "zen.h", hdr.view()).try();
-    seq = order(a, be.fn_names).try();
-    Range(0, tree.module_count()).loop((h, u) {
-        bad = bad + write_unit(env, tree, be, dir, seq, u).try();
-    });
-    (bad == 0).match({
-        false => Ok(bad),
-        true  => Ok(bad + write_symbol_map(a, env, be, symbol_map).try()),
-    });
+// The lowered program and the directory its units go to.
+Units = {
+    a: Alloc,
+    env: Env,
+    tree: Ast,
+    be :: CBackend,
+    dir: str,
+    seq: Vec<usize>,    // function order shared by every unit
+
+    write_all = (self :: @Self, hdr: Emit, symbol_map: str)
+                Res<usize, AllocError> {
+        bad ::= self.write_at(self.a, "zen.h", hdr.view()).try();
+        Range(0, self.tree.module_count()).loop((h, u) {
+            bad = bad + self.write_unit(u).try();
+        });
+        (bad == 0).match({
+            false => Ok(bad),
+            true  => write_symbol_map(self.a, self.env, self.be, symbol_map),
+        });
+    }
+
+    // Always write the root module. Skip other modules with no emitted body.
+    write_unit = (self :: @Self, u: usize) Res<usize, AllocError> {
+        ((u == 0) || unit_used(self.be, u)).match({
+            false => Ok(0),
+            true  => self.write_used(u),
+        })
+    }
+
+    write_used = (self :: @Self, u: usize) Res<usize, AllocError> {
+        scratch ::= self.env.mem.alloc();
+        out     ::= scratch.Emit().try();
+        emit_unit(self.be, 0, u, self.seq, out).try();
+        name ::= scratch.String().try();
+        self.unit_file(u, name).try();
+        self.write_at(scratch, name.view(), out.view())
+    }
+
+    // The stable dotted module name is the translation-unit filename.
+    unit_file = (self: @Self, u: usize, out :: String) Res<(), AllocError> {
+        self.tree.module_at(u).match({
+            None  => out.add("zg_unit"),
+            Ok(m) => out.add(m.name),
+        }).try();
+        out.add(".c")
+    }
+
+    // A failed write is counted, not trapped, so every unit is attempted.
+    write_at = (self: @Self, a: Alloc, name: str, bytes: str)
+               Res<usize, AllocError> {
+        path ::= a.String("{}/{}", self.dir, name).try();
+        self.env.fs.write(path.view(), bytes).match({
+            Ok(_)  => Ok(0),
+            Err(e) => {
+                println("--emit-c-dir {}: {}", path.view(), fs_message(e));
+                Ok(1)
+            },
+        })
+    }
 }
 
 write_symbol_map* = (a: Alloc, env: Env, be :: CBackend, path: str)
                     Res<usize, AllocError> {
     path.is_empty().match({
         true  => Ok(0),
-        false => write_symbol_map_at(a, env, be, path),
+        false => {
+            out ::= a.String().try();
+            render_symbol_map(be, out).try();
+            env.fs.write(path, out.view()).match({
+                Ok(_)  => Ok(0),
+                Err(e) => {
+                    println("--symbol-map {}: {}", path, fs_message(e));
+                    Ok(1)
+                },
+            })
+        },
     })
-}
-
-write_symbol_map_at = (a: Alloc, env: Env, be :: CBackend, path: str)
-                      Res<usize, AllocError> {
-    out ::= a.String().try();
-    render_symbol_map(be, out).try();
-    env.fs.write(path, out.view()).match({
-        Ok(_)  => Ok(0),
-        Err(e) => { println("--symbol-map {}: {}", path, fs_message(e)); Ok(1) },
-    })
-}
-
-// Always write the root module. Skip other modules with no emitted body.
-write_unit = (
-    env  : Env,
-    tree : Ast,
-    be   :: CBackend,
-    dir  : str,
-    seq  : Vec<usize>,
-    u    : usize
-) Res<usize, AllocError> {
-    ((u == 0) || unit_used(be, u)).match({
-        false => Ok(0),
-        true  => write_unit_at(env, tree, be, dir, seq, u),
-    })
-}
-
-write_unit_at = (
-    env  : Env,
-    tree : Ast,
-    be   :: CBackend,
-    dir  : str,
-    seq  : Vec<usize>,
-    u    : usize
-) Res<usize, AllocError> {
-    scratch ::= env.mem.alloc();
-    out     ::= scratch.Emit().try();
-    emit_unit(be, 0, u, seq, out).try();
-    name ::= scratch.String().try();
-    unit_file(tree, u, name).try();
-    write_at(scratch, env, dir, name.view(), out.view())
-}
-
-// Use the stable dotted module name as the translation-unit filename.
-unit_file* = (tree: Ast, u: usize, out :: String) Res<(), AllocError> {
-    tree.module_at(u).match({
-        None  => out.add("zg_unit"),
-        Ok(m) => out.add(m.name),
-    }).try();
-    out.add(".c")
-}
-
-// A write that fails is a fault, not a trap: a full disk or unwritable
-// path is a thing the caller acts on, and one refused unit must not
-// hide the next one.
-write_at = (a: Alloc, env: Env, dir: str, name: str, bytes: str)
-           Res<usize, AllocError> {
-    path ::= a.String().try();
-    path.fmt("{dir}/{name}").try();
-    env.fs.write(path.view(), bytes).match({
-        Ok(_)  => Ok(0),
-        Err(e) => unit_write_failed(path.view(), e),
-    })
-}
-
-unit_write_failed = (path: str, e: FsError) Res<usize, AllocError> {
-    println("--emit-c-dir {}: {}", path, fs_message(e));
-    Ok(1);
 }

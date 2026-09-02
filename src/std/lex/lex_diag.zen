@@ -1,7 +1,5 @@
-// What the lexer says when the bytes are wrong.
-// Diagnostics are collected values; lex returns Err only for AllocError. The
-// scanner resynchronizes after each fault so one source can report several.
-// Spans identify the bytes to fix; messages remain fixed and allocation-free.
+// Lexical faults and their fixed messages. A Diag is a collected value, not
+// an Err; its span marks the bytes to fix. Messages allocate nothing.
 
 Span = std.lex.lex_token
 str = std.text
@@ -20,15 +18,20 @@ LexFault* =
     | HexNeedsDigit            // 0x
     | FloatNeedsDigit          // 12.
     | SuffixOnNumber           // 1abc, 0xffg
-    | IntegerOutOfRange        // wider than u64, so no type can hold it
+    | IntegerOutOfRange        // exceeds u64
     | UnknownAtName            // @foo
     | MisplacedBom             // a byte-order mark past offset 0
-    | StrayByte                // begins no token at all
+    | StrayByte                // a byte that begins no token
 
 Diag* = {
     file*: str,
     fault*: LexFault,
     span*: Span,
+
+    // The terminal form, `file:line:col: message`.
+    say* = (self: @Self) () {
+        println("{}:{}: {}", self.file, self.span.start, message(self.fault));
+    }
 }
 
 message* = (fault: LexFault) str {

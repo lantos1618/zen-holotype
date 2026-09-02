@@ -4,21 +4,20 @@
 
 Alloc, AllocError = std.mem
 Ast = std.ast.ast_arena
-Span, Pos, Trivia, TriviaKind, TriviaRun, no_trivia, Ident = std.ast.ast_span
-Token, TokenKind, Source, Lexed, is_trivia, text_of, empty_eof = std.parse.parse_token
+Span, Pos, Trivia, TriviaKind, TriviaRun, no_trivia, Ident, QualifiedName = std.ast.ast_span
+Token, TokenKind, Source, Lexed, is_trivia, empty_eof = std.parse.parse_token
 Diag, diag, diag_at, truncated = std.parse.parse_diag
 
-// Shared nesting limit for recursive parser, sema, and codegen walks. Binary
-// spines are iterative and therefore do not consume this budget.
+// Nesting limit for the recursive grammar. Binary spines are iterative and do
+// not consume it.
 MAX_DEPTH*: usize = 304
 
-// A node's starting position and leading trivia.
 Mark* = {
     start*: Pos,
     leading*: TriviaRun,
 
-    // Preserve the position while transferring trivia ownership to an inner
-    // node. This prevents nested nodes from printing the same trivia twice.
+    // The same start with no leading trivia: the outer node keeps the run, so
+    // an inner node built from this mark cannot print it twice.
     bare* = (self: @Self) Mark {
         Mark(start: self.start, leading: no_trivia())
     }
@@ -27,13 +26,11 @@ Mark* = {
 Parser* = {
     tokens: Vec<Token>,
 
-    // Source bytes used to recover text from token spans.
     source*: Source,
 
     // Index of the current non-trivia token.
     at* :: usize = 0,
 
-    // AST owned by this parser.
     tree* :: Ast,
 
     diags* :: Vec<Diag>,
@@ -47,8 +44,8 @@ Parser* = {
     // Trivia gathered before `at` and not yet claimed by a node.
     pending :: TriviaRun,
 
-    // Recursive-depth guard. `anchor` identifies the outermost construct in
-    // the current body so an overflow diagnostic points to a useful location.
+    // Depth guard. `anchor` is the outermost construct of the current body,
+    // where an overflow diagnostic points.
     depth :: usize = 0,
     run_base :: usize = 0,
     anchor :: Span,
@@ -67,12 +64,19 @@ Parser* = {
         });
     }
 
-    // Whether the current identifier has the requested text.
     at_text* = (self: @Self, want: str) bool {
         self.at_kind(TokenKind.Ident) && self.text(self.peek()) == want
     }
 
-    // Return the scan's final Eof token, or a synthetic one for empty input.
+    // `impl` is contextual: the declaration is the shape `Circle.impl(`.
+    impl_ahead* = (self: @Self) bool {
+        self.at_kind(TokenKind.Ident)
+            && self.peek_n(1).kind == TokenKind.Dot
+            && self.text(self.peek_n(2)) == "impl"
+            && self.peek_n(3).kind == TokenKind.ParenOpen
+    }
+
+    // The scan ends every token stream with Eof.
     eof_token = (self: @Self) Token {
         (self.tokens.len == 0).match({
             true  => empty_eof(),
@@ -97,9 +101,8 @@ Parser* = {
     }
 
     // Raw token bytes including quotes, escapes, and comment markers.
-    text* = (self: @Self, t: Token) str { text_of(self.source, t) }
+    text* = (self: @Self, t: Token) str { self.source.text_of(t) }
 
-    // One non-trivia token ahead.
     peek_next* = (self: @Self) Token { self.peek_n(1) }
 
     // The nth non-trivia token from the cursor; zero is current.
@@ -168,12 +171,22 @@ Parser* = {
         Ok(Ident(text: "", span: self.empty_span()));
     }
 
+    // `a.b.c` at any depth; sema resolves the segments.
+    qualified_name* = (self :: @Self) Res<QualifiedName, AllocError> {
+        start = self.here();
+        segments ::= self.alloc.Vec<Ident>();
+        segments.add(self.ident("expected a name").try()).try();
+        loop(self.at_kind(TokenKind.Dot), (h) {
+            self.bump().try();
+            segments.add(self.ident("expected a name after `.`").try()).try();
+        });
+        Ok(QualifiedName(segments: segments, span: self.span_from(start)));
+    }
+
     skip* = (self :: @Self) Res<(), AllocError> {
         self.bump().try();
         Ok(());
     }
-
-    nothing* = (self: @Self) Res<(), AllocError> { Ok(()) }
 
     empty_span* = (self: @Self) Span {
         here = self.here();
@@ -184,11 +197,8 @@ Parser* = {
         Span(file: self.source.file, start: self.prev_end, end: self.prev_end)
     }
 
-    // Consume the current token and drain the trivia behind it.
-    // Draining EAGERLY is what makes trailing trivia expressible: a
-    // node that has just finished needs to know whether a comment
-    // follows it on the same line, and it cannot ask about tokens it
-    // has not reached.
+    // Consume the current token, then drain the trivia after it into
+    // `pending` so a finished node can claim a same-line trailing comment.
     bump* = (self :: @Self) Res<Token, AllocError> {
         token         = self.peek();
         self.prev_end = self.span_of(token).end;
@@ -206,9 +216,9 @@ Parser* = {
         Range(self.at, self.tokens.len).loop((h, k) {
             t = self.token_at(k);
             t.kind.is_trivia().match({
-                true  => self.keep_trivia(t),
-                false => { stop = k; h.break(); self.nothing() },
-            }).try();
+                true  => self.keep_trivia(t).try(),
+                false => { stop = k; h.break(); },
+            });
             self.gap_line = t.span.end.line;
         });
         self.blank_before(self.token_at(stop)).try();
@@ -236,10 +246,10 @@ Parser* = {
     // Derive blank-line trivia from the gap between token spans. One Blank
     // represents a run of one or more blank lines.
     blank_before = (self :: @Self, t: Token) Res<(), AllocError> {
-        (t.span.start.line > self.gap_line + 1).match({
-            true  => self.keep_blank(t),
-            false => self.nothing(),
+        (t.span.start.line > self.gap_line + 1).then(() {
+            self.keep_blank(t).try();
         });
+        Ok(());
     }
 
     keep_blank = (self :: @Self, t: Token) Res<(), AllocError> {
@@ -300,15 +310,15 @@ Parser* = {
     }
 
     unclosed = (self :: @Self, message: str, open: Span) Res<bool, AllocError> {
-        self.hushed().match({
-            true  => self.nothing(),
-            false => { self.said = true; self.diags.add(diag_at(
+        (!self.hushed()).then(() {
+            self.said = true;
+            self.diags.add(diag_at(
                 message,
                 open,
                 "the parser gave up here",
                 self.here_span(),
-            )) },
-        }).try();
+            )).try();
+        });
         Ok(false);
     }
 
@@ -317,13 +327,10 @@ Parser* = {
     }
 
     error_at* = (self :: @Self, message: str, span: Span) Res<(), AllocError> {
-        self.hushed().match({
-            true  => self.nothing(),
-            false => self.say(message, span),
-        });
+        (!self.hushed()).then(() { self.say(message, span).try(); });
+        Ok(());
     }
 
-    // Replace the message when input ended before the construct completed.
     say = (self :: @Self, message: str, span: Span) Res<(), AllocError> {
         self.said = true;
         self.diags.add(diag(
@@ -336,8 +343,6 @@ Parser* = {
     // the first syntax error in a statement. `resume` ends that containment.
     hushed = (self: @Self) bool { self.too_deep || self.said }
 
-    // A statement or a declaration boundary: whatever the parser reads
-    // next stands on its own, so the next mistake is a new one.
     resume* = (self :: @Self) () { self.said = false; }
 
     // Claim trivia immediately before consuming the node's first token. The
@@ -383,24 +388,19 @@ Parser* = {
 
     // Depth counts AST links, including links produced by iterative postfix
     // parsing. Excess depth becomes a diagnostic rather than a stack overflow.
-
     enter* = (self :: @Self) Res<(), AllocError> {
-        (self.depth == self.run_base).match({
-            true  => { self.anchor = self.here_span(); self.nothing() },
-            false => self.nothing(),
-        }).try();
+        (self.depth == self.run_base).then(
+            () { self.anchor = self.here_span(); }
+        );
         self.depth = self.depth + 1;
-        (self.depth > MAX_DEPTH && !self.too_deep).match({
-            true  => {
-                self.too_deep = true;
-                self.diags.add(diag(
-                    "nesting too deep: this construct nests deeper than the parser reads",
-                    self.anchor,
-                )).try();
-                Ok(());
-            },
-            false => self.nothing(),
+        (self.depth > MAX_DEPTH && !self.too_deep).then(() {
+            self.too_deep = true;
+            self.diags.add(diag(
+                "nesting too deep: this construct nests deeper than the parser reads",
+                self.anchor,
+            )).try();
         });
+        Ok(());
     }
 
     run_from* = (self :: @Self) usize {
@@ -441,7 +441,7 @@ Parser* = (a: Alloc, lexed: Lexed, tree: Ast) Parser {
     );
 }
 
-trivia_kind* = (self: TokenKind) TriviaKind {
+trivia_kind = (self: TokenKind) TriviaKind {
     self.match({
         BlockComment => TriviaKind.BlockComment,
         _            => TriviaKind.LineComment,

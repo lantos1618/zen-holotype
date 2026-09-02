@@ -1,7 +1,8 @@
 // Converts document URIs to filesystem paths and compiler paths back to local
-// file URIs.
+// file URIs, and reads a document's text from the overlay or the disk.
 
 str, String = std.text
+Map = std.collections
 Alloc, AllocError = std.mem
 
 FILE_SCHEME*: str = "file://"
@@ -28,4 +29,20 @@ remote_path = (uri: str) str {
 uri_at* = (a: Alloc, root: str, rel: str) Res<str, AllocError> {
     out ::= a.String("{}{}/{}", FILE_SCHEME, root, rel).try();
     Ok(out.view());
+}
+
+// The open buffer for `uri` when the client holds one, else the file on
+// disk; an unreadable file reads as empty.
+doc_text* = (env: Env, a: Alloc, docs: Map<str, str>, uri: str) str {
+    docs.get(uri).match({
+        Ok(text) => text,
+        None     => disk_text(env, a, path_of(uri)),
+    })
+}
+
+disk_text* = (env: Env, a: Alloc, path: str) str {
+    env.fs.read(a, path).match({
+        Ok(text) => text.view(),
+        Err(_)   => "",
+    })
 }

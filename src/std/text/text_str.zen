@@ -3,8 +3,7 @@
 
 Ptr = std.mem.mem
 Eq, Hash, Hasher = std.core.core
-Range, loop, to_lower = std.core.core
-is_ident_start, is_ident_cont = std.core.core
+Range, loop = std.core.core
 
 str* = {
     data: Ptr<u8>,
@@ -54,14 +53,7 @@ str* = {
 
     // Returns the first matching byte index, or None.
     find* = (self: @Self, needle: u8) Res<usize> {
-        hit: Res<usize> = None;
-        Range(0, self.len).loop((h, i) {
-            (self.data.read(i) == needle).then(() {
-                hit = Ok(i);
-                h.break(0);
-            });
-        });
-        hit;
+        Range(0, self.len).find((i) { self.data.read(i) == needle })
     }
 
     // An empty needle matches at zero.
@@ -90,6 +82,44 @@ str* = {
         hit;
     }
 
+    contains* = (self: @Self, needle: u8) bool {
+        self.find(needle).match({ Ok(_) => true, None => false })
+    }
+
+    contains* = (self: @Self, needle: str) bool {
+        self.find(needle).match({ Ok(_) => true, None => false })
+    }
+
+    // Number of non-overlapping occurrences; an empty needle has zero.
+    count* = (self: @Self, needle: str) usize {
+        n ::= 0;
+        (needle.len > 0).then(() {
+            at ::= 0;
+            loop(at <= self.len, (h) {
+                self.slice(at, self.len).find(needle).match({
+                    Ok(i) => { n = n + 1; at = at + i + needle.len; },
+                    None  => h.break(),
+                });
+            });
+        });
+        n
+    }
+
+    matches_at = (self: @Self, from: usize, other: str) bool {
+        Range(0, other.len)
+            .find((i) { self.data.read(from + i) != other.data.read(i) })
+            .match({ Ok(_) => false, None => true })
+    }
+
+    // An empty string is both a prefix and suffix of every string.
+    starts_with* = (self: @Self, head: str) bool {
+        self.len >= head.len && self.matches_at(0, head)
+    }
+
+    ends_with* = (self: @Self, tail: str) bool {
+        self.len >= tail.len && self.matches_at(self.len - tail.len, tail)
+    }
+
     // A missing delimiter returns the whole string; a trailing delimiter
     // returns an empty suffix.
     after_last* = (self: @Self, delimiter: u8) str {
@@ -98,117 +128,73 @@ str* = {
             None  => self.slice(0, self.len),
         })
     }
+
+    // Returns None when no non-whitespace byte remains. Whitespace is the
+    // ASCII set recognized by byte.is_space.
+    trim* = (self: @Self) Res<str> {
+        self.trim_start().match({
+            Ok(head) => head.trim_end(),
+            None     => None,
+        });
+    }
+
+    trim_start* = (self: @Self) Res<str> {
+        Range(0, self.len).find((i) { !self.data.read(i).is_space() }).match({
+            Ok(i) => Ok(self.slice(i, self.len)),
+            None  => None,
+        })
+    }
+
+    trim_end* = (self: @Self) Res<str> {
+        hit: Res<str> = None;
+        keep ::= self.len;
+        loop(keep > 0, (h) {
+            keep = keep - 1;
+            (!self.data.read(keep).is_space()).then(() {
+                hit = Ok(self.slice(0, keep + 1));
+                h.break(0);
+            });
+        });
+        hit;
+    }
+
+    // ASCII-only case-insensitive equality.
+    eq_ignore_case* = (self: @Self, other: str) bool {
+        self.len == other.len && self.same_folded(other)
+    }
+
+    same_folded = (self: @Self, other: str) bool {
+        Range(0, other.len)
+            .find((i) {
+                self.data.read(i).to_lower() != other.data.read(i).to_lower()
+            })
+            .match({ Ok(_) => false, None => true })
+    }
+
+    split* = (self: @Self, sep: u8) Split { Split(bytes: self, sep: sep) }
+
+    // Lexicographic byte order; the shorter string wins a prefix tie. This is
+    // not language-aware collation.
+    before* = (self: @Self, other: str) bool {
+        shorter = (self.len < other.len).match({
+            true  => self.len,
+            false => other.len,
+        });
+        ordered ::= self.len < other.len;
+        Range(0, shorter).loop((h, i) {
+            left  = self.data.read(i);
+            right = other.data.read(i);
+            (left != right).then(() { ordered = left < right; h.break(); });
+        });
+        ordered;
+    }
 }
 
 // Borrows `len` bytes from `data`; the owner must keep them alive and stable.
 str_at* = (data: Ptr<u8>, len: usize) str { str(data: data, len: len) }
 
-contains* = (self: str, needle: u8) bool {
-    self.find(needle).match({
-        Ok(_) => true,
-        None  => false,
-    });
-}
-
-contains* = (self: str, needle: str) bool {
-    self.find(needle).match({ Ok(_) => true, None => false })
-}
-
-// Number of non-overlapping occurrences. An empty needle names no concrete
-// byte run, so it has zero occurrences rather than one at every boundary.
-count* = (self: str, needle: str) usize {
-    n ::= 0;
-    (needle.len > 0).then(() {
-        at ::= 0;
-        loop(at <= self.len, (h) {
-            self.slice(at, self.len).find(needle).match({
-                Ok(i) => { n = n + 1; at = at + i + needle.len; },
-                None  => h.break(),
-            });
-        });
-    });
-    n
-}
-
-matches_at = (self: str, from: usize, other: str) bool {
-    hit ::= true;
-    Range(0, other.len).loop((h, i) {
-        (self.data.read(from + i) != other.data.read(i)).then(() {
-            hit = false;
-            h.break();
-        });
-    });
-    hit;
-}
-
-// An empty string is both a prefix and suffix of every string.
-starts_with* = (self: str, head: str) bool {
-    (self.len >= head.len).match({
-        false => false,
-        true  => self.matches_at(0, head),
-    });
-}
-
-ends_with* = (self: str, tail: str) bool {
-    (self.len >= tail.len).match({
-        false => false,
-        true  => self.matches_at(self.len - tail.len, tail),
-    });
-}
-
-// Returns None when no non-whitespace byte remains. Whitespace is the ASCII
-// set recognized by byte.is_space.
-trim* = (self: str) Res<str> {
-    self.trim_start().match({
-        Ok(head) => head.trim_end(),
-        None     => None,
-    });
-}
-
-trim_start* = (self: str) Res<str> {
-    hit: Res<str> = None;
-    Range(0, self.len).loop((h, i) {
-        (!self.data.read(i).is_space()).then(() {
-            hit = Ok(self.slice(i, self.len));
-            h.break(0);
-        });
-    });
-    hit;
-}
-
-trim_end* = (self: str) Res<str> {
-    hit: Res<str> = None;
-    keep ::= self.len;
-    loop(keep > 0, (h) {
-        keep = keep - 1;
-        (!self.data.read(keep).is_space()).then(() {
-            hit = Ok(self.slice(0, keep + 1));
-            h.break(0);
-        });
-    });
-    hit;
-}
-
-// ASCII-only case-insensitive equality.
-eq_ignore_case* = (self: str, other: str) bool {
-    (self.len == other.len).match({
-        false => false,
-        true  => self.same_folded(other),
-    });
-}
-
-same_folded = (self: str, other: str) bool {
-    hit ::= true;
-    Range(0, other.len).loop((h, i) {
-        (self.data.read(i).to_lower() != other.data.read(i).to_lower())
-            .then(() { hit = false; h.break(); });
-    });
-    hit;
-}
-
 // Iterates borrowed byte slices without allocating. A trailing separator
 // yields a final empty piece; adjacent separators preserve empty pieces.
-
 Split* = {
     bytes*: str,
     sep*: u8,
@@ -237,76 +223,43 @@ Split* = {
     }
 }
 
-piece_at = (s: str, sep: u8, k: usize) Res<str> {
-    from ::= 0;
-    n    ::= 0;
-    answer: Res<str> = None;
-    Range(0, s.len + 1).loop((h, i) {
-        edge ::= false;
-        s.get(i).match({
-            None  => { edge = true; },
-            Ok(b) => { (b == sep).then(() { edge = true; }); },
-        });
-        edge.then(() {
-            (n == k).match({
-                true  => { answer = Ok(s.slice(from, i)); h.break(0); },
-                false => { from = i + 1; n = n + 1; },
-            });
-        });
-    });
-    answer;
-}
-
 Split.impl(Range<str>, {
     start: 0,
     end: self.bytes.len + 1,
 
     at ::= (self: @Self, index: usize) Res<str> {
-        piece_at(self.bytes, self.sep, index)
+        s = self.bytes;
+        from ::= 0;
+        n    ::= 0;
+        answer: Res<str> = None;
+        Range(0, s.len + 1).loop((h, i) {
+            edge = s.get(i).match({
+                None  => true,
+                Ok(b) => b == self.sep,
+            });
+            edge.then(() {
+                (n == index).match({
+                    true  => { answer = Ok(s.slice(from, i)); h.break(0); },
+                    false => { from = i + 1; n = n + 1; },
+                });
+            });
+        });
+        answer;
     }
 })
 
-split* = (self: str, sep: u8) Split { Split(bytes: self, sep: sep) }
-
 // FNV basis and prime, with wrapping addition in place of xor.
-STR_HASH_SEED*: u64 = 14695981039346656037
-STR_HASH_MULT*: u64 = 1099511628211
-
-// Lexicographic byte order; the shorter string wins a prefix tie. This is not
-// language-aware collation.
-before* = (self: str, other: str) bool {
-    shorter = (self.len < other.len).match({
-        true  => self.len,
-        false => other.len,
-    });
-    ordered ::= self.len < other.len;
-    Range(0, shorter).loop((h, i) {
-        left  = self.data.read(i);
-        right = other.data.read(i);
-        (left != right).match({
-            true  => { ordered = left < right; h.break(); },
-            false => (),
-        });
-    });
-    ordered;
-}
+STR_HASH_SEED: u64 = 14695981039346656037
+STR_HASH_MULT: u64 = 1099511628211
 
 str.impl(Eq, {
     eq ::= (self: @Self, other: @Self) bool {
-        (self.len == other.len).match({
-            false => false,
-            true  => Range(0, self.len)
-                .find((i) { self.data.read(i) != other.data.read(i) })
-                .match({
-                    Ok(_) => false,
-                    None  => true,
-                }),
-        });
+        self.len == other.len && self.matches_at(0, other)
     }
 })
 
 str.impl(Hash, {
-    // Hashes bytes, matching bytewise equality; arithmetic wraps intentionally.
+    // Hashes bytes, matching bytewise equality.
     hash ::= (self: @Self, hasher :: Hasher) u64 {
         acc ::= STR_HASH_SEED;
         Range(0, self.len).loop((h, i) {

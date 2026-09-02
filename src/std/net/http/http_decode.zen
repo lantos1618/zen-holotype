@@ -5,8 +5,8 @@ str, String, str_at = std.text
 Res, Range, ok_or = std.core
 Sink = std.core.io
 Vec = std.collections
-HttpError, HttpResponseMeta, HttpResponse = std.net.http.http_types
-Stream, read, read_eof = std.net.http.http_transport
+HttpError, HttpResponseMeta, HttpResponse, http_error = std.net.http.http_types
+Stream, read = std.net.tls
 
 HEADER_END: str = "\r\n\r\n"
 HTTP_HEAD_MAX: usize = 65536
@@ -47,7 +47,7 @@ field_name_byte = (b: u8) bool {
 
 field_name = (name: str) bool {
     (name.len > 0) && Range(0, name.len).find((i) {
-        !field_name_byte(name[i])
+        !name[i].field_name_byte()
     }).match({ Ok(_) => false, None => true })
 }
 
@@ -103,7 +103,7 @@ HeaderDecoder = {
     field = (self :: @Self, line: str) Res<(), HttpError> {
         colon = line.find(':').ok_or(HttpError.DecodeFailed).try();
         name  = line.slice(0, colon);
-        field_name(name).ensure(HttpError.DecodeFailed).try();
+        name.field_name().ensure(HttpError.DecodeFailed).try();
         value = line.slice(colon + 1, line.len)
             .trim().ok_or(HttpError.DecodeFailed).try();
 
@@ -184,7 +184,16 @@ parts_at = (raw: str, end: usize) Res<ResponseParts, HttpError> {
 
 response_parts = (raw: str) Res<ResponseParts, HttpError> {
     end = raw.find(HEADER_END).ok_or(HttpError.DecodeFailed).try();
-    parts_at(raw, end)
+    raw.parts_at(end)
+}
+
+// A close-delimited body treats orderly transport close as its end; every
+// other read keeps Closed as a premature RecvFailed.
+read_eof = (s: Stream, buf :: Vec<u8>, n: usize) Res<usize, HttpError> {
+    s.read(buf, n).match({
+        Ok(got) => Ok(got),
+        Err(e)  => e.match({ Closed => Ok(0), _ => Err(e.http_error()) }),
+    })
 }
 
 write_body = (out :: Sink, bytes: str) Res<(), HttpError> {
@@ -245,7 +254,7 @@ ChunkDecoder = {
         take      = (self.left < available).match({
             true => self.left, false => available
         });
-        write_body(out, bytes.slice(at, at + take)).try();
+        out.write_body(bytes.slice(at, at + take)).try();
         self.left = self.left - take;
         (self.left == 0).then(() { self.phase = ChunkPhase.DataCr; });
         Ok(at + take)
@@ -267,7 +276,7 @@ ChunkDecoder = {
     }
 
     size_byte = (self :: @Self, b: u8) Res<(), HttpError> {
-        hex_usize(b).match({
+        b.hex_usize().match({
             Ok(d) => {
                 (self.size <= (usize.MAX - d) / 16)
                     .ensure(HttpError.DecodeFailed).try();
@@ -338,7 +347,7 @@ ChunkDecoder = {
                             self.trailer_has_colon = true;
                             Ok(())
                         },
-                        false => field_name_byte(b)
+                        false => b.field_name_byte()
                             .ensure(HttpError.DecodeFailed),
                     }),
                 }).try();
@@ -368,9 +377,7 @@ ChunkDecoder = {
     }
 }
 
-// One response body after its headers have been decoded. A sink write
-// completes before the next socket read: a slow sink applies backpressure,
-// and any WriteError stops the receive loop without consuming more bytes.
+// One response body after its headers have been decoded.
 ResponseBody = {
     a:          Alloc,
     framing:    BodyFraming,
@@ -392,7 +399,7 @@ ResponseBody = {
         chunk ::= self.a.Vec<u8>();
         loop((h) {
             dec.done().then(() { h.break(); });
-            got = s.read(chunk, 4096).try();
+            got = s.read(chunk, 4096).try((e) { e.http_error() });
             (got > 0).ensure(HttpError.RecvFailed).try();
             dec.feed(str_at(chunk.ptr(), got), out).try();
         });
@@ -405,7 +412,7 @@ ResponseBody = {
             true  => n,
             false => self.prefetched.len,
         });
-        write_body(out, self.prefetched.slice(0, take)).try();
+        out.write_body(self.prefetched.slice(0, take)).try();
         self.read_exact(s, n - take, out)
     }
 
@@ -416,9 +423,9 @@ ResponseBody = {
         loop((h) {
             (left == 0).then(() { h.break(); });
             ask = (left < 4096).match({ true => left, false => 4096 });
-            got = s.read(chunk, ask).try();
+            got = s.read(chunk, ask).try((e) { e.http_error() });
             (got > 0).ensure(HttpError.RecvFailed).try();
-            write_body(out, str_at(chunk.ptr(), got)).try();
+            out.write_body(str_at(chunk.ptr(), got)).try();
             left = left - got;
         });
         Ok(())
@@ -426,20 +433,19 @@ ResponseBody = {
 
     until_eof = (self: @Self, s: Stream, out :: Sink)
                 Res<(), HttpError> {
-        write_body(out, self.prefetched).try();
+        out.write_body(self.prefetched).try();
         chunk ::= self.a.Vec<u8>();
         loop((h) {
             got = s.read_eof(chunk, 4096).try();
             (got == 0).then(() { h.break(); });
-            write_body(out, str_at(chunk.ptr(), got)).try();
+            out.write_body(str_at(chunk.ptr(), got)).try();
         });
         Ok(())
     }
 }
 
-// Headers are bounded by their terminator; body bytes are never accumulated.
-// Each received body chunk is synchronously handed to `out` before another
-// read, so backpressure and sink failure are visible at this API boundary.
+// The head is bounded by HTTP_HEAD_MAX; body bytes are never accumulated,
+// each chunk is written to `out` before the next read.
 read_response_into* = (s: Stream, a: Alloc, out :: Sink)
                       Res<HttpResponseMeta, HttpError> {
     head ::= a.String().try(HttpError.RecvFailed);
@@ -448,7 +454,7 @@ read_response_into* = (s: Stream, a: Alloc, out :: Sink)
     chunk           ::= a.Vec<u8>();
     loop((h) {
         end.match({ Ok(_) => h.break(), None => () });
-        got = s.read(chunk, 4096).try();
+        got = s.read(chunk, 4096).try((e) { e.http_error() });
         (got > 0).ensure(HttpError.RecvFailed).try();
         head.add(str_at(chunk.ptr(), got)).try(HttpError.RecvFailed);
         head.view().find(HEADER_END).match({
@@ -463,7 +469,7 @@ read_response_into* = (s: Stream, a: Alloc, out :: Sink)
     });
 
     at    = end.ok_or(HttpError.DecodeFailed).try();
-    parts = parts_at(head.view(), at).try();
+    parts = head.view().parts_at(at).try();
     ResponseBody(a: a, framing: parts.head.framing, prefetched: parts.body).into(s, out).try();
     Ok(parts.head.meta)
 }
@@ -472,7 +478,7 @@ read_response_into* = (s: Stream, a: Alloc, out :: Sink)
 // contract, without allocating a second body buffer.
 parse_response_into* = (raw: str, out :: Sink)
                        Res<HttpResponseMeta, HttpError> {
-    parts = response_parts(raw).try();
+    parts = raw.response_parts().try();
     parts.head.framing.match({
         BodyNone      => Ok(()),
         BodyChunked   => {
@@ -482,9 +488,9 @@ parse_response_into* = (raw: str, out :: Sink)
         },
         BodyLength(n) => {
             (parts.body.len >= n).ensure(HttpError.DecodeFailed).try();
-            write_body(out, parts.body.slice(0, n))
+            out.write_body(parts.body.slice(0, n))
         },
-        BodyClose     => write_body(out, parts.body),
+        BodyClose     => out.write_body(parts.body),
     }).try();
     Ok(parts.head.meta)
 }

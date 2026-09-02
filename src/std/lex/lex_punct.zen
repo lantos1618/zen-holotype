@@ -4,60 +4,49 @@
 TokenKind = std.lex.lex_token
 Cursor = std.lex.lex_cursor
 
-// Single-byte punctuation; None means the byte begins no Zen token.
-punct_of* = (b: u8) Res<TokenKind> {
+// Bytes that begin a punctuation token.
+is_punct* = (b: u8) bool {
+    b.is_in([
+        '!', '%', '&', '(', ')', '*', '+', ',', '-', '.', '/',
+        ':', ';', '<', '=', '>', '[', ']', '{', '|', '}',
+    ])
+}
+
+// Consume one punctuation token, preferring its multi-byte form. None means
+// the byte begins no token, and nothing is consumed.
+punct_kind* = (cur :: Cursor, b: u8) Res<TokenKind> {
     b.match({
-        '!' => Ok(TokenKind.Bang),
-        '%' => Ok(TokenKind.Percent),
-        '&' => Ok(TokenKind.Amp),
-        '(' => Ok(TokenKind.ParenOpen),
-        ')' => Ok(TokenKind.ParenClose),
-        '*' => Ok(TokenKind.Star),
-        '+' => Ok(TokenKind.Plus),
-        ',' => Ok(TokenKind.Comma),
-        '-' => Ok(TokenKind.Minus),
-        '.' => Ok(TokenKind.Dot),
-        '/' => Ok(TokenKind.Slash),
-        ':' => Ok(TokenKind.Colon),
-        ';' => Ok(TokenKind.Semicolon),
-        '<' => Ok(TokenKind.Lt),
-        '=' => Ok(TokenKind.Eq),
-        '>' => Ok(TokenKind.Gt),
-        '[' => Ok(TokenKind.BracketOpen),
-        ']' => Ok(TokenKind.BracketClose),
-        '{' => Ok(TokenKind.BraceOpen),
-        '|' => Ok(TokenKind.Bar),
-        '}' => Ok(TokenKind.BraceClose),
+        '!' => Ok(cur.pair('=', TokenKind.BangEq, TokenKind.Bang)),
+        '%' => Ok(cur.solo(TokenKind.Percent)),
+        '&' => Ok(cur.pair('&', TokenKind.AmpAmp, TokenKind.Amp)),
+        '(' => Ok(cur.solo(TokenKind.ParenOpen)),
+        ')' => Ok(cur.solo(TokenKind.ParenClose)),
+        '*' => Ok(cur.pair('%', TokenKind.StarWrap, TokenKind.Star)),
+        '+' => Ok(cur.pair('%', TokenKind.PlusWrap, TokenKind.Plus)),
+        ',' => Ok(cur.solo(TokenKind.Comma)),
+        '-' => Ok(cur.pair('%', TokenKind.MinusWrap, TokenKind.Minus)),
+        '.' => Ok(cur.dot_kind()),
+        '/' => Ok(cur.solo(TokenKind.Slash)),
+        ':' => Ok(cur.colon_kind()),
+        ';' => Ok(cur.solo(TokenKind.Semicolon)),
+        '<' => Ok(cur.pair('=', TokenKind.LtEq, TokenKind.Lt)),
+        '=' => Ok(cur.equals_kind()),
+        '>' => Ok(cur.pair('=', TokenKind.GtEq, TokenKind.Gt)),
+        '[' => Ok(cur.solo(TokenKind.BracketOpen)),
+        ']' => Ok(cur.solo(TokenKind.BracketClose)),
+        '{' => Ok(cur.solo(TokenKind.BraceOpen)),
+        '|' => Ok(cur.pair('|', TokenKind.BarBar, TokenKind.Bar)),
+        '}' => Ok(cur.solo(TokenKind.BraceClose)),
         _   => None,
     });
 }
 
-// Consume a punctuation token, preferring its multi-byte form.
-punct_kind* = (cur :: Cursor, b: u8, single: TokenKind) TokenKind {
-    b.match({
-        '!' => cur.pair('=', TokenKind.BangEq, TokenKind.Bang),
-        '&' => cur.pair('&', TokenKind.AmpAmp, TokenKind.Amp),
-        '|' => cur.pair('|', TokenKind.BarBar, TokenKind.Bar),
-        '<' => cur.pair('=', TokenKind.LtEq, TokenKind.Lt),
-        '>' => cur.pair('=', TokenKind.GtEq, TokenKind.Gt),
-        '+' => cur.pair('%', TokenKind.PlusWrap, TokenKind.Plus),
-        '-' => cur.pair('%', TokenKind.MinusWrap, TokenKind.Minus),
-        '*' => cur.pair('%', TokenKind.StarWrap, TokenKind.Star),
-        '.' => cur.dot_kind(),
-        ':' => cur.colon_kind(),
-        '=' => cur.equals_kind(),
-        _   => cur.solo(single),
-    });
-}
-
-// Consume one byte.
-solo* = (cur :: Cursor, kind: TokenKind) TokenKind {
+solo = (cur :: Cursor, kind: TokenKind) TokenKind {
     cur.bump();
     kind
 }
 
-// Consume one byte, plus `second` when present.
-pair* = (
+pair = (
     cur    :: Cursor,
     second : u8,
     both   : TokenKind,
@@ -71,15 +60,14 @@ pair* = (
 }
 
 // `...` is variadic syntax; `..` remains two dot tokens.
-dot_kind* = (cur :: Cursor) TokenKind {
+dot_kind = (cur :: Cursor) TokenKind {
     (cur.at_byte(1, '.') && cur.at_byte(2, '.')).match({
         true  => { cur.bump(); cur.bump(); cur.bump(); TokenKind.Ellipsis },
         false => cur.solo(TokenKind.Dot),
     });
 }
 
-// Prefer `::=`, then `::`, then `:`.
-colon_kind* = (cur :: Cursor) TokenKind {
+colon_kind = (cur :: Cursor) TokenKind {
     cur.at_byte(1, ':').match({
         false => cur.solo(TokenKind.Colon),
         true  => cur.at_byte(2, '=').match({
@@ -89,8 +77,7 @@ colon_kind* = (cur :: Cursor) TokenKind {
     });
 }
 
-// `==` and `=>` are the two-byte readings; `=` is the binding
-equals_kind* = (cur :: Cursor) TokenKind {
+equals_kind = (cur :: Cursor) TokenKind {
     cur.at_byte(1, '=').match({
         true  => { cur.bump(); cur.bump(); TokenKind.EqEq },
         false => cur.pair('>', TokenKind.Arrow, TokenKind.Eq),
