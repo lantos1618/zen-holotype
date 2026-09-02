@@ -15,7 +15,7 @@ Def, decl_at = sema.sema_def
 Ctx = sema.sema_check
 type_from_ast = sema.sema_denote
 union_reading = sema.sema_union
-sym_type = gen.gen_name
+sym_type, sym_variant, RES_PATH = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 Inst = sema.sema_inst
 sub_with, enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
@@ -41,6 +41,30 @@ ctype* = (be :: CBackend, id: TyId, out :: String) Res<(), AllocError> {
         _        => out.add("int"),
     }).try();
     Ok(());
+}
+
+// The zero value used for a compiler-synthesised argument or field.
+write_zero* = (be :: CBackend, t: TyId, out :: String) Res<(), AllocError> {
+    be.check.types.at(t).match({
+        Prim(_) => out.add("0"),
+        _       => be.write_zero_struct(t, out),
+    })
+}
+
+write_zero_struct = (be :: CBackend, t: TyId, out :: String)
+                    Res<(), AllocError> {
+    cty ::= be.alloc.String().try();
+    be.ctype(t, cty).try();
+    out.fmt("({}){0}", cty.view())
+}
+
+write_none* = (be :: CBackend, t: TyId, out :: String)
+              Res<(), AllocError> {
+    cty ::= be.alloc.String().try();
+    be.ctype(t, cty).try();
+    tag ::= be.alloc.String().try();
+    tag.sym_variant(RES_PATH, "None").try();
+    out.fmt("({}){ .zg_tag = {} }", cty.view(), tag.view())
 }
 
 // A `Ptr<T>` is a `T *` and not a struct. `mem_ptr.zen` says the whole

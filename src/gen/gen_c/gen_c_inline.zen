@@ -25,7 +25,7 @@ has_body = gen.gen_c.gen_c_impl
 handle_depth = gen.gen_c.gen_c_handle
 inst_at, settled_inst, recv_inst, sub, sub_with = gen.gen_c.gen_c_mono
 enter_tparams, leave_tparams, enter_struct_tparams = gen.gen_c.gen_c_mono
-declarator, is_unit = gen.gen_c.gen_c_type
+declarator, is_unit, write_none = gen.gen_c.gen_c_type
 expr = gen.gen_c.gen_c_expr
 Dest, block = gen.gen_c.gen_c_stmt
 plain_ctx, body_ctx, self_body_ctx, ref_declarator = gen.gen_c.gen_c_decl
@@ -270,7 +270,7 @@ InlineExpansion = {
                                     None  => unknown,
                                 });
                                 self.argv.get(i).match({
-                                    None      => (),
+                                    None      => bind_absent(be, p, pty).try(),
                                     Ok(value) => InlineSite(
                                         param: p,
                                         value: value,
@@ -309,6 +309,24 @@ InlineExpansion = {
         });
         Ok(())
     }
+}
+
+bind_absent = (be :: CBackend, p: Param, ty: TyId) Res<(), AllocError> {
+    n = be.declare(p.name.text, ty, p.mutable).try();
+    be.check.bind(p.name.text, ty, p.mutable, true).try();
+    cname ::= be.alloc.String().try();
+    sym_local(cname, p.name.text, n).try();
+    line ::= be.alloc.String().try();
+    p.mutable.match({
+        true  => be.ref_declarator(ty, cname.view(), line),
+        false => be.declarator(ty, cname.view(), line),
+    }).try();
+    zero ::= be.alloc.String().try();
+    be.write_none(ty, zero).try();
+    p.mutable.match({
+        true  => be.fmt("{} = &({});\n", line.view(), zero.view()),
+        false => be.fmt("{} = {};\n", line.view(), zero.view()),
+    })
 }
 
 // Facts born when one settled argument meets its parameter. Lambda and value

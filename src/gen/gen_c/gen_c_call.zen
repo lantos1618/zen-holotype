@@ -27,7 +27,7 @@ sub_with, any_open, inst_at = gen.gen_c.gen_c_mono
 settled_inst, inst_open, enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
 complete_inst = gen.gen_c.gen_c_infer
 ctype, is_unit, has_storage, c_prim, spellable, declared_ret = gen.gen_c.gen_c_type
-c_prim_known = gen.gen_c.gen_c_type
+c_prim_known, write_none = gen.gen_c.gen_c_type
 lower_checked_narrow = gen.gen_c.gen_c_num
 expr, ty_of, want_of = gen.gen_c.gen_c_expr
 value_held, holds = gen.gen_c.gen_c_expr
@@ -44,6 +44,7 @@ is_format_door, lower_format_door = gen.gen_c.gen_c_fmt
 is_json_door, lower_json_door = gen.gen_c.gen_c_json
 recv_arg, arg_value, write_arg_at = gen.gen_c.gen_c_arg
 call_callee = sema.sema_call
+omittable = sema.sema_cand
 
 // Resolve and emit one source call. The site owns source identity, receiver,
 // and context; backend services remain borrowed method parameters.
@@ -412,7 +413,30 @@ CallArgs = {
                 },
             }).try();
         });
+        Range(self.first + self.c.args.len, self.sig.len).loop((h, i) {
+            be.check.omittable(self.sig.ty_at(i)).then(() {
+                written.then(() { out.add(", ").try() });
+                self.write_omitted(be, i, out).try();
+                written = true;
+            });
+        });
         Ok(())
+    }
+
+    write_omitted = (self: @Self, be :: CBackend, i: usize, out :: String)
+                    Res<(), AllocError> {
+        ty = self.sig.ty_at(i);
+        self.f.params.get(i).match({
+            Ok(p) => p.mutable.match({
+                false => be.write_none(ty, out),
+                true  => {
+                    out.add("&(").try();
+                    be.write_none(ty, out).try();
+                    out.add(")")
+                },
+            }),
+            None  => be.write_none(ty, out),
+        })
     }
 
     // Fixed arguments precede one packed C argument. Erased fixed values are
@@ -766,6 +790,12 @@ write_indirect = (
         (i > 0).then(() { out.add(", ").try() });
         hold = be.holds(c, i, 0);
         be.write_indirect_arg(a, i, hold, params, ctx, out).try();
+    });
+    Range(c.args.len, params.len).loop((h, i) {
+        be.check.omittable(params.ty_at(i)).then(() {
+            (i > 0).then(() { out.add(", ").try() });
+            be.write_none(params.ty_at(i), out).try();
+        });
     });
     out.add(")").try();
     Ok(());

@@ -9,6 +9,7 @@ Def, decl_at = sema.sema_def
 Checker, Ctx, UNRESOLVED = sema.sema_check
 tparam_vars, push_tparams = sema.sema_inst
 satisfies_bound = sema.sema_bound
+can_hoist = sema.sema_hoist
 type_from_ast, param_type = sema.sema_denote
 pack_elem, pack_slot = sema.sema_vararg
 
@@ -193,7 +194,7 @@ by_arity = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
 
 fixed_matches = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
                 Res<bool, AllocError> {
-    (cand.params.len == actuals.len).match({
+    c.fixed_arity_fits(cand.params, actuals.len, 0).match({
         false => Ok(false),
         true  => c.each_fits(cand.params, actuals, actuals.len, 0),
     })
@@ -337,7 +338,7 @@ fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError> {
 }
 
 value_fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError> {
-    c.assignable(a.ty, p).match({
+    (c.assignable(a.ty, p) || c.can_hoist(a.ty, p)).match({
         true  => Ok(true),
         false => c.satisfies_bound(a.ty, p),
     })
@@ -347,12 +348,21 @@ value_fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError> {
 // parameter zero.
 recv_sig_fits* = (c :: Checker, ps: Vec<TyId>, actuals: Vec<Actual>)
                  Res<bool, AllocError> {
+    c.sig_fits(ps, actuals, 1)
+}
+
+sig_fits* = (
+    c       :: Checker,
+    ps      : Vec<TyId>,
+    actuals : Vec<Actual>,
+    off     : usize
+) Res<bool, AllocError> {
     c.types.pack_slot(ps).match({
-        None     => (ps.len == actuals.len + 1).match({
+        None     => c.fixed_arity_fits(ps, actuals.len, off).match({
             false => Ok(false),
-            true  => c.each_fits(ps, actuals, actuals.len, 1),
+            true  => c.each_fits(ps, actuals, actuals.len, off),
         }),
-        Ok(slot) => c.pack_sig_fits(ps, actuals, 1, slot),
+        Ok(slot) => c.pack_sig_fits(ps, actuals, off, slot),
     })
 }
 
@@ -360,6 +370,31 @@ closure_fits = (c: Checker, p: TyId, arity: usize) bool {
     c.types.at(p).match({
         Fn(f)  => f.params.len == arity,
         Var(_) => true,
+        _      => false,
+    })
+}
+
+// A trailing `Res<T>` is an optional parameter. Omission never crosses a
+// required parameter, and a failure-bearing `Res<T, E>` remains required.
+fixed_arity_fits* = (
+    c        : Checker,
+    params   : Vec<TyId>,
+    supplied : usize,
+    off      : usize
+) bool {
+    used = supplied + off;
+    (used <= params.len) && c.omittable_tail(params, used)
+}
+
+omittable_tail* = (c: Checker, params: Vec<TyId>, from: usize) bool {
+    Range(from, params.len).find((i) {
+        c.omittable(params.ty_at(i)) == false
+    }).match({ Ok(_) => false, None => true })
+}
+
+omittable* = (c: Checker, ty: TyId) bool {
+    c.types.at(ty).match({
+        Res(r) => r.form.match({ Absence => true, _ => false }),
         _      => false,
     })
 }

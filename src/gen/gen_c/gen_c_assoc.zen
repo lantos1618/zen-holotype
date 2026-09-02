@@ -10,6 +10,7 @@ Vec = std.collections
 String = std.text
 TyId = sema.sema_ty
 Ctx = sema.sema_check
+Actual, sig_fits = sema.sema_cand
 Inst = sema.sema_inst
 Def, decl_at = sema.sema_def
 self_ctx = sema.sema_member
@@ -20,13 +21,13 @@ CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
 any_open, recv_inst, inst_open = gen.gen_c.gen_c_mono
 enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
-signature_of, plain, write_extern = gen.gen_c.gen_c_call
+signature_of, plain, write_extern, write_call_args = gen.gen_c.gen_c_call
 write_arg_at = gen.gen_c.gen_c_arg
 holds = gen.gen_c.gen_c_expr
 construct = gen.gen_c.gen_c_build
-Site, site_of, member_at, method_sig = gen.gen_c.gen_c_member
+Site, site_of, member_at, method_sig, call_actuals = gen.gen_c.gen_c_member
 member_symbol = gen.gen_c.gen_c_member
-by_arity, has_body = gen.gen_c.gen_c_impl
+by_arity, kept_or_arity, has_body = gen.gen_c.gen_c_impl
 
 // Lower a call whose base was resolved as a type or module. `false` leaves
 // non-associated members to the caller without producing a second diagnostic.
@@ -182,18 +183,7 @@ write_module_call = (
     sym_fn(sym, be.check.types, be.check.world, d.qname, sig, inst).try();
     be.need_function(d, inst, sym.view()).try();
     out.fmt("{}(", sym.view()).try();
-    c.args.loop((h, i, arg) {
-        (i > 0).then(() { out.add(", ").try() });
-        be.write_arg_at(
-            arg.value,
-            i,
-            be.holds(c, i, 0),
-            f,
-            sig,
-            ctx,
-            out
-        ).try();
-    });
+    be.write_call_args(c, 0, f, sig, ctx, out).try();
     out.add(")").try();
     Ok(true);
 }
@@ -214,9 +204,42 @@ AssocSite = {
         member_at(be, self.site, self.access.name.text, found).try();
         kept ::= be.alloc.Vec<Member>();
         found.loop((h, member) { self.keep(be, member, kept).try() });
-        by_arity(be, kept, self.call.args.len).match({
+        actuals ::= be.alloc.Vec<Actual>();
+        be.call_actuals(self.call, self.ctx, actuals).try();
+        fitting ::= be.alloc.Vec<Member>();
+        kept.loop((h, member) {
+            self.keep_fitting(be, member, actuals, fitting).try();
+        });
+        be.kept_or_arity(fitting, kept, self.call.args.len).match({
             None       => Ok(false),
             Ok(member) => self.lower_member(be, member, out),
+        })
+    }
+
+    keep_fitting = (
+        self    : @Self,
+        be      :: CBackend,
+        member  : Member,
+        actuals : Vec<Actual>,
+        out     :: Vec<Member>
+    ) Res<(), AllocError> {
+        member.kind.match({
+            Function(f) => {
+                inst = be.recv_inst(self.site.ty).try();
+                sig ::= be.alloc.Vec<TyId>();
+                be.method_sig(
+                    self.site.ty,
+                    self.site.decl,
+                    f,
+                    self.site.decl.module.to_usize(),
+                    inst,
+                    sig
+                ).try();
+                be.check.sig_fits(sig, actuals, 0).try()
+                    .then(() { out.add(member).try() });
+                Ok(())
+            },
+            _           => Ok(()),
         })
     }
 
@@ -304,18 +327,7 @@ AssocSite = {
             inst
         ).try();
         out.fmt("{}(", sym.view()).try();
-        self.call.args.loop((h, i, arg) {
-            (i > 0).then(() { out.add(", ").try() });
-            be.write_arg_at(
-                arg.value,
-                i,
-                be.holds(self.call, i, 0),
-                f,
-                sig,
-                self.ctx,
-                out
-            ).try();
-        });
+        be.write_call_args(self.call, 0, f, sig, self.ctx, out).try();
         out.add(")").try();
         Ok(true)
     }

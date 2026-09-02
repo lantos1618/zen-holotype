@@ -24,14 +24,14 @@ static_access = sema.sema_static
 first_hidden, hidden_member = sema.sema_member
 check_bounds = sema.sema_bound
 check_literal = sema.sema_trap
-check_arms, check_arms_agree = sema.sema_hoist
+check_arms, check_arms_agree, hoist_at = sema.sema_hoist
 bound_declares = sema.sema_supply
 type_of, block_type = sema.sema_type
 push_tparams, module_name = sema.sema_inst
 param_type, type_from_ast = sema.sema_denote
 alias_module, module_not_a_value = sema.sema_module
 Cand, TBound, Actual, cands_of, travelled_cands, matches = sema.sema_cand
-ty_at, is_tvar, recv_sig_fits = sema.sema_cand
+ty_at, is_tvar, recv_sig_fits, omittable_tail = sema.sema_cand
 
 CallCheck = {
     id: ExprId,
@@ -142,7 +142,7 @@ CallCheck = {
         c.resolve_call(self.id, k.id).try();
         c.check_bounds(k, actuals, self.node.span).try();
         off = self.call.recv_off(actuals);
-        c.arg_literals(self.call.args, k.params, off).try();
+        c.arg_literals(self.call.args, k.params, off, self.ctx).try();
         ret = c.instantiate(self.id, self.call, k, actuals, self.ctx).try();
         params ::= c.alloc.Vec<TyId>();
         c.settled_params(self.id, k, params).try();
@@ -302,6 +302,9 @@ CallCheck = {
 
     signature = (self :: @Self, c :: Checker, ty: TyId, off: usize)
                 Res<TyId, AllocError> {
+        params ::= c.alloc.Vec<TyId>();
+        c.fn_params(ty, params).try();
+        c.arg_literals(self.call.args, params, off, self.ctx).try();
         c.sig_lambdas(self.call, ty, off, self.ctx).try();
         c.sig_args_handle_check(self.node, self.call, ty, off, self.ctx).try();
         c.fn_ret(self.node, ty)
@@ -628,24 +631,37 @@ recv_off = (call: Call, actuals: Vec<Actual>) usize {
     actuals.len - call.args.len
 }
 
-arg_literals = (c :: Checker, args: Vec<Arg>, params: Vec<TyId>, off: usize)
-               Res<(), AllocError> {
+arg_literals = (
+    c      :: Checker,
+    args   : Vec<Arg>,
+    params : Vec<TyId>,
+    off    : usize,
+    ctx    : Ctx
+) Res<(), AllocError> {
     args.loop((h, i, a) {
-        c.param_literal(a.value, params, i + off).try();
+        c.param_literal(a.value, params, i + off, ctx).try();
     });
     Ok(());
 }
 
 // Variadic arguments beyond the declared prefix have no expected type.
-param_literal = (c :: Checker, id: ExprId, params: Vec<TyId>, i: usize)
-                Res<(), AllocError> {
+param_literal = (
+    c      :: Checker,
+    id     : ExprId,
+    params : Vec<TyId>,
+    i      : usize,
+    ctx    : Ctx
+) Res<(), AllocError> {
     (i < params.len).match({
         false => c.check_arms_agree(id),
-        true  => c.param_wants(id, params.ty_at(i)),
+        true  => c.param_wants(id, params.ty_at(i), ctx),
     })
 }
 
-param_wants = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
+param_wants = (c :: Checker, id: ExprId, want: TyId, ctx: Ctx)
+              Res<(), AllocError> {
+    got = c.type_of(id, ctx).try();
+    c.hoist_at(id, got, want).try();
     c.check_literal(id, want).try();
     c.settled_param(want).match({
         true  => c.check_arms(id, want),
@@ -804,7 +820,10 @@ check_overloads* = (c :: Checker, mi: usize, name: str)
 
 compare = (c :: Checker, name: str, a: Cand, b: Cand) Res<(), AllocError> {
     (a.params.len == b.params.len).match({
-        false => Ok(()),
+        false => c.optional_overlap(a, b).match({
+            true  => c.ambiguous(name, a, b),
+            false => Ok(()),
+        }),
         true  => c.same_signature(a, b).match({
             true  => c.duplicate(name, a, b),
             false => c.maybe_swallow(name, a, b),
@@ -816,12 +835,54 @@ same_signature = (c: Checker, a: Cand, b: Cand) bool {
     c.same_params(a.params, b.params)
 }
 
+// Different declarations may still accept the same call when the longer
+// signature ends in optional parameters.
+optional_overlap = (c: Checker, a: Cand, b: Cand) bool {
+    (a.params.len < b.params.len).match({
+        true  => c.cand_prefix_overlaps(a, b, a.params.len)
+                    && c.omittable_tail(b.params, a.params.len),
+        false => c.cand_prefix_overlaps(a, b, b.params.len)
+                    && c.omittable_tail(a.params, b.params.len),
+    })
+}
+
+cand_prefix_overlaps = (c: Checker, a: Cand, b: Cand, n: usize) bool {
+    Range(0, n).find((i) {
+        x = a.params.ty_at(i);
+        y = b.params.ty_at(i);
+        (c.eats(x, y, a.owner) || c.eats(y, x, b.owner)) == false
+    }).match({ Ok(_) => false, None => true })
+}
+
+prefix_same = (c: Checker, short: Vec<TyId>, long: Vec<TyId>) bool {
+    Range(0, short.len).find((i) {
+        c.same_param(short.ty_at(i), long.ty_at(i)) == false
+    }).match({ Ok(_) => false, None => true })
+}
+
 // Members do not become `Cand`s, but overload identity is still their
 // parameter list; a return type cannot distinguish a call.
 same_fn_signature* = (c: Checker, a: TyId, b: TyId) bool {
     c.types.at(a).match({
         Fn(x) => c.types.at(b).match({
             Fn(y) => c.same_params(x.params, y.params),
+            _     => false,
+        }),
+        _     => false,
+    })
+}
+
+fn_signatures_overlap* = (c: Checker, a: TyId, b: TyId) bool {
+    c.types.at(a).match({
+        Fn(x) => c.types.at(b).match({
+            Fn(y) => (x.params.len != y.params.len) && (
+                (x.params.len < y.params.len).match({
+                    true  => c.prefix_same(x.params, y.params)
+                                && c.omittable_tail(y.params, x.params.len),
+                    false => c.prefix_same(y.params, x.params)
+                                && c.omittable_tail(x.params, y.params.len),
+                })
+            ),
             _     => false,
         }),
         _     => false,

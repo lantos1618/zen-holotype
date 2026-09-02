@@ -269,6 +269,8 @@ A `Sink` dissolves it. A console is a sink, a `String` is a sink, and `println` 
 
 **A function type may not be written where a value is expected.** `f = (a: i32) () i32` and "returns unit, and the next member is named `i32`" are the same tokens — a signature always writes its return type, so `()` in return position and `()` as an empty parameter list cannot be told apart by looking left. The tree-sitter grammar dodges it with a declared GLR conflict; a recursive-descent parser has no such move, so the rule is: after a `)`, a `(` or a `<` never begins a return type in **expression** position. A zero-parameter function type is therefore written only in *parameter* position — `cond: () bool`, `body: () Res<T, E>` — where the following token is a `,` or a `)` and nothing is ambiguous. Every one in the standard library already sits there, so this costs nothing today; it is written down because it is a restriction the parser enforces and no reader could derive.
 
+**A trailing `Res<T>` parameter may be omitted; omission supplies `None`.** Thus `known_header("accept")` and `known_header("accept", None)` are the same call. Several trailing `Res<T>` parameters may be omitted from the right. Omission never skips a parameter, and `Res<T, E>` remains required because failure is not absence. A present bare `T` still uses the ordinary hoisting rule, so `known_header(":method", "GET")` is identical to passing `Ok("GET")`. Two overloads may not accept the same call after this rule is applied.
+
 ```groovy fragment
 Vec*<T> = { .. }                 // declaration: struct. no semicolon.
 Shape = Circle(Circle) | Unit    // declaration: enum. no semicolon.
