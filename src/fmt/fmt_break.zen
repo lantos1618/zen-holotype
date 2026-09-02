@@ -1,17 +1,15 @@
 Alloc, AllocError = std.mem
 str, String = std.text
-Vec = std.collections
+Vec, sort, Ordered = std.collections
 Range = std.core
 Span = std.ast.ast_span
 Ast = std.ast.ast_arena
 ExprId, TypeId, BlockId = std.ast.ast_id
 Module, Decl, Type, Expr, Call, ArrayLit, Union, Enum, Param = std.ast.ast_node
-scan, Source, Lexed = std.lex.lex
-Parser, module = std.parse.parse
-Src = fmt.fmt_src
+Src, Parsed = fmt.fmt_src
 
 // The formatter's single line-width policy.
-WIDTH*: usize = 80
+WIDTH: usize = 80
 
 // One separator-bounded piece of a list, in bytes: an argument, a
 // variant, a union member. Half-open, like the spans it comes from.
@@ -20,18 +18,69 @@ Item = {
     hi: usize,
 }
 
+Item = (src: Src, s: Span) Item {
+    Item(lo: src.offset(s.start), hi: src.offset(s.end))
+}
+
+// How a list is written. `Stacked` (arguments) and `Filled` (array
+// elements) sit in brackets with commas; `Columnar` (parameters) too, but
+// is packed only from one line and blocks no neighbour; `Barred` (union
+// members, enum variants) is `|`-separated with no brackets.
+Form = Stacked | Filled | Columnar | Barred
+
+// A list one round may repack: its bytes, the lines it spans, its form.
 Cand = {
     lo: usize,
     hi: usize,
     line: usize,
     end_line: usize,
-    sep: u8,
-    parens: bool,
-    vetoes: bool,
-    params: bool,
-    fill: bool,
+    form: Form,
     items: Vec<Item>,
+
+    parens = (self: @Self) bool {
+        self.form.match({ Barred => false, _ => true })
+    }
+
+    sep = (self: @Self) u8 {
+        self.form.match({ Barred => '|', _ => ',' })
+    }
+
+    // A vetoing list blocks a disjoint neighbour on its line from
+    // breaking: neither break alone would fix the surrounding expression.
+    vetoes = (self: @Self) bool {
+        self.form.match({ Columnar => false, _ => true })
+    }
+
+    item = (self: @Self, i: usize) Item { self.items.ptr().read(i) }
+
+    first = (self: @Self) Item { self.item(0) }
+
+    last = (self: @Self) Item { self.item(self.items.len - 1) }
+
+    // Width of item `i` on one line, with the separator that follows it.
+    item_width = (self: @Self, i: usize) usize {
+        it = self.item(i);
+        (it.hi - it.lo) + (i + 1 < self.items.len).match({
+            true  => 1,
+            false => 0,
+        })
+    }
+
+    encloses = (self: @Self, other: Cand) bool {
+        self.lo <= other.lo && self.hi >= other.hi
+    }
+
+    disjoint = (self: @Self, other: Cand) bool {
+        self.lo >= other.hi || self.hi <= other.lo
+    }
 }
+
+// Outer lists first: a container sorts before what it contains.
+Cand.impl(Ordered, {
+    before = (self: @Self, other: @Self) bool {
+        (self.lo < other.lo) || (self.lo == other.lo && self.hi > other.hi)
+    }
+})
 
 // One whitespace replacement: `[from, to)` becomes `text`.
 Edit = {
@@ -40,16 +89,21 @@ Edit = {
     text: String,
 }
 
+Edit.impl(Ordered, {
+    before = (self: @Self, other: @Self) bool { self.from < other.from }
+})
+
 // Pack eligible lists, then break those that remain too wide.
 break_lines* = (a: Alloc, file: str, text: str) Res<String, AllocError> {
     packed = rounds(a, file, text, true).try();
     rounds(a, file, packed.view(), false)
 }
 
-// Run one direction until a round makes no change.
+// One direction until a round changes nothing. Each round re-parses, so
+// its edits use fresh offsets; the cap is a convergence guard.
 rounds = (a: Alloc, file: str, text: str, join: bool)
          Res<String, AllocError> {
-    cur   ::= copy_of(a, text).try();
+    cur   ::= a.String("{}", text).try();
     turns ::= 0;
     loop(turns < 16, (h) {
         next  = one_round(a, file, cur.view(), join).try();
@@ -62,406 +116,371 @@ rounds = (a: Alloc, file: str, text: str, join: bool)
     Ok(cur);
 }
 
-// Re-lexing each round prevents edits from using stale offsets. The cap is a
-// convergence guard; each productive round reaches a previously blocked list.
+// A text the parser refuses comes back unchanged.
 one_round = (a: Alloc, file: str, text: str, join: bool)
             Res<String, AllocError> {
-    lexed = scan(a, Source(file: file, text: text)).try();
-    lexed.is_clean().match({
-        false => copy_of(a, text),
-        true  => round_clean(a, text, lexed, join),
-    })
-}
-
-// Whitespace edits should preserve parsing. On violation, keep the input.
-round_clean = (a: Alloc, text: str, lexed: Lexed, join: bool)
-              Res<String, AllocError> {
-    p ::= a.Parser(lexed);
-    m = p.module(lexed.source.file).try();
-    (p.diags.len == 0).match({
-        false => copy_of(a, text),
-        true  => {
-            src = a.Src(text).try();
-            edits ::= a.Vec<Edit>();
-            judge(a, src, collect(a, src, p.tree, m).try(), edits, join).try();
-            apply(a, text, edits)
+    parsed = a.Parsed(file, text).try();
+    parsed.match({
+        None  => a.String("{}", text),
+        Ok(p) => {
+            r ::= a.Round(p.src);
+            r.collect(p.tree, p.m).try();
+            r.judge(join).try();
+            r.apply(text)
         },
     })
 }
 
-// Return an owned copy of unchanged input.
-copy_of* = (a: Alloc, text: str) Res<String, AllocError> {
-    out ::= a.String().try();
-    out.add(text).try();
-    Ok(out);
-}
+// One round: the candidate lists of a parse, in source order, and the
+// whitespace edits judged for them.
+Round = {
+    a: Alloc,
+    src: Src,
+    cands :: Vec<Cand>,
+    edits :: Vec<Edit>,
 
-collect = (a: Alloc, src: Src, tree: Ast, m: Module)
-          Res<Vec<Cand>, AllocError> {
-    cands ::= a.Vec<Cand>();
-    id    ::= ExprId(index: 0);
-    Range(0, tree.expr_ids()).loop((h, i) {
-        e = tree.expr_at(id);
-        e.kind.match({
-            Call(c)   => add_call(a, src, cands, c),
-            Array(al) => add_array(a, src, tree, cands, e, al),
-            Lambda(l) => add_params(a, src, cands, l.params, l.params_span),
-            _         => no_list(),
-        }).try();
-        id = ExprId(index: id.index + 1);
-    });
-    tid ::= TypeId(index: 0);
-    Range(0, tree.type_ids()).loop((h, i) {
-        t = tree.type_at(tid);
-        t.kind.match({
-            Union(u) => add_union(a, src, tree, cands, t, u),
-            Fn(f)    => add_params(a, src, cands, f.params, f.params_span),
-            _        => no_list(),
-        }).try();
-        tid = TypeId(index: tid.index + 1);
-    });
-    m.decls.loop((h, i, d) {
-        add_decl(a, src, cands, d).try();
-    });
-    bid ::= BlockId(index: 0);
-    Range(0, tree.block_ids()).loop((h, i) {
-        tree.block_at(bid).stmts.loop((g, j, s) {
-            s.kind.match({
-                Decl(d) => add_decl(a, src, cands, d),
-                _       => no_list(),
+    // Per candidate: broken this round, so a nested list waits a round
+    // and is measured from reparsed text.
+    moved :: Vec<bool>,
+
+    collect = (self :: @Self, tree: Ast, m: Module) Res<(), AllocError> {
+        id ::= ExprId(index: 0);
+        Range(0, tree.expr_ids()).loop((h, i) {
+            e = tree.expr_at(id);
+            e.kind.match({
+                Call(c)   => self.add_call(c),
+                Array(al) => self.add_array(tree, e, al),
+                Lambda(l) => self.add_params(l.params, l.params_span),
+                _         => Ok(()),
+            }).try();
+            id = ExprId(index: id.index + 1);
+        });
+        tid ::= TypeId(index: 0);
+        Range(0, tree.type_ids()).loop((h, i) {
+            t = tree.type_at(tid);
+            t.kind.match({
+                Union(u) => self.add_union(tree, t, u),
+                Fn(f)    => self.add_params(f.params, f.params_span),
+                _        => Ok(()),
+            }).try();
+            tid = TypeId(index: tid.index + 1);
+        });
+        m.decls.loop((h, i, d) { self.add_decl(d).try(); });
+        bid ::= BlockId(index: 0);
+        Range(0, tree.block_ids()).loop((h, i) {
+            tree.block_at(bid).stmts.loop((g, j, s) {
+                s.kind.match({
+                    Decl(d) => self.add_decl(d),
+                    _       => Ok(()),
+                }).try();
+            });
+            bid = BlockId(index: bid.index + 1);
+        });
+        self.cands.sort();
+        Ok(());
+    }
+
+    add_call = (self :: @Self, c: Call) Res<(), AllocError> {
+        (c.args.len == 0).match({
+            true  => Ok(()),
+            false => {
+                items ::= self.a.Vec<Item>();
+                c.args.loop((h, i, arg) {
+                    items.add(self.src.Item(arg.span)).try();
+                });
+                self.add(c.args_span, Form.Stacked, items)
+            },
+        })
+    }
+
+    add_array = (self :: @Self, tree: Ast, e: Expr, al: ArrayLit)
+                Res<(), AllocError> {
+        (al.elems.len == 0).match({
+            true  => Ok(()),
+            false => {
+                items ::= self.a.Vec<Item>();
+                al.elems.loop((h, i, eid) {
+                    items.add(self.src.Item(tree.expr_at(eid).span)).try();
+                });
+                self.add(e.span, Form.Filled, items)
+            },
+        })
+    }
+
+    add_decl = (self :: @Self, d: Decl) Res<(), AllocError> {
+        d.kind.match({
+            Enum(e)     => self.add_enum(e),
+            Function(f) => self.add_params(f.params, f.params_span),
+            _           => Ok(()),
+        })
+    }
+
+    add_params = (self :: @Self, ps: Vec<Param>, span: Span)
+                 Res<(), AllocError> {
+        (ps.len == 0).match({
+            true  => Ok(()),
+            false => {
+                items ::= self.a.Vec<Item>();
+                ps.loop((h, i, p) { items.add(self.src.Item(p.span)).try(); });
+                self.add(span, Form.Columnar, items)
+            },
+        })
+    }
+
+    add_union = (self :: @Self, tree: Ast, t: Type, u: Union)
+                Res<(), AllocError> {
+        items ::= self.a.Vec<Item>();
+        u.members.loop((h, i, mid) {
+            items.add(self.src.Item(tree.type_at(mid).span)).try();
+        });
+        self.add(t.span, Form.Barred, items)
+    }
+
+    // An enum's list runs from its first variant to its last; one variant
+    // has no separator to rewrite.
+    add_enum = (self :: @Self, e: Enum) Res<(), AllocError> {
+        (e.variants.len < 2).match({
+            true  => Ok(()),
+            false => {
+                items ::= self.a.Vec<Item>();
+                e.variants.loop((h, i, v) {
+                    items.add(self.src.Item(v.span)).try();
+                });
+                first = e.variants.ptr().read(0);
+                last  = e.variants.ptr().read(e.variants.len - 1);
+                self.add(
+                    Span(
+                        file: first.span.file,
+                        start: first.span.start,
+                        end: last.span.end
+                    ),
+                    Form.Barred,
+                    items
+                )
+            },
+        })
+    }
+
+    add = (self :: @Self, span: Span, form: Form, items: Vec<Item>)
+          Res<(), AllocError> {
+        self.cands.add(Cand(
+            lo: self.src.offset(span.start),
+            hi: self.src.offset(span.end),
+            line: span.start.line,
+            end_line: span.end.line,
+            form: form,
+            items: items,
+        ))
+    }
+
+    judge = (self :: @Self, join: bool) Res<(), AllocError> {
+        Range(0, self.cands.len).loop((h, i) { self.moved.add(false).try(); });
+        Range(0, self.cands.len).loop((h, i) {
+            c = self.cands.ptr().read(i);
+            self.relaid(c, join).match({
+                false => Ok(()),
+                true  => join.match({
+                    true  => self.emit_join(c),
+                    false => {
+                        self.moved.ptr().write(i, self.emit_break(c).try());
+                        Ok(())
+                    },
+                }),
             }).try();
         });
-        bid = BlockId(index: bid.index + 1);
-    });
-    in_order(cands);
-    Ok(cands);
-}
+        self.edits.sort();
+        Ok(());
+    }
 
-// The no-op result used beside allocating collector arms.
-no_list = () Res<(), AllocError> { Ok(()) }
+    // Packing needs safe gaps. Breaking also needs a list untouched this
+    // round, not the sole item of a wrapper, alone among vetoing lists on
+    // its line, and too wide when packed.
+    relaid = (self: @Self, c: Cand, join: bool) bool {
+        self.src.may_relay(c) && join.match({
+            true  => self.src.may_join(c),
+            false => !self.inside_moved(c)
+                  && !self.wraps_one_list(c)
+                  && !self.shares_line(c)
+                  && self.src.too_wide(c),
+        })
+    }
 
-// Calls and constructors use parenthesized, comma-separated lists.
-add_call = (a: Alloc, src: Src, cands :: Vec<Cand>, c: Call)
-           Res<(), AllocError> {
-    (c.args.len == 0).match({
-        true  => no_list(),
-        false => {
-            items ::= a.Vec<Item>();
-            c.args.loop((h, i, arg) {
-                items.add(Item(
-                    lo: src.offset(arg.span.start),
-                    hi: src.offset(arg.span.end)
-                )).try();
+    inside_moved = (self: @Self, c: Cand) bool {
+        Range(0, self.cands.len).find((j) {
+            self.moved.ptr().read(j) && self.cands.ptr().read(j).encloses(c)
+        }).match({ Ok(_) => true, None => false })
+    }
+
+    // A one-item wrapper stays packed when a nested list ending with that
+    // item can solve the width by itself.
+    wraps_one_list = (self: @Self, c: Cand) bool {
+        c.items.len == 1 && self.cands.find((d) {
+            d.lo > c.lo && d.hi == c.first().hi
+        }).match({ Ok(_) => true, None => false })
+    }
+
+    // Nested lists do not count: only a disjoint vetoing list on the
+    // same line.
+    shares_line = (self: @Self, c: Cand) bool {
+        ls = self.src.line_at(c.line);
+        le = self.src.after_line(c.line);
+        self.cands.find((d) {
+            d.vetoes() && d.disjoint(c) && d.lo < le && d.hi > ls
+        }).match({ Ok(_) => true, None => false })
+    }
+
+    // Packed form: brackets hug their items and separators carry one space.
+    emit_join = (self :: @Self, c: Cand) Res<(), AllocError> {
+        gone = self.a.String().try();
+        self.bracket_gaps(c, gone, gone).try();
+        Range(0, c.items.len - 1).loop((h, i) {
+            rep ::= self.a.String().try();
+            c.parens().match({
+                true  => (),
+                false => { rep.add(' ').try(); },
             });
-            cands.add(Cand(
-                lo: src.offset(c.args_span.start),
-                hi: src.offset(c.args_span.end),
-                line: c.args_span.start.line,
-                end_line: c.args_span.end.line,
-                sep: ',',
-                parens: true,
-                vetoes: true,
-                params: false,
-                fill: false,
-                items: items,
-            ))
-        },
-    })
-}
-
-// Arrays share the bracketed-list rules but may fill multiple items per line.
-add_array = (
-    a     : Alloc,
-    src   : Src,
-    tree  : Ast,
-    cands :: Vec<Cand>,
-    e     : Expr,
-    al    : ArrayLit
-) Res<(), AllocError> {
-    (al.elems.len == 0).match({
-        true  => no_list(),
-        false => {
-            items ::= a.Vec<Item>();
-            al.elems.loop((h, i, eid) {
-                s = tree.expr_at(eid).span;
-                items.add(Item(
-                    lo: src.offset(s.start),
-                    hi: src.offset(s.end)
-                )).try();
-            });
-            cands.add(Cand(
-                lo: src.offset(e.span.start),
-                hi: src.offset(e.span.end),
-                line: e.span.start.line,
-                end_line: e.span.end.line,
-                sep: ',',
-                parens: true,
-                vetoes: true,
-                params: false,
-                fill: true,
-                items: items,
-            ))
-        },
-    })
-}
-
-// Collect list-bearing declarations at module or block scope.
-add_decl = (a: Alloc, src: Src, cands :: Vec<Cand>, d: Decl)
-           Res<(), AllocError> {
-    d.kind.match({
-        Enum(e)     => add_enum(a, src, cands, e),
-        Function(f) => add_params(a, src, cands, f.params, f.params_span),
-        _           => no_list(),
-    })
-}
-
-// Parameters use the same parenthesized, comma-separated shape as arguments.
-add_params = (
-    a     : Alloc,
-    src   : Src,
-    cands :: Vec<Cand>,
-    ps    : Vec<Param>,
-    span  : Span
-) Res<(), AllocError> {
-    (ps.len == 0).match({
-        true  => no_list(),
-        false => {
-            items ::= a.Vec<Item>();
-            ps.loop((h, i, p) {
-                items.add(Item(
-                    lo: src.offset(p.span.start),
-                    hi: src.offset(p.span.end)
-                )).try();
-            });
-            cands.add(Cand(
-                lo: src.offset(span.start),
-                hi: src.offset(span.end),
-                line: span.start.line,
-                end_line: span.end.line,
-                sep: ',',
-                parens: true,
-                vetoes: false,
-                params: true,
-                fill: false,
-                items: items,
-            ))
-        },
-    })
-}
-
-// A union span covers its first through last member.
-add_union = (
-    a     : Alloc,
-    src   : Src,
-    tree  : Ast,
-    cands :: Vec<Cand>,
-    t     : Type,
-    u     : Union
-) Res<(), AllocError> {
-    items ::= a.Vec<Item>();
-    u.members.loop((h, i, mid) {
-        s = tree.type_at(mid).span;
-        items.add(Item(lo: src.offset(s.start), hi: src.offset(s.end))).try();
-    });
-    cands.add(Cand(
-        lo: src.offset(t.span.start),
-        hi: src.offset(t.span.end),
-        line: t.span.start.line,
-        end_line: t.span.end.line,
-        sep: '|',
-        parens: false,
-        vetoes: true,
-        params: false,
-        fill: false,
-        items: items,
-    ))
-}
-
-// An enum needs at least two variants to have a separator to rewrite.
-add_enum = (a: Alloc, src: Src, cands :: Vec<Cand>, e: Enum)
-           Res<(), AllocError> {
-    (e.variants.len < 2).match({
-        true  => no_list(),
-        false => {
-            items ::= a.Vec<Item>();
-            e.variants.loop((h, i, v) {
-                items.add(Item(
-                    lo: src.offset(v.span.start),
-                    hi: src.offset(v.span.end)
-                )).try();
-            });
-            first = e.variants.ptr().read(0);
-            last  = e.variants.ptr().read(e.variants.len - 1);
-            cands.add(Cand(
-                lo: src.offset(first.span.start),
-                hi: src.offset(last.span.end),
-                line: first.span.start.line,
-                end_line: last.span.end.line,
-                sep: '|',
-                parens: false,
-                vetoes: true,
-                params: false,
-                fill: false,
-                items: items,
-            ))
-        },
-    })
-}
-
-in_order = (cands :: Vec<Cand>) () {
-    Range(1, cands.len).loop((h, i) {
-        j ::= i;
-        loop(() { j > 0 && before(
-            cands.ptr().read(j),
-            cands.ptr().read(j - 1)
-        ) }, (g) {
-            tmp = cands.ptr().read(j - 1);
-            cands.ptr().write(j - 1, cands.ptr().read(j));
-            cands.ptr().write(j, tmp);
-            j = j - 1;
+            rep.add(c.sep()).try();
+            rep.add(' ').try();
+            self.gap(c, i, rep).try();
         });
-    });
-}
+        Ok(());
+    }
 
-before = (x: Cand, y: Cand) bool {
-    (x.lo < y.lo) || (x.lo == y.lo && x.hi > y.hi)
-}
-
-judge = (
-    a     : Alloc,
-    src   : Src,
-    cands : Vec<Cand>,
-    edits :: Vec<Edit>,
-    join  : bool
-) Res<(), AllocError> {
-    moved ::= a.Vec<bool>();
-    Range(0, cands.len).loop((h, i) { moved.add(false).try(); });
-    Range(0, cands.len).loop((h, i) {
-        c = cands.ptr().read(i);
-        relaid(src, cands, moved, c, join).match({
-            false => no_list(),
-            true  => join.match({
-                true  => emit_join(a, c, edits),
-                false => break_and_mark(a, src, c, edits, moved, i),
-            }),
+    // Broken form: one indent level deeper than the line the list opens
+    // on, closing bracket back at that indent. True when an edit changes
+    // the bytes.
+    emit_break = (self :: @Self, c: Cand) Res<bool, AllocError> {
+        was    = self.edits.len;
+        start  = self.src.line_at(c.line);
+        indent = self.src.skip_space(
+            start,
+            self.src.after_line(c.line)
+        ) - start;
+        close ::= self.a.String().try();
+        close.fmt("\n{}", self.src.slice_at(start, start + indent)).try();
+        nl ::= self.a.String().try();
+        nl.fmt("{}    ", close.view()).try();
+        self.bracket_gaps(c, nl, close).try();
+        c.form.match({
+            Filled => self.filled_gaps(c, nl.view(), indent + 4),
+            _      => self.stacked_gaps(c, nl.view()),
         }).try();
-    });
-    in_byte_order(edits);
-    Ok(());
+        Ok(self.rewrites(was));
+    }
+
+    // The gaps inside a bracketed list's brackets.
+    bracket_gaps = (self :: @Self, c: Cand, open: String, close: String)
+                   Res<(), AllocError> {
+        c.parens().match({
+            false => Ok(()),
+            true  => {
+                self.replace(c.lo + 1, c.first().lo, open).try();
+                self.replace(c.last().hi, c.hi - 1, close)
+            },
+        })
+    }
+
+    // One item per line.
+    stacked_gaps = (self :: @Self, c: Cand, nl: str) Res<(), AllocError> {
+        Range(0, c.items.len - 1).loop((h, i) {
+            rep ::= self.a.String().try();
+            c.parens().match({
+                true  => { rep.add(c.sep()).try();
+                           rep.add(nl).try(); },
+                false => { rep.add(nl).try();
+                           rep.add(c.sep()).try();
+                           rep.add(' ').try(); },
+            });
+            self.gap(c, i, rep).try();
+        });
+        Ok(());
+    }
+
+    // Fill left to right. A non-final item's width includes its comma,
+    // which cannot move to the next line.
+    filled_gaps = (self :: @Self, c: Cand, nl: str, indent: usize)
+                  Res<(), AllocError> {
+        col ::= indent + c.item_width(0);
+        Range(0, c.items.len - 1).loop((h, i) {
+            grown = col + 1 + c.item_width(i + 1);
+            rep ::= self.a.String().try();
+            rep.add(c.sep()).try();
+            (grown <= WIDTH).match({
+                true  => { rep.add(' ').try();
+                           col = grown; },
+                false => { rep.add(nl).try();
+                           col = indent + c.item_width(i + 1); },
+            });
+            self.gap(c, i, rep).try();
+        });
+        Ok(());
+    }
+
+    // The gap between item `i` and the next becomes `rep`.
+    gap = (self :: @Self, c: Cand, i: usize, rep: String)
+          Res<(), AllocError> {
+        self.replace(c.item(i).hi, c.item(i + 1).lo, rep)
+    }
+
+    replace = (self :: @Self, from: usize, to: usize, text: String)
+              Res<(), AllocError> {
+        self.edits.add(Edit(from: from, to: to, text: text))
+    }
+
+    // Whether an edit added since `was` differs from the bytes it replaces.
+    rewrites = (self: @Self, was: usize) bool {
+        Range(was, self.edits.len).find((i) {
+            !self.replaces_same(self.edits.ptr().read(i))
+        }).match({ Ok(_) => true, None => false })
+    }
+
+    replaces_same = (self: @Self, e: Edit) bool {
+        e.text.view().eq(self.src.slice_at(e.from, e.to))
+    }
+
+    // Edits never overlap: each list owns only its gaps.
+    apply = (self: @Self, text: str) Res<String, AllocError> {
+        out ::= self.a.String().try();
+        at  ::= 0;
+        self.edits.loop((h, i, e) {
+            out.fmt("{}{}", text.slice(at, e.from), e.text.view()).try();
+            at = e.to;
+        });
+        out.add(text.slice(at, text.len)).try();
+        Ok(out);
+    }
 }
 
-break_and_mark = (
-    a     : Alloc,
-    src   : Src,
-    c     : Cand,
-    edits :: Vec<Edit>,
-    moved :: Vec<bool>,
-    i     : usize
-) Res<(), AllocError> {
-    moved.ptr().write(i, emit_break(a, src, c, edits).try());
-    Ok(());
+Round = (a: Alloc, src: Src) Round {
+    Round(
+        a: a,
+        src: src,
+        cands: a.Vec<Cand>(),
+        edits: a.Vec<Edit>(),
+        moved: a.Vec<bool>()
+    )
 }
 
-// Packing requires safe gaps; breaking also excludes lists affected by this
-// round or by a disjoint neighbour and requires an over-wide packed form.
-relaid = (
-    src   : Src,
-    cands : Vec<Cand>,
-    moved : Vec<bool>,
-    c     : Cand,
-    join  : bool
-) bool {
-    may_relay(src, c) && join.match({
-        true  => may_join(src, c),
-        false => !inside_moved(cands, moved, c)
-              && !wraps_one_list(cands, c)
-              && !shares_line(src, cands, c)
-              && too_wide(src, c),
+// Comments and already-columnar parameter lists keep their layout.
+may_join = (src: Src, c: Cand) bool {
+    src.uncommented(c.lo, c.hi) && c.form.match({
+        Columnar => src.one_line(c.lo, c.hi),
+        _        => true,
     })
 }
 
-// A nested list waits one round after its container moves so its width and
-// indentation are measured from reparsed text.
-inside_moved = (cands: Vec<Cand>, moved: Vec<bool>, c: Cand) bool {
-    found ::= false;
-    Range(0, cands.len).loop((h, j) {
-        other = cands.ptr().read(j);
-        holds = moved.ptr().read(j) && other.lo <= c.lo && other.hi >= c.hi;
-        holds.match({
-            true  => { found = true; h.break(); },
-            false => (),
-        });
-    });
-    found;
-}
-
-// A one-item wrapper stays packed when a nested list ending with that item can
-// solve the width by itself.
-wraps_one_list = (cands: Vec<Cand>, c: Cand) bool {
-    (c.items.len == 1) && ends_the_item(cands, c, c.items.ptr().read(0))
-}
-
-// Whether a nested list closes at the end of the wrapper's only item.
-ends_the_item = (cands: Vec<Cand>, c: Cand, only: Item) bool {
-    found ::= false;
-    Range(0, cands.len).loop((h, j) {
-        d = cands.ptr().read(j);
-        (d.lo > c.lo && d.hi == only.hi).match({
-            true  => { found = true; h.break(); },
-            false => (),
-        });
-    });
-    found;
-}
-
-// Comments and already-columnar parameter lists must keep their layout.
-may_join = (src: Src, c: Cand) bool {
-    uncommented(src, c.lo, c.hi) && !(c.params && !one_line(src, c.lo, c.hi))
-}
-
-// This conservative byte scan may decline a string containing `//`; declining
-// is safe because it leaves the source untouched.
+// A `//` or `/*` inside a string literal also declines, which only
+// leaves that list as written.
 uncommented = (src: Src, from: usize, to: usize) bool {
-    clear ::= true;
-    Range(from, to).loop((h, i) {
-        (src.text.index(i) == '/' && opens_comment(src, i + 1, to)).match({
-            true  => { clear = false; h.break(); },
-            false => (),
-        });
-    });
-    clear;
+    inside = src.slice_at(from, to);
+    !inside.contains("//") && !inside.contains("/*")
 }
 
-opens_comment = (src: Src, at: usize, to: usize) bool {
-    (at < to) && (src.text.index(at) == '/' || src.text.index(at) == '*')
-}
-
-// Measure the line as if eligible whitespace runs were collapsed.
+// The line measured as if the list's whitespace runs were collapsed.
 too_wide = (src: Src, c: Cand) bool {
-    packed_width(src, c) > WIDTH
-}
-
-// Do not break one of two disjoint vetoing lists on a shared line: neither
-// break alone fixes the surrounding expression. Nested lists do not count.
-shares_line = (src: Src, cands: Vec<Cand>, c: Cand) bool {
-    ls = src.line_at(c.line);
-    le = src.after_line(c.line);
-    found ::= false;
-    Range(0, cands.len).loop((h, j) {
-        d        = cands.ptr().read(j);
-        disjoint = d.lo >= c.hi || d.hi <= c.lo;
-        (d.vetoes && disjoint && d.lo < le && d.hi > ls).match({
-            true  => { found = true; h.break(); },
-            false => (),
-        });
-    });
-    found;
-}
-
-packed_width = (src: Src, c: Cand) usize {
     prefix = c.lo - src.line_at(c.line);
     suffix = src.trim_back(c.hi, src.after_line(c.end_line)) - c.hi;
-    prefix + collapsed(src, c.lo, c.hi) + suffix
+    prefix + src.collapsed(c.lo, c.hi) + suffix > WIDTH
 }
 
 collapsed = (src: Src, from: usize, to: usize) usize {
@@ -478,202 +497,27 @@ collapsed = (src: Src, from: usize, to: usize) usize {
     n;
 }
 
-// Rewriting is safe only for single-line items, whitespace-only bracket gaps,
-// and gaps containing exactly the expected separator plus whitespace.
+// Rewriting is safe only for single-line items, whitespace-only bracket
+// gaps, and gaps holding exactly the separator plus whitespace.
 may_relay = (src: Src, c: Cand) bool {
-    first = c.items.ptr().read(0);
-    last  = c.items.ptr().read(c.items.len - 1);
-    clear ::= c.parens.match({
-        true  => src.all_space(c.lo + 1, first.lo)
-              && src.all_space(last.hi, c.hi - 1),
+    brackets = c.parens().match({
+        true  => src.all_space(c.lo + 1, c.first().lo)
+              && src.all_space(c.last().hi, c.hi - 1),
         false => true,
     });
-    Range(0, c.items.len - 1).loop((h, i) {
-        item = c.items.ptr().read(i);
-        ok   = one_line(src, item.lo, item.hi)
-          && clean_gap(src, item.hi, c.items.ptr().read(i + 1).lo, c.sep);
-        ok.match({
-            true  => (),
-            false => { clear = false; h.break(); },
-        });
-    });
-    clear && one_line(src, last.lo, last.hi);
+    brackets && src.one_line(c.last().lo, c.last().hi)
+        && Range(0, c.items.len - 1).find((i) {
+            !src.one_line(c.item(i).lo, c.item(i).hi)
+                || !src.clean_gap(c.item(i).hi, c.item(i + 1).lo, c.sep())
+        }).match({ Ok(_) => false, None => true })
 }
 
 one_line = (src: Src, from: usize, to: usize) bool {
-    flat ::= true;
-    Range(from, to).loop((h, i) {
-        (src.text.index(i) == '\n').match({
-            true  => { flat = false; h.break(); },
-            false => (),
-        });
-    });
-    flat;
+    !src.slice_at(from, to).contains('\n')
 }
 
-// Accept whitespace, one separator, then whitespace and nothing else.
+// Whitespace, one separator, whitespace, and nothing else.
 clean_gap = (src: Src, from: usize, to: usize, sep: u8) bool {
     mid = src.skip_space(from, to);
-    (mid < to && src.text.index(mid) == sep).match({
-        false => false,
-        true  => src.skip_space(mid + 1, to) == to,
-    })
-}
-
-// joining and breaking
-// Packed form: brackets hug their items and separators carry one space.
-emit_join = (a: Alloc, c: Cand, edits :: Vec<Edit>) Res<(), AllocError> {
-    gone ::= a.String().try();
-    first = c.items.ptr().read(0);
-    last  = c.items.ptr().read(c.items.len - 1);
-    c.parens.match({
-        true  => edits.add(Edit(from: c.lo + 1, to: first.lo, text: gone)),
-        false => no_list(),
-    }).try();
-    Range(0, c.items.len - 1).loop((h, i) {
-        rep ::= a.String().try();
-        c.parens.match({
-            true  => (),
-            false => { rep.add(' ').try(); },
-        });
-        rep.add(c.sep).try();
-        rep.add(' ').try();
-        edits.add(Edit(
-            from: c.items.ptr().read(i).hi,
-            to: c.items.ptr().read(i + 1).lo,
-            text: rep
-        )).try();
-    });
-    c.parens.match({
-        true  => edits.add(Edit(from: last.hi, to: c.hi - 1, text: gone)),
-        false => no_list(),
-    }).try();
-    Ok(());
-}
-
-emit_break = (a: Alloc, src: Src, c: Cand, edits :: Vec<Edit>)
-             Res<bool, AllocError> {
-    was    = edits.len;
-    start  = src.line_at(c.line);
-    indent = src.skip_space(start, src.after_line(c.line)) - start;
-    close ::= a.String().try();
-    close.fmt("\n{}", src.slice_at(start, start + indent)).try();
-    nl ::= a.String().try();
-    nl.fmt("{}    ", close.view()).try();
-    first = c.items.ptr().read(0);
-    last  = c.items.ptr().read(c.items.len - 1);
-    c.parens.match({
-        true  => edits.add(Edit(from: c.lo + 1, to: first.lo, text: nl)),
-        false => no_list(),
-    }).try();
-    c.fill.match({
-        true  => filled_gaps(a, c, edits, nl.view(), indent + 4),
-        false => stacked_gaps(a, c, edits, nl.view()),
-    }).try();
-    c.parens.match({
-        true  => edits.add(Edit(from: last.hi, to: c.hi - 1, text: close)),
-        false => no_list(),
-    }).try();
-    Ok(rewrites(src, edits, was));
-}
-
-// Stack one item per line.
-stacked_gaps = (a: Alloc, c: Cand, edits :: Vec<Edit>, nl: str)
-               Res<(), AllocError> {
-    Range(0, c.items.len - 1).loop((h, i) {
-        rep ::= a.String().try();
-        c.parens.match({
-            true  => { rep.add(c.sep).try();
-                       rep.add(nl).try(); },
-            false => { rep.add(nl).try();
-                       rep.add(c.sep).try();
-                       rep.add(' ').try(); },
-        });
-        edits.add(Edit(
-            from: c.items.ptr().read(i).hi,
-            to: c.items.ptr().read(i + 1).lo,
-            text: rep
-        )).try();
-    });
-    Ok(());
-}
-
-// Fill greedily from left to right. A non-final item's width includes its
-// comma because the comma cannot move to the next line.
-filled_gaps = (
-    a      : Alloc,
-    c      : Cand,
-    edits  :: Vec<Edit>,
-    nl     : str,
-    indent : usize
-) Res<(), AllocError> {
-    col ::= indent + item_width(c, 0);
-    Range(0, c.items.len - 1).loop((h, i) {
-        next  = c.items.ptr().read(i + 1);
-        grown = col + 1 + item_width(c, i + 1);
-        rep ::= a.String().try();
-        rep.add(c.sep).try();
-        (grown <= WIDTH).match({
-            true  => { rep.add(' ').try();
-                       col = grown; },
-            false => { rep.add(nl).try();
-                       col = indent + item_width(c, i + 1); },
-        });
-        edits.add(Edit(
-            from: c.items.ptr().read(i).hi,
-            to: next.lo,
-            text: rep
-        )).try();
-    });
-    Ok(());
-}
-
-// Width of a single-line item, including its trailing comma when present.
-item_width = (c: Cand, i: usize) usize {
-    it = c.items.ptr().read(i);
-    (it.hi - it.lo) + (i + 1 < c.items.len).match({
-        true  => 1,
-        false => 0,
-    })
-}
-
-// Whether an edit added since `was` differs from the current source bytes.
-rewrites = (src: Src, edits: Vec<Edit>, was: usize) bool {
-    found ::= false;
-    Range(was, edits.len).loop((h, i) {
-        e = edits.ptr().read(i);
-        e.text.view().eq(src.slice_at(e.from, e.to)).match({
-            false => { found = true; h.break(); },
-            true  => (),
-        });
-    });
-    found;
-}
-
-// Sort edits by byte position. Candidate nesting order differs from edit order;
-// edits never overlap because each list owns only its gaps.
-in_byte_order = (edits :: Vec<Edit>) () {
-    Range(1, edits.len).loop((h, i) {
-        j ::= i;
-        loop(() { j > 0 && edits.ptr().read(j).from
-                         < edits.ptr().read(j - 1).from }, (g) {
-            tmp = edits.ptr().read(j - 1);
-            edits.ptr().write(j - 1, edits.ptr().read(j));
-            edits.ptr().write(j, tmp);
-            j = j - 1;
-        });
-    });
-}
-
-// Apply non-overlapping edits in byte order.
-apply = (a: Alloc, text: str, edits: Vec<Edit>) Res<String, AllocError> {
-    out ::= a.String().try();
-    at  ::= 0;
-    Range(0, edits.len).loop((h, i) {
-        e = edits.ptr().read(i);
-        out.fmt("{}{}", text.slice(at, e.from), e.text.view()).try();
-        at = e.to;
-    });
-    out.add(text.slice(at, text.len)).try();
-    Ok(out);
+    mid < to && src.text.index(mid) == sep && src.skip_space(mid + 1, to) == to
 }
