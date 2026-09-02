@@ -1,7 +1,7 @@
 // Non-allocating complete-decimal integer parsing. Empty, malformed,
 // plus-prefixed, or out-of-range input returns None. Signed parsing accumulates
 // a negative value so i64.MIN is representable without overflow.
-DIGIT_ZERO, digit_value = std.core.byte
+DIGIT_ZERO, digit_value, hex_value = std.core.byte
 
 parse_i64* = (self: str) Res<i64> {
     parsed: Res<i64> = loop<i64>((h) {
@@ -67,6 +67,28 @@ parse_usize* = (self: str) Res<usize> {
     });
     ok.match({ true => Ok(n), false => None })
 }
+
+// Complete unsigned integer in `base`, 2 through 16, digits `0-9a-fA-F`.
+parse_u64_radix* = (self: str, base: u64) Res<u64> {
+    n: u64 ::= 0;
+    ok     ::= !self.is_empty();
+    Range(0, self.len).loop((h, i) {
+        digit: Res<u8> = self[i].hex_value();
+        digit.match({
+            None  => { ok = false; h.break(); },
+            Ok(d) => {
+                v: u64 = d.to_u64();
+                (v >= base || n > (u64.MAX - v) / base).match({
+                    true  => { ok = false; h.break(); },
+                    false => { n = n * base + v; },
+                });
+            },
+        });
+    });
+    ok.match({ true => Ok(n), false => None })
+}
+
+parse_u64* = (self: str) Res<u64> { self.parse_u64_radix(10) }
 
 parse_u16* = (self: str) Res<u16> {
     n: u16 ::= 0;

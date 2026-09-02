@@ -13,16 +13,14 @@ Lexer* = {
     tokens* :: Vec<Token>,
     diags* :: Vec<Diag>,
 
-    // a token from `from` to here. Half-open, so the end is the first byte
-    // that is not part of it
+    // Emit a token spanning `from` to the cursor.
     emit* = (self :: @Self, kind: TokenKind, from: Pos) Res<(), AllocError> {
         self.tokens.add(Token(kind: kind, span: self.span_from(from)));
     }
 
-    // a fault from `from` to here. `from` is the byte the fix goes at, which
-    // is not always the byte the scanner noticed: an unterminated string is
-    // reported at its OPENING QUOTE, because end-of-file names no useful
-    // location and the quote is what the author has to change
+    // Report a fault spanning `from` to the cursor. `from` is where the fix
+    // belongs, not where the scanner noticed: an unterminated string is
+    // reported at its opening quote.
     report* = (self :: @Self, fault: LexFault, from: Pos) Res<(), AllocError> {
         self.diags.add(Diag(
             file: self.source.file,
@@ -35,10 +33,9 @@ Lexer* = {
         Span(start: from, end: self.cur.pos());
     }
 
-    // the bytes between `from` and the cursor. What a name, a number and an
-    // `@name` all need in order to decide which token they are
+    // The source bytes from `from` to the cursor.
     since* = (self: @Self, from: Pos) str {
-        self.source.text.slice(from.offset, self.cur.pos().offset);
+        self.source.text_in(self.span_from(from))
     }
 }
 
@@ -52,10 +49,8 @@ Lexer* = (alloc: Alloc, source: Source) Lexer {
     );
 }
 
-// what one lex run produced. The tokens it could read AND the diagnostics
-// it owes — never one or the other, because a file with a bad escape in it
-// still has three hundred perfectly good tokens, and a driver reporting
-// twelve faults at once needs them all
+// Result of one lex pass. `tokens` is complete even when `diags` is not
+// empty, so a driver can report every fault of a file in one run.
 Lexed* = {
     source*: Source,
     tokens*: Vec<Token>,

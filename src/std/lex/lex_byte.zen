@@ -1,42 +1,33 @@
 // Token-opening byte classes. General ASCII predicates live on u8;
 // punctuation is classified separately by lex_punct.
 
-// What a byte can start.
 ByteClass* =
       Space      // skipped; never a token
-    | Slash      // `//`, `/*`, or division: one byte of lookahead tells them apart
-    | Quote      // "
-    | Apos       // '
+    | Slash      // `//`, `/*`, or `/`; lex_scan peeks one byte to decide
+    | Quote
+    | Apos
     | Digit
     | Letter     // an identifier's first byte, `_` included
-    | At         // @Self, @meta, @scope, and nothing else
-    | Other      // punctuation, or a byte that begins no Zen token at all
+    | At         // the `@` namespace; lex_scan validates the name
+    | Other      // punctuation, or a byte that begins no token
 
 // Valid single-byte escapes. Unknown escapes are lexical errors.
 is_escape* = (b: u8) bool {
     b.is_in(['n', 't', 'r', 'v', 'f', '0', '\\', '\'', '"'])
 }
 
+// The guards are disjoint, so their order is free. The loop always breaks;
+// its Res is the language's shape for a guard chain, not a reachable path.
 class_of* = (b: u8) ByteClass {
     found: Res<ByteClass> = loop<ByteClass>((h) {
-        // Classification order is significant for overlapping predicates.
         b.is_space().then(() { h.break(ByteClass.Space) });
         b.is_digit().then(() { h.break(ByteClass.Digit) });
         b.is_ident_start().then(() { h.break(ByteClass.Letter) });
-        h.break(opener_class(b));
+        (b == '/').then(() { h.break(ByteClass.Slash) });
+        (b == '"').then(() { h.break(ByteClass.Quote) });
+        (b == '\'').then(() { h.break(ByteClass.Apos) });
+        (b == '@').then(() { h.break(ByteClass.At) });
+        h.break(ByteClass.Other);
     });
-    found.match({
-        Ok(one) => one,
-        None    => opener_class(b),
-    });
-}
-
-opener_class = (b: u8) ByteClass {
-    b.match({
-        '/'  => ByteClass.Slash,
-        '"'  => ByteClass.Quote,
-        '\'' => ByteClass.Apos,
-        '@'  => ByteClass.At,
-        _    => ByteClass.Other
-    })
+    found.match({ Ok(one) => one, None => ByteClass.Other });
 }

@@ -5,7 +5,7 @@ Lexer, Lexed = std.lex.lex_state
 TokenKind, Source = std.lex.lex_token
 LexFault = std.lex.lex_diag
 class_of = std.lex.lex_byte
-punct_of, punct_kind = std.lex.lex_punct
+is_punct = std.lex.lex_punct
 string, character, number = std.lex.lex_literal
 Alloc, AllocError = std.mem
 str = std.text
@@ -14,15 +14,10 @@ str = std.text
 // failure so scanning can continue after malformed input.
 scan* = (alloc: Alloc, source: Source) Res<Lexed, AllocError> {
     lx ::= alloc.Lexer(source);
-    lx.strip_bom();
+    lx.cur.skip_bom();
     loop(!lx.cur.is_done(), (h) { lx.step().try(); });
     lx.emit(TokenKind.Eof, lx.cur.pos()).try();
     Ok(Lexed(source: source, tokens: lx.tokens, diags: lx.diags));
-}
-
-// Strip a BOM only at offset zero while retaining byte-based columns.
-strip_bom = (lx :: Lexer) () {
-    lx.cur.at_bom().then(() { lx.cur.bump(); lx.cur.bump(); lx.cur.bump(); });
 }
 
 step = (lx :: Lexer) Res<(), AllocError> {
@@ -45,7 +40,6 @@ dispatch = (lx :: Lexer, b: u8) Res<(), AllocError> {
     });
 }
 
-// Whitespace is represented by gaps between token spans.
 skip = (lx :: Lexer) Res<(), AllocError> {
     lx.cur.bump();
     Ok(());
@@ -85,28 +79,24 @@ block_comment = (lx :: Lexer) Res<(), AllocError> {
         });
     });
 
-    // Unterminated comments produce a fault but no token.
     closed.match({
         true  => lx.emit(TokenKind.BlockComment, from),
         false => lx.report(LexFault.UnterminatedComment, from),
     });
 }
 
-// Identifiers are ASCII `[A-Za-z_][A-Za-z0-9_]*`; `_` becomes a wildcard only
-// when parsed as a pattern.
 name = (lx :: Lexer) Res<(), AllocError> {
     from = lx.cur.pos();
     lx.cur.bump_while((b) { b.is_ident_cont() });
     lx.emit(word_kind(lx.since(from)), from);
 }
 
-// The grammar's complete reserved-word table. Completion and generated-name
-// validation read this same table, so accepting a new identifier spelling is
-// one language decision rather than three lists that can drift.
 KEYWORD_COUNT*: usize = 3
 
 Keyword* = { text*: str, kind*: TokenKind }
 
+// The reserved-word table, indexed so LSP completion (lsp_compl) and C-name
+// validation (zen_c_translate) can enumerate it. Add keywords here only.
 keyword_at* = (i: usize) Res<Keyword> {
     i.match({
         0 => Ok(Keyword(text: "consume", kind: TokenKind.Consume)),
@@ -117,19 +107,9 @@ keyword_at* = (i: usize) Res<Keyword> {
 }
 
 keyword_of = (word: str) Res<Keyword> {
-    found ::= Keyword(text: "", kind: TokenKind.Ident);
-    have  ::= false;
-    Range(0, KEYWORD_COUNT).loop((h, i) {
-        keyword_at(i).match({
-            Ok(keyword) => keyword.text.eq(word).then(() {
-                found = keyword;
-                have  = true;
-                h.break();
-            }),
-            None        => (),
-        });
-    });
-    have.match({ true => Ok(found), false => None })
+    Range(0, KEYWORD_COUNT).find((i) {
+        keyword_at(i).match({ Ok(keyword) => keyword.text.eq(word), None => false })
+    }).match({ Ok(i) => keyword_at(i), None => None })
 }
 
 word_kind = (word: str) TokenKind {
@@ -144,7 +124,6 @@ is_keyword* = (word: str) bool {
 
 is_zen_name* = (word: str) bool { word.is_identifier() && !is_keyword(word) }
 
-// The @ namespace contains only Self, meta, and scope.
 at_name = (lx :: Lexer) Res<(), AllocError> {
     from = lx.cur.pos();
     lx.cur.bump();
@@ -166,9 +145,9 @@ at_kind = (word: str) Res<TokenKind> {
 
 punctuation = (lx :: Lexer, b: u8) Res<(), AllocError> {
     from = lx.cur.pos();
-    punct_of(b).match({
-        Ok(single) => lx.emit(punct_kind(lx.cur, b, single), from),
-        None       => lx.stray(),
+    lx.cur.punct_kind(b).match({
+        Ok(kind) => lx.emit(kind, from),
+        None     => lx.stray(),
     });
 }
 
@@ -184,8 +163,5 @@ stray = (lx :: Lexer) Res<(), AllocError> {
 }
 
 begins_no_token = (b: u8) bool {
-    class_of(b).match({
-        Other => punct_of(b).match({ Ok(_) => false, None => true }),
-        _     => false,
-    });
+    class_of(b).match({ Other => !b.is_punct(), _ => false });
 }

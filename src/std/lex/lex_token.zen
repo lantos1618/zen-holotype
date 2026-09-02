@@ -10,7 +10,6 @@ Pos* = {
     col*: usize,
 }
 
-// Display as `line:col`; the byte offset is not rendered.
 Pos.impl(Display, {
     toString ::= (self: @Self, out :: Sink) Res<(), WriteError> {
         out.fmt("{}:{}", self.line, self.col)
@@ -23,23 +22,17 @@ Span* = {
     end*: Pos,
 }
 
-// Source bytes and the filename used in diagnostics.
-Source* = {
-    file*: str,
-    text*: str,
-}
-
 // Complete token alphabet. Comments are tokens so the formatter can preserve
 // them; whitespace is derived from gaps between spans.
 TokenKind* =
-      Ident              // `[A-Za-z_][A-Za-z0-9_]*`; `_` is parsed later
+      Ident              // `[A-Za-z_][A-Za-z0-9_]*`; `_` is a wildcard only in patterns
     | Int(u64)           // validated unsigned magnitude; sign is a unary operator
     | Float              // source digits; conversion waits for the target type
     | Str
     | Char
-    | True | False       // reserved by the grammar, so they are not Idents
-    | Consume            // the one keyword. `consume` moves, stated at the use site
-    | AtSelf | AtMeta | AtScope   // the whole `@` namespace. It is closed at three
+    | True | False
+    | Consume
+    | AtSelf | AtMeta | AtScope   // the entire `@` namespace
 
     | LineComment | BlockComment
 
@@ -58,9 +51,7 @@ TokenKind* =
     | Star | StarWrap
     | Slash | Percent
 
-    | Eof                // exactly one, last, spanning nothing. A parser that can
-                         // ask "what is here" at the end needs no second shape for
-                         // the end, and "unexpected end of file" gets a position
+    | Eof                // exactly one, always last, empty span
 
 // Token equality compares Int payloads and otherwise compares variant tags.
 TokenKind.impl(Eq, {
@@ -123,9 +114,18 @@ Token* = {
     span*: Span,
 }
 
-// Borrow the source bytes covered by a token.
-text_of* = (source: Source, token: Token) str {
-    source.text.slice(token.span.start.offset, token.span.end.offset);
+// Source bytes and the filename used in diagnostics.
+Source* = {
+    file*: str,
+    text*: str,
+
+    // Borrow the source bytes covered by a token.
+    text_of* = (self: @Self, token: Token) str { self.text_in(token.span) }
+
+    // Borrow the source bytes a span covers.
+    text_in* = (self: @Self, span: Span) str {
+        self.text.slice(span.start.offset, span.end.offset)
+    }
 }
 
 // User-facing token names. Operators are named by their source glyphs.
