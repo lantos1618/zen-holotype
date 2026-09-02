@@ -1,8 +1,7 @@
 Alloc, AllocError = std.mem
 Vec, Map = std.collections
 str, String = std.text
-Eq, Hash, Hasher = std.core
-Range = std.core
+Eq, Hash, Hasher, Range = std.core
 DeclId = sema.sema_id
 
 // Index into Types. u32 supports lossless indexing and hashing conversions.
@@ -33,7 +32,7 @@ is_integer* = (name: str) bool {
 
 // Integers whose width is a Zen language property. C ABI integers are
 // intentionally absent: their width follows the selected C target.
-fixed_integer* = (name: str) bool {
+fixed_integer = (name: str) bool {
     name.is_in(["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize"])
 }
 
@@ -116,8 +115,7 @@ Types* = {
     // reading
     // -----------------------------------------------------------------
 
-    // What a type IS. Traps on an id this store never handed out — same
-    // as `Ast.expr_at`: a compiler bug, not input a caller can act on.
+    // Traps on an id this store never handed out.
     at* = (self: @Self, id: TyId) Ty {
         i = id.index.to_usize();
         self.kinds.len - i - 1;
@@ -140,16 +138,14 @@ Types* = {
 
 
     intern* = (self :: @Self, key: str, kind: Ty) Res<TyId, AllocError> {
-        // the None arm leads because a match takes its type from its
-        // first arm, and this is the arm whose type is written down.
+        // `None` first: the match takes its type from its first arm.
         self.by_key.get(key).match({
             None   => self.fresh(key, kind),
             Ok(id) => Ok(id),
         })
     }
 
-    // A key this store has not seen. Never called twice for one key —
-    // `intern` is the only caller and it has already looked.
+    // Only `intern` calls this, after a miss.
     fresh = (self :: @Self, key: str, kind: Ty) Res<TyId, AllocError> {
         id = TyId(index: self.count);
         owned ::= self.alloc.String().try();
@@ -167,8 +163,7 @@ Types* = {
     // the constructors
     // -----------------------------------------------------------------
 
-    // `i32`, `bool`, `str`, `()`. The key is the name: a primitive is
-    // nominal on nothing else, and no declaration can shadow one.
+    // The key is the name; no declaration can shadow a primitive.
     prim* = (self :: @Self, name: str) Res<TyId, AllocError> {
         self.intern(name, Ty.Prim(Prim(name: name)))
     }
@@ -260,8 +255,7 @@ Types* = {
         self.intern(key.view(), Ty.Var(TyVar(name: name, owner: owner)))
     }
 
-    // A function type. Parameter names are not in the key because they
-    // are not in the type.
+    // Parameter names are not part of the type.
     fn_ty* = (self :: @Self, params: Vec<TyId>, ret: TyId) Res<TyId, AllocError> {
         key ::= self.alloc.String().try();
         key.add("(").try();
@@ -278,8 +272,6 @@ Types* = {
         self.flatten_into(flat, members).try();
         canon ::= self.alloc.Vec<TyId>();
         self.sort_unique_into(canon, flat).try();
-        // a set of one IS its member: `Res<T, E>` never changes shape,
-        // and "a single error type is a set of one"
         canon.len.match({
             0 => self.prim("()"),
             1 => canon.get(0).match({ None => self.unknown(), Ok(m) => Ok(m) }),
@@ -287,8 +279,7 @@ Types* = {
         })
     }
 
-    // The pair form, which is what `.try()` propagation actually asks
-    // for: the callee's set merged into the caller's.
+    // `.try()` propagation: the callee's set merged into the caller's.
     merge* = (self :: @Self, a: TyId, b: TyId) Res<TyId, AllocError> {
         both ::= self.alloc.Vec<TyId>();
         both.add(a).try();
@@ -298,7 +289,7 @@ Types* = {
 
     set_has* = (self: @Self, set: TyId, member: TyId) bool {
         self.at(set).match({
-            Union(u) => self.vec_has(u.members, member),
+            Union(u) => member.is_in(u.members),
             Var(_)   => true,
             _        => set.eq(member),
         })
@@ -312,8 +303,7 @@ Types* = {
         })
     }
 
-    // The members of a set, as a list, whatever its shape — a caller
-    // walking an error set shouldn't have to know union vs. set-of-one.
+    // The members of a set; a set of one lists its member.
     members_of* = (self: @Self, set: TyId, out :: Vec<TyId>) Res<(), AllocError> {
         self.at(set).match({
             Union(u) => self.copy_members(out, u.members),
@@ -322,9 +312,8 @@ Types* = {
         Ok(());
     }
 
-    // The loop family returns `Res<T>` (an absence), so a bare `loop`
-    // can't sit in a match arm beside an `add` returning
-    // `Res<(), AllocError>`; naming the walk gives both arms one type.
+    // Named so both `members_of` arms have one type: a bare `loop`
+    // yields `Res<T>`.
     copy_members = (self: @Self, out :: Vec<TyId>, members: Vec<TyId>)
                    Res<(), AllocError> {
         members.loop((h, m) { out.add(m).try() });
@@ -347,8 +336,7 @@ Types* = {
         Ok(());
     }
 
-    // The name as a fresh String, for a caller that wants one value
-    // rather than a sink. Allocates, and says so.
+    // Allocates a fresh String.
     name_of* = (self: @Self, id: TyId) Res<String, AllocError> {
         out ::= self.alloc.String().try();
         self.write_name(id, out).try();
@@ -356,7 +344,7 @@ Types* = {
     }
 
     // -----------------------------------------------------------------
-    // the pieces the above stand on
+    // writing names and keys
     // -----------------------------------------------------------------
 
     write_res = (self: @Self, r: TyRes, out :: String) Res<(), AllocError> {
@@ -405,8 +393,7 @@ Types* = {
         Ok(());
     }
 
-    // `[i32, 4]` — the source spelling, count and all, because the count
-    // is what a diagnostic about a fixed array is usually about.
+    // `[i32, 4]`, the source spelling.
     write_array = (self: @Self, a: TyArray, out :: String)
                   Res<(), AllocError> {
         out.add("[").try();
@@ -445,8 +432,7 @@ Types* = {
         self.intern(key.view(), Ty.Union(TyUnion(members: canon)))
     }
 
-    // A member that is itself a union contributes its members, not
-    // itself: "`A | B | C` is one Union of three, never a Union of a Union".
+    // A nested union contributes its members.
     flatten_into = (self: @Self, out :: Vec<TyId>, members: Vec<TyId>)
                    Res<(), AllocError> {
         members.loop((h, m) {
@@ -458,14 +444,12 @@ Types* = {
         Ok(());
     }
 
-    // Insertion sort, dropping a member equal to the one before it.
-    // A set has a handful of members and never more, so the shape that
-    // is obviously correct is the one to write.
+    // Insertion sort, deduplicated.
     sort_unique_into = (self: @Self, out :: Vec<TyId>, src: Vec<TyId>)
                        Res<(), AllocError> {
         src.loop((h, id) {
-            // Keep the fallible arm first so the match retains AllocError.
-            self.vec_has(out, id).match({
+            // The fallible arm first so the match retains AllocError.
+            id.is_in(out).match({
                 false => self.insert_ordered(out, id),
                 true  => Ok(()),
             }).try();
@@ -473,8 +457,7 @@ Types* = {
         Ok(());
     }
 
-    // Append, then walk the new element down to its place. No break,
-    // for the reason `sort_unique_into` gives.
+    // Append, then walk the new element down to its place.
     insert_ordered = (self: @Self, out :: Vec<TyId>, id: TyId)
                      Res<(), AllocError> {
         out.add(id).try();
@@ -491,26 +474,15 @@ Types* = {
         Ok(());
     }
 
-    // Lexicographic order on the intern keys. Ordering by id would be
-    // canonical too, but would print a set in whatever order it happened
-    // to be interned; ordering by key is stable across runs.
+    // Lexicographic order on intern keys: stable across runs, unlike
+    // id order.
     before = (self: @Self, a: TyId, b: TyId) bool {
         self.key_at(a).before(self.key_at(b))
     }
 
-    vec_has = (self: @Self, haystack: Vec<TyId>, needle: TyId) bool {
-        Range(0, haystack.len).find((i) {
-            haystack.get(i).match({ Ok(v) => v.eq(needle), None => false })
-        }).match({ Ok(_) => true, None => false })
-    }
-
     all_within = (self: @Self, members: Vec<TyId>, wide: TyId) bool {
-        Range(0, members.len).find((i) {
-            members.get(i).match({
-                Ok(m) => self.set_has(wide, m) == false,
-                None  => false,
-            })
-        }).match({ Ok(_) => false, None => true })
+        members.find((m) { self.set_has(wide, m) == false })
+            .match({ Ok(_) => false, None => true })
     }
 }
 
@@ -524,7 +496,7 @@ Types* = (a: Alloc) Types {
     )
 }
 
-put* = (out :: Vec<TyId>, i: usize, v: TyId) Res<(), AllocError> {
+put = (out :: Vec<TyId>, i: usize, v: TyId) Res<(), AllocError> {
     out.set(i, v).match({
         None  => Err(AllocError.OutOfMemory),
         Ok(_) => Ok(()),

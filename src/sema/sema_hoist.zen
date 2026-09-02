@@ -9,9 +9,10 @@ Checker, Ctx = sema.sema_check
 Found, members_of = sema.sema_member
 storage_seat_name = sema.sema_supply
 check_literal = sema.sema_trap
+refuse_handle_value = sema.sema_handle
 type_of = sema.sema_type
 
-hoist_check* = (c :: Checker, file: str, span: Span, got: TyId, want: TyId)
+hoist_check = (c :: Checker, file: str, span: Span, got: TyId, want: TyId)
                Res<(), AllocError> {
     c.assignable(got, want).match({
         true  => Ok(()),
@@ -65,13 +66,12 @@ lone_failure = (c :: Checker, file: str, span: Span, err: bool)
     })
 }
 
-// An unsettled slot carries no countable value, so a `Res` with an
-// unsettled success payload cannot be counted at all.
-countable = (c: Checker, r: TyRes) bool { settled(c, r.value) }
+// A `Res` whose success payload is unsettled cannot be counted.
+countable = (c: Checker, r: TyRes) bool { c.settled(r.value) }
 
 carries_failure = (c: Checker, got: TyId, r: TyRes) bool {
     r.form.match({
-        Failure => settled(c, r.error) && c.assignable(got, r.error),
+        Failure => c.settled(r.error) && c.assignable(got, r.error),
         Absence => false,
         Open    => false,
     })
@@ -99,7 +99,6 @@ failure_never_lifts = (c :: Checker, file: str, span: Span)
     c.report(file, span, SemaFault.HoistNotSuccess(NameFault(name: "Err")))
 }
 
-// the two positions
 check_return* = (c :: Checker, body: BlockId, ctx: Ctx, got: TyId)
                 Res<(), AllocError> {
     blk = c.tree.block_at(body);
@@ -163,7 +162,7 @@ lift_or_refuse = (
     r    : TyRes
 ) Res<(), AllocError> {
     c.hoist_into_res(node.span.file, node.span, got, want, r).try();
-    (c.lands_somewhere(got, r) || (was_written(node) == false)).match({
+    (c.lands_somewhere(got, r) || (node.was_written() == false)).match({
         true  => Ok(()),
         false => c.wrong_return(blk, node, got, want),
     })
@@ -188,7 +187,7 @@ wrong_return = (c :: Checker, blk: Block, node: Expr, got: TyId, want: TyId)
 
 value_was_asked_for = (c: Checker, blk: Block, got: TyId, want: TyId) bool {
     (c.unit_ty(want) == false)
-        && (written_value(blk) || (c.unit_ty(got) == false))
+        && (blk.written_value() || (c.unit_ty(got) == false))
 }
 
 written_value = (blk: Block) bool {
@@ -203,8 +202,8 @@ hoist_at = (c :: Checker, id: ExprId, got: TyId, want: TyId)
     c.hoist_check(node.span.file, node.span, got, want)
 }
 
-// The block's value, written with or without the closing `;` — the AST
-// records only which was written, and both are the block's value.
+// The block's value, with or without its closing `;`; a trailing block
+// statement supplies its own tail.
 tail_expr* = (c: Checker, blk: Block) Res<ExprId> {
     blk.value.match({
         Ok(e) => Ok(e),
@@ -220,8 +219,6 @@ last_stmt_expr = (c: Checker, blk: Block) Res<ExprId> {
     })
 }
 
-// A nested block ends on its own tail, so descend through a final block
-// statement to the expression that supplies its value.
 last_stmt_of = (c: Checker, stmts: Vec<Stmt>) Res<ExprId> {
     stmts.get(stmts.len - 1).match({
         None  => None,
@@ -237,7 +234,6 @@ stmt_tail_expr = (c: Checker, s: Stmt) Res<ExprId> {
     })
 }
 
-// the third position: an arm
 check_arms* = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
     c.arms_owe(id, want, Blame.Position)
 }
@@ -260,8 +256,7 @@ arms_owe = (c :: Checker, id: ExprId, want: TyId, blame: Blame)
     })
 }
 
-// A nested match's arms are the values; the inner match is only how
-// they were chosen — same recursion, same reason as `literal_within`.
+// A nested match's arms are the values, as in `literal_within`.
 arms_within = (c :: Checker, m: Match, want: TyId, blame: Blame)
               Res<(), AllocError> {
     m.arms.loop((h, a) { c.arm_within(a.body, want, blame).try() });
@@ -428,11 +423,11 @@ ctor_names_constant = (
 
 // A field is a typed slot: check lifting, assignability, match arms, literal
 // range, and whether the value is a non-storable loop handle.
-refuse_handle_value = sema.sema_handle
 field_fits = (c :: Checker, a: Arg, want: TyId, ctx: Ctx)
              Res<(), AllocError> {
-    c.refuse_handle_value(a.value, c.type_of(a.value, ctx).try()).try();
-    c.hoist_at(a.value, c.type_of(a.value, ctx).try(), want).try();
+    got = c.type_of(a.value, ctx).try();
+    c.refuse_handle_value(a.value, got).try();
+    c.hoist_at(a.value, got, want).try();
     c.check_literal(a.value, want).try();
     c.check_arms(a.value, want)
 }

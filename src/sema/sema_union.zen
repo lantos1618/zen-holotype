@@ -2,10 +2,9 @@ Decl, Enum, Variant = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
-Range = std.core
 DeclId = sema.sema_id
 TyId, TyNamed, TyUnion = sema.sema_ty
-Def, decl_at = sema.sema_def
+Def, decl_at, has_variant = sema.sema_def
 Checker = sema.sema_check
 enum_has_discriminants = sema.sema_discriminant
 
@@ -34,7 +33,7 @@ record_if_union = (c :: Checker, id: TyId, decl: DeclId)
 compute_set = (c :: Checker, id: TyId, decl: DeclId) Res<(), AllocError> {
     c.set_memo.set(id, id).try();
     members ::= c.alloc.Vec<TyId>();
-    collect_members(c, decl, members).try();
+    c.collect_members(decl, members).try();
     set = c.types.union_ty(members).try();
     c.set_memo.set(id, set).try();
     Ok(());
@@ -59,7 +58,7 @@ decl_members = (c :: Checker, decl: DeclId, d: Decl, out :: Vec<TyId>)
 enum_members = (c :: Checker, decl: DeclId, e: Enum, out :: Vec<TyId>)
                Res<(), AllocError> {
     e.variants.loop((h, v) {
-        out.add(member_type(c, decl, v.name.text).try()).try();
+        out.add(c.variant_member_type(decl, v.name.text).try()).try();
     });
     Ok(());
 }
@@ -81,29 +80,23 @@ member_named = (c :: Checker, d: Def) Res<TyId, AllocError> {
 
 // Resolve a member before reading its flattened set so containment is
 // independent of declaration order.
-member_type = (c :: Checker, decl: DeclId, name: str) Res<TyId, AllocError> {
+variant_member_type = (c :: Checker, decl: DeclId, name: str)
+                      Res<TyId, AllocError> {
     id = c.union_member(decl, name).try();
     Ok(c.set_of(id));
 }
 
 union_carrier* = (c :: Checker, ty: TyId, name: str) Res<TyId, AllocError> {
     c.types.at(ty).match({
-        Named(n) => named_carrier(c, n, name),
+        Named(n) => c.named_carrier(n, name),
         _        => c.types.unknown(),
     })
 }
 
 named_carrier = (c :: Checker, n: TyNamed, name: str) Res<TyId, AllocError> {
-    (c.union_reading(n.decl) && c.variant_named(n.decl, name)).match({
+    (c.union_reading(n.decl) && c.decl_has_variant(n.decl, name)).match({
         true  => c.union_member(n.decl, name),
         false => c.types.unknown(),
-    })
-}
-
-variant_named = (c :: Checker, decl: DeclId, name: str) bool {
-    decl_at(c.tree, decl).match({
-        None  => false,
-        Ok(d) => decl_names_variant(d, name),
     })
 }
 
@@ -144,7 +137,7 @@ member_is = (c :: Checker, m: TyId, name: str) bool {
     })
 }
 
-decl_is_named* = (c :: Checker, decl: DeclId, name: str) bool {
+decl_is_named = (c :: Checker, decl: DeclId, name: str) bool {
     decl_at(c.tree, decl).match({
         None  => false,
         Ok(d) => decl_kind_names(d, name),
@@ -159,9 +152,7 @@ decl_kind_names = (d: Decl, name: str) bool {
     })
 }
 
-// The declared-variants walk `variant_named` uses, exported to the
-// backend through `Checker` for the same agreement rule.
-decl_has_variant* = (c :: Checker, decl: DeclId, name: str) bool {
+decl_has_variant = (c :: Checker, decl: DeclId, name: str) bool {
     decl_at(c.tree, decl).match({
         None  => false,
         Ok(d) => decl_names_variant(d, name),
@@ -170,18 +161,9 @@ decl_has_variant* = (c :: Checker, decl: DeclId, name: str) bool {
 
 decl_names_variant = (d: Decl, name: str) bool {
     d.kind.match({
-        Enum(e) => enum_names_variant(e, name),
+        Enum(e) => e.has_variant(name),
         _       => false,
     })
-}
-
-enum_names_variant = (e: Enum, name: str) bool {
-    Range(0, e.variants.len).find((i) {
-        e.variants.get(i).match({
-            None  => false,
-            Ok(v) => v.name.text.eq(name),
-        })
-    }).match({ Ok(_) => true, None => false })
 }
 
 union_reading* = (c :: Checker, decl: DeclId) bool {
@@ -193,7 +175,7 @@ union_reading* = (c :: Checker, decl: DeclId) bool {
 
 enum_union_reading = (c :: Checker, decl: DeclId, d: Decl) bool {
     d.kind.match({
-        Enum(e) => enum_has_discriminants(e).match({
+        Enum(e) => e.enum_has_discriminants().match({
             true  => false,
             false => c.no_nominal_variant(decl, e),
         }),
@@ -210,25 +192,13 @@ no_nominal_variant = (c :: Checker, decl: DeclId, e: Enum) bool {
 }
 
 every_variant_named = (c :: Checker, decl: DeclId, e: Enum) bool {
-    Range(0, e.variants.len).find((i) {
-        e.variants.get(i).match({
-            None  => true,
-            Ok(v) => !names_a_type(c, decl, v),
-        })
-    }).match({ Ok(_) => false, None => true })
+    e.variants.find((v) { !c.names_a_type(decl, v) })
+        .match({ Ok(_) => false, None => true })
 }
 
 names_a_type = (c :: Checker, decl: DeclId, v: Variant) bool {
     v.payload.match({
         Ok(_) => false,
-        None  => c.defs_named(decl, v.name.text),
-    })
-}
-
-defs_named = (c :: Checker, decl: DeclId, name: str) bool {
-    found ::= c.alloc.Vec<Def>();
-    c.world.defs_of(decl.module.to_usize(), name, found).match({
-        Err(_) => false,
-        Ok(_)  => found.len > 0,
+        None  => c.world.defines(decl.module.to_usize(), v.name.text),
     })
 }

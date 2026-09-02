@@ -1,8 +1,8 @@
-Ast, Module, Decl, Expr, Import, Pos, Span, ExprId, nowhere = std.ast
+Ast, Module, Decl, Import, Span, ExprId, nowhere = std.ast
 Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
-Range = std.core
+Range, Eq = std.core
 World, Def, DefKind, dotted, module_display = sema.sema_def
 
 ConstSite = {
@@ -10,77 +10,323 @@ ConstSite = {
     span:   Span,
 }
 
+// `from` has a top-level constant that names one of `to`'s.
 Edge = {
     from: usize,
     to:   usize,
 }
 
+Edge.impl(Eq, {
+    eq ::= (self: @Self, other: @Self) bool {
+        (self.from == other.from) && (self.to == other.to)
+    }
+})
+
+// The module graph two diagnostics are asked of: a module importing
+// itself, and a constant cycle between modules.
+Graph = {
+    alloc: Alloc,
+    tree: Ast,
+    world: World,
+    edges :: Vec<Edge>,
+
+    self_imports = (self: @Self, out :: String) Res<usize, AllocError> {
+        n ::= 0;
+        Range(0, self.tree.module_count()).loop((h, mi) {
+            n = n + self.module_self_imports(mi, out).try();
+        });
+        Ok(n);
+    }
+
+    module_self_imports = (self: @Self, mi: usize, out :: String)
+                          Res<usize, AllocError> {
+        self.tree.module_at(mi).match({
+            None  => Ok(0),
+            Ok(m) => self.decls_self_import(m, mi, out),
+        })
+    }
+
+    decls_self_import = (self: @Self, m: Module, mi: usize, out :: String)
+                        Res<usize, AllocError> {
+        n ::= 0;
+        m.decls.loop((h, d) {
+            n = n + self.decl_self_import(m, d, mi, out).try();
+        });
+        Ok(n);
+    }
+
+    decl_self_import = (self: @Self, m: Module, d: Decl, mi: usize,
+                        out :: String) Res<usize, AllocError> {
+        d.kind.match({
+            Import(im) => self.names_module(im, mi).try().match({
+                false => Ok(0),
+                true  => say_self_import(m, im.module.span, out),
+            }),
+            _          => Ok(0),
+        })
+    }
+
+    // Whether the import path names module `mi`.
+    names_module = (self: @Self, im: Import, mi: usize)
+                   Res<bool, AllocError> {
+        path = dotted(self.alloc, im.module).try();
+        Ok(self.world.index_of(path).match({
+            Ok(j) => j == mi,
+            None  => false,
+        }))
+    }
+
+    const_cycles = (self: @Self, out :: String) Res<usize, AllocError> {
+        n ::= 0;
+        Range(0, self.world.count()).loop((h, mi) {
+            n = n + self.cycle_at(mi, out).try();
+        });
+        Ok(n);
+    }
+
+    cycle_at = (self: @Self, mi: usize, out :: String)
+               Res<usize, AllocError> {
+        onward = self.reach_from(mi).try();
+        mi.is_in(onward).match({
+            false => Ok(0),
+            true  => self.report_component(mi, onward, out),
+        })
+    }
+
+    // One report per component, from its first module by name.
+    report_component = (self: @Self, mi: usize, onward: Vec<usize>,
+                        out :: String) Res<usize, AllocError> {
+        comp = self.component_of(mi, onward).try();
+        self.first_named(comp, mi).match({
+            false => Ok(0),
+            true  => self.say_cycle(mi, comp, out),
+        })
+    }
+
+    component_of = (self: @Self, mi: usize, onward: Vec<usize>)
+                   Res<Vec<usize>, AllocError> {
+        comp ::= self.alloc.Vec<usize>();
+        comp.add(mi).try();
+        onward.loop((h, j) {
+            (j == mi).match({
+                true  => Ok(()),
+                false => self.add_if_reaches(mi, j, comp),
+            }).try();
+        });
+        Ok(comp);
+    }
+
+    add_if_reaches = (self: @Self, mi: usize, j: usize, comp :: Vec<usize>)
+                     Res<(), AllocError> {
+        back = self.reach_from(j).try();
+        mi.is_in(back).match({
+            false => Ok(()),
+            true  => comp.add(j),
+        })
+    }
+
+    first_named = (self: @Self, comp: Vec<usize>, mi: usize) bool {
+        name = self.world.name_at(mi);
+        comp.find((k) { self.world.name_at(k).before(name) })
+            .match({ Ok(_) => false, None => true })
+    }
+
+    say_cycle = (self: @Self, mi: usize, comp: Vec<usize>, out :: String)
+                Res<usize, AllocError> {
+        path = self.shortest_cycle(mi, comp).try();
+        at   = self.edge_span(mi, path.get(1).value_or(mi)).try();
+        write_where(out, at).try();
+        out.add("import cycle: ").try();
+        path.loop((h, k, m) {
+            (k > 0).then(() { out.add(" -> ").try(); });
+            out.add(module_display(self.world.name_at(m))).try();
+        });
+        out.add(
+            ": a top-level constant needs a value from a module whose own needs it back, and no order computes both"
+        ).try();
+        out.add("\n").try();
+        Ok(1);
+    }
+
+    shortest_cycle = (self: @Self, start: usize, comp: Vec<usize>)
+                     Res<Vec<usize>, AllocError> {
+        s ::= Search(
+            start: start,
+            comp: comp,
+            order: self.alloc.Vec<usize>(),
+            prev: self.alloc.Vec<usize>(),
+            closed: self.alloc.Vec<usize>(),
+        );
+        s.order.add(start).try();
+        s.prev.add(0).try();
+        i ::= 0;
+        loop(() { i < s.order.len && s.closed.len == 0 }, (h) {
+            from = s.order.get(i).value_or(start);
+            self.edges.loop((g, e) {
+                (e.from == from).then(() { s.take(e.to, i).try() });
+            });
+            i = i + 1;
+        });
+        s.path(self.alloc)
+    }
+
+    // Every module a constant of `start` reaches, transitively.
+    reach_from = (self: @Self, start: usize) Res<Vec<usize>, AllocError> {
+        seen  ::= self.alloc.Vec<usize>();
+        front ::= self.alloc.Vec<usize>();
+        front.add(start).try();
+        i ::= 0;
+        loop(i < front.len, (h) {
+            from = front.get(i).value_or(start);
+            i    = i + 1;
+            self.edges.loop((g, e) {
+                (e.from == from && !e.to.is_in(seen)).then(() {
+                    seen.add(e.to).try();
+                    front.add(e.to).try();
+                });
+            });
+        });
+        Ok(seen);
+    }
+
+    // The import in `from` that names `to`; the module span when none does.
+    edge_span = (self: @Self, from: usize, to: usize) Res<Span, AllocError> {
+        self.tree.module_at(from).match({
+            None  => Ok(nowhere()),
+            Ok(m) => self.module_edge_span(m, to),
+        })
+    }
+
+    module_edge_span = (self: @Self, m: Module, to: usize)
+                       Res<Span, AllocError> {
+        hit: Res<Span> ::= None;
+        m.decls.loop((h, d) {
+            d.kind.match({
+                Import(im) => self.names_module(im, to).try().match({
+                    true  => { hit = Ok(im.module.span); h.break(); },
+                    false => (),
+                }),
+                _          => (),
+            });
+        });
+        Ok(hit.value_or(m.span));
+    }
+
+    // The constant graph: an edge from each module-level constant to
+    // every other module whose constant it names.
+    add_edges = (self :: @Self) Res<(), AllocError> {
+        sites = self.const_sites().try();
+        eid ::= ExprId(index: 0);
+        Range(0, self.tree.expr_ids()).loop((h, i) {
+            e = self.tree.expr_at(eid);
+            e.kind.match({
+                Name(n) => self.name_edges(sites, e.span, n.text),
+                _       => Ok(()),
+            }).try();
+            eid = ExprId(index: eid.index + 1);
+        });
+        Ok(());
+    }
+
+    const_sites = (self: @Self) Res<Vec<ConstSite>, AllocError> {
+        sites ::= self.alloc.Vec<ConstSite>();
+        Range(0, self.tree.module_count()).loop((h, mi) {
+            self.tree.module_at(mi).match({
+                None  => Ok(()),
+                Ok(m) => decl_const_sites(m, mi, sites),
+            }).try();
+        });
+        Ok(sites);
+    }
+
+    name_edges = (self :: @Self, sites: Vec<ConstSite>, at: Span, name: str)
+                 Res<(), AllocError> {
+        site_of(sites, at).match({
+            None   => Ok(()),
+            Ok(mi) => self.resolved_edges(mi, name),
+        })
+    }
+
+    resolved_edges = (self :: @Self, mi: usize, name: str)
+                     Res<(), AllocError> {
+        found ::= self.alloc.Vec<Def>();
+        self.world.defs_of(mi, name, found).try();
+        found.loop((h, d) {
+            other = d.id.module.to_usize();
+            (is_const(d.kind) && other != mi).match({
+                false => Ok(()),
+                true  => self.add_edge(Edge(from: mi, to: other)),
+            }).try();
+        });
+        Ok(());
+    }
+
+    add_edge = (self :: @Self, e: Edge) Res<(), AllocError> {
+        e.is_in(self.edges).match({
+            true  => Ok(()),
+            false => self.edges.add(e),
+        })
+    }
+}
+
+Graph = (a: Alloc, tree: Ast, w: World) Res<Graph, AllocError> {
+    g ::= Graph(alloc: a, tree: tree, world: w, edges: a.Vec<Edge>());
+    g.add_edges().try();
+    Ok(g);
+}
+
+// Breadth-first search for the shortest cycle through `start`, inside one
+// component.
+Search = {
+    start: usize,
+    comp: Vec<usize>,
+    order :: Vec<usize>,
+    prev :: Vec<usize>,
+    closed :: Vec<usize>,
+
+    // The first edge back to `start` closes a shortest cycle.
+    take = (self :: @Self, to: usize, at: usize) Res<(), AllocError> {
+        (to == self.start).match({
+            true  => (self.closed.len == 0).match({
+                false => Ok(()),
+                true  => self.closed.add(at),
+            }),
+            false => self.open(to, at),
+        })
+    }
+
+    // Inside the component only: an edge leaving it never comes back.
+    open = (self :: @Self, to: usize, at: usize) Res<(), AllocError> {
+        (to.is_in(self.comp) && !to.is_in(self.order)).match({
+            false => Ok(()),
+            true  => { self.order.add(to).try(); self.prev.add(at) },
+        })
+    }
+
+    // The cycle as modules, `start` first and last.
+    path = (self: @Self, a: Alloc) Res<Vec<usize>, AllocError> {
+        back ::= a.Vec<usize>();
+        at   ::= self.closed.get(0).value_or(0);
+        back.add(self.order.get(at).value_or(self.start)).try();
+        loop(at > 0, (h) {
+            at = self.prev.get(at).value_or(0);
+            back.add(self.order.get(at).value_or(self.start)).try();
+        });
+        path ::= a.Vec<usize>();
+        Range(0, back.len).loop((h, k) {
+            path.add(back.get(back.len - 1 - k).value_or(self.start)).try();
+        });
+        path.add(self.start).try();
+        Ok(path);
+    }
+}
+
 check_module_graph* = (a: Alloc, tree: Ast, w: World, out :: String)
                       Res<usize, AllocError> {
-    n ::= self_imports(a, tree, w, out).try();
-    n = n + const_cycles(a, tree, w, out).try();
+    g = Graph(a, tree, w).try();
+    n ::= g.self_imports(out).try();
+    n = n + g.const_cycles(out).try();
     Ok(n);
-}
-
-// a module that imports itself
-self_imports = (a: Alloc, tree: Ast, w: World, out :: String)
-               Res<usize, AllocError> {
-    n ::= 0;
-    Range(0, tree.module_count()).loop((h, mi) {
-        n = n + module_self_imports(a, tree, w, mi, out).try();
-    });
-    Ok(n);
-}
-
-module_self_imports = (
-    a    : Alloc,
-    tree : Ast,
-    w    : World,
-    mi   : usize,
-    out  :: String
-) Res<usize, AllocError> {
-    tree.module_at(mi).match({
-        None  => Ok(0),
-        Ok(m) => decls_self_import(a, w, m, mi, out),
-    })
-}
-
-decls_self_import = (a: Alloc, w: World, m: Module, mi: usize, out :: String)
-                    Res<usize, AllocError> {
-    n ::= 0;
-    m.decls.loop((h, d) {
-        n = n + decl_self_import(a, w, m, d, mi, out).try();
-    });
-    Ok(n);
-}
-
-decl_self_import = (
-    a   : Alloc,
-    w   : World,
-    m   : Module,
-    d   : Decl,
-    mi  : usize,
-    out :: String
-) Res<usize, AllocError> {
-    d.kind.match({
-        Import(im) => import_self(a, w, m, im, mi, out),
-        _          => Ok(0),
-    })
-}
-
-import_self = (
-    a   : Alloc,
-    w   : World,
-    m   : Module,
-    im  : Import,
-    mi  : usize,
-    out :: String
-) Res<usize, AllocError> {
-    path = dotted(a, im.module).try();
-    names_module(w, path, mi).match({
-        false => Ok(0),
-        true  => say_self_import(m, im.module.span, out),
-    })
 }
 
 say_self_import = (m: Module, at: Span, out :: String)
@@ -93,344 +339,20 @@ say_self_import = (m: Module, at: Span, out :: String)
     Ok(1);
 }
 
-// a cycle in top-level constants
-const_cycles = (a: Alloc, tree: Ast, w: World, out :: String)
-               Res<usize, AllocError> {
-    es = const_edges(a, tree, w).try();
-    (es.len == 0).match({
-        true  => Ok(0),
-        false => cycles_in(a, tree, w, es, out),
-    })
-}
-
-cycles_in = (a: Alloc, tree: Ast, w: World, es: Vec<Edge>, out :: String)
-            Res<usize, AllocError> {
-    n ::= 0;
-    Range(0, w.count()).loop((h, mi) {
-        n = n + cycle_at(a, tree, w, es, mi, out).try();
-    });
-    Ok(n);
-}
-
-cycle_at = (
-    a    : Alloc,
-    tree : Ast,
-    w    : World,
-    es   : Vec<Edge>,
-    mi   : usize,
-    out  :: String
-) Res<usize, AllocError> {
-    onward = reach_from(a, es, mi).try();
-    mi.is_in(onward).match({
-        false => Ok(0),
-        true  => report_component(a, tree, w, es, mi, onward, out),
-    })
-}
-
-report_component = (
-    a      : Alloc,
-    tree   : Ast,
-    w      : World,
-    es     : Vec<Edge>,
-    mi     : usize,
-    onward : Vec<usize>,
-    out    :: String
-)
-                   Res<usize, AllocError> {
-    comp = component_of(a, es, mi, onward).try();
-    first_named(w, comp, mi).match({
-        false => Ok(0),
-        true  => say_cycle(a, tree, w, es, mi, comp, out),
-    })
-}
-
-component_of = (a: Alloc, es: Vec<Edge>, mi: usize, onward: Vec<usize>)
-               Res<Vec<usize>, AllocError> {
-    comp ::= a.Vec<usize>();
-    comp.add(mi).try();
-    onward.loop((h, j) {
-        keep_if_mutual(a, es, mi, j, comp).try();
-    });
-    Ok(comp);
-}
-
-keep_if_mutual = (
-    a    : Alloc,
-    es   : Vec<Edge>,
-    mi   : usize,
-    j    : usize,
-    comp :: Vec<usize>
-) Res<(), AllocError> {
-    (j == mi).match({
-        true  => Ok(()),
-        false => add_if_reaches(a, es, mi, j, comp),
-    })
-}
-
-add_if_reaches = (
-    a    : Alloc,
-    es   : Vec<Edge>,
-    mi   : usize,
-    j    : usize,
-    comp :: Vec<usize>
-) Res<(), AllocError> {
-    back = reach_from(a, es, j).try();
-    mi.is_in(back).match({
-        false => Ok(()),
-        true  => comp.add(j),
-    })
-}
-
-first_named = (w: World, comp: Vec<usize>, mi: usize) bool {
-    Range(0, comp.len).find((k) {
-        module_name_of(w, comp.get(k).value_or(mi)).before(module_name_of(w, mi))
-    }).match({
-        Ok(_) => false,
-        None  => true,
-    })
-}
-
-module_name_of = (w: World, mi: usize) str {
-    w.table_at(mi).match({
-        Ok(t) => t.name,
-        None  => "",
-    })
-}
-
-say_cycle = (
-    a    : Alloc,
-    tree : Ast,
-    w    : World,
-    es   : Vec<Edge>,
-    mi   : usize,
-    comp : Vec<usize>,
-    out  :: String
-) Res<usize, AllocError> {
-    path = shortest_cycle(a, es, mi, comp).try();
-    at   = edge_span(a, tree, w, mi, path.get(1).value_or(mi)).try();
-    write_where(out, at).try();
-    out.add("import cycle: ").try();
-    Range(0, path.len).loop((h, k) {
-        write_hop(out, module_name_of(w, path.get(k).value_or(mi)), k).try();
-    });
-    out.add(
-        ": a top-level constant needs a value from a module whose own needs it back, and no order computes both"
-    ).try();
-    out.add("\n").try();
-    Ok(1);
-}
-
-write_hop = (out :: String, name: str, k: usize) Res<(), AllocError> {
-    (k > 0).then(() { out.add(" -> ").try(); });
-    out.add(module_display(name))
-}
-
-shortest_cycle = (a: Alloc, es: Vec<Edge>, start: usize, comp: Vec<usize>)
-                 Res<Vec<usize>, AllocError> {
-    order  ::= a.Vec<usize>();
-    prev   ::= a.Vec<usize>();
-    closed ::= a.Vec<usize>();
-    order.add(start).try();
-    prev.add(0).try();
-    i ::= 0;
-    loop(() { i < order.len && closed.len == 0 }, (h) {
-        from = order.get(i).value_or(start);
-        at   = i;
-        es.loop((g, e) {
-            visit_edge(e, from, at, start, comp, order, prev, closed).try();
-        });
-        i = i + 1;
-    });
-    unwind_cycle(a, order, prev, closed, start)
-}
-
-visit_edge = (
-    e      : Edge,
-    from   : usize,
-    at     : usize,
-    start  : usize,
-    comp   : Vec<usize>,
-    order  :: Vec<usize>,
-    prev   :: Vec<usize>,
-    closed :: Vec<usize>
-)
-             Res<(), AllocError> {
-    (e.from == from).match({
-        false => Ok(()),
-        true  => take_edge(e.to, at, start, comp, order, prev, closed),
-    })
-}
-
-take_edge = (
-    to     : usize,
-    at     : usize,
-    start  : usize,
-    comp   : Vec<usize>,
-    order  :: Vec<usize>,
-    prev   :: Vec<usize>,
-    closed :: Vec<usize>
-)
-            Res<(), AllocError> {
-    (to == start).match({
-        true  => close_cycle(at, closed),
-        false => open_edge(to, at, comp, order, prev),
-    })
-}
-
-// Breadth-first search keeps the first edge that closes a shortest cycle.
-close_cycle = (at: usize, closed :: Vec<usize>) Res<(), AllocError> {
-    (closed.len == 0).match({
-        false => Ok(()),
-        true  => closed.add(at),
-    })
-}
-
-// Inside the component only: an edge leaving it can never come back, so
-// following one would search the whole graph to prove nothing.
-open_edge = (
-    to    : usize,
-    at    : usize,
-    comp  : Vec<usize>,
-    order :: Vec<usize>,
-    prev  :: Vec<usize>
-) Res<(), AllocError> {
-    (to.is_in(comp) && !to.is_in(order)).match({
-        false => Ok(()),
-        true  => { order.add(to).try(); prev.add(at) },
-    })
-}
-
-unwind_cycle = (
-    a      : Alloc,
-    order  : Vec<usize>,
-    prev   : Vec<usize>,
-    closed : Vec<usize>,
-    start  : usize
-) Res<Vec<usize>, AllocError> {
-    back ::= a.Vec<usize>();
-    at   ::= closed.get(0).value_or(0);
-    back.add(order.get(at).value_or(start)).try();
-    loop(at > 0, (h) {
-        at = prev.get(at).value_or(0);
-        back.add(order.get(at).value_or(start)).try();
-    });
-    path ::= a.Vec<usize>();
-    Range(0, back.len).loop((h, k) {
-        path.add(back.get(back.len - 1 - k).value_or(start)).try();
-    });
-    path.add(start).try();
-    Ok(path);
-}
-
-reach_from = (a: Alloc, es: Vec<Edge>, start: usize)
-             Res<Vec<usize>, AllocError> {
-    seen  ::= a.Vec<usize>();
-    front ::= a.Vec<usize>();
-    front.add(start).try();
-    i ::= 0;
-    loop(i < front.len, (h) {
-        from = front.get(i).value_or(start);
-        i    = i + 1;
-        es.loop((g, e) { step_reach(e, from, seen, front).try(); });
-    });
-    Ok(seen);
-}
-
-step_reach = (e: Edge, from: usize, seen :: Vec<usize>, front :: Vec<usize>)
-             Res<(), AllocError> {
-    (e.from == from && !e.to.is_in(seen)).match({
-        false => Ok(()),
-        true  => { seen.add(e.to).try(); front.add(e.to) },
-    })
-}
-
-// the constant graph
-const_edges = (a: Alloc, tree: Ast, w: World) Res<Vec<Edge>, AllocError> {
-    sites = const_sites(a, tree).try();
-    es  ::= a.Vec<Edge>();
-    eid ::= ExprId(index: 0);
-    Range(0, tree.expr_ids()).loop((h, i) {
-        name_edges(a, tree, w, sites, tree.expr_at(eid), es).try();
-        eid = ExprId(index: eid.index + 1);
-    });
-    Ok(es);
-}
-
-const_sites = (a: Alloc, tree: Ast) Res<Vec<ConstSite>, AllocError> {
-    sites ::= a.Vec<ConstSite>();
-    Range(0, tree.module_count()).loop((h, mi) {
-        module_const_sites(tree, mi, sites).try();
-    });
-    Ok(sites);
-}
-
-module_const_sites = (tree: Ast, mi: usize, sites :: Vec<ConstSite>)
-                     Res<(), AllocError> {
-    tree.module_at(mi).match({
-        None  => Ok(()),
-        Ok(m) => decl_const_sites(m, mi, sites),
-    })
-}
-
 decl_const_sites = (m: Module, mi: usize, sites :: Vec<ConstSite>)
                    Res<(), AllocError> {
     m.decls.loop((h, d) {
-        keep_const_site(d, mi, sites).try();
+        d.kind.match({
+            Const(_) => sites.add(ConstSite(module: mi, span: d.span)),
+            _        => Ok(()),
+        }).try();
     });
     Ok(());
 }
 
-keep_const_site = (d: Decl, mi: usize, sites :: Vec<ConstSite>)
-                  Res<(), AllocError> {
-    d.kind.match({
-        Const(_) => sites.add(ConstSite(module: mi, span: d.span)),
-        _        => Ok(()),
-    })
-}
-
-name_edges = (
-    a     : Alloc,
-    tree  : Ast,
-    w     : World,
-    sites : Vec<ConstSite>,
-    e     : Expr,
-    es    :: Vec<Edge>
-) Res<(), AllocError> {
-    e.kind.match({
-        Name(n) => site_edges(a, w, sites, e.span, n.text, es),
-        _       => Ok(()),
-    })
-}
-
-site_edges = (
-    a     : Alloc,
-    w     : World,
-    sites : Vec<ConstSite>,
-    at    : Span,
-    name  : str,
-    es    :: Vec<Edge>
-) Res<(), AllocError> {
-    site_of(sites, at).match({
-        None   => Ok(()),
-        Ok(mi) => resolved_edges(a, w, mi, name, es),
-    })
-}
-
 // Which module-level constant this expression is written inside.
 site_of = (sites: Vec<ConstSite>, at: Span) Res<usize> {
-    Range(0, sites.len).find((k) {
-        sites.get(k).match({
-            Ok(s) => encloses(s.span, at),
-            None  => false,
-        })
-    }).match({
-        Ok(k) => site_module(sites, k),
-        None  => None,
-    })
-}
-
-site_module = (sites: Vec<ConstSite>, k: usize) Res<usize> {
-    sites.get(k).match({
+    sites.find((s) { s.span.encloses(at) }).match({
         Ok(s) => Ok(s.module),
         None  => None,
     })
@@ -442,101 +364,10 @@ encloses = (outer: Span, at: Span) bool {
         && outer.file.eq(at.file)
 }
 
-resolved_edges = (a: Alloc, w: World, mi: usize, name: str, es :: Vec<Edge>)
-                 Res<(), AllocError> {
-    found ::= a.Vec<Def>();
-    w.defs_of(mi, name, found).try();
-    found.loop((h, d) {
-        keep_const_edge(d, mi, es).try();
-    });
-    Ok(());
-}
-
-keep_const_edge = (d: Def, mi: usize, es :: Vec<Edge>) Res<(), AllocError> {
-    other = d.id.module.to_usize();
-    (is_const(d.kind) && other != mi).match({
-        false => Ok(()),
-        true  => add_edge(mi, other, es),
-    })
-}
-
 is_const = (k: DefKind) bool {
     k.match({
         ConstDef => true,
         _        => false,
-    })
-}
-
-add_edge = (from: usize, to: usize, es :: Vec<Edge>) Res<(), AllocError> {
-    has_edge(es, from, to).match({
-        true  => Ok(()),
-        false => es.add(Edge(from: from, to: to)),
-    })
-}
-
-has_edge = (es: Vec<Edge>, from: usize, to: usize) bool {
-    Range(0, es.len).find((k) {
-        es.get(k).match({
-            Ok(e) => e.from == from && e.to == to,
-            None  => false,
-        })
-    }).match({
-        Ok(_) => true,
-        None  => false,
-    })
-}
-
-edge_span = (a: Alloc, tree: Ast, w: World, from: usize, to: usize)
-            Res<Span, AllocError> {
-    tree.module_at(from).match({
-        None  => Ok(nowhere()),
-        Ok(m) => module_edge_span(a, w, m, to),
-    })
-}
-
-module_edge_span = (a: Alloc, w: World, m: Module, to: usize)
-                   Res<Span, AllocError> {
-    spans ::= a.Vec<Span>();
-    m.decls.loop((h, d) {
-        keep_import_span(a, w, d, to, spans).try();
-    });
-    spans.get(0).match({
-        Ok(s) => Ok(s),
-        None  => Ok(m.span),
-    })
-}
-
-keep_import_span = (
-    a     : Alloc,
-    w     : World,
-    d     : Decl,
-    to    : usize,
-    spans :: Vec<Span>
-) Res<(), AllocError> {
-    d.kind.match({
-        Import(im) => keep_if_names(a, w, im, to, spans),
-        _          => Ok(()),
-    })
-}
-
-keep_if_names = (
-    a     : Alloc,
-    w     : World,
-    im    : Import,
-    to    : usize,
-    spans :: Vec<Span>
-) Res<(), AllocError> {
-    path = dotted(a, im.module).try();
-    names_module(w, path, to).match({
-        false => Ok(()),
-        true  => spans.add(im.module.span),
-    })
-}
-
-names_module = (w: World, path: str, mi: usize) bool {
-    w.index_of(path).match({
-        Ok(j) => j == mi,
-        None  => false,
     })
 }
 
