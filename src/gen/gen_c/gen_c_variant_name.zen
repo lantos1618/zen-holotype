@@ -1,0 +1,72 @@
+// Lower `value.variant_name()` to one evaluation of `value` and a switch over
+// its private dense enum tag. Every result is static borrowed text.
+
+Access, Variant = std.ast
+AllocError = std.mem
+str, String = std.text
+TyId = sema.sema_ty
+Ctx = sema.sema_check
+VariantNameCall, EnumValue, enum_value = sema.sema_variant_name
+sym_variant = gen.gen_name
+CBackend = gen.gen_c.gen_c_state
+expr, lower_meta_name = gen.gen_c.gen_c_expr
+temp = gen.gen_c.gen_c_flow
+write_qname = gen.gen_c.gen_c_layout
+
+lower_variant_name_call* = (
+    be   :: CBackend,
+    ac   : Access,
+    call : VariantNameCall,
+    ctx  : Ctx,
+    out  :: String
+) Res<(), AllocError> {
+    shape = be.required_enum_value(call.ty).try();
+    code ::= be.alloc.String().try();
+    expr(be, ac.base, ctx, shape.ty, code).try();
+    text  = be.check.types.str_ty().try();
+    dst   = be.temp(text, "variant_name").try();
+    qname = be.enum_qname(shape.ty).try();
+    be.fmt("switch (({}).zg_tag) {\n", code.view()).try();
+    be.indent();
+    shape.value.variants.loop((h, variant) {
+        be.write_variant_name_case(qname.view(), variant, dst.view()).try();
+    });
+    be.dedent();
+    be.writeln("}").try();
+    out.add(dst.view())
+}
+
+write_variant_name_case = (
+    be      :: CBackend,
+    qname   : str,
+    variant : Variant,
+    dst     : str
+) Res<(), AllocError> {
+    tag ::= be.alloc.String().try();
+    tag.sym_variant(qname, variant.name.text).try();
+    literal ::= be.alloc.String().try();
+    lower_meta_name(variant.name.text, literal).try();
+    be.fmt("case {}:\n", tag.view()).try();
+    be.indent();
+    be.set_line(dst, literal.view()).try();
+    be.writeln("break;").try();
+    be.dedent();
+    Ok(())
+}
+
+required_enum_value = (be: CBackend, ty: TyId)
+                      Res<EnumValue, AllocError> {
+    enum_value(be.check, ty).match({
+        Ok(shape) => Ok(shape),
+        None      => Err(AllocError.OutOfMemory),
+    })
+}
+
+enum_qname = (be :: CBackend, ty: TyId) Res<String, AllocError> {
+    out ::= be.alloc.String().try();
+    be.check.types.at(ty).match({
+        Named(n) => be.write_qname(out, n),
+        _        => Ok(()),
+    }).try();
+    Ok(out)
+}
