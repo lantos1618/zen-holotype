@@ -15,6 +15,7 @@ meta_member_call, MetaCall = sema.sema_meta
 discriminant_member_call, DiscriminantAnswer = sema.sema_discriminant
 variant_name_member_call, VariantNameAnswer = sema.sema_variant_name
 construct, instantiate, variant_call_type = sema.sema_apply
+refuse_variant_surplus = sema.sema_apply
 Inst, subst, subst_list, unify_list = sema.sema_inst
 is_case = sema.sema_case
 Found, Base, base_of, members_of, actor_spawn_ret, ref_of_actor = sema.sema_member
@@ -56,7 +57,10 @@ CallCheck = {
             Res<TyId, AllocError> {
         self.load_actuals(c).try();
         name.is_res_ctor().match({
-            true  => c.res_ctor_type(name, self.actuals),
+            true  => {
+                c.refuse_res_surplus(self.call, name).try();
+                c.res_ctor_type(name, self.actuals)
+            },
             false => self.print_or_call(c, name),
         })
     }
@@ -201,7 +205,10 @@ CallCheck = {
         ).try();
         c.sig_lambdas(self.call, got, 0, self.ctx).try();
         c.is_case(ty, ac.name.text).try().match({
-            true  => c.variant_call_type(self.call, ty, ac.name.text, self.ctx),
+            true  => {
+                c.refuse_variant_surplus(self.call, ty, ac.name.text).try();
+                c.variant_call_type(self.call, ty, ac.name.text, self.ctx)
+            },
             false => c.fn_ret(self.node, got),
         })
     }
@@ -387,6 +394,21 @@ print_type = (c :: Checker, call: Call) Res<TyId, AllocError> {
 is_print_sugar = (name: str) bool { name.eq("println") || name.eq("print") }
 
 is_res_ctor = (name: str) bool { name.eq("Ok") || name.eq("Err") }
+
+// `Ok` and `Err` carry one value each, so a second argument is evaluated
+// and then dropped on the floor: `Ok(41, "x")` is an `Ok(41)` that read
+// the string for nothing. Only the first surplus is worth naming.
+refuse_res_surplus = (c :: Checker, call: Call, name: str)
+                     Res<(), AllocError> {
+    call.args.get(1).match({
+        None  => Ok(()),
+        Ok(a) => c.report(
+            a.span.file,
+            a.span,
+            SemaFault.ResSurplusArgument(NameFault(name: name))
+        ),
+    })
+}
 
 res_ctor_type = (c :: Checker, name: str, actuals: Vec<Actual>)
                 Res<TyId, AllocError> {

@@ -20,7 +20,7 @@ case_payload, Case, cases_of, find_case = sema.sema_case
 check_ctor_fields = sema.sema_hoist
 check_ctor_shape = sema.sema_bound
 Found, members_of = sema.sema_member
-SemaFault, NameFault = sema.sema_diag
+SemaFault, NameFault, TypeFault = sema.sema_diag
 catch_all_named = sema.sema_discriminant
 
 construct* = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
@@ -230,6 +230,35 @@ applied_at_own_vars = (c :: Checker, ty: TyId) Res<TyId, AllocError> {
             },
         }),
         _        => Ok(ty),
+    })
+}
+
+// A variant holds one payload seat or none, so an argument past its arity
+// has nowhere to land: codegen evaluates it and drops it, and the reader is
+// told nothing. Report the first one; the rest are the same mistake.
+refuse_variant_surplus* = (c :: Checker, call: Call, ty: TyId, name: str)
+                          Res<(), AllocError> {
+    cases ::= c.alloc.Vec<Case>();
+    c.cases_of(ty, cases).try();
+    cases.find_case(name).match({
+        None   => Ok(()),
+        Ok(cs) => c.refuse_surplus_payload(call, ty, cs),
+    })
+}
+
+refuse_surplus_payload = (c :: Checker, call: Call, ty: TyId, cs: Case)
+                         Res<(), AllocError> {
+    call.args.get(cs.arity()).match({
+        None  => Ok(()),
+        Ok(a) => c.report(
+            a.span.file,
+            a.span,
+            SemaFault.CtorSurplusArgument(TypeFault(
+                name: "",
+                expected: c.types.unknown().try(),
+                found: ty,
+            ))
+        ),
     })
 }
 
