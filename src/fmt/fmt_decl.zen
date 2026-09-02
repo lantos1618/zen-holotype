@@ -5,217 +5,21 @@ Range = std.core
 Pos = std.ast.ast_span
 ExprId, TypeId, BlockId = std.ast.ast_id
 Ast = std.ast.ast_arena
-Expr, Match, Arm, Block, Stmt, Bind = std.ast.ast_node
-Module, Decl, Type, Param = std.ast.ast_node
-scan, Source, Lexed = std.lex.lex
-Parser, module = std.parse.parse
-Src = fmt.fmt_src
-copy_of = fmt.fmt_break
+Expr, Match, Block, Stmt, Bind, Decl, Type, Param = std.ast.ast_node
+Src, Parsed = fmt.fmt_src
 
+// The spaces in `[from, to)` on one line become `width` spaces. `to` of 0
+// marks a line with nothing to align.
 Pad = {
     from: usize,
     to: usize,
     width: usize,
 }
 
-// Nothing to do on this line. `to` of 0 is the sentinel: a `=>` at byte
-// 0 has no pattern in front of it to align against.
 no_pad = () Pad { Pad(from: 0, to: 0, width: 0) }
 
-Aligned* = {
-    pads :: Vec<Pad>,
-
-    record = (self :: @Self, line: usize, p: Pad) Res<(), AllocError> {
-        // No line is ever past the table's end (one entry per source
-        // line, by construction). `_` because `Res<()>` and
-        // `Res<(), AllocError>` are different types `.try()` can't join.
-        self.pads.set(line, p).match({
-            _ => Ok(()),
-        })
-    }
-
-    pad_at = (self: @Self, line: usize) Pad {
-        self.pads.get(line).match({
-            Ok(p) => p,
-            None  => no_pad(),
-        })
-    }
-
-    padded* = (self: @Self, a: Alloc, src: Src, from: usize, to: usize,
-               line: usize) Res<String, AllocError> {
-        out ::= a.String().try();
-        at  ::= from;
-        ln  ::= line;
-        loop(at < to, (h) {
-            stop = self.line_stop(src, ln, at, to);
-            p    = self.pad_at(ln);
-            (p.to > at && p.to <= stop && p.from >= at).then(() {
-                out.add(src.slice_at(at, p.from)).try();
-                Range(0, p.width).loop((g, k) { out.add(' ').try() });
-                at = p.to;
-            });
-            out.add(src.slice_at(at, stop)).try();
-            at = stop;
-            ln = ln + 1;
-        });
-        Ok(out);
-    }
-
-    // Where the copy stops this round: end of line `ln`, or `to`,
-    // whichever is first. Can never return `at` (the loop wouldn't
-    // terminate) — a line past EOF falls back to `to`.
-    line_stop = (self: @Self, src: Src, ln: usize, at: usize, to: usize) usize {
-        end = src.after_line(ln);
-        (end > at && end < to).match({
-            true  => end,
-            false => to,
-        })
-    }
-}
-
-Aligned* = (a: Alloc, src: Src, tree: Ast, m: Module)
-           Res<Aligned, AllocError> {
-    pads ::= a.Vec<Pad>();
-    Range(0, src.lines() + 2).loop((h, i) { pads.add(no_pad()).try() });
-    table ::= Aligned(pads: pads);
-    id    ::= ExprId(index: 0);
-    Range(0, tree.expr_ids()).loop((h, i) {
-        table.align_expr(src, tree, tree.expr_at(id)).try();
-        id = ExprId(index: id.index + 1);
-    });
-    tid ::= TypeId(index: 0);
-    Range(0, tree.type_ids()).loop((h, i) {
-        table.align_type(src, tree.type_at(tid)).try();
-        tid = TypeId(index: tid.index + 1);
-    });
-    m.decls.loop((h, i, d) { table.align_decl(src, d).try(); });
-    bid ::= BlockId(index: 0);
-    Range(0, tree.block_ids()).loop((h, i) {
-        block = tree.block_at(bid);
-        table.align_binds(src, tree, block).try();
-        table.align_block_decls(src, block).try();
-        bid = BlockId(index: bid.index + 1);
-    });
-    Ok(table);
-}
-
-// One expression: an arm list, a lambda's parameters, or nothing this
-// rule has to say.
-align_expr = (al :: Aligned, src: Src, tree: Ast, e: Expr) Res<(), AllocError> {
-    e.kind.match({
-        Match(mt) => al.align_arms(src, tree, mt),
-        Lambda(l) => al.align_params(src, l.params),
-        _         => unaligned(),
-    })
-}
-
-// One type: a function type's parameters.
-align_type = (al :: Aligned, src: Src, t: Type) Res<(), AllocError> {
-    t.kind.match({
-        Fn(f) => al.align_params(src, f.params),
-        _     => unaligned(),
-    })
-}
-
-align_decl = (al :: Aligned, src: Src, d: Decl) Res<(), AllocError> {
-    d.kind.match({
-        Function(f) => al.align_params(src, f.params),
-        _           => unaligned(),
-    })
-}
-
-align_block_decls = (al :: Aligned, src: Src, b: Block) Res<(), AllocError> {
-    b.stmts.loop((h, i, s) {
-        s.kind.match({
-            Decl(d) => al.align_decl(src, d),
-            _       => unaligned(),
-        }).try();
-    });
-    Ok(());
-}
-
-unaligned = () Res<(), AllocError> { Ok(()) }
-
-align_arms = (al :: Aligned, src: Src, tree: Ast, mt: Match)
-             Res<(), AllocError> {
-    col ::= 0;
-    Range(0, mt.arms.len).loop((h, i) {
-        want = src.arrow_col(tree, mt, i);
-        (want > col).then(() { col = want; });
-    });
-    (col > 0).then(() {
-        Range(0, mt.arms.len).loop((h, i) {
-            al.pad_arm(src, tree, mt, i, col).try();
-        });
-    });
-    Ok(());
-}
-
-pad_arm = (
-    al   :: Aligned,
-    src  : Src,
-    tree : Ast,
-    mt   : Match,
-    i    : usize,
-    col  : usize
-) Res<(), AllocError> {
-    mt.arms.get(i).match({
-        None    => unaligned(),
-        Ok(arm) => al.pad_one(src, tree, mt, i, arm, col),
-    })
-}
-
-pad_one = (
-    al   :: Aligned,
-    src  : Src,
-    tree : Ast,
-    mt   : Match,
-    i    : usize,
-    arm  : Arm,
-    col  : usize
-) Res<(), AllocError> {
-    src.movable(tree, mt, i, arm).match({
-        false => unaligned(),
-        true  => {
-            end = tree.pattern_at(arm.pattern).span.end;
-            al.record(arm.arrow_span.start.line, Pad(
-                from: src.offset(end),
-                to: src.offset(arm.arrow_span.start),
-                width: col - end.col,
-            ))
-        },
-    })
-}
-
-arrow_col = (src: Src, tree: Ast, mt: Match, i: usize) usize {
-    mt.arms.get(i).match({
-        None    => 0,
-        Ok(arm) => src.movable(tree, mt, i, arm).match({
-            false => 0,
-            true  => tree.pattern_at(arm.pattern).span.end.col + 1,
-        }),
-    })
-}
-
-movable = (src: Src, tree: Ast, mt: Match, i: usize, arm: Arm) bool {
-    line = arm.arrow_span.start.line;
-    end  = tree.pattern_at(arm.pattern).span.end;
-    arm.span.start.line == line
-        && end.line == line
-        && alone(mt, i, arm)
-        && src.all_spaces(src.line_at(line), src.offset(arm.span.start))
-        && src.all_spaces(src.offset(end), src.offset(arm.arrow_span.start))
-}
-
-alone = (mt: Match, i: usize, arm: Arm) bool {
-    after = mt.arms.get(i + 1).match({
-        Ok(next) => next.span.start.line,
-        None     => mt.arms_span.end.line,
-    });
-    after > arm.span.end.line
-}
-
-// binding operators
+// An alignable operator: `width` bytes at `at`, after the name or pattern
+// ending at `end`. Width 0 means the line stays as written.
 Op = {
     end: Pos,
     at: usize,
@@ -224,25 +28,205 @@ Op = {
 
 no_op = () Op { Op(end: Pos(line: 0, col: 0), at: 0, width: 0) }
 
-align_binds = (al :: Aligned, src: Src, tree: Ast, b: Block)
-              Res<(), AllocError> {
-    from ::= 0;
-    Range(0, b.stmts.len).loop((h, i) {
-        (i > 0 && src.joins(tree, b, i)).match({
-            true  => (),
-            false => {
-                al.align_run(src, tree, b, from, i).try();
-                from = i;
-            },
+// One pad per source line, applied while a declaration's bytes are copied.
+Aligned* = {
+    src: Src,
+    pads :: Vec<Pad>,
+
+    // One entry per source line by construction; a line past the table
+    // is dropped.
+    record = (self :: @Self, line: usize, p: Pad) Res<(), AllocError> {
+        self.pads.set(line, p).match({ _ => Ok(()) })
+    }
+
+    pad_at = (self: @Self, line: usize) Pad {
+        self.pads.get(line).value_or(no_pad())
+    }
+
+    // The bytes in `[from, to)` with each line's pad applied; `line` is
+    // the source line `from` sits on.
+    padded* = (self: @Self, a: Alloc, from: usize, to: usize, line: usize)
+              Res<String, AllocError> {
+        out ::= a.String().try();
+        at  ::= from;
+        ln  ::= line;
+        loop(at < to, (h) {
+            stop = self.line_stop(ln, at, to);
+            p    = self.pad_at(ln);
+            (p.to > at && p.to <= stop && p.from >= at).then(() {
+                out.add(self.src.slice_at(at, p.from)).try();
+                Range(0, p.width).loop((g, k) { out.add(' ').try() });
+                at = p.to;
+            });
+            out.add(self.src.slice_at(at, stop)).try();
+            at = stop;
+            ln = ln + 1;
         });
-    });
-    al.align_run(src, tree, b, from, b.stmts.len)
+        Ok(out);
+    }
+
+    // End of line `ln` or `to`, whichever comes first. A line past the
+    // text falls back to `to`, so the copy always advances.
+    line_stop = (self: @Self, ln: usize, at: usize, to: usize) usize {
+        end = self.src.after_line(ln);
+        (end > at && end < to).match({
+            true  => end,
+            false => to,
+        })
+    }
+
+    // Pad every op in `[from, to)` to one column past the widest left side.
+    align = (self :: @Self, ops: Vec<Op>, from: usize, to: usize)
+            Res<(), AllocError> {
+        col ::= 0;
+        Range(from, to).loop((h, i) {
+            op = ops.ptr().read(i);
+            (op.width > 0 && op.end.col + 1 > col).then(() {
+                col = op.end.col + 1;
+            });
+        });
+        Range(from, to).loop((h, i) {
+            op = ops.ptr().read(i);
+            (op.width > 0).then(() {
+                self.record(op.end.line, Pad(
+                    from: self.src.offset(op.end),
+                    to: op.at,
+                    width: col - op.end.col,
+                )).try();
+            });
+        });
+        Ok(());
+    }
+
+    align_all = (self :: @Self, ops: Vec<Op>) Res<(), AllocError> {
+        self.align(ops, 0, ops.len)
+    }
+
+    align_expr = (self :: @Self, a: Alloc, tree: Ast, e: Expr)
+                 Res<(), AllocError> {
+        e.kind.match({
+            Match(mt) => self.align_all(self.src.arm_ops(a, tree, mt).try()),
+            Lambda(l) => self.align_all(self.src.param_ops(a, l.params).try()),
+            _         => Ok(()),
+        })
+    }
+
+    align_type = (self :: @Self, a: Alloc, t: Type) Res<(), AllocError> {
+        t.kind.match({
+            Fn(f) => self.align_all(self.src.param_ops(a, f.params).try()),
+            _     => Ok(()),
+        })
+    }
+
+    align_decl = (self :: @Self, a: Alloc, d: Decl) Res<(), AllocError> {
+        d.kind.match({
+            Function(f) => self.align_all(
+                self.src.param_ops(a, f.params).try()
+            ),
+            _           => Ok(()),
+        })
+    }
+
+    // Bindings align in runs: consecutive statements whose operators have
+    // the same width.
+    align_block = (self :: @Self, a: Alloc, tree: Ast, b: Block)
+                  Res<(), AllocError> {
+        ops = self.src.stmt_ops(a, tree, b).try();
+        from ::= 0;
+        Range(1, ops.len).loop((h, i) {
+            joins(ops, b, i).match({
+                true  => (),
+                false => {
+                    self.align(ops, from, i).try();
+                    from = i;
+                },
+            });
+        });
+        self.align(ops, from, ops.len).try();
+        b.stmts.loop((h, i, s) {
+            s.kind.match({
+                Decl(d) => self.align_decl(a, d),
+                _       => Ok(()),
+            }).try();
+        });
+        Ok(());
+    }
 }
 
-// True when statement `i` continues the run that ends at `i - 1`.
-joins = (src: Src, tree: Ast, b: Block, i: usize) bool {
-    here = src.op_at(tree, b, i);
-    (here.width > 0 && here.width == src.op_at(tree, b, i - 1).width)
+Aligned* = (a: Alloc, p: Parsed) Res<Aligned, AllocError> {
+    pads ::= a.Vec<Pad>();
+    Range(0, p.src.lines() + 2).loop((h, i) { pads.add(no_pad()).try() });
+    table ::= Aligned(src: p.src, pads: pads);
+    id    ::= ExprId(index: 0);
+    Range(0, p.tree.expr_ids()).loop((h, i) {
+        table.align_expr(a, p.tree, p.tree.expr_at(id)).try();
+        id = ExprId(index: id.index + 1);
+    });
+    tid ::= TypeId(index: 0);
+    Range(0, p.tree.type_ids()).loop((h, i) {
+        table.align_type(a, p.tree.type_at(tid)).try();
+        tid = TypeId(index: tid.index + 1);
+    });
+    p.m.decls.loop((h, i, d) { table.align_decl(a, d).try(); });
+    bid ::= BlockId(index: 0);
+    Range(0, p.tree.block_ids()).loop((h, i) {
+        table.align_block(a, p.tree, p.tree.block_at(bid)).try();
+        bid = BlockId(index: bid.index + 1);
+    });
+    Ok(table);
+}
+
+// One op per arm, at its `=>`; width 0 unless the arm sits alone on its
+// line with only spaces before it and between pattern and arrow.
+arm_ops = (src: Src, a: Alloc, tree: Ast, mt: Match)
+          Res<Vec<Op>, AllocError> {
+    ops ::= a.Vec<Op>();
+    mt.arms.loop((h, i, arm) {
+        line  = arm.arrow_span.start.line;
+        end   = tree.pattern_at(arm.pattern).span.end;
+        alone = arm.span.start.line == line
+            && end.line == line
+            && next_arm_line(mt, i) > arm.span.end.line
+            && src.all_spaces(src.line_at(line), src.offset(arm.span.start))
+            && src.all_spaces(
+                src.offset(end),
+                src.offset(arm.arrow_span.start)
+            );
+        ops.add(Op(
+            end: end,
+            at: src.offset(arm.arrow_span.start),
+            width: alone.match({ true => 1, false => 0 }),
+        )).try();
+    });
+    Ok(ops);
+}
+
+next_arm_line = (mt: Match, i: usize) usize {
+    mt.arms.get(i + 1).match({
+        Ok(next) => next.span.start.line,
+        None     => mt.arms_span.end.line,
+    })
+}
+
+// One op per statement: a binding's `=`, `:=` or `::=` run, else none.
+stmt_ops = (src: Src, a: Alloc, tree: Ast, b: Block)
+           Res<Vec<Op>, AllocError> {
+    ops ::= a.Vec<Op>();
+    b.stmts.loop((h, i, s) {
+        ops.add(s.kind.match({
+            Bind(bd) => src.op_after(s.span.start, name_end(tree, bd), "=:"),
+            _        => no_op(),
+        })).try();
+    });
+    Ok(ops);
+}
+
+// Statement `i` continues the run ending at `i - 1`: same operator width,
+// starting on the line after the previous statement ends.
+joins = (ops: Vec<Op>, b: Block, i: usize) bool {
+    here = ops.ptr().read(i);
+    prev = ops.ptr().read(i - 1);
+    here.width > 0 && here.width == prev.width
         && stmt_line(b, i, true) == stmt_line(b, i - 1, false) + 1
 }
 
@@ -256,68 +240,6 @@ stmt_line = (b: Block, i: usize, first: bool) usize {
     })
 }
 
-align_run = (
-    al   :: Aligned,
-    src  : Src,
-    tree : Ast,
-    b    : Block,
-    from : usize,
-    to   : usize
-) Res<(), AllocError> {
-    col ::= 0;
-    Range(from, to).loop((h, i) {
-        op   = src.op_at(tree, b, i);
-        want = op.end.col + 1;
-        (op.width > 0 && want > col).then(() { col = want; });
-    });
-    (col > 0).then(() {
-        Range(from, to).loop((h, i) { al.pad_bind(src, tree, b, i, col).try() });
-    });
-    Ok(());
-}
-
-pad_bind = (
-    al   :: Aligned,
-    src  : Src,
-    tree : Ast,
-    b    : Block,
-    i    : usize,
-    col  : usize
-) Res<(), AllocError> {
-    op = src.op_at(tree, b, i);
-    (op.width == 0).match({
-        true  => unaligned(),
-        false => al.record(op.end.line, Pad(
-            from: src.offset(op.end),
-            to: op.at,
-            width: col - op.end.col,
-        )),
-    })
-}
-
-op_at = (src: Src, tree: Ast, b: Block, i: usize) Op {
-    b.stmts.get(i).match({
-        None  => no_op(),
-        Ok(s) => s.kind.match({
-            Bind(bd) => src.bind_op(tree, s, bd),
-            _        => no_op(),
-        }),
-    })
-}
-
-bind_op = (src: Src, tree: Ast, s: Stmt, bd: Bind) Op {
-    line = s.span.start.line;
-    end  = name_end(tree, bd);
-    at   = src.past_spaces(src.offset(end), src.after_line(line));
-    w    = src.op_width(at, src.after_line(line));
-    (w > 0
-        && end.line == line
-        && src.all_spaces(src.line_at(line), src.offset(s.span.start))).match({
-        false => no_op(),
-        true  => Op(end: end, at: at, width: w),
-    })
-}
-
 name_end = (tree: Ast, bd: Bind) Pos {
     bd.type.match({
         Ok(t) => tree.type_at(t).span.end,
@@ -325,95 +247,44 @@ name_end = (tree: Ast, bd: Bind) Pos {
     })
 }
 
-op_width = (src: Src, at: usize, to: usize) usize {
-    n ::= 0;
-    Range(at, to).loop((h, i) {
-        byte = src.text.index(i);
-        (byte == '=' || byte == ':').match({
-            true  => { n = n + 1; },
-            false => h.break(),
-        });
+// One op per parameter, at its `:` or `::`.
+param_ops = (src: Src, a: Alloc, ps: Vec<Param>) Res<Vec<Op>, AllocError> {
+    ops ::= a.Vec<Op>();
+    ps.loop((h, i, p) {
+        ops.add(src.op_after(p.span.start, p.name.span.end, ":")).try();
     });
-    n;
+    Ok(ops);
 }
 
-// parameter operators
-align_params = (al :: Aligned, src: Src, ps: Vec<Param>)
-               Res<(), AllocError> {
-    col ::= 0;
-    Range(0, ps.len).loop((h, i) {
-        op   = src.param_op(ps, i);
-        want = op.end.col + 1;
-        (op.width > 0 && want > col).then(() { col = want; });
-    });
-    (col > 0).then(() {
-        Range(0, ps.len).loop((h, i) { al.pad_param(src, ps, i, col).try() });
-    });
-    Ok(());
-}
-
-pad_param = (al :: Aligned, src: Src, ps: Vec<Param>, i: usize, col: usize)
-            Res<(), AllocError> {
-    op = src.param_op(ps, i);
-    (op.width == 0).match({
-        true  => unaligned(),
-        false => al.record(op.end.line, Pad(
-            from: src.offset(op.end),
-            to: op.at,
-            width: col - op.end.col,
-        )),
-    })
-}
-
-param_op = (src: Src, ps: Vec<Param>, i: usize) Op {
-    ps.get(i).match({
-        None  => no_op(),
-        Ok(p) => src.name_op(p),
-    })
-}
-
-name_op = (src: Src, p: Param) Op {
-    line = p.span.start.line;
-    end  = p.name.span.end;
+// The run of bytes from `ops` that follows `end` on the line `start` is
+// on, when only spaces precede `start` on that line.
+op_after = (src: Src, start: Pos, end: Pos, ops: str) Op {
+    line = start.line;
     at   = src.past_spaces(src.offset(end), src.after_line(line));
-    w    = src.colon_width(at, src.after_line(line));
+    w    = src.op_run(at, src.after_line(line), ops);
     (w > 0
         && end.line == line
-        && src.all_spaces(src.line_at(line), src.offset(p.span.start))).match({
+        && src.all_spaces(src.line_at(line), src.offset(start))).match({
         false => no_op(),
         true  => Op(end: end, at: at, width: w),
     })
 }
 
-// the columns, as a pass
-align_columns* = (a: Alloc, file: str, text: str) Res<String, AllocError> {
-    lexed = scan(a, Source(file: file, text: text)).try();
-    lexed.is_clean().match({
-        false => copy_of(a, text),
-        true  => columns_clean(a, text, lexed),
-    })
+op_run = (src: Src, at: usize, to: usize, ops: str) usize {
+    stop: Res<usize> = Range(at, to).find((i) {
+        !ops.contains(src.text.index(i))
+    });
+    stop.value_or(to) - at
 }
 
-columns_clean = (a: Alloc, text: str, lexed: Lexed) Res<String, AllocError> {
-    p ::= a.Parser(lexed);
-    m = p.module(lexed.source.file).try();
-    (p.diags.len == 0).match({
-        false => copy_of(a, text),
-        true  => {
-            src = a.Src(text).try();
-            al  = a.Aligned(src, p.tree, m).try();
-            al.padded(a, src, 0, text.len, 1)
+// The column pass over a text the earlier passes have already reshaped.
+align_columns* = (a: Alloc, file: str, text: str) Res<String, AllocError> {
+    parsed = a.Parsed(file, text).try();
+    parsed.match({
+        None  => a.String("{}", text),
+        Ok(p) => {
+            al = a.Aligned(p).try();
+            al.padded(a, 0, text.len, 1)
         },
     })
-}
-
-colon_width = (src: Src, at: usize, to: usize) usize {
-    n ::= 0;
-    Range(at, to).loop((h, i) {
-        (src.text.index(i) == ':').match({
-            true  => { n = n + 1; },
-            false => h.break(),
-        });
-    });
-    n;
 }

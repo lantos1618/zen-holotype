@@ -3,72 +3,54 @@ str = std.text
 Vec = std.collections
 Range = std.core
 Pos = std.ast.ast_span
+Ast = std.ast.ast_arena
+Module = std.ast.ast_node
+scan, Source = std.lex.lex
+Parser, module = std.parse.parse
 
+// A source text with its line index. Positions are 1-based; every byte
+// offset returned is clamped to the text.
 Src* = {
     text*: str,
 
-    // Byte offset of the first byte of each line. `starts.get(0)` is 0;
-    // `Pos` is 1-based, so line `n` begins at `starts.get(n - 1)`. Built
-    // once per file so a per-span scan doesn't go quadratic.
+    // Byte offset of the first byte of each line: line `n` starts at
+    // `starts.get(n - 1)`.
     starts: Vec<usize>,
 
-    // Map a position to a byte offset, clamping both ends. The one caller can hand an
-    // out-of-range position is the end-of-file span, and refusing the
-    // last line is worse than reading to the end of it.
+    // A line past the index maps to the end of the text; the end-of-file
+    // span points there.
     offset* = (self: @Self, p: Pos) usize {
         (p.line == 0 || p.line > self.starts.len).match({
             true  => self.text.len,
-            false => self.column_of(p),
+            false => self.bounded(self.line_at(p.line) + col_index(p.col)),
         })
     }
 
-    column_of = (self: @Self, p: Pos) usize {
-        self.bounded(self.line_at(p.line) + col_index(p.col))
-    }
-
-    // One more than the newline count — a file without a trailing
-    // newline still has a last line.
     lines* = (self: @Self) usize { self.starts.len }
 
-    // The first byte of a 1-based line, and the first byte past it —
-    // turns "this `=>` is on line 9" back into bytes without a scan
-    // (fmt_decl.zen asks once per line).
     line_at* = (self: @Self, line: usize) usize {
         (line == 0).match({
             true  => 0,
-            false => self.starts.get(line - 1).match({
-                Ok(o) => o,
-                None  => self.text.len,
-            }),
+            false => self.starts.get(line - 1).value_or(self.text.len),
         })
     }
 
     after_line* = (self: @Self, line: usize) usize {
-        self.starts.get(line).match({
-            Ok(o) => o,
-            None  => self.text.len,
-        })
+        self.starts.get(line).value_or(self.text.len)
     }
 
-    all_spaces* = (self: @Self, from: usize, to: usize) bool {
-        clear ::= true;
-        Range(from, self.bounded(to)).loop((h, i) {
-            (self.text.index(i) == ' ').match({
-                true  => (),
-                false => { clear = false; h.break(); },
-            });
-        });
-        clear;
-    }
-
-    // One past the run of spaces at `from`, never past `to`. The same
-    // one-byte semantics as `all_spaces`: a tab stops the walk.
+    // `*_spaces` walks ASCII spaces only; `*_space` walks any whitespace
+    // byte. Neither passes `to`.
     past_spaces* = (self: @Self, from: usize, to: usize) usize {
         at ::= from;
         loop(() { at < to && self.text.index(at) == ' ' }, (h) {
             at = at + 1;
         });
         at;
+    }
+
+    all_spaces* = (self: @Self, from: usize, to: usize) bool {
+        self.past_spaces(from, to) == to
     }
 
     skip_space* = (self: @Self, from: usize, to: usize) usize {
@@ -79,8 +61,6 @@ Src* = {
         at;
     }
 
-    // `skip_space`'s predicate form: nothing in `[from, to)` but
-    // whitespace.
     all_space* = (self: @Self, from: usize, to: usize) bool {
         self.skip_space(from, to) == to
     }
@@ -100,9 +80,7 @@ Src* = {
         })
     }
 
-    // `to`, walked back over whitespace, never past `from`. The only
-    // rule in this folder that deletes source bytes; it removes only
-    // whitespace, never a token.
+    // `to` walked back over whitespace, stopping at `from`.
     trim_back* = (self: @Self, from: usize, to: usize) usize {
         end ::= self.bounded(to);
         loop(() { end > from && self.text.index(end - 1).is_space() }, (h) {
@@ -127,4 +105,31 @@ Src* = (a: Alloc, text: str) Res<Src, AllocError> {
         (text.index(i) == '\n').then(() { starts.add(i + 1).try() });
     });
     Ok(Src(text: text, starts: starts));
+}
+
+// A text the lexer and the parser both accepted, with its byte index.
+Parsed* = {
+    src*: Src,
+    tree*: Ast,
+    m*: Module,
+}
+
+// None when either stage reports; a pass leaves such a text unchanged.
+Parsed* = (a: Alloc, file: str, text: str) Res<Res<Parsed>, AllocError> {
+    lexed = scan(a, Source(file: file, text: text)).try();
+    lexed.is_clean().match({
+        false => Ok(None),
+        true  => {
+            p ::= a.Parser(lexed);
+            m = p.module(file).try();
+            (p.diags.len == 0).match({
+                false => Ok(None),
+                true  => Ok(Ok(Parsed(
+                    src: a.Src(text).try(),
+                    tree: p.tree,
+                    m: m
+                ))),
+            })
+        },
+    })
 }

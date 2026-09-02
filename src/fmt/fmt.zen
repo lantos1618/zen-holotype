@@ -4,15 +4,15 @@ Vec = std.collections
 Range = std.core
 Pos, TriviaRun = std.ast.ast_span
 Ast = std.ast.ast_arena
-Module, Decl = std.ast.ast_node
+Decl = std.ast.ast_node
 scan, Source, Lexed = std.lex.lex
 Diag, Parser, module = std.parse.parse
 
-Src* = fmt.fmt_src
-Out* = fmt.fmt_out
-Aligned* = fmt.fmt_decl
-align_columns = fmt.fmt_decl
+Src, Parsed = fmt.fmt_src
+Aligned, align_columns = fmt.fmt_decl
 break_lines = fmt.fmt_break
+
+FIRST: usize = 1
 
 // The formatted bytes, source diagnostics, and token-preservation result.
 Render* = {
@@ -36,12 +36,14 @@ render* = (a: Alloc, lexed: Lexed) Res<Render, AllocError> {
 }
 
 parsed = (a: Alloc, lexed: Lexed) Res<Render, AllocError> {
-    src = a.Src(lexed.source.text).try();
     p ::= a.Parser(lexed);
     m = p.module(lexed.source.file).try();
     (p.diags.len == 0).match({
         false => rejected(a, p.diags),
-        true  => printed(a, src, p.tree, m, lexed),
+        true  => {
+            src = a.Src(lexed.source.text).try();
+            printed(a, Parsed(src: src, tree: p.tree, m: m), lexed)
+        },
     })
 }
 
@@ -49,79 +51,96 @@ rejected = (a: Alloc, diags: Vec<Diag>) Res<Render, AllocError> {
     Ok(Render(text: a.String().try(), diags: diags, faithful: false));
 }
 
-printed = (a: Alloc, src: Src, tree: Ast, m: Module, lexed: Lexed)
-          Res<Render, AllocError> {
+printed = (a: Alloc, p: Parsed, lexed: Lexed) Res<Render, AllocError> {
     out ::= a.Out().try();
-    out.write_module(a, a.Aligned(src, tree, m).try(), src, tree, m).try();
+    out.write_module(a, a.Aligned(p).try(), p).try();
     broke = break_lines(a, lexed.source.file, out.view()).try();
     text  = align_columns(a, lexed.source.file, broke.view()).try();
     ok    = unchanged_tokens(a, lexed, text.view()).try();
     Ok(Render(text: text, diags: a.Vec<Diag>(), faithful: ok));
 }
 
-// Print declarations and their trivia in source order.
-write_module* = (
-    out  :: Out,
-    a    : Alloc,
-    al   : Aligned,
-    src  : Src,
-    tree : Ast,
-    m    : Module
-) Res<(), AllocError> {
-    m.decls.loop((h, i, d) {
-        out.write_trivia(tree, d.leading).try();
-        out.write_decl(a, al, src, tree, m, i, d).try();
-    });
-    out.write_trivia(tree, m.trailing).try();
-    Ok(());
+// Lines out. A blank line is owed between items, never before the first.
+Out = {
+    text :: String,
+    started :: bool = false,
+    owed :: bool = false,
+
+    // Declarations and their trivia, in source order.
+    write_module = (self :: @Self, a: Alloc, al: Aligned, p: Parsed)
+                   Res<(), AllocError> {
+        p.m.decls.loop((h, i, d) {
+            self.write_trivia(p.tree, d.leading).try();
+            self.write_decl(a, al, p, i, d).try();
+        });
+        self.write_trivia(p.tree, p.m.trailing)
+    }
+
+    // Comments are copied as source slices and are not rewrapped.
+    write_trivia = (self :: @Self, tree: Ast, run: TriviaRun)
+                   Res<(), AllocError> {
+        Range(0, run.len).loop((h, i) {
+            piece = tree.trivia_at(run, i);
+            piece.kind.match({
+                Blank => self.blank(),
+                _     => self.say_at(piece.span.start.col, piece.text),
+            }).try();
+        });
+        Ok(());
+    }
+
+    // A declaration's bytes run to the next printable item, not to
+    // `Decl.span`: a trailing comment can belong to its last nested node.
+    write_decl = (
+        self :: @Self,
+        a    : Alloc,
+        al   : Aligned,
+        p    : Parsed,
+        i    : usize,
+        d    : Decl
+    ) Res<(), AllocError> {
+        from = p.src.offset(d.span.start);
+        to   = p.src.trim_back(from, p.src.offset(p.next_start(i)));
+        text = al.padded(a, from, to, d.span.start.line).try();
+        self.say(text.view())
+    }
+
+    say = (self :: @Self, s: str) Res<(), AllocError> {
+        self.say_at(FIRST, s)
+    }
+
+    say_at = (self :: @Self, col: usize, s: str) Res<(), AllocError> {
+        self.open().try();
+        Range(FIRST, col).loop((h, i) { self.text.add(' ').try() });
+        self.text.add(s).try();
+        self.text.add('\n')
+    }
+
+    blank = (self :: @Self) Res<(), AllocError> {
+        self.owed = true;
+        Ok(());
+    }
+
+    open = (self :: @Self) Res<(), AllocError> {
+        (self.owed && self.started).then(() {
+            self.text.add('\n').try();
+        });
+        self.owed    = false;
+        self.started = true;
+        Ok(());
+    }
+
+    view = (self: @Self) str { self.text.view() }
 }
 
-// Comments are copied as source slices and are not rewrapped.
-write_trivia = (out :: Out, tree: Ast, run: TriviaRun) Res<(), AllocError> {
-    Range(0, run.len).loop((h, i) {
-        piece = tree.trivia_at(run, i);
-        piece.kind.match({
-            Blank => out.blank(),
-            _     => out.say_at(piece.span.start.col, piece.text),
-        }).try();
-    });
-    Ok(());
+Out = (a: Alloc) Res<Out, AllocError> {
+    Ok(Out(text: a.String().try()));
 }
 
-// Copy through the next printable item rather than stopping at Decl.span;
-// trailing comments can belong to a declaration's last nested node.
-write_decl = (
-    out  :: Out,
-    a    : Alloc,
-    al   : Aligned,
-    src  : Src,
-    tree : Ast,
-    m    : Module,
-    i    : usize,
-    d    : Decl
-) Res<(), AllocError> {
-    from = src.offset(d.span.start);
-    to   = src.offset(next_start(tree, m, i));
-    text = al.padded(
-        a,
-        src,
-        from,
-        src.trim_back(from, to),
-        d.span.start.line
-    ).try();
-    out.say(text.view())
-}
-
-next_start = (tree: Ast, m: Module, i: usize) Pos {
-    m.decls.get(i + 1).match({
-        Ok(next) => run_start(tree, next.leading).match({
-            Ok(p) => p,
-            None  => next.span.start,
-        }),
-        None     => run_start(tree, m.trailing).match({
-            Ok(p) => p,
-            None  => m.span.end,
-        }),
+next_start = (p: Parsed, i: usize) Pos {
+    p.m.decls.get(i + 1).match({
+        Ok(next) => p.tree.run_start(next.leading).value_or(next.span.start),
+        None     => p.tree.run_start(p.m.trailing).value_or(p.m.span.end),
     })
 }
 
@@ -132,35 +151,21 @@ run_start = (tree: Ast, run: TriviaRun) Res<Pos> {
     })
 }
 
-// The formatted output must contain the same token kinds and bytes.
+// The formatted output must lex to the same token kinds and bytes.
 unchanged_tokens = (a: Alloc, before: Lexed, text: str) Res<bool, AllocError> {
     after = scan(a, Source(file: before.source.file, text: text)).try();
-    Ok(after.is_clean() && same_stream(before, after));
+    Ok(after.is_clean() && before.same_stream(after));
 }
 
 same_stream = (before: Lexed, after: Lexed) bool {
-    (before.tokens.len == after.tokens.len) && every_token_same(before, after)
+    before.tokens.len == after.tokens.len
+        && Range(0, before.tokens.len).find((i) {
+            !before.token_same(after, i)
+        }).match({ Ok(_) => false, None => true })
 }
 
-every_token_same = (before: Lexed, after: Lexed) bool {
-    ok ::= true;
-    Range(0, before.tokens.len).loop((h, i) {
-        token_same(before, after, i).match({
-            true  => (),
-            false => { ok = false; h.break(); },
-        });
-    });
-    ok;
-}
-
-// Compare both kind and bytes so neither token identity nor spelling changes.
 token_same = (before: Lexed, after: Lexed, i: usize) bool {
-    before.tokens.get(i).match({
-        None  => false,
-        Ok(x) => after.tokens.get(i).match({
-            None  => false,
-            Ok(y) => x.kind == y.kind
-                  && before.source.text_of(x).eq(after.source.text_of(y)),
-        }),
-    })
+    x = before.tokens.ptr().read(i);
+    y = after.tokens.ptr().read(i);
+    x.kind == y.kind && before.source.text_of(x).eq(after.source.text_of(y))
 }
