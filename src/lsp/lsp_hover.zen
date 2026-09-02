@@ -10,24 +10,45 @@ Variant = std.ast
 Checker = sema.sema_check
 TyId, TyNamed, Prim = sema.sema_ty
 Def, decl_at = sema.sema_def
-to_pos, to_wire, WirePos = lsp.lsp_pos
+to_pos, to_wire, WirePos, WireRange = lsp.lsp_pos
 Tell, told_at = std.ast.ast_named
 check_standalone = lsp.lsp_query
 check_build = zen.zen_build
+to_json = std.json
 
 Hover* = {
     found*: bool,
     shown*: str,
     start*: WirePos,
     end*: WirePos,
+
+    // `null` when nothing was found, else a plaintext MarkupContent.
+    write* = (self: @Self, a: Alloc, out :: String) Res<(), AllocError> {
+        self.found.match({
+            false => out.add("null"),
+            true  => {
+                encoded ::= HoverResult(contents: MarkupContent(kind: "plaintext", value: self.shown), range: WireRange(start: self.start, end: self.end)).to_json(a).try();
+                out.add(encoded.view())
+            },
+        })
+    }
+}
+
+MarkupContent = {
+    kind: str,
+    value: str,
+}
+
+HoverResult = {
+    contents: MarkupContent,
+    range: WireRange,
 }
 
 hover_at* = (a: Alloc, name: str, text: str, line: usize, character: usize)
             Res<Hover, AllocError> {
     c ::= check_standalone(a, name, text).try();
-
     pos = to_pos(text, line, character);
-    said(c, a, text, told_at(c.tree, name, pos))
+    c.said(a, text, told_at(c.tree, name, pos))
 }
 
 hover_in* = (
@@ -41,7 +62,7 @@ hover_in* = (
 ) Res<Hover, AllocError> {
     checked = check_build(env, a, workspace, path, text).try();
     pos     = to_pos(text, line, character);
-    said(checked.c, a, text, told_at(checked.c.tree, checked.rel, pos))
+    checked.c.said(a, text, told_at(checked.c.tree, checked.rel, pos))
 }
 
 hover_with* = (
@@ -53,10 +74,10 @@ hover_with* = (
     character : usize
 ) Res<Hover, AllocError> {
     pos = to_pos(text, line, character);
-    said(c, a, text, told_at(c.tree, rel, pos))
+    c.said(a, text, told_at(c.tree, rel, pos))
 }
 
-no_type* = () Hover {
+no_type = () Hover {
     Hover(
         found: false,
         shown: "",
@@ -65,28 +86,26 @@ no_type* = () Hover {
     )
 }
 
-said = (c : Checker, a: Alloc, text: str, t: Tell) Res<Hover, AllocError> {
+said = (c: Checker, a: Alloc, text: str, t: Tell) Res<Hover, AllocError> {
     out ::= a.String().try();
     t.match({
-        Nothing     => nothing_found(),
+        Nothing     => Ok(no_type()),
         Sig(f)      => wired(
             text,
             f.name.span,
-            write_decl_sig(c, f, out).try(),
+            c.write_decl_sig(f, out).try(),
             out
         ),
         OfType(ta)  => wired(
             text,
             ta.span,
-            write_written_ty(c, ta.id, out).try(),
+            c.write_written_ty(ta.id, out).try(),
             out
         ),
-        OfValue(v)  => wired(text, v.span, write_val(c, v.id, out).try(), out),
-        Imported(_) => nothing_found(),
+        OfValue(v)  => wired(text, v.span, c.write_val(v.id, out).try(), out),
+        Imported(_) => Ok(no_type()),
     })
 }
-
-nothing_found = () Res<Hover, AllocError> { Ok(no_type()) }
 
 wired = (text: str, span: Span, known: bool, out :: String)
         Res<Hover, AllocError> {
@@ -98,88 +117,83 @@ wired = (text: str, span: Span, known: bool, out :: String)
     ));
 }
 
-write_written_ty = (
-    c   : Checker,
-    id  : TypeId,
-    out :: String
-) Res<bool, AllocError> {
+// The bool each writer returns is whether every type it wrote was settled.
+write_written_ty = (c: Checker, id: TypeId, out :: String)
+                   Res<bool, AllocError> {
     c.type_memo.get(id).match({
-        None     => no_answer(),
-        Ok(memo) => write_ty_named(c, memo, out),
+        None     => Ok(false),
+        Ok(memo) => c.write_ty_named(memo, out),
     })
 }
 
-write_ty = (c : Checker, id: TypeId, out :: String) Res<bool, AllocError> {
+write_ty = (c: Checker, id: TypeId, out :: String) Res<bool, AllocError> {
     c.type_memo.get(id).match({
-        None     => no_answer(),
-        Ok(memo) => write_ty_id(c, memo, out),
+        None     => Ok(false),
+        Ok(memo) => c.write_ty_id(memo, out),
     })
 }
 
-write_ty_named = (c : Checker, id: TyId, out :: String) Res<bool, AllocError> {
-    poison_free(c, id).match({
-        false => no_answer(),
+// A written type shows its declaration; a primitive shows its prelude members.
+write_ty_named = (c: Checker, id: TyId, out :: String) Res<bool, AllocError> {
+    c.poison_free(id).match({
+        false => Ok(false),
         true  => c.types.at(id).match({
-            Prim(p)  => write_prim(c, id, p, out),
-            Named(n) => write_named(c, id, n, out),
-            _        => { c.types.write_name(id, out).try(); an_answer() },
+            Prim(p)  => c.write_prim(id, p, out),
+            Named(n) => c.write_named(id, n, out),
+            _        => { c.types.write_name(id, out).try(); Ok(true) },
         }),
     })
 }
 
-write_ty_value = (c : Checker, id: TyId, out :: String) Res<bool, AllocError> {
-    poison_free(c, id).match({
-        false => no_answer(),
+// A value shows its declaration only for a named type.
+write_ty_value = (c: Checker, id: TyId, out :: String) Res<bool, AllocError> {
+    c.poison_free(id).match({
+        false => Ok(false),
         true  => c.types.at(id).match({
-            Named(n) => write_named(c, id, n, out),
-            _        => { c.types.write_name(id, out).try(); an_answer() },
+            Named(n) => c.write_named(id, n, out),
+            _        => { c.types.write_name(id, out).try(); Ok(true) },
         }),
     })
 }
 
-write_named = (c : Checker, id: TyId, n: TyNamed, out :: String)
+write_named = (c: Checker, id: TyId, n: TyNamed, out :: String)
               Res<bool, AllocError> {
     c.types.write_name(id, out).try();
     decl_at(c.tree, n.decl).match({
-        None   => an_answer(),
-        Ok(dd) => { write_decl_note(
-            c,
-            dd,
-            WHOLE_SHAPE,
-            out
-        ).try(); an_answer() },
+        None   => Ok(true),
+        Ok(dd) => { c.write_decl_note(dd, WHOLE_SHAPE, out).try(); Ok(true) },
     })
 }
 
-write_prim = (c : Checker, id: TyId, p: Prim, out :: String)
+write_prim = (c: Checker, id: TyId, p: Prim, out :: String)
              Res<bool, AllocError> {
     c.types.write_name(id, out).try();
     defs ::= c.alloc.Vec<Def>();
     c.world.prelude_of(p.name, defs).try();
     defs.get(0).match({
-        None  => an_answer(),
+        None  => Ok(true),
         Ok(d) => {
-            write_prelude_note(c, d, out).try();
-            an_answer()
+            c.write_prelude_note(d, out).try();
+            Ok(true)
         },
     })
 }
 
-write_prelude_note = (c : Checker, d: Def, out :: String) Res<(), AllocError> {
+write_prelude_note = (c: Checker, d: Def, out :: String) Res<(), AllocError> {
     decl_at(c.tree, d.id).match({
         None   => Ok(()),
-        Ok(dd) => write_decl_note(c, dd, EXPORTED_ONLY, out),
+        Ok(dd) => c.write_decl_note(dd, EXPORTED_ONLY, out),
     })
 }
 
-write_decl_note = (c : Checker, dd: Decl, all: bool, out :: String)
+write_decl_note = (c: Checker, dd: Decl, all: bool, out :: String)
                   Res<(), AllocError> {
     doc = doc_block(c.alloc, c.tree, dd.leading).try();
     (doc.len > 0).then(() {
         out.add(" — ").try();
         out.add(doc).try();
     });
-    write_members(c, dd, Shown(joined: joiner(doc), all: all), out)
+    c.write_members(dd, Shown(joined: joiner(doc), all: all), out)
 }
 
 EXPORTED_ONLY: bool = false
@@ -194,16 +208,16 @@ Shown = {
 joiner = (doc: str) str {
     (doc.len == 0).match({
         true  => " — ",
-        false => ended(doc).match({ true => " ", false => "; " }),
+        false => doc.ended().match({ true => " ", false => "; " }),
     })
 }
 
-write_members = (c : Checker, dd: Decl, shown: Shown, out :: String)
+write_members = (c: Checker, dd: Decl, shown: Shown, out :: String)
                 Res<(), AllocError> {
     body ::= c.alloc.String().try();
     dd.kind.match({
-        Struct(s) => write_member_run(c, s.members, shown.all, body),
-        Enum(e)   => write_variant_run(c, e.variants, body),
+        Struct(s) => c.write_member_run(s.members, shown.all, body),
+        Enum(e)   => c.write_variant_run(e.variants, body),
         _         => Ok(()),
     }).try();
     (body.len() > 0).then(() {
@@ -213,15 +227,13 @@ write_members = (c : Checker, dd: Decl, shown: Shown, out :: String)
     Ok(());
 }
 
-MEMBERS: str = "members: "
-
-write_member_run = (c : Checker, ms: Vec<Member>, all: bool, body :: String)
+write_member_run = (c: Checker, ms: Vec<Member>, all: bool, body :: String)
                    Res<(), AllocError> {
     list  ::= c.alloc.String().try();
     names ::= c.alloc.Vec<str>();
-    ms.loop((h, m) { write_one_member(c, m, all, names, list).try(); });
+    ms.loop((h, m) { c.write_one_member(m, all, names, list).try(); });
     (list.len() > 0).then(() {
-        body.add(MEMBERS).try();
+        body.add("members: ").try();
         body.add(list.view()).try();
     });
     Ok(());
@@ -235,21 +247,19 @@ write_one_member = (
     body  :: String
 ) Res<(), AllocError> {
     m.kind.match({
-        Field(f)    => write_typed(
-            c,
+        Field(f)    => c.write_typed(
             all || f.exported,
             f.name.text,
             f.type,
             body
         ),
-        Const(k)    => write_typed(
-            c,
+        Const(k)    => c.write_typed(
             all || k.exported,
             k.name.text,
             k.type,
             body
         ),
-        Function(f) => write_fn_member(c, f, all, names, body),
+        Function(f) => c.write_fn_member(f, all, names, body),
     })
 }
 
@@ -263,20 +273,20 @@ write_typed = (
     show.match({
         false => Ok(()),
         true  => {
-            separate(body).try();
+            body.separate().try();
             body.add(name).try();
-            write_type_suffix(c, ty, body)
+            c.write_type_suffix(ty, body)
         },
     })
 }
 
-write_type_suffix = (c : Checker, ty: Res<TypeId>, body :: String)
+write_type_suffix = (c: Checker, ty: Res<TypeId>, body :: String)
                     Res<(), AllocError> {
     ty.match({
         None   => Ok(()),
         Ok(id) => {
             scratch ::= c.alloc.String().try();
-            write_ty(c, id, scratch).try().then(() {
+            c.write_ty(id, scratch).try().then(() {
                 body.add(": ").try();
                 body.add(scratch.view()).try();
             });
@@ -285,6 +295,7 @@ write_type_suffix = (c : Checker, ty: Res<TypeId>, body :: String)
     })
 }
 
+// Arity overloads share a name; the first declaration is the one shown.
 write_fn_member = (
     c     : Checker,
     f     : Function,
@@ -298,35 +309,35 @@ write_fn_member = (
             Ok(_) => Ok(()),
             None  => {
                 names.add(f.name.text).try();
-            scratch ::= c.alloc.String().try();
-            whole = write_decl_sig(c, f, scratch).try();
-            separate(body).try();
-            whole.match({
-                true  => body.add(scratch.view()),
-                false => body.add(f.name.text),
-            })
+                scratch ::= c.alloc.String().try();
+                whole = c.write_decl_sig(f, scratch).try();
+                body.separate().try();
+                whole.match({
+                    true  => body.add(scratch.view()),
+                    false => body.add(f.name.text),
+                })
             },
         }),
     })
 }
 
-write_variant_run = (c : Checker, vs: Vec<Variant>, body :: String)
+write_variant_run = (c: Checker, vs: Vec<Variant>, body :: String)
                     Res<(), AllocError> {
     vs.loop((h, i, v) {
         (i > 0).then(() { body.add(" | ").try() });
         body.add(v.name.text).try();
-        write_payload(c, v.payload, body).try();
+        c.write_payload(v.payload, body).try();
     });
     Ok(());
 }
 
-write_payload = (c : Checker, payload: Res<TypeId>, body :: String)
+write_payload = (c: Checker, payload: Res<TypeId>, body :: String)
                 Res<(), AllocError> {
     payload.match({
         None   => Ok(()),
         Ok(id) => {
             scratch ::= c.alloc.String().try();
-            write_ty(c, id, scratch).try().then(() {
+            c.write_ty(id, scratch).try().then(() {
                 body.add("(").try();
                 body.add(scratch.view()).try();
                 body.add(")").try();
@@ -340,11 +351,13 @@ separate = (body :: String) Res<(), AllocError> {
     (body.len() > 0).match({ true => body.add(", "), false => Ok(()) })
 }
 
+// The doc is the line comments after the last blank line, joined by spaces,
+// cut at the first sentence-ending line.
 doc_block = (a: Alloc, tree: Ast, run: TriviaRun) Res<str, AllocError> {
     doc ::= a.String().try();
     Range(after_last_blank(tree, run), run.len).loop((h, i) {
         piece = tree.trivia_at(run, i);
-        ended(doc.view()).match({
+        doc.view().ended().match({
             true  => (),
             false => piece.kind.match({
                 LineComment => add_doc_line(
@@ -359,10 +372,8 @@ doc_block = (a: Alloc, tree: Ast, run: TriviaRun) Res<str, AllocError> {
 }
 
 ended = (doc: str) bool {
-    (doc.len > 0) && terminal(doc.index(doc.len - 1))
+    (doc.len > 0) && doc.index(doc.len - 1).is_in(['.', '!', '?'])
 }
-
-terminal = (b: u8) bool { b.is_in(['.', '!', '?']) }
 
 after_last_blank = (tree: Ast, run: TriviaRun) usize {
     from ::= 0;
@@ -396,56 +407,53 @@ comment_text = (text: str) str {
     text.slice(from, text.len);
 }
 
-write_val = (c : Checker, e: ExprId, out :: String) Res<bool, AllocError> {
+write_val = (c: Checker, e: ExprId, out :: String) Res<bool, AllocError> {
     c.expr_memo.get(e).match({
-        None     => no_answer(),
-        Ok(memo) => write_ty_value(c, memo, out),
+        None     => Ok(false),
+        Ok(memo) => c.write_ty_value(memo, out),
     })
 }
 
-write_ty_id = (c : Checker, id: TyId, out :: String) Res<bool, AllocError> {
-    poison_free(c, id).match({
-        false => no_answer(),
-        true  => { c.types.write_name(id, out).try(); an_answer() },
+write_ty_id = (c: Checker, id: TyId, out :: String) Res<bool, AllocError> {
+    c.poison_free(id).match({
+        false => Ok(false),
+        true  => { c.types.write_name(id, out).try(); Ok(true) },
     })
 }
 
-poison_free = (c : Checker, id: TyId) bool {
+poison_free = (c: Checker, id: TyId) bool {
     c.types.at(id).match({
         Unknown   => false,
-        Res(r)    => poison_free(c, r.value) && poison_free(c, r.error),
-        Named(n)  => all_poison_free(c, n.args),
-        Fn(f)     => poison_free(c, f.ret) && all_poison_free(c, f.params),
-        Union(u)  => all_poison_free(c, u.members),
-        Array(ar) => poison_free(c, ar.elem),
+        Res(r)    => c.poison_free(r.value) && c.poison_free(r.error),
+        Named(n)  => c.all_poison_free(n.args),
+        Fn(f)     => c.poison_free(f.ret) && c.all_poison_free(f.params),
+        Union(u)  => c.all_poison_free(u.members),
+        Array(ar) => c.poison_free(ar.elem),
         _         => true,
     })
 }
 
-all_poison_free = (c : Checker, ids: Vec<TyId>) bool {
+all_poison_free = (c: Checker, ids: Vec<TyId>) bool {
     every ::= true;
-    ids.loop((h, id) { every = every && poison_free(c, id); });
+    ids.loop((h, id) { every = every && c.poison_free(id); });
     every;
 }
 
-write_decl_sig = (
-    c   : Checker,
-    f   : Function,
-    out :: String
-) Res<bool, AllocError> {
+write_decl_sig = (c: Checker, f: Function, out :: String)
+                 Res<bool, AllocError> {
     out.add(f.name.text).try();
     out.add(" = ").try();
-    write_tparams(f, out).try();
+    f.write_tparams(out).try();
     out.add("(").try();
     whole ::= true;
     f.params.loop((h, i, prm) {
         (i > 0).then(() { out.add(", ").try() });
         out.add(prm.name.text).try();
         out.add(prm.binder()).try();
-        whole = write_opt_ty(c, prm.type, out).try() && whole;
+        whole = c.write_opt_ty(prm.type, out).try() && whole;
     });
     out.add(") ").try();
-    Ok(write_opt_ty(c, f.ret, out).try() && whole);
+    Ok(c.write_opt_ty(f.ret, out).try() && whole);
 }
 
 write_tparams = (f: Function, out :: String) Res<(), AllocError> {
@@ -463,14 +471,10 @@ write_tparams = (f: Function, out :: String) Res<(), AllocError> {
     })
 }
 
-write_opt_ty = (c : Checker, t: Res<TypeId>, out :: String)
+write_opt_ty = (c: Checker, t: Res<TypeId>, out :: String)
                Res<bool, AllocError> {
     t.match({
-        None   => no_answer(),
-        Ok(id) => write_ty(c, id, out),
+        None   => Ok(false),
+        Ok(id) => c.write_ty(id, out),
     })
 }
-
-an_answer = () Res<bool, AllocError> { Ok(true) }
-
-no_answer = () Res<bool, AllocError> { Ok(false) }

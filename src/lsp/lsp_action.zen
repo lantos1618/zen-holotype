@@ -14,7 +14,35 @@ ModuleTable = sema.sema_def
 to_pos, to_wire, WirePos, WireRange = lsp.lsp_pos
 written, obj, arr, Nest, to_json = std.json
 
-Action = { name: str, module: str }
+Action = {
+    name: str,
+    module: str,
+
+    write = (self: @Self, t: Alloc, at: WirePos, uri: str, list :: Nest,
+             out :: String) Res<(), AllocError> {
+        stmt  ::= t.String("{} = {}", self.name, self.module).try();
+        title ::= t.String("Import {}", stmt.view()).try();
+        stmt.add("\n").try();
+
+        list.next(out).try();
+        fix ::= obj(out).try();
+        fix.text("title", title.view(), out).try();
+        fix.text("kind", "quickfix", out).try();
+        fix.key("edit", out).try();
+        edit ::= obj(out).try();
+        edit.key("changes", out).try();
+        changes ::= obj(out).try();
+        changes.key(uri, out).try();
+        edits ::= arr(out).try();
+        edits.next(out).try();
+        encoded ::= ActionTextEdit(range: WireRange(start: at, end: at), newText: stmt.view()).to_json(t).try();
+        out.add(encoded.view()).try();
+        edits.close(out).try();
+        changes.close(out).try();
+        edit.close(out).try();
+        fix.close(out)
+    }
+}
 
 ActionTextEdit = {
     range: WireRange,
@@ -27,188 +55,128 @@ write_actions* = (
     file : str,
     text : str,
     uri  : str,
-    sl   : usize,
-    sc   : usize,
-    el   : usize,
-    ec   : usize,
+    from : WirePos,
+    upto : WirePos,
     out  :: String
 ) Res<(), AllocError> {
-    found ::= t.Vec<Action>();
-    from = to_pos(text, sl, sc);
-    upto = to_pos(text, el, ec);
+    fixes ::= Fixes(c: c, t: t, file: file, found: t.Vec<Action>());
+    lo = to_pos(text, from.line, from.character);
+    hi = to_pos(text, upto.line, upto.character);
     Range(0, c.diag_count()).loop((h, i) {
         c.diag_at(i).match({
             None  => written(),
-            Ok(d) => offer(c, t, file, d, from, upto, found),
+            Ok(d) => fixes.offer(d, lo, hi),
         }).try();
     });
-    write_offerings(c, t, file, text, uri, found, out)
+    fixes.write(text, uri, out)
 }
 
-offer = (
+// Collects one import fix per undefined name reported inside the range.
+Fixes = {
     c     : Checker,
     t     : Alloc,
     file  : str,
-    d     : Diag,
-    from  : Pos,
-    upto  : Pos,
-    found :: Vec<Action>
-) Res<(), AllocError> {
-    (d.file.eq(file) && covers(d.span, from, upto)).match({
-        false => written(),
-        true  => d.fault.match({
-            UndefinedName(nf) => offer_name(c, t, nf.name, found),
-            _                 => written(),
-        }),
-    })
-}
-
-offer_name = (c: Checker, t: Alloc, name: str, found :: Vec<Action>)
-             Res<(), AllocError> {
-    found.find((a) { a.name.eq(name) }).match({
-        Ok(_) => written(),
-        None  => {
-            defs  ::= t.Vec<Def>();
-            lines ::= t.Vec<str>();
-            c.world.exported_named(name, defs).try();
-            defs.loop((h, d) {
-                offer_def(c, t, name, d, found, lines).try();
-            });
-            Ok(())
-        },
-    })
-}
-
-offer_def = (
-    c     : Checker,
-    t     : Alloc,
-    name  : str,
-    d     : Def,
     found :: Vec<Action>,
-    seen  :: Vec<str>
-)
+
+    offer = (self :: @Self, d: Diag, from: Pos, upto: Pos)
             Res<(), AllocError> {
-    mi = d.id.module.to_usize();
-    c.world.table_at(mi).match({
-        None      => written(),
-        Ok(table) => offer_at(c, t, name, mi, table, found, seen),
-    })
+        (d.file.eq(self.file) && d.span.covers(from, upto)).match({
+            false => written(),
+            true  => d.fault.match({
+                UndefinedName(nf) => self.offer_name(nf.name),
+                _                 => written(),
+            }),
+        })
+    }
+
+    offer_name = (self :: @Self, name: str) Res<(), AllocError> {
+        self.found.find((a) { a.name.eq(name) }).match({
+            Ok(_) => written(),
+            None  => {
+                defs ::= self.t.Vec<Def>();
+                self.c.world.exported_named(name, defs).try();
+                defs.loop((h, d) {
+                    mi = d.id.module.to_usize();
+                    self.c.world.table_at(mi).match({
+                        None      => written(),
+                        Ok(table) => self.offer_at(name, mi, table),
+                    }).try();
+                });
+                Ok(())
+            },
+        })
+    }
+
+    offer_at = (self :: @Self, name: str, mi: usize, table: ModuleTable)
+               Res<(), AllocError> {
+        offered = self.spoken_home(name, mi, table).try();
+        self.found.find((a) { a.name.eq(name) && a.module.eq(offered) }).match({
+            Ok(_) => written(),
+            None  => self.found.add(Action(name: name, module: offered)),
+        })
+    }
+
+    // The folder root when it re-exports `name`, else the module itself.
+    spoken_home = (self: @Self, name: str, mi: usize, table: ModuleTable)
+                  Res<str, AllocError> {
+        spoken = module_display(table.name);
+        spoken.eq(table.name).match({
+            true  => Ok(table.name),
+            false => self.c.world.index_of(spoken).match({
+                None  => Ok(table.name),
+                Ok(r) => (r == mi).match({
+                    true  => Ok(table.name),
+                    false => {
+                        at_root ::= self.t.Vec<Def>();
+                        visited ::= self.t.Vec<usize>();
+                        self.c.world.exports_of(
+                            r,
+                            name,
+                            at_root,
+                            visited
+                        ).try();
+                        Ok((at_root.len > 0).match({
+                            true  => spoken,
+                            false => table.name,
+                        }))
+                    },
+                }),
+            }),
+        })
+    }
+
+    // Fixes insert after the last import of the file.
+    insert_at = (self: @Self, text: str) WirePos {
+        line ::= 1;
+        module_index_of(self.c.tree, self.file).match({
+            None   => {},
+            Ok(mi) => self.c.tree.module_at(mi).match({
+                None  => {},
+                Ok(m) => m.decls.loop((h, d) {
+                    d.kind.match({
+                        Import(_) => { line = d.span.end.line + 1; },
+                        _         => {},
+                    });
+                }),
+            }),
+        });
+        to_wire(text, Pos(line: line, col: 1))
+    }
+
+    write = (self: @Self, text: str, uri: str, out :: String)
+            Res<(), AllocError> {
+        at = self.insert_at(text);
+        list ::= arr(out).try();
+        self.found.loop((h, a) { a.write(self.t, at, uri, list, out).try(); });
+        list.close(out)
+    }
 }
 
-offer_at = (
-    c     : Checker,
-    t     : Alloc,
-    name  : str,
-    mi    : usize,
-    table : ModuleTable,
-    found :: Vec<Action>,
-    seen  :: Vec<str>
-) Res<(), AllocError> {
-    spoken = module_display(table.name);
-    at_root ::= t.Vec<Def>();
-    visited ::= t.Vec<usize>();
-    offered ::= table.name;
-    (spoken.eq(table.name)).match({
-        false => c.world.index_of(spoken).match({
-            None  => written(),
-            Ok(r) => (r == mi).match({
-                true  => written(),
-                false => {
-                    c.world.exports_of(r, name, at_root, visited).try();
-                    (at_root.len > 0).then(() { offered = spoken; });
-                    written()
-                },
-            }).try(),
-        }).try(),
-        true  => written(),
-    });
-    line ::= t.String().try();
-    line.add(name).try();
-    line.add(" = ").try();
-    line.add(offered).try();
-    seen.find((s) { s.eq(line.view()) }).match({
-        Ok(_) => written(),
-        None  => {
-            seen.add(line.view()).try();
-            found.add(Action(name: name, module: offered))
-        },
-    });
-    Ok(())
-}
-
+// An empty range covers a span it sits inside; otherwise the two overlap.
 covers = (span: Span, from: Pos, upto: Pos) bool {
     empty = from.line == upto.line && from.col == upto.col;
     (empty).match({
         true  => !before(from, span.start) && before(from, span.end),
         false => before(span.start, upto) && before(from, span.end),
     })
-}
-
-insert_at = (c: Checker, file: str, text: str) WirePos {
-    line ::= 1;
-    module_index_of(c.tree, file).match({
-        None   => {},
-        Ok(mi) => c.tree.module_at(mi).match({
-            None  => {},
-            Ok(m) => m.decls.loop((h, d) {
-                d.kind.match({
-                    Import(_) => { line = d.span.end.line + 1; },
-                    _         => {},
-                });
-            }),
-        }),
-    });
-    to_wire(text, Pos(line: line, col: 1))
-}
-
-write_offerings = (
-    c     : Checker,
-    t     : Alloc,
-    file  : str,
-    text  : str,
-    uri   : str,
-    found : Vec<Action>,
-    out   :: String
-) Res<(), AllocError> {
-    at = insert_at(c, file, text);
-    list ::= arr(out).try();
-    found.loop((h, a) { write_action(t, a, at, uri, list, out).try(); });
-    list.close(out)
-}
-
-write_action = (
-    t    : Alloc,
-    a    : Action,
-    at   : WirePos,
-    uri  : str,
-    list :: Nest,
-    out  :: String
-) Res<(), AllocError> {
-    line ::= t.String().try();
-    line.add(a.name).try();
-    line.add(" = ").try();
-    line.add(a.module).try();
-    line.add("\n").try();
-    said = line.view();
-    title ::= t.String().try();
-    title.add("Import ").try();
-    title.add(said.slice(0, said.len - 1)).try();
-
-    list.next(out).try();
-    fix ::= obj(out).try();
-    fix.text("title", title.view(), out).try();
-    fix.text("kind", "quickfix", out).try();
-    fix.key("edit", out).try();
-    edit ::= obj(out).try();
-    edit.key("changes", out).try();
-    changes ::= obj(out).try();
-    changes.key(uri, out).try();
-    edits ::= arr(out).try();
-    edits.next(out).try();
-    encoded ::= ActionTextEdit(range: WireRange(start: at, end: at), newText: said).to_json(t).try();
-    out.add(encoded.view()).try();
-    edits.close(out).try();
-    changes.close(out).try();
-    edit.close(out).try();
-    fix.close(out)
 }

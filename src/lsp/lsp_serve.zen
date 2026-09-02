@@ -7,23 +7,19 @@ Range = std.core
 Alloc, AllocError, Arena = std.mem
 Checker = sema.sema_check
 Jsons, JsonId, written, read = std.json
-FrameFault, frame_at, write_frame = lsp.lsp_frame
-Hover, hover_at, hover_in, hover_with = lsp.lsp_hover
+frame_at, write_frame, write_fault = lsp.lsp_frame
+hover_at, hover_in, hover_with = lsp.lsp_hover
 definition_at, definition_in, definition_with = lsp.lsp_def
 Sym, symbols_at, write_symbols = lsp.lsp_symbol
 write_edits = lsp.lsp_fmt
-Item, MemberCache, complete_at, complete_shared = lsp.lsp_compl
-sort_items, write_items = lsp.lsp_compl
+Item, MemberCache, complete_at, complete_shared, write_items = lsp.lsp_compl
 write_tokens = lsp.lsp_colour
 Diagnostics, Shared = lsp.lsp_diag
 write_actions = lsp.lsp_action
 relative_to = zen.zen_path
-method_of, param, string_at = lsp.lsp_reply
-DecodedRequest, RequestTurn = lsp.lsp_reply
-write_hover, write_target = lsp.lsp_reply
-write_capabilities = lsp.lsp_reply
-RpcFault, own_str = lsp.lsp_reply
-request_of = lsp.lsp_reply
+WirePos = lsp.lsp_pos
+Decoded, RequestTurn, write_capabilities = lsp.lsp_reply
+RpcFault, own_str, request_of, notice_of = lsp.lsp_reply
 path_of = lsp.lsp_uri
 
 Server* = {
@@ -66,14 +62,14 @@ Server* = {
 
     route = (self :: @Self, tree: Jsons, req: JsonId, turn :: RequestTurn)
             Res<(), AllocError> {
-        method = method_of(tree, req);
-        tree.field(req, "id").match({
-            None    => self.notified(tree, req, method),
-            Ok(rid) => self.requested(DecodedRequest(tree, req, rid), turn),
+        request = Decoded(tree, req);
+        request.id.match({
+            None  => self.notified(request),
+            Ok(_) => self.requested(request, turn),
         })
     }
 
-    requested = (self :: @Self, request: DecodedRequest, turn :: RequestTurn)
+    requested = (self :: @Self, request: Decoded, turn :: RequestTurn)
                 Res<(), AllocError> {
         method = request.method();
         (self.ready || method.eq("initialize")).match({
@@ -86,7 +82,7 @@ Server* = {
         })
     }
 
-    answered = (self :: @Self, request: DecodedRequest, turn :: RequestTurn)
+    answered = (self :: @Self, request: Decoded, turn :: RequestTurn)
                Res<(), AllocError> {
         method = request.method();
         request_of(method).match({
@@ -106,7 +102,7 @@ Server* = {
         })
     }
 
-    initialized = (self :: @Self, request: DecodedRequest,
+    initialized = (self :: @Self, request: Decoded,
                    turn :: RequestTurn) Res<(), AllocError> {
         self.members.invalidate();
         self.ready     = true;
@@ -119,7 +115,7 @@ Server* = {
         turn.result(request, caps.view())
     }
 
-    unknown = (self :: @Self, request: DecodedRequest,
+    unknown = (self :: @Self, request: Decoded,
                turn :: RequestTurn) Res<(), AllocError> {
         why ::= turn.alloc().String().try();
         why.add("method not found: ").try();
@@ -127,37 +123,27 @@ Server* = {
         turn.failed(request, RpcFault.MethodNotFound, why.view())
     }
 
-    notified = (self :: @Self, tree: Jsons, req: JsonId, method: str)
-               Res<(), AllocError> {
-        handled: Res<Res<(), AllocError>> = loop<Res<(), AllocError>>((h) {
-            method.eq("textDocument/didOpen").then(() {
-                h.break(self.opened(tree, req))
-            });
-            method.eq("textDocument/didChange").then(() {
-                h.break(self.changed(tree, req))
-            });
-            method.eq("textDocument/didClose").then(() {
-                h.break(self.closed(tree, req))
-            });
-            method.eq("workspace/didChangeWatchedFiles").then(() {
-                h.break(self.watched(tree, req))
-            });
-            h.break(written());
-        });
-        handled.match({ Ok(done) => done, None => written() })
+    notified = (self :: @Self, request: Decoded) Res<(), AllocError> {
+        notice_of(request.method()).match({
+            DidOpen          => self.opened(request),
+            DidChange        => self.changed(request),
+            DidClose         => self.closed(request),
+            DidChangeWatched => self.watched(request),
+            Ignored          => written(),
+        })
     }
 
-    watched = (self :: @Self, tree: Jsons, req: JsonId)
-              Res<(), AllocError> {
-        changes = param(tree, req, "changes");
+    // A change to a file the client has not opened stales the build.
+    watched = (self :: @Self, request: Decoded) Res<(), AllocError> {
+        changes = request.param("changes");
         i     ::= 0;
         stale ::= false;
         more  ::= true;
         loop(more, (h) {
-            tree.item(changes, i).match({
+            request.item_at(changes, i).match({
                 None       => { more = false; },
                 Ok(change) => {
-                    uri = string_at(tree, change, "uri");
+                    uri = request.string_at(change, "uri");
                     self.docs.get(uri).match({
                         None  => { stale = true; },
                         Ok(_) => (),
@@ -179,25 +165,26 @@ Server* = {
         })
     }
 
-    opened = (self :: @Self, tree: Jsons, req: JsonId) Res<(), AllocError> {
-        doc = param(tree, req, "textDocument");
-        self.remember(string_at(tree, doc, "uri"), string_at(tree, doc, "text"))
+    opened = (self :: @Self, request: Decoded) Res<(), AllocError> {
+        doc = request.param("textDocument");
+        self.remember(
+            request.string_at(doc, "uri"),
+            request.string_at(doc, "text")
+        )
     }
 
-    changed = (self :: @Self, tree: Jsons, req: JsonId) Res<(), AllocError> {
-        uri   = string_at(tree, param(tree, req, "textDocument"), "uri");
-        edits = param(tree, req, "contentChanges");
-        text  = tree.item(edits, 0).match({
+    changed = (self :: @Self, request: Decoded) Res<(), AllocError> {
+        uri   = request.string_at(request.param("textDocument"), "uri");
+        edits = request.param("contentChanges");
+        text  = request.item_at(edits, 0).match({
             None    => "",
-            Ok(one) => string_at(tree, one, "text"),
+            Ok(one) => request.string_at(one, "text"),
         });
         self.remember(uri, text)
     }
 
-    closed = (self :: @Self, tree: Jsons, req: JsonId)
-             Res<(), AllocError> {
-        doc = param(tree, req, "textDocument");
-        uri = string_at(tree, doc, "uri");
+    closed = (self :: @Self, request: Decoded) Res<(), AllocError> {
+        uri = request.string_at(request.param("textDocument"), "uri");
         self.docs.get(uri).match({
             None  => written(),
             Ok(_) => self.forget(uri),
@@ -298,7 +285,7 @@ Server* = {
         })
     }
 
-    unopened = (self :: @Self, request: DecodedRequest,
+    unopened = (self :: @Self, request: Decoded,
                 turn :: RequestTurn)
                Res<(), AllocError> {
         turn.failed(
@@ -308,7 +295,7 @@ Server* = {
         )
     }
 
-    hovered = (self :: @Self, request: DecodedRequest, turn :: RequestTurn)
+    hovered = (self :: @Self, request: Decoded, turn :: RequestTurn)
               Res<(), AllocError> {
         t         = turn.alloc();
         uri       = request.string_at(request.param("textDocument"), "uri");
@@ -322,11 +309,7 @@ Server* = {
                 self.workspace.is_empty().match({
                     true  => {
                         qa ::= self.env.mem.alloc();
-                        self.write_hovered(
-                            qa,
-                            hover_at(qa, uri, text, line, character).try(),
-                            body
-                        )
+                        hover_at(qa, uri, text, line, character).try().write(qa, body)
                     },
                     false => self.shared_hover(
                         t,
@@ -342,7 +325,7 @@ Server* = {
         })
     }
 
-    coloured = (self :: @Self, request: DecodedRequest,
+    coloured = (self :: @Self, request: Decoded,
                 turn :: RequestTurn) Res<(), AllocError> {
         t   = turn.alloc();
         uri = request.string_at(request.param("textDocument"), "uri");
@@ -376,44 +359,32 @@ Server* = {
         sh.c.match({
             None  => {
                 qa ::= self.env.mem.alloc();
-                self.write_hovered(
+                hover_in(
+                    self.env,
                     qa,
-                    hover_in(
-                        self.env,
-                        qa,
-                        self.workspace,
-                        path,
-                        text,
-                        line,
-                        character
-                    ).try(),
-                    body
-                )
-            },
-            Ok(c) => self.write_hovered(
-                t,
-                hover_with(
-                    c,
-                    t,
-                    relative_to(sh.root, path),
+                    self.workspace,
+                    path,
                     text,
                     line,
                     character
-                ).try(),
-                body
-            ),
+                )
+                    .try()
+                    .write(qa, body)
+            },
+            Ok(c) => hover_with(
+                c,
+                t,
+                relative_to(sh.root, path),
+                text,
+                line,
+                character
+            )
+                .try()
+                .write(t, body),
         })
     }
 
-    write_hovered = (self :: @Self, a: Alloc, h: Hover, body :: String)
-                    Res<(), AllocError> {
-        h.found.match({
-            false => body.add("null"),
-            true  => write_hover(a, h, body),
-        })
-    }
-
-    defined = (self :: @Self, request: DecodedRequest, turn :: RequestTurn)
+    defined = (self :: @Self, request: Decoded, turn :: RequestTurn)
               Res<(), AllocError> {
         t         = turn.alloc();
         uri       = request.string_at(request.param("textDocument"), "uri");
@@ -427,11 +398,9 @@ Server* = {
                 self.workspace.is_empty().match({
                     true  => {
                         qa ::= self.env.mem.alloc();
-                        write_target(
-                            qa,
-                            definition_at(qa, uri, text, line, character).try(),
-                            body
-                        )
+                        definition_at(qa, uri, text, line, character)
+                            .try()
+                            .write(qa, body)
                     },
                     false => self.write_definition(
                         t,
@@ -455,41 +424,13 @@ Server* = {
         sh.c.match({
             None  => {
                 qa ::= self.env.mem.alloc();
-                write_target(
-                    qa,
-                    definition_in(
-                        self.env,
-                        qa,
-                        self.workspace,
-                        path,
-                        uri,
-                        text,
-                        line,
-                        character
-                    ).try(),
-                    body
-                )
+                definition_in(self.env, qa, self.workspace, path, uri, text, line, character).try().write(qa, body)
             },
-            Ok(c) => write_target(
-                t,
-                definition_with(
-                    self.env,
-                    c,
-                    t,
-                    sh.root,
-                    self.docs,
-                    uri,
-                    text,
-                    relative_to(sh.root, path),
-                    line,
-                    character
-                ).try(),
-                body
-            ),
+            Ok(c) => definition_with(self.env, c, t, sh.root, self.docs, uri, text, relative_to(sh.root, path), line, character).try().write(t, body),
         })
     }
 
-    outlined = (self :: @Self, request: DecodedRequest,
+    outlined = (self :: @Self, request: Decoded,
                 turn :: RequestTurn) Res<(), AllocError> {
         t   = turn.alloc();
         uri = request.string_at(request.param("textDocument"), "uri");
@@ -505,7 +446,7 @@ Server* = {
         })
     }
 
-    formatted = (self :: @Self, request: DecodedRequest,
+    formatted = (self :: @Self, request: Decoded,
                  turn :: RequestTurn) Res<(), AllocError> {
         t   = turn.alloc();
         uri = request.string_at(request.param("textDocument"), "uri");
@@ -519,7 +460,7 @@ Server* = {
         })
     }
 
-    acted = (self :: @Self, request: DecodedRequest, turn :: RequestTurn)
+    acted = (self :: @Self, request: Decoded, turn :: RequestTurn)
             Res<(), AllocError> {
         t     = turn.alloc();
         uri   = request.string_at(request.param("textDocument"), "uri");
@@ -536,10 +477,14 @@ Server* = {
                         t,
                         uri,
                         text,
-                        request.number_at(first, "line"),
-                        request.number_at(first, "character"),
-                        request.number_at(last, "line"),
-                        request.number_at(last, "character"),
+                        WirePos(
+                            line: request.number_at(first, "line"),
+                            character: request.number_at(first, "character")
+                        ),
+                        WirePos(
+                            line: request.number_at(last, "line"),
+                            character: request.number_at(last, "character")
+                        ),
                         body
                     ),
                 }).try();
@@ -549,8 +494,8 @@ Server* = {
     }
 
     shared_actions = (self :: @Self, t: Alloc, uri: str, text: str,
-                      sl: usize, sc: usize, el: usize, ec: usize,
-                      body :: String) Res<(), AllocError> {
+                      from: WirePos, upto: WirePos, body :: String)
+                     Res<(), AllocError> {
         path = path_of(uri);
         sh   = self.build_for(path, t).try();
         sh.c.match({
@@ -561,16 +506,14 @@ Server* = {
                 relative_to(sh.root, path),
                 text,
                 uri,
-                sl,
-                sc,
-                el,
-                ec,
+                from,
+                upto,
                 body
             ),
         })
     }
 
-    completed = (self :: @Self, request: DecodedRequest,
+    completed = (self :: @Self, request: Decoded,
                  turn :: RequestTurn) Res<(), AllocError> {
         t         = turn.alloc();
         uri       = request.string_at(request.param("textDocument"), "uri");
@@ -598,7 +541,7 @@ Server* = {
                         (!cached).then(() {
                             complete_at(qa, text, line, character, items).try();
                         });
-                        sort_items(items);
+                        items.sort();
                         write_items(qa, items, body)
                     },
                     false => self.write_completion(
@@ -662,7 +605,7 @@ Server* = {
         done.match({
             false => written(),
             true  => {
-                sort_items(items);
+                items.sort();
                 write_items(t, items, body)
             },
         }).try();
@@ -683,7 +626,7 @@ Server* = {
             character,
             items
         ).try();
-        sort_items(items);
+        items.sort();
         write_items(t, items, body)
     }
 }
@@ -721,17 +664,13 @@ serve* = (s :: Server, input: str, out :: String) Res<(), AllocError> {
     going ::= true;
     loop(() { going && at < input.len }, (h) {
         frame_at(input, at).match({
-            Err(f) => { going = false; frame_fault(f, out).try(); },
+            Err(f) => {
+                going = false;
+                f.write_fault(out).try();
+                out.add("\n").try();
+            },
             Ok(fr) => { at = fr.next; s.one(s.a, fr.body, out).try(); },
         });
     });
     s.settled(s.a, out)
-}
-
-frame_fault = (f: FrameFault, out :: String) Res<(), AllocError> {
-    out.add("lsp: bad frame at byte ").try();
-    out.write_usize(f.byte()).try();
-    out.add(" (").try();
-    out.add(f.why()).try();
-    out.add(")\n")
 }

@@ -10,262 +10,188 @@ Struct, Enum, Alias, Impl, Member, Function, Named, Call, Match, Try = std.ast
 Span, ExprId, TypeId, BlockId = std.ast
 Checker = sema.sema_check
 decl_at = sema.sema_def
-Classed, Colour, sort_classes = lsp.lsp_colour
+Classed, Colour = lsp.lsp_colour
 written = std.json
-
-Classes = {
-    file: str,
-    rows :: Vec<Classed>,
-}
 
 classify* = (a: Alloc, c: Checker, file: str)
            Res<Vec<Classed>, AllocError> {
-    out ::= Classes(file: file, rows: a.Vec<Classed>());
-    decl_sites(a, c, out).try();
-    written_types(a, c, out).try();
-    expr_sites(a, c, out).try();
-    sort_classes(out.rows);
+    out ::= Classes(c: c, file: file, rows: a.Vec<Classed>());
+    out.decl_sites().try();
+    out.written_types().try();
+    out.expr_sites().try();
+    out.rows.sort();
     Ok(out.rows)
 }
 
-class_as = (
-    a      : Alloc,
-    span   : Span,
-    colour : Colour,
-    out    :: Classes
-) Res<(), AllocError> {
-    span.file.eq(out.file).match({
-        false => written(),
-        true  => out.rows.add(Classed(
-            line: span.start.line,
-            col: span.start.col,
-            colour: colour
-        )),
-    }).try();
-    Ok(())
-}
-
-decl_sites = (a: Alloc, c: Checker, out :: Classes)
-             Res<(), AllocError> {
-    Range(0, c.tree.module_count()).loop((h, i) {
-        c.tree.module_at(i).match({
-            None  => written(),
-            Ok(m) => m.span.file.eq(out.file).match({
-                false => written(),
-                true  => module_sites(a, m, out),
-            }),
-        }).try();
-    });
-    nested_sites(a, c.tree, out)
-}
-
-module_sites = (a: Alloc, m: Module, out :: Classes)
-               Res<(), AllocError> {
-    m.decls.loop((h, d) { decl_site(a, d, out).try(); });
-    Ok(());
-}
-
-nested_sites = (a: Alloc, tree: Ast, out :: Classes)
-               Res<(), AllocError> {
-    bid ::= BlockId(index: 0);
-    Range(0, tree.block_ids()).loop((h, i) {
-        block_sites(a, tree.block_at(bid), out).try();
-        bid = BlockId(index: bid.index + 1);
-    });
-    Ok(());
-}
-
-block_sites = (a: Alloc, b: Block, out :: Classes)
-              Res<(), AllocError> {
-    b.stmts.loop((h, s) {
-        s.kind.match({
-            Decl(d) => decl_site(a, d, out),
-            _       => written(),
-        }).try();
-    });
-    Ok(());
-}
-
-decl_site = (a: Alloc, d: Decl, out :: Classes)
-            Res<(), AllocError> {
-    d.kind.match({
-        Function(f) => fn_site(a, f, out),
-        Struct(s)   => member_sites(a, s.name.span, s.members, out),
-        Enum(e)     => class_as(a, e.name.span, Colour.Type, out),
-        Alias(x)    => class_as(a, x.name.span, Colour.Type, out),
-        Impl(im)    => member_sites(a, im.target.span, im.members, out),
-        Const(_)    => written(),
-        Import(_)   => written(),
-    })
-}
-
-fn_site = (a: Alloc, f: Function, out :: Classes)
-          Res<(), AllocError> {
-    class_as(a, f.name.span, Colour.Function, out).try();
-    f.params.loop((h, p) {
-        class_as(a, p.name.span, Colour.Parameter, out).try();
-    });
-    Ok(());
-}
-
-member_sites = (
-    a       : Alloc,
-    name    : Span,
-    members : Vec<Member>,
-    out     :: Classes
-) Res<(), AllocError> {
-    class_as(a, name, Colour.Type, out).try();
-    members.loop((h, m) { member_site(a, m, out).try(); });
-    Ok(());
-}
-
-member_site = (a: Alloc, m: Member, out :: Classes)
-              Res<(), AllocError> {
-    m.kind.match({
-        Function(f) => fn_site(a, f, out),
-        Const(_)    => written(),
-        Field(_)    => written(),
-    })
-}
-
-written_types = (a: Alloc, c: Checker, out :: Classes)
-               Res<(), AllocError> {
-    tid ::= TypeId(index: 0);
-    Range(0, c.tree.type_ids()).loop((h, i) {
-        written_type(a, c, tid, out).try();
-        tid = TypeId(index: tid.index + 1);
-    });
-    Ok(());
-}
-
-written_type = (
-    a   : Alloc,
-    c   : Checker,
-    tid : TypeId,
-    out :: Classes
-) Res<(), AllocError> {
-    c.tree.type_at(tid).kind.match({
-        Named(n) => named_site(a, c, tid, n, out),
-        _        => written(),
-    })
-}
-
-named_site = (
-    a   : Alloc,
-    c   : Checker,
-    tid : TypeId,
-    n   : Named,
-    out :: Classes
-) Res<(), AllocError> {
-    c.type_memo.get(tid).match({
-        None   => written(),
-        Ok(ty) => c.is_unknown(ty).match({
-            true  => written(),
-            false => class_as(a, n.name.span, Colour.Type, out),
-        }),
-    })
-}
-
-expr_sites = (a: Alloc, c: Checker, out :: Classes)
-             Res<(), AllocError> {
-    eid ::= ExprId(index: 0);
-    Range(0, c.tree.expr_ids()).loop((h, i) {
-        expr_site(a, c, eid, out).try();
-        eid = ExprId(index: eid.index + 1);
-    });
-    Ok(());
-}
-
-expr_site = (
-    a   : Alloc,
-    c   : Checker,
-    id  : ExprId,
-    out :: Classes
-) Res<(), AllocError> {
-    e = c.tree.expr_at(id);
-    e.kind.match({
-        Call(k)  => call_site(a, c, id, k, out),
-        Match(m) => class_as(a, m.name_span, Colour.Keyword, out),
-        Try(t)   => class_as(a, t.name_span, Colour.Keyword, out),
-        Name(_)  => param_site(a, c, id, e.span, out),
-        _        => written(),
-    })
-}
-
-param_site = (
-    a    : Alloc,
+// Collects the classifications of one file; spans in other files are dropped.
+Classes = {
     c    : Checker,
-    id   : ExprId,
-    span : Span,
-    out  :: Classes
-) Res<(), AllocError> {
-    c.param_memo.get(id).match({
-        Ok(_) => class_as(a, span, Colour.Parameter, out),
-        None  => written(),
-    })
-}
+    file : str,
+    rows :: Vec<Classed>,
 
-call_site = (
-    a   : Alloc,
-    c   : Checker,
-    id  : ExprId,
-    k   : Call,
-    out :: Classes
-) Res<(), AllocError> {
-    c.resolved_call(id).match({
-        None    => written(),
-        Ok(did) => decl_at(c.tree, did).match({
-            None  => written(),
-            Ok(d) => callee_site(a, c, d, k, out),
-        }),
-    })
-}
-
-callee_site = (
-    a   : Alloc,
-    c   : Checker,
-    d   : Decl,
-    k   : Call,
-    out :: Classes
-) Res<(), AllocError> {
-    d.kind.match({
-        Function(_) => fn_callee(a, c, k, out),
-        Struct(s)   => type_callee(a, c, k, s.name.text, out),
-        Enum(e)     => type_callee(a, c, k, e.name.text, out),
-        Alias(x)    => type_callee(a, c, k, x.name.text, out),
-        Const(_)    => written(),
-        Import(_)   => written(),
-        Impl(_)     => written(),
-    })
-}
-
-fn_callee = (
-    a   : Alloc,
-    c   : Checker,
-    k   : Call,
-    out :: Classes
-) Res<(), AllocError> {
-    callee = c.tree.expr_at(k.callee);
-    callee.kind.match({
-        Name(_)   => class_as(a, callee.span, Colour.Function, out),
-        Access(x) => class_as(a, x.name.span, Colour.Function, out),
-        _         => written(),
-    })
-}
-
-type_callee = (
-    a    : Alloc,
-    c    : Checker,
-    k    : Call,
-    decl : str,
-    out  :: Classes
-) Res<(), AllocError> {
-    callee = c.tree.expr_at(k.callee);
-    callee.kind.match({
-        Name(n) => n.text.eq(decl).match({
-            true  => class_as(a, callee.span, Colour.Type, out),
+    class_as = (self :: @Self, span: Span, colour: Colour)
+               Res<(), AllocError> {
+        span.file.eq(self.file).match({
             false => written(),
-        }),
-        _       => written(),
-    })
+            true  => self.rows.add(Classed(
+                line: span.start.line,
+                col: span.start.col,
+                colour: colour
+            )),
+        })
+    }
+
+    decl_sites = (self :: @Self) Res<(), AllocError> {
+        Range(0, self.c.tree.module_count()).loop((h, i) {
+            self.c.tree.module_at(i).match({
+                None  => written(),
+                Ok(m) => m.span.file.eq(self.file).match({
+                    false => written(),
+                    true  => self.module_sites(m),
+                }),
+            }).try();
+        });
+        self.nested_sites()
+    }
+
+    module_sites = (self :: @Self, m: Module) Res<(), AllocError> {
+        m.decls.loop((h, d) { self.decl_site(d).try(); });
+        Ok(());
+    }
+
+    nested_sites = (self :: @Self) Res<(), AllocError> {
+        bid ::= BlockId(index: 0);
+        Range(0, self.c.tree.block_ids()).loop((h, i) {
+            self.block_sites(self.c.tree.block_at(bid)).try();
+            bid = BlockId(index: bid.index + 1);
+        });
+        Ok(());
+    }
+
+    block_sites = (self :: @Self, b: Block) Res<(), AllocError> {
+        b.stmts.loop((h, s) {
+            s.kind.match({
+                Decl(d) => self.decl_site(d),
+                _       => written(),
+            }).try();
+        });
+        Ok(());
+    }
+
+    decl_site = (self :: @Self, d: Decl) Res<(), AllocError> {
+        d.kind.match({
+            Function(f) => self.fn_site(f),
+            Struct(s)   => self.member_sites(s.name.span, s.members),
+            Enum(e)     => self.class_as(e.name.span, Colour.Type),
+            Alias(x)    => self.class_as(x.name.span, Colour.Type),
+            Impl(im)    => self.member_sites(im.target.span, im.members),
+            Const(_)    => written(),
+            Import(_)   => written(),
+        })
+    }
+
+    fn_site = (self :: @Self, f: Function) Res<(), AllocError> {
+        self.class_as(f.name.span, Colour.Function).try();
+        f.params.loop((h, p) {
+            self.class_as(p.name.span, Colour.Parameter).try();
+        });
+        Ok(());
+    }
+
+    member_sites = (self :: @Self, name: Span, members: Vec<Member>)
+                   Res<(), AllocError> {
+        self.class_as(name, Colour.Type).try();
+        members.loop((h, m) {
+            m.kind.match({
+                Function(f) => self.fn_site(f),
+                Const(_)    => written(),
+                Field(_)    => written(),
+            }).try();
+        });
+        Ok(());
+    }
+
+    written_types = (self :: @Self) Res<(), AllocError> {
+        tid ::= TypeId(index: 0);
+        Range(0, self.c.tree.type_ids()).loop((h, i) {
+            self.c.tree.type_at(tid).kind.match({
+                Named(n) => self.named_site(tid, n),
+                _        => written(),
+            }).try();
+            tid = TypeId(index: tid.index + 1);
+        });
+        Ok(());
+    }
+
+    named_site = (self :: @Self, tid: TypeId, n: Named)
+                 Res<(), AllocError> {
+        self.c.type_memo.get(tid).match({
+            None   => written(),
+            Ok(ty) => self.c.is_unknown(ty).match({
+                true  => written(),
+                false => self.class_as(n.name.span, Colour.Type),
+            }),
+        })
+    }
+
+    expr_sites = (self :: @Self) Res<(), AllocError> {
+        eid ::= ExprId(index: 0);
+        Range(0, self.c.tree.expr_ids()).loop((h, i) {
+            self.expr_site(eid).try();
+            eid = ExprId(index: eid.index + 1);
+        });
+        Ok(());
+    }
+
+    expr_site = (self :: @Self, id: ExprId) Res<(), AllocError> {
+        e = self.c.tree.expr_at(id);
+        e.kind.match({
+            Call(k)  => self.call_site(id, k),
+            Match(m) => self.class_as(m.name_span, Colour.Keyword),
+            Try(t)   => self.class_as(t.name_span, Colour.Keyword),
+            Name(_)  => self.c.param_memo.get(id).match({
+                Ok(_) => self.class_as(e.span, Colour.Parameter),
+                None  => written(),
+            }),
+            _        => written(),
+        })
+    }
+
+    call_site = (self :: @Self, id: ExprId, k: Call) Res<(), AllocError> {
+        self.c.resolved_call(id).match({
+            None    => written(),
+            Ok(did) => decl_at(self.c.tree, did).match({
+                None  => written(),
+                Ok(d) => d.kind.match({
+                    Function(_) => self.fn_callee(k),
+                    Struct(s)   => self.type_callee(k, s.name.text),
+                    Enum(e)     => self.type_callee(k, e.name.text),
+                    Alias(x)    => self.type_callee(k, x.name.text),
+                    Const(_)    => written(),
+                    Import(_)   => written(),
+                    Impl(_)     => written(),
+                }),
+            }),
+        })
+    }
+
+    fn_callee = (self :: @Self, k: Call) Res<(), AllocError> {
+        callee = self.c.tree.expr_at(k.callee);
+        callee.kind.match({
+            Name(_)   => self.class_as(callee.span, Colour.Function),
+            Access(x) => self.class_as(x.name.span, Colour.Function),
+            _         => written(),
+        })
+    }
+
+    type_callee = (self :: @Self, k: Call, decl: str) Res<(), AllocError> {
+        callee = self.c.tree.expr_at(k.callee);
+        callee.kind.match({
+            Name(n) => n.text.eq(decl).match({
+                true  => self.class_as(callee.span, Colour.Type),
+                false => written(),
+            }),
+            _       => written(),
+        })
+    }
 }

@@ -1,3 +1,7 @@
+// Answers completion requests. After a dot the buffer is re-checked with the
+// partial name replaced by `DUMMY`, so the base expression has a type; the
+// member answer is cached per patched buffer.
+
 str, String = std.text
 Vec, Map, Ordered = std.collections
 Alloc, AllocError, Arena = std.mem
@@ -21,28 +25,36 @@ KEYWORD_COUNT, keyword_at = std.lex
 Item* = {
     label*: str,
     kind*: usize,
+
+    write = (self: @Self, a: Alloc, offers :: Nest, out :: String)
+            Res<(), AllocError> {
+        offers.next(out).try();
+        encoded ::= CompletionItem(label: self.label, kind: self.kind)
+            .to_json(a).try();
+        out.add(encoded.view())
+    }
 }
 
 Item.impl(Ordered, {
     before = (self: @Self, other: @Self) bool { self.label.before(other.label) }
 })
 
-METHOD*: usize = 2
-FUNCTION*: usize = 3
-FIELD*: usize = 5
-CLASS*: usize = 7        // LSP has no type-alias completion kind.
-ENUM*: usize = 13
-KEYWORD*: usize = 14
-ENUM_MEMBER*: usize = 20
-CONSTANT*: usize = 21
-STRUCT*: usize = 22
+METHOD: usize = 2
+FUNCTION: usize = 3
+FIELD: usize = 5
+CLASS: usize = 7        // LSP has no type-alias completion kind.
+ENUM: usize = 13
+KEYWORD: usize = 14
+ENUM_MEMBER: usize = 20
+CONSTANT: usize = 21
+STRUCT: usize = 22
 
-DUMMY*: str = "zen_wip"
+DUMMY: str = "zen_wip"
 
-Trigger* = {
-    text*: str,
-    prefix*: str,
-    dot*: bool,
+Trigger = {
+    text: str,
+    prefix: str,
+    dot: bool,
 }
 
 MemberAnswer = {
@@ -104,8 +116,7 @@ MemberCache* = {
         workspace.is_empty().match({
             true  => {
                 c ::= check_standalone(qa, "doc", patched).try();
-                items_from(
-                    c,
+                c.items_from(
                     qa,
                     "doc",
                     Trigger(text: patched, prefix: "", dot: true),
@@ -114,8 +125,7 @@ MemberCache* = {
             },
             false => {
                 checked = check_build(env, qa, workspace, path, patched).try();
-                items_from(
-                    checked.c,
+                checked.c.items_from(
                     qa,
                     checked.rel,
                     Trigger(text: patched, prefix: "", dot: true),
@@ -180,23 +190,7 @@ complete_at* = (
 ) Res<(), AllocError> {
     trig = trigger_at(a, text, line, character).try();
     c ::= check_standalone(a, "doc", trig.text).try();
-    items_from(c, a, "doc", trig, out)
-}
-
-complete_in* = (
-    env       : Env,
-    a         : Alloc,
-    workspace : str,
-    path      : str,
-    text      : str,
-    line      : usize,
-    character : usize,
-    out       :: Vec<Item>
-)
-               Res<(), AllocError> {
-    trig    = trigger_at(a, text, line, character).try();
-    checked = check_build(env, a, workspace, path, trig.text).try();
-    items_from(checked.c, a, checked.rel, trig, out)
+    c.items_from(a, "doc", trig, out)
 }
 
 complete_shared* = (
@@ -212,7 +206,7 @@ complete_shared* = (
     trig = trigger_at(a, text, line, character).try();
     trig.dot.match({
         true  => Ok(false),
-        false => { items_from(c, a, rel, trig, out).try(); Ok(true) },
+        false => { c.items_from(a, rel, trig, out).try(); Ok(true) },
     })
 }
 
@@ -382,7 +376,7 @@ Completion = {
         decl_at(self.c.tree, n.decl).match({
             None  => written(),
             Ok(d) => d.kind.match({
-                Struct(s) => member_names(s.members, cands),
+                Struct(s) => s.members.member_names(cands),
                 _         => written(),
             }),
         }).try();
@@ -408,7 +402,7 @@ Completion = {
             None  => written(),
             Ok(d) => d.kind.match({
                 Impl(im) => im.target.text.eq(name).match({
-                    true  => member_names(im.members, cands),
+                    true  => im.members.member_names(cands),
                     false => written(),
                 }),
                 _        => written(),
@@ -425,7 +419,7 @@ Completion = {
             Ok(d) => decl_at(self.c.tree, d.id).match({
                 None   => written(),
                 Ok(dd) => dd.kind.match({
-                    Struct(s) => member_names(s.members, cands),
+                    Struct(s) => s.members.member_names(cands),
                     _         => written(),
                 }),
             }),
@@ -487,7 +481,7 @@ Offers = {
                     None  => written(),
                     Ok(d) => self.remember(Item(
                         label: name,
-                        kind: global_kind(d.kind)
+                        kind: d.kind.global_kind()
                     )),
                 })
             },
@@ -565,10 +559,6 @@ global_kind = (k: DefKind) usize {
     })
 }
 
-sort_items* = (items :: Vec<Item>) () {
-    items.sort()
-}
-
 CompletionItem = {
     label: str,
     kind: usize,
@@ -581,15 +571,7 @@ write_items* = (a: Alloc, items: Vec<Item>, out :: String)
     out.add("false").try();
     list.key("items", out).try();
     offers ::= arr(out).try();
-    items.loop((h, it) { write_item(a, it, offers, out).try(); });
+    items.loop((h, it) { it.write(a, offers, out).try(); });
     offers.close(out).try();
     list.close(out)
-}
-
-write_item = (a: Alloc, it: Item, offers :: Nest, out :: String)
-             Res<(), AllocError> {
-    offers.next(out).try();
-    encoded ::= CompletionItem(label: it.label, kind: it.kind)
-        .to_json(a).try();
-    out.add(encoded.view())
 }

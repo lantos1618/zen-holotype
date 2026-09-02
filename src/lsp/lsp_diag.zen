@@ -10,7 +10,7 @@ root_for, relative_to = zen.zen_path
 WireRange, wire_range, write_range = lsp.lsp_pos
 obj, arr, Nest, written, to_json = std.json
 write_frame = lsp.lsp_frame
-path_of = lsp.lsp_uri
+path_of, doc_text = lsp.lsp_uri
 own_str = lsp.lsp_reply
 Built, Spot* = lsp.lsp_built
 Classed = lsp.lsp_colour
@@ -27,8 +27,8 @@ Shared* = {
     root*: str,
 }
 
-// Inputs borrowed from the server for one workspace check or publication.
-// Session state stays in `Diagnostics`; temporary output stays in `temp`.
+// The server's inputs for one check or publication; nothing here outlives
+// the turn.
 WorkspaceTurn = {
     env: Env,
     workspace: str,
@@ -41,7 +41,7 @@ WorkspaceTurn = {
     }
 
     text = (self: @Self, uri: str) str {
-        text_of(self.env, self.temp, uri, self.docs)
+        doc_text(self.env, self.temp, self.docs, uri)
     }
 }
 
@@ -176,7 +176,7 @@ Diagnostics* = {
                spots: Vec<Spot>, out :: String)
               Res<(), AllocError> {
         now ::= turn.temp.Vec<str>();
-        uris_of(spots, now).try();
+        spots.uris_of(now).try();
         self.say_one(turn, uri, spots, out).try();
         now.loop((h, u) {
             u.eq(uri).match({
@@ -239,7 +239,7 @@ Diagnostics* = {
                  now: Vec<str>, spots: Vec<Spot>, out :: String)
                 Res<(), AllocError> {
         self.showing.loop((h, u) {
-            gone(u, uri, now).match({
+            u.gone(uri, now).match({
                 false => written(),
                 true  => self.say_one(turn, u, spots, out),
             }).try();
@@ -292,20 +292,6 @@ uris_of = (spots: Vec<Spot>, into :: Vec<str>) Res<(), AllocError> {
     Ok(());
 }
 
-text_of = (env: Env, t: Alloc, uri: str, docs: Map<str, str>) str {
-    docs.get(uri).match({
-        Ok(text) => text,
-        None     => on_disk(env, t, path_of(uri)),
-    })
-}
-
-on_disk = (env: Env, t: Alloc, path: str) str {
-    env.fs.read(t, path).match({
-        Ok(text) => text.view(),
-        Err(_)   => "",
-    })
-}
-
 publish* = (a: Alloc, uri: str, text: str, spots: Vec<Spot>, out :: String)
            Res<(), AllocError> {
     body ::= a.String().try();
@@ -328,41 +314,34 @@ write_notification = (
     params.text("uri", uri, body).try();
     params.key("diagnostics", body).try();
     items ::= arr(body).try();
-    spots.loop((h, s) { one_of(a, s, uri, text, items, body).try(); });
+    spots.loop((h, s) {
+        s.uri.eq(uri).then(() {
+            items.next(body).try();
+            s.write_spot(a, text, body).try();
+        });
+    });
     items.close(body).try();
     params.close(body).try();
     top.close(body)
 }
 
-one_of = (a: Alloc, s: Spot, uri: str, text: str, items :: Nest, out :: String)
-         Res<(), AllocError> {
-    s.uri.eq(uri).then(() { written_at(a, s, text, items, out).try(); });
-    Ok(())
-}
-
-written_at = (a: Alloc, s: Spot, text: str, items :: Nest, out :: String)
-             Res<(), AllocError> {
-    items.next(out).try();
-    write_spot(a, s, text, out)
-}
-
-write_spot = (a: Alloc, s: Spot, text: str, out :: String)
+write_spot = (s: Spot, a: Alloc, text: str, out :: String)
              Res<(), AllocError> {
     s.note.match({
-        None  => write_plain_spot(a, s, text, out),
-        Ok(_) => write_noted_spot(a, s, text, out),
+        None  => s.write_plain_spot(a, text, out),
+        Ok(n) => s.write_noted_spot(a, n, text, out),
     })
 }
 
-write_plain_spot = (a: Alloc, s: Spot, text: str, out :: String)
+write_plain_spot = (s: Spot, a: Alloc, text: str, out :: String)
                    Res<(), AllocError> {
     encoded ::= Diagnostic(range: wire_range(text, s.span), severity: ERROR, source: "zen", message: s.message).to_json(a).try();
     out.add(encoded.view())
 }
 
-// relatedInformation is conditionally omitted, so the noted shape remains a
-// streaming object until typed JSON gains an explicit omission policy.
-write_noted_spot = (a: Alloc, s: Spot, text: str, out :: String)
+// Typed JSON cannot omit a field, so a spot with relatedInformation is
+// streamed by hand.
+write_noted_spot = (s: Spot, a: Alloc, n: Note, text: str, out :: String)
                    Res<(), AllocError> {
     spot ::= obj(out).try();
     spot.key("range", out).try();
@@ -371,21 +350,8 @@ write_noted_spot = (a: Alloc, s: Spot, text: str, out :: String)
     out.write_usize(ERROR).try();
     spot.text("source", "zen", out).try();
     spot.text("message", s.message, out).try();
-    write_note(a, s, text, spot, out).try();
+    write_related(a, s.uri, n, text, spot, out).try();
     spot.close(out)
-}
-
-write_note = (
-    a    : Alloc,
-    s    : Spot,
-    text : str,
-    spot :: Nest,
-    out  :: String
-) Res<(), AllocError> {
-    s.note.match({
-        None  => written(),
-        Ok(n) => write_related(a, s.uri, n, text, spot, out),
-    })
 }
 
 write_related = (

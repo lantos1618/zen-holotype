@@ -5,11 +5,11 @@ str, String, str_at = std.text
 Vec = std.collections
 Alloc, AllocError = std.mem
 Server = lsp.lsp_serve
-FrameFault, frame_at, short_by, partial = lsp.lsp_frame
+FrameFault, frame_at, short_by, write_fault = lsp.lsp_frame
 
-Drain* = {
-    at*: usize,
-    framed*: bool,
+Drain = {
+    at: usize,
+    framed: bool,
 }
 
 serve_stdio* = (env: Env, a: Alloc) Res<i32, AllocError> {
@@ -25,15 +25,15 @@ serve_stdio* = (env: Env, a: Alloc) Res<i32, AllocError> {
         bytes = str_at(held.ptr(), held.len);
         frame_at(bytes, at).match({
             Err(f) => {
-                framed = partial(f);
-                fault_line(f, framed);
+                framed = f.partial();
+                f.fault_line(framed, input_arena).try();
             },
             Ok(_)  => {
                 batch ::= env.mem.alloc();
-                d      = drain(server, batch, bytes, at).try();
+                d      = server.drain(batch, bytes, at).try();
                 at     = d.at;
                 framed = d.framed;
-                after_drain(server, batch).try();
+                server.print_settled(batch).try();
                 (at == held.len).then(() {
                     held.clear();
                     at = 0;
@@ -44,7 +44,7 @@ serve_stdio* = (env: Env, a: Alloc) Res<i32, AllocError> {
     Ok(exit_code(server.stopped(), framed));
 }
 
-after_drain = (server :: Server, t: Alloc) Res<(), AllocError> {
+print_settled = (server :: Server, t: Alloc) Res<(), AllocError> {
     out ::= t.String().try();
     server.settled(t, out).try();
     print(out.view());
@@ -52,16 +52,12 @@ after_drain = (server :: Server, t: Alloc) Res<(), AllocError> {
 }
 
 arrived = (env: Env, held :: Vec<u8>, n: usize) Res<bool, AllocError> {
-    want = at_least_one(n);
+    want = (n == 0).match({ true => 1, false => n });
     held.reserve(want).try();
     env.in.read(held, want).match({
         Err(_)  => Ok(false),
         Ok(got) => Ok(got > 0),
     })
-}
-
-at_least_one = (n: usize) usize {
-    (n == 0).match({ true => 1, false => n })
 }
 
 drain = (server :: Server, t: Alloc, held: str, at: usize)
@@ -71,25 +67,37 @@ drain = (server :: Server, t: Alloc, held: str, at: usize)
     framed ::= true;
     loop(() { more && from < held.len }, (h) {
         frame_at(held, from).match({
-            Ok(fr) => { from = fr.next; answered(server, t, fr.body).try(); },
-            Err(f) => { more = false; framed = partial(f); fault_line(f, framed); },
+            Ok(fr) => { from = fr.next; server.print_answer(
+                t,
+                fr.body
+            ).try(); },
+            Err(f) => {
+                more   = false;
+                framed = f.partial();
+                f.fault_line(framed, t).try();
+            },
         });
     });
     Ok(Drain(at: from, framed: framed));
 }
 
-answered = (server :: Server, t: Alloc, body: str) Res<(), AllocError> {
+print_answer = (server :: Server, t: Alloc, body: str) Res<(), AllocError> {
     out ::= t.String().try();
     server.one(t, body, out).try();
     print(out.view());
     Ok(());
 }
 
-fault_line = (f: FrameFault, framed: bool) () {
+fault_line = (f: FrameFault, framed: bool, t: Alloc) Res<(), AllocError> {
     framed.match({
-        true  => (),
-        false => println("lsp: bad frame at byte {} ({})", f.byte(), f.why()),
-    });
+        true  => Ok(()),
+        false => {
+            line ::= t.String().try();
+            f.write_fault(line).try();
+            println("{}", line.view());
+            Ok(())
+        },
+    })
 }
 
 exit_code = (stopped: bool, framed: bool) i32 {
