@@ -6,13 +6,16 @@ str = std.text
 Range = std.core
 DeclId = sema.sema_id
 decl_at = sema.sema_def
-Checker = sema.sema_check
+Checker, UNRESOLVED = sema.sema_check
 tail_expr = sema.sema_hoist
 SemaFault, NameFault = sema.sema_diag
-refuse, Own, place_type, captures_scope = sema.sema_own
-arena_var, scoped_var, UNTYPED = sema.sema_own
+Own, place_type = sema.sema_own
 TyId = sema.sema_ty
 own_member = sema.sema_recv
+
+// `@scope` names the enclosing block: it may be passed inward but never
+// returned, stored in a construction, or read by an escaping closure. A
+// value backed by an arena this body made may not be returned either.
 
 check_scope_returned* = (c :: Checker, o :: Own, id: BlockId, b: Block)
                          Res<(), AllocError> {
@@ -41,7 +44,7 @@ is_construction* = (c :: Checker, id: ExprId) bool {
 }
 
 decl_is_struct = (c :: Checker, d: DeclId) bool {
-    decl_at(c.tree, d).match({
+    c.tree.decl_at(d).match({
         None   => false,
         Ok(dc) => dc.kind.match({ Struct(_) => true, _ => false }),
     })
@@ -66,12 +69,13 @@ refuse_scope_expr = (c :: Checker, id: ExprId) Res<(), AllocError> {
 
 check_scope_captured* = (c :: Checker, o :: Own, span: Span, text: str)
                         Res<(), AllocError> {
-    captures_scope(o, text).match({
+    o.captures_scope(text).match({
         false => Ok(()),
         true  => c.refuse(span, SemaFault.ScopeEscapes(NameFault(name: text))),
     })
 }
 
+// The expression through which a `@scope` leaves, if one does.
 scope_escape = (c :: Checker, o :: Own, id: ExprId) Res<ExprId> {
     c.scope_carries(o, id).match({
         false => None,
@@ -82,7 +86,7 @@ scope_escape = (c :: Checker, o :: Own, id: ExprId) Res<ExprId> {
 scope_escape_of = (c :: Checker, o :: Own, id: ExprId) Res<ExprId> {
     c.tree.expr_at(id).kind.match({
         Scope     => Ok(id),
-        Name(n)   => c.named_scope(o, id, n.text),
+        Name(n)   => o.scoped_var(n.text).match({ true => Ok(id), false => None }),
         Paren(p)  => c.scope_escape(o, p.inner),
         Try(t)    => c.scope_escape(o, t.operand),
         Access(a) => c.scope_escape(o, a.base),
@@ -91,22 +95,10 @@ scope_escape_of = (c :: Checker, o :: Own, id: ExprId) Res<ExprId> {
     })
 }
 
-named_scope = (c :: Checker, o :: Own, id: ExprId, text: str) Res<ExprId> {
-    scoped_var(o, text).match({ true => Ok(id), false => None })
-}
-
 scope_escape_in_args = (c :: Checker, o :: Own, k: Call) Res<ExprId> {
-    Range(0, k.args.len).find((i) {
-        k.args.get(i).match({
-            None  => false,
-            Ok(a) => c.scope_escapes(o, a.value),
-        })
-    }).match({
+    k.args.find((a) { c.scope_escapes(o, a.value) }).match({
         None  => None,
-        Ok(i) => k.args.get(i).match({
-            None  => None,
-            Ok(a) => c.scope_escape(o, a.value),
-        }),
+        Ok(a) => c.scope_escape(o, a.value),
     })
 }
 
@@ -119,49 +111,38 @@ scope_alias* = (c :: Checker, o :: Own, id: ExprId) bool {
     node.kind.match({
         Scope    => true,
         Paren(p) => c.scope_alias(o, p.inner),
-        Name(n)  => scoped_var(o, n.text),
+        Name(n)  => o.scoped_var(n.text),
         _        => false,
     })
 }
 
-refuse_scope_returned = (
-    c  :: Checker,
-    o  :: Own,
-    id : ExprId
-) Res<(), AllocError> {
+refuse_scope_returned = (c :: Checker, o :: Own, id: ExprId)
+                        Res<(), AllocError> {
     c.scope_escape(o, id).match({
         None   => Ok(()),
-        Ok(at) => c.refuse_scope_node(o, at),
+        Ok(at) => c.refuse_scope_node(at),
     })
 }
 
-refuse_scope_node = (c :: Checker, o :: Own, at: ExprId) Res<(), AllocError> {
+// A binding leaves with its name in the message, the keyword without one.
+refuse_scope_node = (c :: Checker, at: ExprId) Res<(), AllocError> {
     node = c.tree.expr_at(at);
-    c.refuse(
-        node.span,
-        SemaFault.ScopeEscapes(NameFault(name: scope_fault_name(node)))
-    )
-}
-
-// A binding leaves with its name in the message, the keyword alone
-// without one — the same shape `check_scope_captured` prints.
-scope_fault_name = (node: Expr) str {
-    node.kind.match({
-        Name(n) => n.text,
-        _       => "",
-    })
+    name = node.kind.match({ Name(n) => n.text, _ => "" });
+    c.refuse(node.span, SemaFault.ScopeEscapes(NameFault(name: name)))
 }
 
 scope_carries = (c :: Checker, o :: Own, id: ExprId) bool {
-    c.may_carry_scope(c.place_type(o, id))
+    c.leaf_prim(c.place_type(o, id)).len == 0
 }
 
-may_carry_scope = (c: Checker, ty: TyId) bool {
-    ty.eq(UNTYPED).match({
-        true  => true,
+// The primitive a type bottoms out at through any `Res`; "" for a
+// non-primitive, and for an untyped place, which may hold anything.
+leaf_prim = (c: Checker, ty: TyId) str {
+    ty.eq(UNRESOLVED).match({
+        true  => "",
         false => c.types.at(ty).match({
-            Res(r) => c.may_carry_scope(r.value),
-            _      => c.prim_name(ty).len == 0,
+            Res(r) => c.leaf_prim(r.value),
+            _      => c.prim_name(ty),
         }),
     })
 }
@@ -174,6 +155,8 @@ is_scope_value* = (c :: Checker, id: ExprId) bool {
     })
 }
 
+// A method that takes an `Alloc` may keep its lambda arguments alive
+// past the call.
 call_escapes* = (c :: Checker, o :: Own, k: Call) bool {
     c.tree.expr_at(k.callee).kind.match({
         Access(a) => c.member_escapes(o, a),
@@ -184,37 +167,27 @@ call_escapes* = (c :: Checker, o :: Own, k: Call) bool {
 member_escapes = (c :: Checker, o :: Own, a: Access) bool {
     c.own_member(c.place_type(o, a.base), a.name.text).match({
         None  => false,
-        Ok(m) => c.member_takes_alloc(m),
-    })
-}
-
-member_takes_alloc = (c :: Checker, m: Member) bool {
-    m.kind.match({
-        Function(f) => c.takes_alloc(f),
-        _           => false,
+        Ok(m) => m.kind.match({
+            Function(f) => c.takes_alloc(f),
+            _           => false,
+        }),
     })
 }
 
 takes_alloc = (c :: Checker, f: Function) bool {
-    Range(0, f.params.len).find((i) {
-        f.params.get(i).match({
-            None  => false,
-            Ok(p) => c.param_is_alloc(p),
-        })
-    }).match({ Ok(_) => true, None => false })
+    f.params.find((p) { c.param_is_alloc(p) }).match({
+        Ok(_) => true,
+        None  => false,
+    })
 }
 
 param_is_alloc = (c :: Checker, p: Param) bool {
     p.type.match({
         None    => false,
-        Ok(tid) => c.type_is_alloc(tid),
-    })
-}
-
-type_is_alloc = (c :: Checker, tid: TypeId) bool {
-    c.tree.type_at(tid).kind.match({
-        Named(n) => n.name.text.eq("Alloc"),
-        _        => false,
+        Ok(tid) => c.tree.type_at(tid).kind.match({
+            Named(n) => n.name.text.eq("Alloc"),
+            _        => false,
+        }),
     })
 }
 
@@ -257,6 +230,7 @@ draws_on_arena = (c :: Checker, o :: Own, id: ExprId) bool {
     c.arena_name(o, id).match({ Ok(_) => true, None => false })
 }
 
+// The arena-backed binding an expression draws on, if one.
 arena_name = (c :: Checker, o :: Own, id: ExprId) Res<str> {
     c.holds_pointer(o, id).match({
         false => None,
@@ -266,17 +240,13 @@ arena_name = (c :: Checker, o :: Own, id: ExprId) Res<str> {
 
 arena_name_of = (c :: Checker, o :: Own, id: ExprId) Res<str> {
     c.tree.expr_at(id).kind.match({
-        Name(n)   => named_arena(o, n.text),
+        Name(n)   => o.arena_var(n.text).match({ true => Ok(n.text), false => None }),
         Paren(p)  => c.arena_name(o, p.inner),
         Try(t)    => c.arena_name(o, t.operand),
         Access(a) => c.arena_name(o, a.base),
         Call(k)   => c.arena_name_in_call(o, k),
         _         => None,
     })
-}
-
-named_arena = (o: Own, text: str) Res<str> {
-    arena_var(o, text).match({ true => Ok(text), false => None })
 }
 
 arena_name_in_call = (c :: Checker, o :: Own, k: Call) Res<str> {
@@ -294,36 +264,14 @@ arena_name_of_callee = (c :: Checker, o :: Own, id: ExprId) Res<str> {
 }
 
 arena_name_in_args = (c :: Checker, o :: Own, k: Call) Res<str> {
-    Range(0, k.args.len).find((i) {
-        c.arg_draws_on_arena(o, k, i)
-    }).match({
+    k.args.find((a) { c.draws_on_arena(o, a.value) }).match({
         None  => None,
-        Ok(i) => k.args.get(i).match({
-            None  => None,
-            Ok(a) => c.arena_name(o, a.value),
-        }),
-    })
-}
-
-arg_draws_on_arena = (c :: Checker, o :: Own, k: Call, i: usize) bool {
-    k.args.get(i).match({
-        None  => false,
-        Ok(a) => c.draws_on_arena(o, a.value),
+        Ok(a) => c.arena_name(o, a.value),
     })
 }
 
 holds_pointer = (c :: Checker, o :: Own, id: ExprId) bool {
-    c.carries_address(c.place_type(o, id))
-}
-
-carries_address = (c :: Checker, ty: TyId) bool {
-    ty.eq(UNTYPED).match({
-        true  => true,
-        false => c.types.at(ty).match({
-            Res(r) => c.carries_address(r.value),
-            _      => is_pointerish(c.prim_name(ty)),
-        }),
-    })
+    is_pointerish(c.leaf_prim(c.place_type(o, id)))
 }
 
 is_pointerish = (name: str) bool { name.len == 0 || name.eq("str") }

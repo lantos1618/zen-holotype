@@ -156,7 +156,7 @@ Checker* = {
     }
 
     // The count an `@meta(...).fields().len` chain folded to. A miss
-    // means the ordinary lowering applies — every other dot and call.
+    // means the ordinary lowering applies.
     meta_count_of* = (self: @Self, t: TypeId) Res<usize> {
         self.meta_count_memo.get(t)
     }
@@ -180,8 +180,7 @@ Checker* = {
     }
 
     // The active walk's binder row, while sema checks a pass. A miss
-    // means no walk is being checked — the ordinary answer for every
-    // name the program was written with.
+    // means no walk is being checked.
     walk_row* = (self: @Self) Res<WalkBind> {
         self.walk_stack.len.match({
             0 => None,
@@ -232,9 +231,9 @@ Checker* = {
         self.types.prim("usize")
     }
 
-    // What this call instantiated its callee's type parameters with.
-    // A miss means "the callee is not generic, or resolution could not
-    // settle it" — never "it instantiated at nothing".
+    // What this call instantiated its callee's type parameters with. A
+    // miss means the callee is not generic, or resolution could not
+    // settle it.
     resolved_inst* = (self: @Self, id: ExprId) Res<Inst> {
         self.inst_memo.get(id)
     }
@@ -263,8 +262,7 @@ Checker* = {
 
     modules* = (self: @Self) World { self.world }
 
-    // Every diagnostic, rendered, one per line. The store is this
-    // checker's own, so a caller never has to pair the two up.
+    // Every diagnostic, rendered, one per line.
     render_diags* = (self: @Self, out :: String) Res<(), AllocError> {
         self.diags.loop((h, d) {
             d.render(self.types, out).try();
@@ -276,6 +274,12 @@ Checker* = {
     report* = (self :: @Self, file: str, span: Span, fault: SemaFault)
               Res<(), AllocError> {
         self.diags.add(Diag(file: file, span: span, fault: fault))
+    }
+
+    // `report` at the position's own file.
+    refuse* = (self :: @Self, span: Span, fault: SemaFault)
+              Res<(), AllocError> {
+        self.report(span.file, span, fault)
     }
 
 
@@ -320,10 +324,7 @@ Checker* = {
 
     // Drop every binding added since `mark`.
     release* = (self :: @Self, mark: usize) Res<(), AllocError> {
-        extra = self.locals.len - mark;
-        Range(0, extra).loop((h, i) {
-            self.locals.take(self.locals.len - 1);
-        });
+        self.locals.truncate(mark);
         Ok(());
     }
 
@@ -356,73 +357,43 @@ Checker* = {
     tvar_mark* = (self: @Self) usize { self.tvars.len }
 
     push_tvar* = (self :: @Self, name: str, ty: TyId) Res<(), AllocError> {
-        self.tvars.add(Binding(
-            name: name,
-            ty: ty,
-            mutable: false,
-            param: false,
-            span: nowhere()
-        ))
+        self.tvars.add(Binding(name, ty))
     }
 
     release_tvars* = (self :: @Self, mark: usize) Res<(), AllocError> {
-        extra = self.tvars.len - mark;
-        Range(0, extra).loop((h, i) {
-            self.tvars.take(self.tvars.len - 1);
-        });
+        self.tvars.truncate(mark);
         Ok(());
     }
 
     // The `T` of an enclosing `<T>`, innermost first. A type parameter
-    // shadows a declaration of the same name, exactly as a local
-    // binding shadows one.
+    // shadows a declaration of the same name, as a local binding does.
     lookup_tvar* = (self: @Self, name: str) Res<Binding> {
-        n = self.tvars.len;
-        Range(0, n).find((k) {
-            self.tvars.get(n - k - 1).match({
-                Ok(b) => b.name.eq(name),
-                None  => false,
-            })
-        }).match({
-            None  => None,
-            Ok(k) => self.tvars.get(n - k - 1),
-        })
+        self.tvars.innermost(name)
     }
 
     bound_mark* = (self: @Self) usize { self.bounds.len }
 
     push_bound* = (self :: @Self, name: str, ty: TyId) Res<(), AllocError> {
-        self.bounds.add(Binding(
-            name: name,
-            ty: ty,
-            mutable: false,
-            param: false,
-            span: nowhere()
-        ))
+        self.bounds.add(Binding(name, ty))
     }
 
     release_bounds* = (self :: @Self, mark: usize) Res<(), AllocError> {
-        extra = self.bounds.len - mark;
-        Range(0, extra).loop((h, i) {
-            self.bounds.take(self.bounds.len - 1);
-        });
+        self.bounds.truncate(mark);
         Ok(());
     }
 
-    // A bound some generic in scope declared — the only question impl
+    // A bound some generic in scope declared: the only question impl
     // selection asks.
     has_bound* = (self: @Self, ty: TyId) bool {
-        Range(0, self.bounds.len).find((i) {
-            self.bounds.get(i).match({ Ok(b) => b.ty.eq(ty), None => false })
-        }).match({ Ok(_) => true, None => false })
+        self.bounds.find((b) { b.ty.eq(ty) }).match({
+            Ok(_) => true,
+            None  => false,
+        })
     }
 
-    // `bounds_of` asked as a predicate, so "does this parameter promise
-    // anything at all" costs no allocation.
+    // `bounds_of` asked as a predicate, so no allocation.
     is_bounded* = (self: @Self, name: str) bool {
-        Range(0, self.bounds.len).find((i) {
-            self.bounds.get(i).match({ Ok(b) => b.name.eq(name), None => false })
-        }).match({ Ok(_) => true, None => false })
+        self.bounds.innermost(name).match({ Ok(_) => true, None => false })
     }
 
     // Every bound on one type parameter. `<K: Eq + Hash>` has two, and
@@ -436,20 +407,9 @@ Checker* = {
         Ok(());
     }
 
-    // The innermost binding of `name`. Walks from the top so an inner
-    // scope shadows an outer one, which is the only thing the ordering
-    // of this Vec is for.
+    // The innermost binding of `name`.
     lookup* = (self: @Self, name: str) Res<Binding> {
-        n = self.locals.len;
-        Range(0, n).find((k) {
-            self.locals.get(n - k - 1).match({
-                Ok(b) => b.name.eq(name),
-                None  => false,
-            })
-        }).match({
-            None  => None,
-            Ok(k) => self.locals.get(n - k - 1),
-        })
+        self.locals.innermost(name)
     }
 
     // -----------------------------------------------------------------
@@ -533,33 +493,17 @@ Checker* = {
     // arguments, but an expected bare generic head has no arguments to compare.
     args_agree = (self: @Self, g: Vec<TyId>, w: Vec<TyId>) bool {
         (g.len == w.len).match({
-            false => self.wrote_no_args(w),
+            false => w.len == 0,
             true  => self.every_arg_agrees(g, w),
         })
     }
 
-    // The context's expectation carries no arguments — a bare head, not
-    // an application nobody filled in. What the value side forgot is
-    // then nobody's lie: there was no answer written to contradict.
-    wrote_no_args = (self: @Self, w: Vec<TyId>) bool { w.len == 0 }
-
     every_arg_agrees = (self: @Self, g: Vec<TyId>, w: Vec<TyId>) bool {
-        Range(0, g.len).find((i) { self.arg_disagrees(g, w, i) })
-            .match({ Ok(_) => false, None => true })
-    }
-
-    arg_disagrees = (self: @Self, g: Vec<TyId>, w: Vec<TyId>, i: usize) bool {
-        g.get(i).match({
-            None  => false,
-            Ok(a) => self.arg_unlike(a, w, i),
-        })
-    }
-
-    arg_unlike = (self: @Self, a: TyId, w: Vec<TyId>, i: usize) bool {
-        w.get(i).match({
-            None  => false,
-            Ok(b) => self.assignable(a, b) == false,
-        })
+        Range(0, g.len).find((i) {
+            a = g.get(i).value_or(UNRESOLVED);
+            b = w.get(i).value_or(UNRESOLVED);
+            self.assignable(a, b) == false
+        }).match({ Ok(_) => false, None => true })
     }
 
     // -----------------------------------------------------------------
@@ -585,15 +529,9 @@ Checker* = {
     take_raised* = (self :: @Self, mark: usize, out :: Vec<TyId>)
                    Res<(), AllocError> {
         Range(mark, self.raised.len).loop((h, i) {
-            self.raised.get(i).match({
-                None  => Ok(()),
-                Ok(e) => out.add(e),
-            }).try();
+            out.add(self.raised.get(i).value_or(UNRESOLVED)).try();
         });
-        extra = self.raised.len - mark;
-        Range(0, extra).loop((h, i) {
-            self.raised.take(self.raised.len - 1);
-        });
+        self.raised.truncate(mark);
         Ok(());
     }
 
@@ -750,7 +688,7 @@ Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
         bounds: a.Vec<Binding>(),
         alloc: a,
     );
-    check_import_gate(c).try();
+    c.check_import_gate().try();
     Ok(c);
 }
 
@@ -759,7 +697,7 @@ check_import_gate = (c :: Checker) Res<(), AllocError> {
     Range(0, c.world.count()).loop((h, mi) {
         c.world.blocked_imports(c.tree, mi, blocked).try();
     });
-    blocked.loop((h, b) { report_blocked(c, b).try() });
+    blocked.loop((h, b) { c.report_blocked(b).try() });
     Ok(());
 }
 
@@ -774,8 +712,8 @@ report_blocked = (c :: Checker, b: ImportBinding) Res<(), AllocError> {
     )
 }
 
-// A context with nothing in it: module 0, no `@Self`, no enclosing Res.
-// A caller fills in what it knows.
+// A context with no `@Self` and no enclosing Res; a caller fills in what
+// it knows.
 Ctx* = (module: usize, none: TyId) Ctx {
     Ctx(
         module: module,
@@ -797,12 +735,11 @@ is_predicate* = (op: BinOp) bool {
     })
 }
 
-// Logical operators short-circuit and require boolean operands.
 is_logical* = (op: BinOp) bool {
     op.match({ And => true, Or => true, _ => false })
 }
 
-forms_fit* = (got: ResForm, want: ResForm) bool {
+forms_fit = (got: ResForm, want: ResForm) bool {
     got.match({
         Open    => true,
         Absence => undecided_or(want, false),
@@ -818,16 +755,22 @@ undecided_or = (f: ResForm, failure: bool) bool {
     })
 }
 
-absence_into_failure* = (got: ResForm, want: ResForm) bool {
-    got.match({
-        Absence => want.match({ Failure => true, _ => false }),
-        _       => false,
+// A type-parameter or bound binding: immutable, and written nowhere.
+Binding = (name: str, ty: TyId) Binding {
+    Binding(name: name, ty: ty, mutable: false, param: false, span: nowhere())
+}
+
+// The last binding of `name`: an inner scope shadows an outer one.
+innermost = (v: Vec<Binding>, name: str) Res<Binding> {
+    n = v.len;
+    Range(0, n).find((k) {
+        v.get(n - k - 1).match({ Ok(b) => b.name.eq(name), None => false })
+    }).match({
+        None  => None,
+        Ok(k) => v.get(n - k - 1),
     })
 }
 
-both_failures* = (got: ResForm, want: ResForm) bool {
-    got.match({
-        Failure => want.match({ Failure => true, _ => false }),
-        _       => false,
-    })
+truncate*<T> = (v :: Vec<T>, len: usize) () {
+    loop(v.len > len, (h) { v.take(v.len - 1); });
 }

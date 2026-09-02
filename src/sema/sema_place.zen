@@ -11,10 +11,6 @@ check_arms, check_arms_agree = sema.sema_hoist
 type_of = sema.sema_type
 type_from_ast = sema.sema_denote
 settle_variant_at = sema.sema_apply
-
-// sema_handle owns the shared refusal rule for every position that could give
-// a loop handle storage.
-
 refuse_handle_value = sema.sema_handle
 
 bind_stmt* = (c :: Checker, b: Bind, ctx: Ctx) Res<TyId, AllocError> {
@@ -37,8 +33,8 @@ plain_write = (b: Bind) bool {
     (b.mutable == false) && (written == false)
 }
 
-// Resolve the existing binding targeted by a plain-name write. This predicate
-// must stay identical to the backend's store classification.
+// The existing binding a plain-name write targets. This predicate must
+// stay identical to the backend's store classification.
 assign_binding = (c :: Checker, b: Bind) Res<Binding> {
     plain_write(b).match({
         false => None,
@@ -49,9 +45,9 @@ assign_binding = (c :: Checker, b: Bind) Res<Binding> {
     })
 }
 
-// Refuse a second immutable `=` binding in the same block and report both
-// sites. lookup_here preserves legal shadowing in nested blocks.
-check_rebound* = (c :: Checker, b: Bind) Res<bool, AllocError> {
+// A second immutable `=` binding of one name in the same block; both
+// sites are reported. `lookup_here` leaves shadowing in nested blocks legal.
+check_rebound = (c :: Checker, b: Bind) Res<bool, AllocError> {
     c.rebound_of(b).match({
         None    => Ok(false),
         Ok(old) => c.report_rebound(b, old),
@@ -79,8 +75,7 @@ settled_binding = (found: Res<Binding>) Res<Binding> {
 report_rebound = (c :: Checker, b: Bind, old: Binding)
                  Res<bool, AllocError> {
     target = c.tree.expr_at(b.target);
-    c.report(
-        target.span.file,
+    c.refuse(
         target.span,
         SemaFault.Rebound(PairFault(
             name: old.name,
@@ -91,7 +86,7 @@ report_rebound = (c :: Checker, b: Bind, old: Binding)
     Ok(true);
 }
 
-bind_want* = (c :: Checker, b: Bind, got: TyId, ctx: Ctx)
+bind_want = (c :: Checker, b: Bind, got: TyId, ctx: Ctx)
              Res<TyId, AllocError> {
     b.type.match({
         Ok(t) => c.type_from_ast(t, ctx),
@@ -109,7 +104,7 @@ store_want = (c :: Checker, old: TyId, got: TyId) Res<TyId, AllocError> {
     })
 }
 
-place_want* = (c :: Checker, id: ExprId, got: TyId, ctx: Ctx)
+place_want = (c :: Checker, id: ExprId, got: TyId, ctx: Ctx)
               Res<TyId, AllocError> {
     c.tree.expr_at(id).kind.match({
         Name(_) => c.settled_array(got),
@@ -135,16 +130,15 @@ settled_elem = (c :: Checker, ty: TyId, a: TyArray) Res<TyId, AllocError> {
     })
 }
 
-check_assign* = (c :: Checker, b: Bind, got: TyId, want: TyId, ctx: Ctx)
+check_assign = (c :: Checker, b: Bind, got: TyId, want: TyId, ctx: Ctx)
                Res<(), AllocError> {
     node = c.tree.expr_at(b.value);
     (c.assignable(got, want) || c.nullary_settles(got, want)).match({
         true  => Ok(()),
         false => c.mismatch(node.span.file, node.span, got, want, ""),
     }).try();
-    // family agreeing != value fitting: `n: i32 = 2147483648` is an
-    // `int` literal, and `literal_fits` says every one fits every
-    // integer type, so `coerce` alone said nothing
+    // `literal_fits` accepts every integer literal for every integer
+    // type; the value is checked against the width here.
     c.check_literal(b.value, want).try();
     c.written_want(b, want).try();
     Ok(());
@@ -157,7 +151,7 @@ written_want = (c :: Checker, b: Bind, want: TyId) Res<(), AllocError> {
     })
 }
 
-bind_target* = (c :: Checker, b: Bind, ty: TyId, ctx: Ctx)
+bind_target = (c :: Checker, b: Bind, ty: TyId, ctx: Ctx)
               Res<(), AllocError> {
     target = c.tree.expr_at(b.target);
     target.kind.match({
@@ -168,8 +162,8 @@ bind_target* = (c :: Checker, b: Bind, ty: TyId, ctx: Ctx)
     Ok(());
 }
 
-// A write introduces no binding. When local lookup misses,
-// fresh_or_refused checks whether a module constant blocks the write.
+// A write introduces no binding; a plain `=` on no local is a fresh
+// binding unless a module constant already owns the name.
 bind_name = (
     c      :: Checker,
     b      : Bind,
@@ -197,8 +191,7 @@ fresh_or_refused = (
     plain_write(b).match({
         false => c.bind_at(name, ty, b.mutable, false, target.span),
         true  => c.const_def(name, ctx).try().match({
-            Ok(_) => c.report(
-                target.span.file,
+            Ok(_) => c.refuse(
                 target.span,
                 SemaFault.ImmutableWrite(NameFault(name: name))
             ),
@@ -208,8 +201,8 @@ fresh_or_refused = (
 }
 
 // `c.width = 5` on an impl-supplied field: there is nothing to assign
-// into. "Mutation goes through exported methods, as it always does."
-assign_access* = (c :: Checker, target: Expr, a: Access, ctx: Ctx)
+// into.
+assign_access = (c :: Checker, target: Expr, a: Access, ctx: Ctx)
                 Res<(), AllocError> {
     c.writable_member(a, ctx).try();
     c.computed_member(a, ctx).try().match({
@@ -218,9 +211,8 @@ assign_access* = (c :: Checker, target: Expr, a: Access, ctx: Ctx)
     })
 }
 
-no_storage* = (c :: Checker, target: Expr, a: Access) Res<(), AllocError> {
-    c.report(
-        target.span.file,
+no_storage = (c :: Checker, target: Expr, a: Access) Res<(), AllocError> {
+    c.refuse(
         target.span,
         SemaFault.ComputedFieldAssign(NameFault(name: a.name.text))
     )

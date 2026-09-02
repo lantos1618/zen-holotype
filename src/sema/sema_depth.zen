@@ -12,8 +12,7 @@ Inst, InstEdge, subst, subst_list = sema.sema_inst
 has_var, zip, owner_of = sema.sema_inst
 enter_struct_tvars, member_type = sema.sema_member
 
-// Maximum instantiation-chain depth before sema reports divergence. Keep this
-// value consistent across compiler implementations.
+// Instantiation-chain depth past which sema reports divergence.
 DEPTH_BUDGET: usize = 24
 
 Frame = {
@@ -47,7 +46,7 @@ Walk = {
     }
 }
 
-Walk* = (a: Alloc) Walk {
+Walk = (a: Alloc) Walk {
     Walk(frames: a.Vec<Frame>(), visited: a.Map<str, bool>())
 }
 
@@ -73,9 +72,9 @@ fn_root_at = (c :: Checker, i: usize, w :: Walk) Res<(), AllocError> {
 
 root_if_settled = (c :: Checker, e: InstEdge, w :: Walk)
                   Res<(), AllocError> {
-    settled(c, e.args).match({
+    c.settled(e.args).match({
         false => Ok(()),
-        true  => enter(c, e.to_name, e.span, e.to_owner, e.to_tvars, e.args, w),
+        true  => c.enter(e.to_name, e.span, e.to_owner, e.to_tvars, e.args, w),
     })
 }
 
@@ -158,7 +157,7 @@ out_edge = (c :: Checker, owner: str, i: usize, inst: Inst, w :: Walk)
 
 follow = (c :: Checker, owner: str, e: InstEdge, inst: Inst, w :: Walk)
          Res<(), AllocError> {
-    (e.from_owner.eq(owner) && (settled(c, e.args) == false)).match({
+    (e.from_owner.eq(owner) && (c.settled(e.args) == false)).match({
         false => Ok(()),
         true  => c.follow_subst(e, inst, w),
     })
@@ -168,9 +167,9 @@ follow_subst = (c :: Checker, e: InstEdge, inst: Inst, w :: Walk)
                Res<(), AllocError> {
     args ::= c.alloc.Vec<TyId>();
     c.subst_list(e.args, inst, args).try();
-    settled(c, args).match({
+    c.settled(args).match({
         false => Ok(()),
-        true  => enter(c, e.to_name, e.span, e.to_owner, e.to_tvars, args, w),
+        true  => c.enter(e.to_name, e.span, e.to_owner, e.to_tvars, args, w),
     })
 }
 
@@ -189,7 +188,7 @@ type_root_at = (c :: Checker, i: usize, w :: Walk) Res<(), AllocError> {
 }
 
 type_root = (c :: Checker, n: TyNamed, w :: Walk) Res<(), AllocError> {
-    ((n.args.len > 0) && settled(c, n.args)).match({
+    ((n.args.len > 0) && c.settled(n.args)).match({
         false => Ok(()),
         true  => c.enter_type(n.name, nowhere(), n.decl, n.args, w),
     })
@@ -230,7 +229,7 @@ enter_type_now = (
 
 expand_type = (c :: Checker, id: DeclId, args: Vec<TyId>, w :: Walk)
               Res<(), AllocError> {
-    decl_at(c.tree, id).match({
+    c.tree.decl_at(id).match({
         None  => Ok(()),
         Ok(d) => c.expand_decl(d, id, args, w),
     })
@@ -257,7 +256,7 @@ expand_struct = (
     w    :: Walk
 ) Res<(), AllocError> {
     mi    = id.module.to_usize();
-    owner = owner_of(c, mi, s.name.text).try();
+    owner = c.owner_of(mi, s.name.text).try();
     key   = c.node_key(owner, args).try();
     w.visited.get(key).match({
         Ok(_) => Ok(()),
@@ -279,7 +278,7 @@ expand_fields = (
     tmark = c.tvar_mark();
     c.enter_struct_tvars(s, mi).try();
     c.struct_inst(s, mi, args, inst).try();
-    s.members.loop((h, m) { field_edge(c, m, mi, poison, inst, w).try() });
+    s.members.loop((h, m) { c.field_edge(m, mi, poison, inst, w).try() });
     c.release_tvars(tmark).try();
     Ok(());
 }
@@ -291,7 +290,7 @@ struct_inst = (
     args : Vec<TyId>,
     inst :: Inst
 ) Res<(), AllocError> {
-    owner = owner_of(c, mi, s.name.text).try();
+    owner = c.owner_of(mi, s.name.text).try();
     vars ::= c.alloc.Vec<TyId>();
     s.tparams.loop((h, tp) {
         vars.add(c.types.var(tp.name.text, owner).try()).try();
@@ -322,7 +321,7 @@ field_target = (
     inst   : Inst,
     w      :: Walk
 ) Res<(), AllocError> {
-    declared = member_type(c, m, mi, poison).try();
+    declared = c.member_type(m, mi, poison).try();
     applied  = c.subst(declared, inst).try();
     c.types.at(applied).match({
         Named(n) => c.field_step(n, m.span, w),
@@ -332,7 +331,7 @@ field_target = (
 
 field_step = (c :: Checker, n: TyNamed, span: Span, w :: Walk)
              Res<(), AllocError> {
-    ((n.args.len > 0) && settled(c, n.args)).match({
+    ((n.args.len > 0) && c.settled(n.args)).match({
         false => Ok(()),
         true  => c.enter_type(n.name, span, n.decl, n.args, w),
     })
@@ -343,8 +342,7 @@ blame = (c :: Checker, w :: Walk) Res<(), AllocError> {
     w.done = true;
     w.frames.get(w.blamed()).match({
         None  => Ok(()),
-        Ok(f) => c.report(
-            f.span.file,
+        Ok(f) => c.refuse(
             f.span,
             SemaFault.InstantiationDepth(NameFault(name: f.name))
         ),
@@ -352,23 +350,14 @@ blame = (c :: Checker, w :: Walk) Res<(), AllocError> {
 }
 
 settled = (c: Checker, args: Vec<TyId>) bool {
-    Range(0, args.len).find((i) {
-        args.get(i).match({ Ok(t) => c.has_var(t), None => false })
-    }).match({ Ok(_) => false, None => true })
+    args.find((t) { c.has_var(t) }).match({ Ok(_) => false, None => true })
 }
 
-// Structural size is the growth signal used to detect widening recursion.
-args_size = (c: Checker, args: Vec<TyId>) usize { c.list_size(args, 0) }
-
-list_size = (c: Checker, list: Vec<TyId>, i: usize) usize {
-    (i < list.len).match({
-        false => 0,
-        true  => c.item_size(list, i) + c.list_size(list, i + 1),
-    })
-}
-
-item_size = (c: Checker, list: Vec<TyId>, i: usize) usize {
-    list.get(i).match({ Ok(t) => c.ty_size(t), None => 0 })
+// Structural size is the growth signal that detects widening recursion.
+args_size = (c: Checker, args: Vec<TyId>) usize {
+    total ::= 0;
+    args.loop((h, t) { total = total + c.ty_size(t); });
+    total
 }
 
 ty_size = (c: Checker, t: TyId) usize {
@@ -385,19 +374,6 @@ node_key = (c :: Checker, owner: str, args: Vec<TyId>)
            Res<str, AllocError> {
     out ::= c.alloc.String().try();
     out.add(owner).try();
-    Range(0, args.len).loop((h, i) { c.key_part(args, i, out).try() });
+    args.loop((h, t) { out.fmt(",{}", c.types.key_at(t)).try() });
     Ok(out.view());
-}
-
-key_part = (c :: Checker, args: Vec<TyId>, i: usize, out :: String)
-           Res<(), AllocError> {
-    args.get(i).match({
-        None  => Ok(()),
-        Ok(t) => c.add_key(t, out),
-    })
-}
-
-add_key = (c :: Checker, t: TyId, out :: String) Res<(), AllocError> {
-    out.fmt(",{}", c.types.key_at(t)).try();
-    Ok(());
 }

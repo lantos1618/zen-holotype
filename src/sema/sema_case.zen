@@ -2,19 +2,25 @@ Decl, Enum, Variant = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
-Range = std.core
 TyId, TyNamed, TyRes = sema.sema_ty
 decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 type_from_ast = sema.sema_denote
 union_reading, union_member = sema.sema_union
 
+// One value a scrutinee can be. `payload` is `()` when there is none.
 Case* = {
     name*: str,
     payload*: TyId,
     has_payload*: bool,
+
+    arity* = (self: @Self) usize {
+        self.has_payload.match({ true => 1, false => 0 })
+    }
 }
 
+// The cases of a type, or false for one with none to enumerate: a struct
+// scrutinee is covered by `_` alone, and a structural union has no tags.
 cases_of* = (c :: Checker, ty: TyId, out :: Vec<Case>) Res<bool, AllocError> {
     c.types.at(ty).match({
         Prim(p)  => c.bool_cases(p.name, out),
@@ -24,45 +30,40 @@ cases_of* = (c :: Checker, ty: TyId, out :: Vec<Case>) Res<bool, AllocError> {
     })
 }
 
-// Structural unions are not enumerated here; only named union declarations
-// have the codegen representation needed for case tags.
-
 case_payload* = (c :: Checker, ty: TyId, name: str) Res<TyId, AllocError> {
     cases ::= c.alloc.Vec<Case>();
     c.cases_of(ty, cases).try();
-    // The declared case supplies the payload type.
-    find_case(cases, name).match({
+    cases.find_case(name).match({
         None   => c.types.unknown(),
         Ok(cs) => Ok(cs.payload),
     })
 }
 
+// A case nobody declared has the arity the pattern wrote.
 case_arity* = (c :: Checker, ty: TyId, name: str, wrote_sub: bool)
               Res<usize, AllocError> {
     cases ::= c.alloc.Vec<Case>();
     c.cases_of(ty, cases).try();
-    Ok(find_case(cases, name).match({
-        Ok(cs) => bool_to_arity(cs.has_payload),
-        None   => bool_to_arity(wrote_sub),
+    Ok(cases.find_case(name).match({
+        Ok(cs) => cs.arity(),
+        None   => wrote_sub.match({ true => 1, false => 0 }),
     }));
 }
 
-find_case* = (cases: Vec<Case>, name: str) Res<Case> {
-    Range(0, cases.len).find((i) {
-        cases.get(i).match({ Ok(cs) => cs.name.eq(name), None => false })
-    }).match({
-        Ok(i) => cases.get(i),
-        None  => None,
-    })
+is_case* = (c :: Checker, ty: TyId, name: str) Res<bool, AllocError> {
+    cases ::= c.alloc.Vec<Case>();
+    c.cases_of(ty, cases).try();
+    Ok(cases.find_case(name).match({ Ok(_) => true, None => false }));
 }
 
-bool_to_arity = (b: bool) usize { b.match({ true => 1, false => 0 }) }
+find_case* = (cases: Vec<Case>, name: str) Res<Case> {
+    cases.find((cs) { cs.name.eq(name) })
+}
 
-// `bool` is an enum of two cases and gets no exemption: "one-sided is
-// spelled `.then`, which is a different word and cannot be a typo".
+// `bool` is an enum of two cases and gets no exemption.
 bool_cases = (c :: Checker, name: str, out :: Vec<Case>) Res<bool, AllocError> {
     name.eq("bool").match({
-        true  => add_bool(c, out),
+        true  => c.add_bool(out),
         false => Ok(false),
     })
 }
@@ -77,15 +78,15 @@ add_bool = (c :: Checker, out :: Vec<Case>) Res<bool, AllocError> {
 res_cases = (c :: Checker, r: TyRes, out :: Vec<Case>) Res<bool, AllocError> {
     out.add(Case(name: "Ok", payload: r.value, has_payload: true)).try();
     r.form.match({
-        Failure => c.add_err(r, out),
+        Failure => out.add(Case(
+            name: "Err",
+            payload: r.error,
+            has_payload: true
+        )),
         Absence => c.add_none(out),
         Open    => c.add_none(out),
     }).try();
     Ok(true);
-}
-
-add_err = (c :: Checker, r: TyRes, out :: Vec<Case>) Res<(), AllocError> {
-    out.add(Case(name: "Err", payload: r.error, has_payload: true))
 }
 
 add_none = (c :: Checker, out :: Vec<Case>) Res<(), AllocError> {
@@ -93,11 +94,10 @@ add_none = (c :: Checker, out :: Vec<Case>) Res<(), AllocError> {
     out.add(Case(name: "None", payload: unit, has_payload: false))
 }
 
-// A declared type. Only an enum has cases; a struct has fields, and a
-// struct scrutinee is covered by `_` alone.
+// Only an enum has cases; a struct has fields.
 named_cases = (c :: Checker, n: TyNamed, out :: Vec<Case>)
               Res<bool, AllocError> {
-    decl_at(c.tree, n.decl).match({
+    c.tree.decl_at(n.decl).match({
         Ok(d) => c.enum_cases(d, n, out),
         None  => Ok(false),
     })
@@ -121,7 +121,6 @@ variant_cases = (c :: Checker, e: Enum, n: TyNamed, out :: Vec<Case>)
     })
 }
 
-// A union member carries its named type rather than the flattened set.
 add_members = (c :: Checker, e: Enum, n: TyNamed, out :: Vec<Case>)
               Res<bool, AllocError> {
     e.variants.loop((h, v) {
@@ -141,7 +140,7 @@ add_variants = (c :: Checker, e: Enum, n: TyNamed, out :: Vec<Case>)
     e.variants.loop((h, v) {
         out.add(Case(
             name: v.name.text,
-            payload: variant_payload(c, v, ctx).try(),
+            payload: c.variant_payload(v, ctx).try(),
             has_payload: v.payload.match({ Ok(_) => true, None => false }),
         )).try();
     });
