@@ -1,0 +1,172 @@
+// The HPACK static table pairs a name with a value at one RFC 7541 index,
+// but the two halves live in different structures: STATIC_NAMES is an
+// array and static_value is a match, twenty lines apart. Nothing else
+// checks that they still agree, and a renumbering of either encodes
+// headers that no longer compress — no crash, no error, just a silently
+// larger block.
+//
+// So drive the encoder and demand the index it must have chosen. The
+// pairs below are transcribed from RFC 7541 Appendix A rather than read
+// from the table, because a check that reads what it is checking cannot
+// fail.
+
+block_add_header = std.net.http2.http2_hpack
+
+// The single byte a fully-indexed header must encode to, 0x80 + index,
+// or 0 when the encoder chose a literal form instead.
+indexed_byte = (a: Alloc, name: str, value: str) Res<u8, AllocError> {
+    blk ::= a.String().try();
+    blk.block_add_header(name, value).match({
+        Ok(_)  => (blk.view().len == 1).match({
+            true  => Ok(blk.view()[0]),
+            false => Ok(0),
+        }),
+        Err(_) => Ok(0),
+    });
+}
+
+expect_index = (a: Alloc, name: str, value: str, want: usize)
+               Res<(), AllocError> {
+    got = a.indexed_byte(name, value).try();
+    (got.to_usize() == 128 + want).match({
+        true  => Ok(()),
+        false => {
+            println(
+                "MISPAIRED {} {} -> {} want {}",
+                name,
+                value,
+                got,
+                128 + want
+            );
+            Ok(())
+        },
+    });
+}
+
+// The name index the encoder chose, given a value the table cannot hold.
+// A literal-with-indexed-name writes a 4-bit prefix: an index under 15 is
+// that one byte, and 15 or above saturates the prefix and continues in
+// the next. 0 means the encoder found no name at all.
+name_index = (a: Alloc, name: str) Res<usize, AllocError> {
+    blk ::= a.String().try();
+    blk.block_add_header(name, "no-such-value-is-in-the-table").match({
+        Ok(_)  => {
+            v  = blk.view();
+            b0 = v[0].to_usize();
+            (b0 < 15).match({
+                true  => Ok(b0),
+                false => Ok(15 + v[1].to_usize()),
+            })
+        },
+        Err(_) => Ok(0),
+    });
+}
+
+expect_name = (a: Alloc, name: str, want: usize) Res<(), AllocError> {
+    got = a.name_index(name).try();
+    (got == want).match({
+        true  => Ok(()),
+        false => {
+            println("MISNAMED {} -> {} want {}", name, got, want);
+            Ok(())
+        },
+    });
+}
+
+main = (env: Env) Res<(), AllocError> {
+    a = env.mem.alloc();
+
+    // Every Appendix A entry that carries a value.
+    a.expect_index(":method", "GET", 2).try();
+    a.expect_index(":method", "POST", 3).try();
+    a.expect_index(":path", "/", 4).try();
+    a.expect_index(":path", "/index.html", 5).try();
+    a.expect_index(":scheme", "http", 6).try();
+    a.expect_index(":scheme", "https", 7).try();
+    a.expect_index(":status", "200", 8).try();
+    a.expect_index(":status", "204", 9).try();
+    a.expect_index(":status", "206", 10).try();
+    a.expect_index(":status", "304", 11).try();
+    a.expect_index(":status", "400", 12).try();
+    a.expect_index(":status", "404", 13).try();
+    a.expect_index(":status", "500", 14).try();
+    a.expect_index("accept-encoding", "gzip, deflate", 16).try();
+    println("pairs agree");
+
+    // Every distinct name, at the index of its first entry. A repeated
+    // name resolves to the lowest index that carries it, so `:status`
+    // is 8 and not any of the six that follow it.
+    a.expect_name(":authority", 1).try();
+    a.expect_name(":method", 2).try();
+    a.expect_name(":path", 4).try();
+    a.expect_name(":scheme", 6).try();
+    a.expect_name(":status", 8).try();
+    a.expect_name("accept-charset", 15).try();
+    a.expect_name("accept-encoding", 16).try();
+    a.expect_name("accept-language", 17).try();
+    a.expect_name("accept-ranges", 18).try();
+    a.expect_name("accept", 19).try();
+    a.expect_name("access-control-allow-origin", 20).try();
+    a.expect_name("age", 21).try();
+    a.expect_name("allow", 22).try();
+    a.expect_name("authorization", 23).try();
+    a.expect_name("cache-control", 24).try();
+    a.expect_name("content-disposition", 25).try();
+    a.expect_name("content-encoding", 26).try();
+    a.expect_name("content-language", 27).try();
+    a.expect_name("content-length", 28).try();
+    a.expect_name("content-location", 29).try();
+    a.expect_name("content-range", 30).try();
+    a.expect_name("content-type", 31).try();
+    a.expect_name("cookie", 32).try();
+    a.expect_name("date", 33).try();
+    a.expect_name("etag", 34).try();
+    a.expect_name("expect", 35).try();
+    a.expect_name("expires", 36).try();
+    a.expect_name("from", 37).try();
+    a.expect_name("host", 38).try();
+    a.expect_name("if-match", 39).try();
+    a.expect_name("if-modified-since", 40).try();
+    a.expect_name("if-none-match", 41).try();
+    a.expect_name("if-range", 42).try();
+    a.expect_name("if-unmodified-since", 43).try();
+    a.expect_name("last-modified", 44).try();
+    a.expect_name("link", 45).try();
+    a.expect_name("location", 46).try();
+    a.expect_name("max-forwards", 47).try();
+    a.expect_name("proxy-authenticate", 48).try();
+    a.expect_name("proxy-authorization", 49).try();
+    a.expect_name("range", 50).try();
+    a.expect_name("referer", 51).try();
+    a.expect_name("refresh", 52).try();
+    a.expect_name("retry-after", 53).try();
+    a.expect_name("server", 54).try();
+    a.expect_name("set-cookie", 55).try();
+    a.expect_name("strict-transport-security", 56).try();
+    a.expect_name("transfer-encoding", 57).try();
+    a.expect_name("user-agent", 58).try();
+    a.expect_name("vary", 59).try();
+    a.expect_name("via", 60).try();
+    a.expect_name("www-authenticate", 61).try();
+    println("names agree");
+
+    // A name the table knows with a value it does not: the encoder must
+    // fall to the literal form, so the block cannot be one byte.
+    a.indexed_byte(":status", "418").match({
+        Ok(b)  => (b == 0).match({
+            true  => println("unknown value stays literal"),
+            false => println("unknown value wrongly indexed as {}", b),
+        }),
+        Err(_) => println("unknown value failed"),
+    });
+
+    // A name the table does not hold at all.
+    a.name_index("x-trace-id").match({
+        Ok(i)  => (i == 0).match({
+            true  => println("unknown name stays literal"),
+            false => println("unknown name wrongly indexed as {}", i),
+        }),
+        Err(_) => println("unknown name failed"),
+    });
+    Ok(())
+}
