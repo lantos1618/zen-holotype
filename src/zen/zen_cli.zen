@@ -9,8 +9,8 @@ Env = std.env
 BuildArgs, ProjectArgs, BuildFlags, build_options = std.build
 FLAG_EMIT_C, ZEN_STD_ENV = std.build
 Options, options, is_word, arg_at, OPTIONS_END = std.cli
+holds_build_zen = zen.zen_path
 
-// Usage carries an invalid word; Missing carries an absent required option.
 Cli* = Build(BuildArgs)
      | Project(ProjectArgs)
      | Run(ProjectArgs)
@@ -21,11 +21,9 @@ Cli* = Build(BuildArgs)
 
 // `zen fmt` takes files; zen_fmt validates that they are not directories.
 FmtJob* = {
-    // Keep argv borrowed; paths are copied only when a caller supplies Alloc.
     argv*: Vec<str>,
 
-    // `--check`: report, change nothing. Without it the files are
-    // rewritten in place.
+    // `--check` reports without writing.
     check*: bool,
 
     // Every path the caller named.
@@ -47,9 +45,6 @@ ARGS*: usize = 2
 
 USAGE*: str = "usage: zen build [<project-or-target>]\n       zen run [<project-or-target>] [-- <args>...]\n       zen build <root> [--entry <file>] [--std <path>] [--ffi] [--symbol-map <file>] --emit-c -o <file.c>\n       zen build <root> [--entry <file>] [--std <path>] [--ffi] [--symbol-map <file>] --emit-c-dir <dir>\n       zen fmt [--check] <file.zen>..."
 
-COMMAND_FMT: str = "fmt"
-COMMAND_TEST: str = "test"
-COMMAND_LSP: str = "lsp"
 FLAG_FMT_CHECK: str = "--check"
 
 FmtFlag = | Check
@@ -67,26 +62,11 @@ command = (env: Env, a: Alloc, argv: Vec<str>, name: str)
     name.match({
         "build" => job_of(env, a, argv),
         "run"   => project_of(env, a, argv, true),
-        _       => not_build(a, argv, name),
+        "fmt"   => fmt_of(a, argv),
+        "test"  => Ok(Cli.Later(name)),
+        "lsp"   => Ok(Cli.Later(name)),
+        _       => Ok(Cli.Usage(name)),
     })
-}
-
-not_build = (a: Alloc, argv: Vec<str>, name: str) Res<Cli, AllocError> {
-    name.eq(COMMAND_FMT).match({
-        true  => fmt_of(a, argv),
-        false => Ok(not_written(name)),
-    })
-}
-
-not_written = (name: str) Cli {
-    is_later(name).match({
-        true  => Cli.Later(name),
-        false => Cli.Usage(name),
-    })
-}
-
-is_later = (name: str) bool {
-    name.eq(COMMAND_TEST) || name.eq(COMMAND_LSP)
 }
 
 // `zen fmt [--check] <file.zen>...` requires at least one path.
@@ -158,6 +138,8 @@ job_of = (env: Env, a: Alloc, argv: Vec<str>) Res<Cli, AllocError> {
     })
 }
 
+// The stdlib root is left empty: `cli` allocates in a scratch arena, and
+// `zen.project_cli` resolves the root in one that outlives the build.
 project_of = (env: Env, a: Alloc, argv: Vec<str>, run: bool)
              Res<Cli, AllocError> {
     first = arg_at(argv, ARGS);
@@ -165,7 +147,7 @@ project_of = (env: Env, a: Alloc, argv: Vec<str>, run: bool)
     target ::= "";
     at     ::= ARGS;
     (!first.is_empty() && !first.eq(OPTIONS_END)).then(() {
-        project_marker(env, a, first).match({
+        holds_build_zen(env, a, first).match({
             true  => { root = first; },
             false => { target = first; },
         });
@@ -182,19 +164,11 @@ project_of = (env: Env, a: Alloc, argv: Vec<str>, run: bool)
             job = ProjectArgs(
                 root: root,
                 target: target,
-                std_root: std_root_for(env, a),
                 argv: argv,
                 args_at: at
             );
             run.match({ true => Ok(Cli.Run(job)), false => Ok(Cli.Project(job)) })
         },
-    })
-}
-
-project_marker = (env: Env, a: Alloc, root: str) bool {
-    a.String("{}/build.zen", root).match({
-        Err(_)     => false,
-        Ok(marker) => env.fs.exists(marker.view()),
     })
 }
 

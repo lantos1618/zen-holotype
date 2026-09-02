@@ -131,7 +131,7 @@ sublayer from every test that does not name it).
 | `TokenKind.impl(Eq)` is 48 hand-written arms (`lex_token.zen`) | No enum in the tree has `Eq`; sema does not derive tag equality (`sema_bound.zen:574-588`). A `kind_name` string compare would land on the parser's hottest predicate. Needs a sema tag-compare intrinsic. |
 | `lex.Pos` duplicates `ast_span.Pos` + Display | Pinned deliberately by `tests/corpus/std/pos_display_both_format_doors_agree.zen`. |
 | `lex.Span → ast.Span` converter ×2 | No import rename; one file cannot name both types. |
-| `lex_diag` has no `render`/`say` while sema/gen/parse diags do | `zen_fmt.zen:76` spells the format itself; adding the method without a caller is dead code. Do it when a second consumer appears. |
+| `lex_diag` has no `render`/`say` while sema/gen/parse diags do | Done by the `zen` lane: `Diag.say` in `lex_diag.zen`, called from `zen_fmt.zen`. |
 | `message`/`kind_name` on enums | Enums have no body. |
 
 ## The pass, per folder

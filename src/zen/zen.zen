@@ -5,15 +5,15 @@ str, String = std.text
 FsError = std.env
 BuildArgs, ProjectArgs = std.build
 
-Cli*, FmtJob*, cli*, USAGE* = zen.zen_cli
+Cli*, FmtJob*, cli*, USAGE = zen.zen_cli
 Build* = zen.zen_build
-fs_message* = std.env
-Unit* = zen.zen_path
+fs_message = std.env
 std_root_for = zen.zen_path
 build* = zen.zen_run
 project = zen.zen_project
-format* = zen.zen_fmt
+format = zen.zen_fmt
 Server, serve, serve_stdio = lsp
+arg_at = std.cli
 
 main = (env: Env) Res<i32, AllocError> {
     alloc ::= env.mem.alloc();
@@ -28,9 +28,8 @@ main = (env: Env) Res<i32, AllocError> {
     })
 }
 
-// The CLI parser borrows most project arguments from Env, but an inferred
-// stdlib root is assembled in its scratch arena. Copy it into main's arena
-// before the build starts so the project never observes a dangling path.
+// `cli` parses in a scratch arena; the stdlib root is resolved here, in the
+// arena that outlives the build.
 project_cli = (env: Env, a: Alloc, job: ProjectArgs, execute: bool)
               Res<i32, AllocError> {
     std_root ::= a.String("{}", std_root_for(env, a)).try();
@@ -64,7 +63,6 @@ build_cli = (env: Env, a: Alloc, job: BuildArgs) Res<i32, AllocError> {
     })
 }
 
-// Dispatch commands that do not yet need parsed command-specific arguments.
 later = (env: Env, alloc: Alloc, name: str) Res<i32, AllocError> {
     name.eq("lsp").match({
         true  => lsp(env, alloc),
@@ -80,11 +78,8 @@ not_yet = (name: str) Res<i32, AllocError> {
     Ok(2);
 }
 
-// Run the language server over standard I/O.
-// `zen lsp <requests> <replies>` runs the same server over two files for
-// deterministic transport tests. Both forms reach lsp_serve.
-// `--stdio` is accepted for editor clients that append an explicit transport
-// flag even when the server supports only standard I/O.
+// `zen lsp` serves standard I/O; `zen lsp <requests> <replies>` serves the
+// same session over two files for transport tests. `--stdio` is accepted.
 lsp = (env: Env, a: Alloc) Res<i32, AllocError> {
     from = file_arg(env, 2);
     to   = file_arg(env, 3);
@@ -94,9 +89,7 @@ lsp = (env: Env, a: Alloc) Res<i32, AllocError> {
     })
 }
 
-// One path, not two, means the caller meant to name both: the file
-// form answers INTO a file, so `zen lsp requests.txt` with nowhere to
-// write would run a whole session and drop every reply.
+// A request file without a reply file is a usage error.
 paired = (env: Env, a: Alloc, from: str, to: str) Res<i32, AllocError> {
     to.is_empty().match({
         true  => lsp_usage(),
@@ -104,15 +97,9 @@ paired = (env: Env, a: Alloc, from: str, to: str) Res<i32, AllocError> {
     })
 }
 
-arg = (env: Env, i: usize) str {
-    env.argv.get(i).match({ Ok(s) => s, None => "" })
-}
-
-// A transport word is not a filename. `""` already means "no file
-// here" to the caller above, so a client's `--stdio` answers the same
-// as an absent argument, reaching the stdio path via the same branch.
+// A transport word is not a file name.
 file_arg = (env: Env, i: usize) str {
-    word = arg(env, i);
+    word = arg_at(env.argv, i);
     word.eq("--stdio").match({ true => "", false => word })
 }
 
@@ -152,8 +139,7 @@ unwritable = (path: str, e: FsError) Res<i32, AllocError> {
     Ok(1);
 }
 
-// Exit 2 not 1: "this build found problems" and "I couldn't tell what
-// you asked for" are different answers.
+// Exit 2: a usage error is not a build failure.
 usage = (word: str) Res<i32, AllocError> {
     word.is_empty().match({
         true  => println("{}", USAGE),
@@ -162,9 +148,6 @@ usage = (word: str) Res<i32, AllocError> {
     Ok(2);
 }
 
-// A flag needed and absent is not an unknown argument: the caller
-// spelled everything right and left one thing out, and naming which
-// is the difference between a typo hunt and a one-word fix.
 missing = (flag: str) Res<i32, AllocError> {
     println(
         "zen build: `{}` is required — a build with no `{}` writes nothing\n{}",

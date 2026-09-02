@@ -16,7 +16,7 @@ build* = (env: Env, a: Alloc, job: BuildArgs) Res<i32, AllocError> {
     Range(0, at_least_one(job.repeat)).loop((h, i) {
         worst = max_code(
             worst,
-            run_once(env, a, job_for(a, job, i).try()).try()
+            run_once(env, a, job.numbered(a, i).try()).try()
         );
     });
     Ok(worst);
@@ -46,49 +46,45 @@ at_least_one = (n: usize) usize {
 
 // Run zero uses requested paths; later file and symbol-map outputs gain a
 // one-based suffix. Stdout and directory emission have no file path to number.
-job_for = (a: Alloc, job: BuildArgs, i: usize) Res<BuildArgs, AllocError> {
+numbered = (job: BuildArgs, a: Alloc, i: usize) Res<BuildArgs, AllocError> {
     (i == 0 || (!job.writes_file() && job.symbol_map.is_empty())).match({
         true  => Ok(job),
-        false => numbered(a, job, i),
+        false => {
+            emission = job.emission.numbered_emission(a, i).try();
+            symbols  = job.symbol_map.numbered_path(a, i).try();
+            Ok(BuildArgs(
+                root: job.root,
+                emission: emission,
+                entry: job.entry,
+                std_root: job.std_root,
+                symbol_map: symbols.view(),
+                ffi: job.ffi,
+                repeat: job.repeat,
+                permute: job.permute
+            ))
+        },
     })
 }
 
-numbered = (a: Alloc, job: BuildArgs, i: usize) Res<BuildArgs, AllocError> {
-    emission = numbered_emission(a, job.emission, i).try();
-    symbols  = numbered_path(a, job.symbol_map, i).try();
-    Ok(BuildArgs(
-        root: job.root,
-        emission: emission,
-        entry: job.entry,
-        std_root: job.std_root,
-        symbol_map: symbols.view(),
-        ffi: job.ffi,
-        repeat: job.repeat,
-        permute: job.permute
-    ));
-}
-
-numbered_emission = (a: Alloc, emission: Emission, i: usize)
+numbered_emission = (emission: Emission, a: Alloc, i: usize)
                     Res<Emission, AllocError> {
     emission.match({
         CFile(path) => {
-            out = numbered_path(a, path, i).try();
+            out = path.numbered_path(a, i).try();
             Ok(Emission.CFile(out.view()))
         },
         _           => Ok(emission),
     })
 }
 
-numbered_path = (a: Alloc, path: str, i: usize) Res<String, AllocError> {
+numbered_path = (path: str, a: Alloc, i: usize) Res<String, AllocError> {
     path.is_empty().match({
         true  => a.String(),
         false => a.String("{}.{}", path, i + 1),
     })
 }
 
-// The worse of two exit codes: a run that found something outranks one
-// that didn't, so `--repeat 2` over a broken tree still exits non-zero
-// even if only one run said so.
+// A repetition that found something outranks one that did not.
 max_code = (l: i32, r: i32) i32 {
     (l > r).match({
         true  => l,
