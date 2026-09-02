@@ -1,14 +1,7 @@
-// Expression parsing: precedence climbing, postfix chains, and ambiguous
-// delimiters. Binary chains and postfix chains are iterative so AST depth does
-// not consume parser stack. Ambiguities use bounded lookahead:
-//
-//   `(..)` is a lambda when a body or return type follows; otherwise it is a
-//   parenthesized expression.
-//
-//   `[..]` is a fixed-array constructor when it has two items and a call
-//   follows; otherwise it is an array literal.
-//
-//   `.match(` and `.try(` have dedicated AST nodes rather than Call nodes.
+// Expression parsing: precedence climbing and an iterative postfix chain, so
+// AST depth does not consume parser stack. `(..)`, `[..]` and `<` are
+// disambiguated by `parse_lookahead`; `.match(` and `.try(` are their own
+// nodes, not calls.
 
 AllocError = std.mem
 Span, Ident, no_trivia = std.ast.ast_span
@@ -18,10 +11,10 @@ Match, Arm, Try, Record, Access, Index, Unary, Binary, Consume, Meta = std.ast.a
 Literal, LiteralKind, UnOp, BinOp, Param, TParam, Member = std.ast.ast_node
 TokenKind = std.parse.parse_token
 Parser, Mark = std.parse.parser
-type, type_args, starts_type, written_type = std.parse.parse_type
-lambda_ahead, fixed_array_ahead, targs_ahead = std.parse.parse_lookahead
-arms = std.parse.parse_match
-body_block = std.parse.parse_stmt
+type, type_args, written_type = std.parse.parse_type
+lambda_ahead, fixed_array_ahead, targs_ahead, starts_type = std.parse.parse_lookahead
+pattern = std.parse.parse_pattern
+block, body_block = std.parse.parse_stmt
 record_body, params_list, type_params = std.parse.parse_member
 
 // `consume` has the lowest binding strength: `consume a + b` moves the sum.
@@ -54,7 +47,7 @@ consume_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
 }
 
 // Binary precedence. Zero means the token is not a binary operator.
-precedence* = (kind: TokenKind) usize {
+precedence = (kind: TokenKind) usize {
     kind.match({
         BarBar    => 1,
         AmpAmp    => 2,
@@ -106,16 +99,11 @@ binary_from = (p :: Parser, m: Mark, min: usize) Res<ExprId, AllocError> {
     running.loop((h) {
         prec    = p.peek().kind.precedence();
         running = prec > 0 && prec >= min;
-        running.match({
-            true  => { lhs = p.binary_step(m, prec, lhs).try(); p.nothing() },
-            false => p.nothing(),
-        }).try();
+        running.then(() { lhs = p.binary_step(m, prec, lhs).try(); });
     });
     Ok(lhs);
 }
 
-// One operator and its right operand, folded onto the spine. The
-// recursion is at `prec + 1` — see `binary_from`.
 binary_step = (
     p    :: Parser,
     m    : Mark,
@@ -135,7 +123,6 @@ binary_step = (
     )), m.bare());
 }
 
-// Parse unary `!`, `-`, and address-of `&`.
 unary_at = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     op = p.peek().kind.match({
         Bang  => Ok(UnOp.Not),
@@ -160,7 +147,8 @@ unary_expr = (p :: Parser, m: Mark, op: UnOp) Res<ExprId, AllocError> {
     );
 }
 
-// Charge each recursive unary operand without charging ordinary postfix entry.
+// Each nested unary operand costs one depth link; a postfix chain charges
+// its own.
 unary_operand = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     p.enter().try();
     id = p.too_deep.match({
@@ -179,15 +167,11 @@ postfix = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     running ::= true;
     running.loop((h) {
         running = !p.too_deep && p.postfix_continues();
-        running.match({
-            true  => {
-                p.enter().try();
-                links = links + 1;
-                base  = p.postfix_step(m, base).try();
-                p.nothing();
-            },
-            false => p.nothing(),
-        }).try();
+        running.then(() {
+            p.enter().try();
+            links = links + 1;
+            base  = p.postfix_step(m, base).try();
+        });
     });
     p.unwind(links);
     Ok(base);
@@ -195,7 +179,7 @@ postfix = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
 
 // Whether the current token can begin an expression. Delimited lists use this
 // to stop before reporting their missing closer.
-starts_expr* = (p :: Parser) bool {
+starts_expr = (p :: Parser) bool {
     p.peek().kind.match({
         Ident       => true,
         Int(_)      => true,
@@ -219,8 +203,6 @@ starts_expr* = (p :: Parser) bool {
     });
 }
 
-// Whether the token extends a postfix chain; `<` requires lookahead to
-// distinguish type arguments from comparison.
 postfix_continues = (p :: Parser) bool {
     p.peek().kind.match({
         Dot         => true,
@@ -240,7 +222,6 @@ postfix_step = (p :: Parser, m: Mark, base: ExprId) Res<ExprId, AllocError> {
     });
 }
 
-// Parse type arguments followed by a call.
 targs_call = (p :: Parser, m: Mark, base: ExprId) Res<ExprId, AllocError> {
     targs ::= p.alloc.Vec<TypeId>();
     p.type_args(targs).try();
@@ -253,7 +234,6 @@ after_dot = (p :: Parser, m: Mark, base: ExprId) Res<ExprId, AllocError> {
     p.dot_target(m, base, name);
 }
 
-// Recognize `.match` and `.try` intrinsics before ordinary access.
 dot_target = (
     p    :: Parser,
     m    : Mark,
@@ -274,8 +254,7 @@ dot_target = (
     });
 }
 
-// `.match({ pattern => expr, .. })`. Its own node and not a call: the
-// argument is an arm list, and exhaustiveness is checked on it.
+// `.match({ pattern => expr, .. })`; the arm list is not an argument list.
 match_expr = (
     p         :: Parser,
     m         : Mark,
@@ -299,10 +278,67 @@ match_expr = (
     )), m.bare());
 }
 
-// `.try()`, `.try(error)`, `.try((error) { mapped })` — the
-// non-local-exit intrinsic. `name_span` is kept for the same reason
-// `.match`'s is: the diagnostics are about the intrinsic, and the node's
-// own span starts at the operand.
+// `{ pattern => expr, .. }` with its braces. A trailing comma is allowed.
+arms = (p :: Parser, out :: Vec<Arm>) Res<Span, AllocError> {
+    start = p.here();
+    open  = p.here_span();
+    p.expect(
+        TokenKind.BraceOpen,
+        "expected `{` to open this `.match`'s arms"
+    ).try();
+    running ::= !p.at_kind(TokenKind.BraceClose) && !p.at_eof();
+    running.loop((h) {
+        before = p.at;
+        out.add(p.one_arm().try()).try();
+        running = !p.at_kind(
+            TokenKind.BraceClose
+        ) && !p.at_eof() && p.at > before;
+    });
+    p.expect_close(
+        TokenKind.BraceClose,
+        "unclosed `{`: these match arms are never closed",
+        open
+    ).try();
+    Ok(p.span_from(start));
+}
+
+one_arm = (p :: Parser) Res<Arm, AllocError> {
+    m     = p.open();
+    pat   = p.pattern().try();
+    arrow = p.here_span();
+    p.expect(TokenKind.Arrow, "expected `=>` after this arm's pattern").try();
+    body = p.arm_body().try();
+    end  = p.prev_end;
+    span = p.span_from(m.start);
+
+    // Consume the comma after taking the span so a same-line comment remains
+    // attached to this arm.
+    p.eat(TokenKind.Comma).try();
+    Ok(Arm(
+        pattern: pat,
+        arrow_span: arrow,
+        body: body,
+        span: span,
+        leading: m.leading,
+        trailing: p.claim_trailing(end),
+    ));
+}
+
+arm_body = (p :: Parser) Res<ExprId, AllocError> {
+    p.at_kind(TokenKind.BraceOpen).match({
+        true  => p.block_expr(),
+        false => p.expr(),
+    });
+}
+
+block_expr = (p :: Parser) Res<ExprId, AllocError> {
+    m  = p.open();
+    id = p.block().try();
+    p.add_expr(ExprKind.Block(id), m);
+}
+
+// `.try()`, `.try(error)`, `.try((error) { mapped })`. `name_span` locates the
+// intrinsic; the node's span starts at its operand.
 try_expr = (
     p         :: Parser,
     m         : Mark,
@@ -369,10 +405,8 @@ call_expr = (
     )), m.bare());
 }
 
-// `(a, b: 3, { .. })`. An argument is named when an identifier is
-// followed by `:` — construction and an impl's supplied field use the
-// same form, so they use the same node.
-args* = (p :: Parser, out :: Vec<Arg>) Res<Span, AllocError> {
+// `(a, b: 3, { .. })`: an argument is named when an identifier precedes `:`.
+args = (p :: Parser, out :: Vec<Arg>) Res<Span, AllocError> {
     start = p.here();
     open  = p.here_span();
     p.bump().try();
@@ -483,7 +517,7 @@ word_expr = (p :: Parser, m: Mark, kind: ExprKind) Res<ExprId, AllocError> {
     p.add_expr(kind, m);
 }
 
-// Parse value and typed forms of `@meta`.
+// `@meta(value)` or `@meta(name: Type)`.
 meta_expr = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
     p.bump().try();
     open = p.here_span();
@@ -559,7 +593,7 @@ generic_lambda = (p :: Parser, m: Mark) Res<ExprId, AllocError> {
 }
 
 // A lambda's omitted return type means `()`; declarations must write one.
-lambda* = (p :: Parser, m: Mark, tps: Vec<TParam>) Res<ExprId, AllocError> {
+lambda = (p :: Parser, m: Mark, tps: Vec<TParam>) Res<ExprId, AllocError> {
     ps ::= p.alloc.Vec<Param>();
     span = p.params_list(ps).try();
     ret  = p.starts_type().match({
@@ -632,7 +666,7 @@ elem_list = (
 
 // Recovery placeholder at an empty span; consumers reject the accompanying
 // diagnostic before walking it.
-poison_expr* = (p :: Parser) Res<ExprId, AllocError> {
+poison_expr = (p :: Parser) Res<ExprId, AllocError> {
     p.tree.add_expr(Expr(
         kind: ExprKind.Unit,
         span: p.empty_span(),
@@ -641,7 +675,7 @@ poison_expr* = (p :: Parser) Res<ExprId, AllocError> {
     ))
 }
 
-add_expr* = (p :: Parser, kind: ExprKind, m: Mark) Res<ExprId, AllocError> {
+add_expr = (p :: Parser, kind: ExprKind, m: Mark) Res<ExprId, AllocError> {
     p.tree.add_expr(Expr(
         kind: kind,
         span: p.span_from(m.start),

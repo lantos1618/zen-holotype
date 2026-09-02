@@ -5,12 +5,12 @@
 AllocError = std.mem
 no_trivia = std.ast.ast_span
 ExprId, TypeId, BlockId = std.ast.ast_id
-Block, Stmt, StmtKind, Bind, ExprStmt, Decl, Expr, ExprKind = std.ast.ast_node
+Block, Stmt, StmtKind, Bind, ExprStmt = std.ast.ast_node
 TokenKind = std.parse.parse_token
 Parser, Mark = std.parse.parser
-expr, add_expr = std.parse.parse_expr
+expr = std.parse.parse_expr
 type = std.parse.parse_type
-declaration, impl_ahead = std.parse.parse_decl
+declaration = std.parse.parse_decl
 decl_head_ahead = std.parse.parse_lookahead
 
 // `{ statement* expression? }`
@@ -36,9 +36,9 @@ block_here = (p :: Parser) Res<BlockId, AllocError> {
         TokenKind.BraceOpen,
         "expected `{` to open a block"
     ).try();
-    stmts   ::= p.alloc.Vec<Stmt>();
-    value   ::= p.no_value();
-    running ::= !p.at_kind(TokenKind.BraceClose) && !p.at_eof();
+    stmts              ::= p.alloc.Vec<Stmt>();
+    value: Res<ExprId> ::= None;
+    running            ::= !p.at_kind(TokenKind.BraceClose) && !p.at_eof();
     running.loop((h) {
         before = p.at;
         opened.then(() { p.resume(); });
@@ -46,13 +46,9 @@ block_here = (p :: Parser) Res<BlockId, AllocError> {
             Ok(v) => { value = Ok(v); running = false; },
             None  => (),
         });
-        (p.at == before).match({
-            true  => { p.skip_one().try(); p.nothing() },
-            false => p.nothing(),
-        }).try();
-        (p.at_kind(TokenKind.BraceClose) || p.at_eof()).match({
-            true  => { running = false; },
-            false => (),
+        (p.at == before).then(() { p.skip_one().try(); });
+        (p.at_kind(TokenKind.BraceClose) || p.at_eof()).then(() {
+            running = false;
         });
     });
     // Claim closing trivia before consuming the brace; bump drains the next run.
@@ -79,12 +75,6 @@ body_block* = (p :: Parser) Res<BlockId, AllocError> {
     Ok(id);
 }
 
-block_expr* = (p :: Parser) Res<ExprId, AllocError> {
-    m  = p.open();
-    id = p.block().try();
-    p.add_expr(ExprKind.Block(id), m);
-}
-
 // `Ok(v)` is the block's trailing value; `None` means a statement was added.
 one_item = (p :: Parser, stmts :: Vec<Stmt>) Res<Res<ExprId>, AllocError> {
     m = p.open();
@@ -100,7 +90,6 @@ nested_block = (p :: Parser, stmts :: Vec<Stmt>, m: Mark) Res<(), AllocError> {
     p.push(stmts, StmtKind.Block(id), m);
 }
 
-// Declaration lookahead disambiguates a leading name from a binding target.
 ident_item = (
     p     :: Parser,
     stmts :: Vec<Stmt>,
@@ -123,8 +112,6 @@ binding_item = (
     });
 }
 
-// Impl declarations are parsed for recovery but diagnosed inside bodies;
-// their scope is module-only.
 impl_item = (p :: Parser, stmts :: Vec<Stmt>, m: Mark) Res<(), AllocError> {
     p.error(
         "`.impl` declares an impl, so it is legal only at module level, never inside a body"
@@ -152,19 +139,14 @@ expr_item = (
     });
 }
 
-// A trailing expression must be followed by `}`; otherwise diagnose the
-// missing semicolon at the expression.
 tail_value = (p :: Parser, value: ExprId) Res<Res<ExprId>, AllocError> {
-    p.at_kind(TokenKind.BraceClose).match({
-        true  => Ok(Ok(value)),
-        false => {
-            p.error_at(
-                "expected `;` — a statement ends with one, a declaration does not",
-                p.gap_span()
-            ).try();
-            Ok(Ok(value));
-        },
+    (!p.at_kind(TokenKind.BraceClose)).then(() {
+        p.error_at(
+            "expected `;` — a statement ends with one, a declaration does not",
+            p.gap_span()
+        ).try();
     });
+    Ok(Ok(value));
 }
 
 bind_typed = (
@@ -222,7 +204,7 @@ expr_stmt = (
 }
 
 // A statement span includes its semicolon; the inner expression span does not.
-push* = (
+push = (
     p     :: Parser,
     stmts :: Vec<Stmt>,
     kind  : StmtKind,
@@ -239,17 +221,13 @@ push* = (
 
 // Recovery consumes one token to guarantee forward progress.
 skip_one = (p :: Parser) Res<(), AllocError> {
-    p.at_eof().match({
-        true  => p.nothing(),
-        false => { p.bump().try(); p.nothing() },
-    });
+    (!p.at_eof()).then(() { p.bump().try(); });
+    Ok(());
 }
-
-no_value = (p: Parser) Res<ExprId> { None }
 
 // Depth-limit recovery consumes no closer, so it must not claim trailing
 // trivia that belongs to the following node.
-poison_block* = (p :: Parser) Res<BlockId, AllocError> {
+poison_block = (p :: Parser) Res<BlockId, AllocError> {
     p.tree.add_block(Block(
         stmts: p.alloc.Vec<Stmt>(),
         value: None,
