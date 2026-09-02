@@ -1,29 +1,25 @@
-// Reads JSON-RPC request fields and writes response envelopes and capabilities.
+// Reads JSON-RPC message fields and writes response envelopes and
+// capabilities. A message without an `id` is a notification and gets no
+// response.
 
 str, String = std.text
 Alloc, AllocError = std.mem
 Jsons, JsonId, write_text, written, obj, Nest,
-    JsonFault, to_json = std.json
-Hover = lsp.lsp_hover
-Target, write_location = lsp.lsp_def
-WireRange = lsp.lsp_pos
+    JsonFault = std.json
 write_legend = lsp.lsp_colour
 
-method_of* = (tree: Jsons, req: JsonId) str {
-    string_at(tree, req, "method")
-}
-
-DecodedRequest* = {
+// Absent fields read as "" / 0 / the enclosing value.
+Decoded* = {
     tree: Jsons,
     request: JsonId,
-    id: JsonId,
+    id*: Res<JsonId>,
 
-    method* = (self: @Self) str { method_of(self.tree, self.request) }
+    method* = (self: @Self) str { self.string_at(self.request, "method") }
 
-    params* = (self: @Self) JsonId { params_of(self.tree, self.request) }
+    params* = (self: @Self) JsonId { self.field_at(self.request, "params") }
 
     param* = (self: @Self, name: str) JsonId {
-        param(self.tree, self.request, name)
+        self.field_at(self.params(), name)
     }
 
     field_at* = (self: @Self, value: JsonId, name: str) JsonId {
@@ -31,16 +27,26 @@ DecodedRequest* = {
     }
 
     string_at* = (self: @Self, value: JsonId, name: str) str {
-        string_at(self.tree, value, name)
+        self.tree.field(value, name).match({
+            None  => "",
+            Ok(v) => self.tree.text(v).match({ Ok(s) => s, None => "" }),
+        })
     }
 
     number_at* = (self: @Self, value: JsonId, name: str) usize {
-        number_at(self.tree, value, name)
+        self.tree.field(value, name).match({
+            None  => 0,
+            Ok(v) => self.tree.whole(v).match({ Ok(n) => n, None => 0 }),
+        })
+    }
+
+    item_at* = (self: @Self, value: JsonId, i: usize) Res<JsonId> {
+        self.tree.item(value, i)
     }
 }
 
-DecodedRequest* = (tree: Jsons, request: JsonId, id: JsonId) DecodedRequest {
-    DecodedRequest(tree: tree, request: request, id: id)
+Decoded* = (tree: Jsons, request: JsonId) Decoded {
+    Decoded(tree: tree, request: request, id: tree.field(request, "id"))
 }
 
 RequestTurn* = {
@@ -53,18 +59,64 @@ RequestTurn* = {
 
     view* = (self: @Self) str { self.response.view() }
 
-    result* = (self :: @Self, request: DecodedRequest, body: str)
+    result* = (self :: @Self, request: Decoded, body: str)
               Res<(), AllocError> {
-        result(request.tree, request.id, body, self.response)
+        request.id.match({
+            None    => written(),
+            Ok(rid) => {
+                reply ::= self.head(request.tree, rid).try();
+                reply.key("result", self.response).try();
+                self.response.add(body).try();
+                reply.close(self.response)
+            },
+        })
     }
 
-    failed* = (self :: @Self, request: DecodedRequest, code: RpcFault,
-               why: str) Res<(), AllocError> {
-        failed(request.tree, request.id, code, why, self.response)
+    failed* = (self :: @Self, request: Decoded, code: RpcFault, why: str)
+              Res<(), AllocError> {
+        request.id.match({
+            None    => written(),
+            Ok(rid) => {
+                reply ::= self.head(request.tree, rid).try();
+                reply.key("error", self.response).try();
+                self.error(code, why).try();
+                reply.close(self.response)
+            },
+        })
     }
 
-    parse_error* = (self :: @Self, fault: JsonFault) Res<(), AllocError> {
-        parse_error(fault, self.response)
+    parse_error* = (self :: @Self, f: JsonFault) Res<(), AllocError> {
+        reply ::= obj(self.response).try();
+        reply.text("jsonrpc", "2.0", self.response).try();
+        reply.key("id", self.response).try();
+        self.response.add("null").try();
+        reply.key("error", self.response).try();
+        why ::= self.temporary.String().try();
+        why.add(f.fault_text()).try();
+        f.fault_at().match({
+            None  => written(),
+            Ok(i) => { why.add(" at byte ").try(); why.write_usize(i) },
+        }).try();
+        self.error(RpcFault.ParseError, why.view()).try();
+        reply.close(self.response)
+    }
+
+    head = (self :: @Self, tree: Jsons, rid: JsonId) Res<Nest, AllocError> {
+        reply ::= obj(self.response).try();
+        reply.text("jsonrpc", "2.0", self.response).try();
+        reply.key("id", self.response).try();
+        tree.write(rid, self.response).try();
+        Ok(reply)
+    }
+
+    error = (self :: @Self, code: RpcFault, why: str) Res<(), AllocError> {
+        fault ::= obj(self.response).try();
+        fault.key("code", self.response).try();
+        self.response.add('-').try();
+        self.response.write_usize(code.rpc_code()).try();
+        fault.key("message", self.response).try();
+        write_text(why, self.response).try();
+        fault.close(self.response)
     }
 }
 
@@ -72,130 +124,27 @@ RequestTurn* = (temporary: Alloc) Res<RequestTurn, AllocError> {
     Ok(RequestTurn(temporary: temporary, response: temporary.String().try()))
 }
 
-params_of* = (tree: Jsons, req: JsonId) JsonId {
-    tree.field(req, "params").match({ None => req, Ok(ps) => ps })
-}
-
-param* = (tree: Jsons, req: JsonId, name: str) JsonId {
-    ps = params_of(tree, req);
-    tree.field(ps, name).match({ None => ps, Ok(v) => v })
-}
-
-string_at* = (tree: Jsons, obj: JsonId, name: str) str {
-    tree.field(obj, name).match({
-        None  => "",
-        Ok(v) => tree.text(v).match({ Ok(s) => s, None => "" }),
-    })
-}
-
-number_at* = (tree: Jsons, obj: JsonId, name: str) usize {
-    tree.field(obj, name).match({
-        None  => 0,
-        Ok(v) => tree.whole(v).match({ Ok(n) => n, None => 0 }),
-    })
-}
-
-result = (tree: Jsons, rid: JsonId, body: str, msg :: String)
-         Res<(), AllocError> {
-    reply ::= head(tree, rid, msg).try();
-    reply.key("result", msg).try();
-    msg.add(body).try();
-    reply.close(msg)
-}
-
-failed = (
-    tree : Jsons,
-    rid  : JsonId,
-    code : RpcFault,
-    why  : str,
-    msg  :: String
-) Res<(), AllocError> {
-    reply ::= head(tree, rid, msg).try();
-    reply.key("error", msg).try();
-    fault ::= obj(msg).try();
-    fault.key("code", msg).try();
-    msg.add('-').try();
-    msg.write_usize(rpc_code(code)).try();
-    fault.key("message", msg).try();
-    write_text(why, msg).try();
-    fault.close(msg).try();
-    reply.close(msg)
-}
-
-head = (tree: Jsons, rid: JsonId, msg :: String) Res<Nest, AllocError> {
-    reply ::= obj(msg).try();
-    reply.text("jsonrpc", "2.0", msg).try();
-    reply.key("id", msg).try();
-    tree.write(rid, msg).try();
-    Ok(reply)
-}
-
-parse_error = (f: JsonFault, msg :: String) Res<(), AllocError> {
-    reply ::= obj(msg).try();
-    reply.text("jsonrpc", "2.0", msg).try();
-    reply.key("id", msg).try();
-    msg.add("null").try();
-    reply.key("error", msg).try();
-    why ::= obj(msg).try();
-    why.key("code", msg).try();
-    msg.add('-').try();
-    msg.write_usize(rpc_code(RpcFault.ParseError)).try();
-    why.key("message", msg).try();
-    write_fault(f, msg).try();
-    why.close(msg).try();
-    reply.close(msg)
-}
-
-write_fault = (f: JsonFault, msg :: String) Res<(), AllocError> {
-    msg.add('"').try();
-    said = fault_text(f);
-    msg.add(said.why).try();
-    said.at.match({
-        None  => written(),
-        Ok(i) => { msg.add(" at byte ").try(); msg.write_usize(i) },
-    }).try();
-    msg.add('"')
-}
-
-FaultText = { why: str, at: Res<usize> }
-
-fault_text = (f: JsonFault) FaultText {
+fault_at = (f: JsonFault) Res<usize> {
     f.match({
-        Unexpected(i) => FaultText(why: "unexpected byte", at: Ok(i)),
-        Truncated(i)  => FaultText(
-            why: "the document ended inside a value",
-            at: Ok(i)
-        ),
-        BadEscape(i)  => FaultText(why: "bad escape", at: Ok(i)),
-        BadNumber(i)  => FaultText(why: "not a JSON number", at: Ok(i)),
-        TooDeep(i)    => FaultText(why: "nested too deeply", at: Ok(i)),
-        Trailing(i)   => FaultText(
-            why: "trailing bytes after the value",
-            at: Ok(i)
-        ),
-        NoMemory      => FaultText(why: "out of memory", at: None),
+        Unexpected(i) => Ok(i),
+        Truncated(i)  => Ok(i),
+        BadEscape(i)  => Ok(i),
+        BadNumber(i)  => Ok(i),
+        TooDeep(i)    => Ok(i),
+        Trailing(i)   => Ok(i),
+        NoMemory      => None,
     })
 }
 
-MarkupContent = {
-    kind: str,
-    value: str,
-}
-
-HoverResult = {
-    contents: MarkupContent,
-    range: WireRange,
-}
-
-write_hover* = (a: Alloc, h: Hover, out :: String) Res<(), AllocError> {
-    encoded ::= HoverResult(contents: MarkupContent(kind: "plaintext", value: h.shown), range: WireRange(start: h.start, end: h.end)).to_json(a).try();
-    out.add(encoded.view())
-}
-
-write_target* = (a: Alloc, t: Target, body :: String) Res<(), AllocError> {
-    t.found.match({
-        false => body.add("null"),
-        true  => write_location(a, t, body),
+fault_text = (f: JsonFault) str {
+    f.match({
+        Unexpected(_) => "unexpected byte",
+        Truncated(_)  => "the document ended inside a value",
+        BadEscape(_)  => "bad escape",
+        BadNumber(_)  => "not a JSON number",
+        TooDeep(_)    => "nested too deeply",
+        Trailing(_)   => "trailing bytes after the value",
+        NoMemory      => "out of memory",
     })
 }
 
@@ -209,7 +158,7 @@ write_capabilities* = (out :: String) Res<(), AllocError> {
     )
 }
 
-SEMANTIC_TOKENS*: str = "textDocument/semanticTokens/full"
+SEMANTIC_TOKENS: str = "textDocument/semanticTokens/full"
 
 Request* = Initialize
     | Shutdown
@@ -238,6 +187,24 @@ request_of* = (method: str) Request {
     found.match({
         Ok(one) => one,
         None    => Request.Unknown,
+    });
+}
+
+Notice* = DidOpen | DidChange | DidClose | DidChangeWatched | Ignored
+
+notice_of* = (method: str) Notice {
+    found: Res<Notice> = loop<Notice>((h) {
+        method.eq("textDocument/didOpen").then(() { h.break(Notice.DidOpen) });
+        method.eq("textDocument/didChange").then(() { h.break(Notice.DidChange) });
+        method.eq("textDocument/didClose").then(() { h.break(Notice.DidClose) });
+        method.eq("workspace/didChangeWatchedFiles").then(() {
+            h.break(Notice.DidChangeWatched)
+        });
+        h.break(Notice.Ignored);
+    });
+    found.match({
+        Ok(one) => one,
+        None    => Notice.Ignored,
     });
 }
 

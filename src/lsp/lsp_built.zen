@@ -8,7 +8,7 @@ Range = std.core
 Span = std.ast.ast_span
 Note = std.parse.parse_diag
 Checker = sema.sema_check
-SemaFault, message, write_detail = sema.sema_diag
+message, write_detail = sema.sema_diag
 Build, check_workspace = zen.zen_build
 Classed = lsp.lsp_colour
 classify = lsp.lsp_names
@@ -27,9 +27,9 @@ Spot* = {
 Inner = {
     root: str,          // the compilation root, copied into the arena
     entry: str,         // the open document, relative to the root
-    b: Build,           // lex/parse's tally and diags
-    c: Checker,         // sema's memos — what every query reads
-    spots: Vec<Spot>,   // every diagnostic, grouped at publish time
+    b: Build,
+    c: Checker,
+    spots: Vec<Spot>,   // every diagnostic of the build, in report order
     classed :: Map<str, Vec<Classed>>,
 }
 
@@ -87,8 +87,8 @@ Built* = {
             over
         ).try();
         spots ::= self.arena.Vec<Spot>();
-        from_build(checked.b, self.arena, kept_root, spots).try();
-        from_check(checked.c, self.arena, kept_root, spots).try();
+        checked.b.parse_spots(self.arena, kept_root, spots).try();
+        checked.c.sema_spots(self.arena, kept_root, spots).try();
         classed ::= self.arena.Map<str, Vec<Classed>>();
 
         self.cur   = Ok(Inner(
@@ -147,60 +147,39 @@ Built* = (env: Env) Built {
     Built(arena: env.mem.alloc(), cur: None)
 }
 
-from_build = (b: Build, a: Alloc, root: str, spots :: Vec<Spot>)
-             Res<(), AllocError> {
+parse_spots = (b: Build, a: Alloc, root: str, spots :: Vec<Spot>)
+              Res<(), AllocError> {
     Range(0, b.diag_count()).loop((h, i) {
         b.diag_at(i).match({
             None  => written(),
-            Ok(d) => add_parse(a, root, d.message, d.span, d.note, spots),
+            Ok(d) => spots.add(Spot(
+                uri: uri_at(a, root, d.span.file).try(),
+                message: d.message,
+                span: d.span,
+                note: d.note
+            )),
         }).try();
     });
     Ok(());
 }
 
-add_parse = (
-    a     : Alloc,
-    root  : str,
-    said  : str,
-    span  : Span,
-    note  : Res<Note>,
-    spots :: Vec<Spot>
-) Res<(), AllocError> {
-    spots.add(Spot(
-        uri: uri_at(a, root, span.file).try(),
-        message: said,
-        span: span,
-        note: note
-    ))
-}
-
-from_check = (c : Checker, a: Alloc, root: str, spots :: Vec<Spot>)
+sema_spots = (c: Checker, a: Alloc, root: str, spots :: Vec<Spot>)
              Res<(), AllocError> {
     Range(0, c.diag_count()).loop((h, i) {
         c.diag_at(i).match({
             None  => written(),
-            Ok(d) => add_sema(c, a, root, d.file, d.span, d.fault, spots),
+            Ok(d) => {
+                said ::= a.String().try();
+                said.add(message(d.fault)).try();
+                write_detail(d.fault, c.types, said).try();
+                spots.add(Spot(
+                    uri: uri_at(a, root, d.file).try(),
+                    message: said.view(),
+                    span: d.span,
+                    note: None
+                ))
+            },
         }).try();
     });
     Ok(());
-}
-
-add_sema = (
-    c     : Checker,
-    a     : Alloc,
-    root  : str,
-    file  : str,
-    span  : Span,
-    fault : SemaFault,
-    spots :: Vec<Spot>
-) Res<(), AllocError> {
-    said ::= a.String().try();
-    said.add(message(fault)).try();
-    write_detail(fault, c.types, said).try();
-    spots.add(Spot(
-        uri: uri_at(a, root, file).try(),
-        message: said.view(),
-        span: span,
-        note: None
-    ))
 }
