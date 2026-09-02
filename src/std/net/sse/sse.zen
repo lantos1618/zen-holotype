@@ -1,0 +1,193 @@
+// Incremental Server-Sent Events framing. Transport and payload formats stay
+// outside this module: callers feed arbitrary byte boundaries and receive
+// complete event data or retry controls.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+Vec = std.collections
+Range = std.core
+
+SseMessage* = {
+    data*: str,
+    kind*: str,
+    id*:   str,
+}
+
+SseEvent* = Message(SseMessage) | Retry(usize)
+
+SseDecoder* = {
+    line :: String,
+    data :: String,
+    kind :: String,
+    last_id :: String,
+    saw_cr :: bool,
+    first_line :: bool,
+
+    feed* = <B: Range<u8>>(
+        self   :: @Self,
+        bytes  : B,
+        event_a: Alloc,
+        events :: Vec<SseEvent>
+    ) Res<(), AllocError> {
+        bytes.loop((h, i, byte) {
+            self.feed_byte(byte, event_a, events).try();
+        });
+        Ok(())
+    }
+
+    feed_byte* = (
+        self   :: @Self,
+        byte   : u8,
+        event_a: Alloc,
+        events :: Vec<SseEvent>
+    ) Res<(), AllocError> {
+        self.saw_cr.match({
+            true  => {
+                self.saw_cr = false;
+                (byte == '\n').match({
+                    true  => Ok(()),
+                    false => self.consume_byte(byte, event_a, events),
+                })
+            },
+            false => self.consume_byte(byte, event_a, events),
+        }).try();
+        Ok(())
+    }
+
+    consume_byte = (
+        self   :: @Self,
+        byte   : u8,
+        event_a: Alloc,
+        events :: Vec<SseEvent>
+    ) Res<(), AllocError> {
+        (byte == '\r' || byte == '\n').match({
+            true  => {
+                self.consume_line(event_a, events).try();
+                self.line.clear();
+                (byte == '\r').then(() { self.saw_cr = true; });
+                Ok(())
+            },
+            false => self.line.add(byte),
+        })
+    }
+
+    // EOF is not an event boundary. A final event without a blank line is
+    // discarded; the last event ID remains available across reconnections.
+    finish* = (self :: @Self) () {
+        self.line.clear();
+        self.data.clear();
+        self.kind.clear();
+        self.saw_cr = false;
+        self.first_line = true;
+    }
+
+    first = (self :: @Self, raw: str) str {
+        first ::= self.first_line;
+        self.first_line = false;
+        (first && raw.len >= 3
+            && raw.index(0) == 239
+            && raw.index(1) == 187
+            && raw.index(2) == 191).match({
+            true  => raw.slice(3, raw.len),
+            false => raw,
+        });
+    }
+
+    consume_line = (
+        self   :: @Self,
+        event_a: Alloc,
+        events :: Vec<SseEvent>
+    ) Res<(), AllocError> {
+        line = self.first(self.line.view());
+        line.is_empty().match({
+            true  => self.dispatch(event_a, events),
+            false => (line.index(0) == ':').match({
+                true  => Ok(()),
+                false => self.field(line, event_a, events),
+            }),
+        })
+    }
+
+    field = (
+        self   :: @Self,
+        line   : str,
+        event_a: Alloc,
+        events :: Vec<SseEvent>
+    ) Res<(), AllocError> {
+        colon = line.find(':');
+        name  = colon.match({
+            Ok(at) => line.slice(0, at),
+            None   => line,
+        });
+        raw_value = colon.match({
+            Ok(at) => line.slice(at + 1, line.len),
+            None   => line.slice(line.len, line.len),
+        });
+        value = (raw_value.len > 0 && raw_value.index(0) == ' ').match({
+            true  => raw_value.slice(1, raw_value.len),
+            false => raw_value,
+        });
+        name.match({
+            "data"  => {
+                self.data.add(value).try();
+                self.data.add('\n')
+            },
+            "event" => {
+                self.kind.clear();
+                self.kind.add(value)
+            },
+            "id"    => value.contains('\0').match({
+                true  => Ok(()),
+                false => {
+                    self.last_id.clear();
+                    self.last_id.add(value)
+                },
+            }),
+            "retry" => value.parse_usize().match({
+                Ok(ms) => events.add(SseEvent.Retry(ms)),
+                None   => Ok(()),
+            }),
+            _       => Ok(()),
+        })
+    }
+
+    dispatch = (
+        self   :: @Self,
+        event_a: Alloc,
+        events :: Vec<SseEvent>
+    ) Res<(), AllocError> {
+        self.data.is_empty().match({
+            true  => {
+                self.kind.clear();
+                Ok(())
+            },
+            false => {
+                raw  = self.data.view();
+                body = raw.slice(0, raw.len - 1);
+                kind = self.kind.is_empty().match({
+                    true  => "message",
+                    false => self.kind.view(),
+                });
+                events.add(SseEvent.Message(SseMessage(
+                    data: body.dup(event_a).try(),
+                    kind: kind.dup(event_a).try(),
+                    id: self.last_id.view().dup(event_a).try()
+                ))).try();
+                self.data.clear();
+                self.kind.clear();
+                Ok(())
+            },
+        })
+    }
+}
+
+SseDecoder* = (a: Alloc) Res<SseDecoder, AllocError> {
+    Ok(SseDecoder(
+        line: a.String().try(),
+        data: a.String().try(),
+        kind: a.String().try(),
+        last_id: a.String().try(),
+        saw_cr: false,
+        first_line: true
+    ))
+}

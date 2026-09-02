@@ -1,0 +1,49 @@
+SseDecoder, SseEvent = std.net.sse
+
+show = (events: Vec<SseEvent>) () {
+    events.loop((h, event) {
+        event.match({
+            Message(message) => println(
+                "event={} id={} data={}",
+                message.kind,
+                message.id,
+                message.data
+            ),
+            Retry(ms)        => println("retry={}", ms),
+        });
+    });
+}
+
+main = (env: Env) Res<(), AllocError> {
+    state ::= env.mem.alloc();
+    event ::= env.mem.alloc();
+    decoder ::= state.SseDecoder().try();
+    events  ::= event.Vec<SseEvent>();
+
+    decoder.feed(": comment\nid: 7\nevent: ans", event, events).try();
+    decoder.feed("wer\ndata: first\ndata: second\nretry: 25\n\n", event, events).try();
+    events.show();
+    events.clear();
+
+    decoder.feed("data: [DO", event, events).try();
+    decoder.feed("NE]\n\n", event, events).try();
+    events.show();
+    events.clear();
+
+    // EOF does not dispatch an event that never received its blank line.
+    decoder.feed("event: discarded\ndata: incomplete", event, events).try();
+    decoder.finish();
+    events.show();
+
+    // A leading UTF-8 BOM is ignored. CR, LF, and CRLF are all line endings,
+    // even when a CRLF pair crosses feed boundaries.
+    bom: [u8, 3] = [239, 187, 191];
+    decoder.feed(bom, event, events).try();
+    decoder.feed("id: 9\revent: cr\rdata: only-cr\r\r", event, events).try();
+    decoder.feed("data: pair\r", event, events).try();
+    decoder.feed("\n\r\n", event, events).try();
+    decoder.feed("event: cleared\n\ndata: default\n\n", event, events).try();
+    decoder.feed("retry: +25\n\n", event, events).try();
+    events.show();
+    Ok(())
+}
