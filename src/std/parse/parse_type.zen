@@ -3,7 +3,7 @@
 // are flattened while parsing in type position.
 
 AllocError = std.mem
-Span, Ident, no_trivia = std.ast.ast_span
+Span, no_trivia = std.ast.ast_span
 TypeId = std.ast.ast_id
 Type, TypeKind, Named, Union, FnType, ArrayType, Param, TParam = std.ast.ast_node
 TokenKind, WILDCARD = std.parse.parse_token
@@ -71,7 +71,6 @@ primary_type_here = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     });
 }
 
-// `_` is lexed as an identifier and means inference only in type position.
 named_or_infer = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     p.at_text(WILDCARD).match({
         true  => p.token_type(TypeKind.Infer, m),
@@ -89,10 +88,7 @@ token_type = (p :: Parser, kind: TypeKind, m: Mark) Res<TypeId, AllocError> {
 named_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
     name = p.ident("expected a type name").try();
     args ::= p.alloc.Vec<TypeId>();
-    p.at_kind(TokenKind.Lt).match({
-        true  => p.type_args(args),
-        false => p.nothing(),
-    }).try();
+    p.at_kind(TokenKind.Lt).then(() { p.type_args(args).try(); });
     p.add_type(TypeKind.Named(Named(name: name, args: args)), m);
 }
 
@@ -154,12 +150,12 @@ fn_type = (p :: Parser, m: Mark) Res<TypeId, AllocError> {
 named_params = (p :: Parser, ps: Vec<Param>) Res<(), AllocError> {
     ps.loop((h, param) {
         param.type.match({
-            Ok(_) => p.nothing(),
+            Ok(_) => (),
             None  => p.error_at(
                 "expected a parameter name: a function type must name its parameters, and this is a type where the name belongs",
                 param.span
-            ),
-        }).try();
+            ).try(),
+        });
     });
     Ok(());
 }
@@ -181,22 +177,8 @@ fn_type_rest = (
     )), m);
 }
 
-starts_type* = (p :: Parser) bool { p.peek().kind.starts_type_kind() }
-
-starts_type_kind* = (kind: TokenKind) bool {
-    kind.match({
-        Ident       => true,
-        AtSelf      => true,
-        Ellipsis    => true,
-        BracketOpen => true,
-        ParenOpen   => true,
-        Lt          => true,
-        _           => false,
-    });
-}
-
 // Recovery inserts an inferred type so later tree walks remain valid.
-poison_type* = (p :: Parser) Res<TypeId, AllocError> {
+poison_type = (p :: Parser) Res<TypeId, AllocError> {
     p.tree.add_type(Type(
         kind: TypeKind.Infer,
         span: p.empty_span(),
@@ -205,7 +187,7 @@ poison_type* = (p :: Parser) Res<TypeId, AllocError> {
     ))
 }
 
-add_type* = (p :: Parser, kind: TypeKind, m: Mark) Res<TypeId, AllocError> {
+add_type = (p :: Parser, kind: TypeKind, m: Mark) Res<TypeId, AllocError> {
     p.tree.add_type(Type(
         kind: kind,
         span: p.span_from(m.start),

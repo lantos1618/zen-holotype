@@ -3,7 +3,7 @@
 // between `Unit` and `Unit(_)`.
 
 AllocError = std.mem
-Ident, QualifiedName, no_trivia = std.ast.ast_span
+QualifiedName, no_trivia = std.ast.ast_span
 PatternId = std.ast.ast_id
 Pattern, PatternKind, PatName, Destructure, Literal, LiteralKind = std.ast.ast_node
 TokenKind, WILDCARD = std.parse.parse_token
@@ -40,7 +40,6 @@ pattern_here = (p :: Parser) Res<PatternId, AllocError> {
     });
 }
 
-// `_` is lexed as an identifier and means wildcard only in pattern position.
 name_or_wild = (p :: Parser, m: Mark) Res<PatternId, AllocError> {
     p.at_text(WILDCARD).match({
         true  => p.wild_pattern(m),
@@ -100,23 +99,8 @@ destructure_pattern = (
     );
 }
 
-// `Shape.Unit`. Segments are kept apart so a diagnostic can point at
-// the segment that is wrong rather than at the whole name.
-//
-// Parsing accepts any path depth; sema decides what each segment resolves to.
-qualified_name* = (p :: Parser) Res<QualifiedName, AllocError> {
-    start = p.here();
-    segments ::= p.alloc.Vec<Ident>();
-    segments.add(p.ident("expected a name").try()).try();
-    loop(p.at_kind(TokenKind.Dot), (h) {
-        p.bump().try();
-        segments.add(p.ident("expected a name after `.`").try()).try();
-    });
-    Ok(QualifiedName(segments: segments, span: p.span_from(start)));
-}
-
 // Recovery uses wildcard to avoid a secondary exhaustiveness error.
-poison_pattern* = (p :: Parser) Res<PatternId, AllocError> {
+poison_pattern = (p :: Parser) Res<PatternId, AllocError> {
     p.tree.add_pattern(Pattern(
         kind: PatternKind.Wild,
         span: p.empty_span(),
@@ -125,7 +109,7 @@ poison_pattern* = (p :: Parser) Res<PatternId, AllocError> {
     ))
 }
 
-add_pattern* = (
+add_pattern = (
     p    :: Parser,
     kind : PatternKind,
     m    : Mark

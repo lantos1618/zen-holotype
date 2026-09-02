@@ -1,12 +1,11 @@
 // Side-effect-free lookahead for ambiguous token sequences.
 //
 // Each query scans to a matching delimiter and inspects the next live
-// token. None advances the parser or records diagnostics. Scans use
-// `live_at` because formatter trivia remains in the token stream.
+// token. None advances the parser or records diagnostics. Trivia tokens
+// stay in the stream, so scans step with `live_at`.
 
 TokenKind, is_trivia = std.parse.parse_token
 Parser = std.parse.parser
-starts_type_kind = std.parse.parse_type
 
 ValueShape* = StructValue
     | EnumValue
@@ -16,7 +15,7 @@ ValueShape* = StructValue
     | ExprValue
 
 // First non-trivia token index at or after `from`.
-live_at* = (p :: Parser, from: usize) usize {
+live_at = (p :: Parser, from: usize) usize {
     out ::= p.tokens_len();
     Range(from, p.tokens_len()).loop((h, k) {
         (!p.token_kind_at(k).is_trivia()).then(() {
@@ -27,7 +26,7 @@ live_at* = (p :: Parser, from: usize) usize {
     out;
 }
 
-live_kind* = (p :: Parser, from: usize) TokenKind {
+live_kind = (p :: Parser, from: usize) TokenKind {
     p.token_kind_at(p.live_at(from))
 }
 
@@ -39,12 +38,26 @@ lambda_ahead* = (p :: Parser) bool {
     after == TokenKind.BraceOpen || after.ret_start()
 }
 
-ret_start* = (kind: TokenKind) bool {
+ret_start = (kind: TokenKind) bool {
     kind.starts_type_kind() && !kind.is_in([TokenKind.Lt, TokenKind.ParenOpen])
 }
 
-fn_value_after* = (kind: TokenKind) bool {
+fn_value_after = (kind: TokenKind) bool {
     kind.is_in([TokenKind.BraceOpen, TokenKind.ParenOpen]) || kind.ret_start()
+}
+
+starts_type* = (p :: Parser) bool { p.peek().kind.starts_type_kind() }
+
+starts_type_kind = (kind: TokenKind) bool {
+    kind.match({
+        Ident       => true,
+        AtSelf      => true,
+        Ellipsis    => true,
+        BracketOpen => true,
+        ParenOpen   => true,
+        Lt          => true,
+        _           => false,
+    });
 }
 
 // A `[` here opens a fixed array type applied to arguments if it holds
@@ -55,9 +68,8 @@ fixed_array_ahead* = (p :: Parser) bool {
     p.live_kind(j) == TokenKind.ParenOpen && p.group_items_at(p.at, j) == 2
 }
 
-// A `<` here opens type arguments if its matching `>` is followed by
-// `(`. Otherwise it is a comparison, which is the commoner reading and
-// the one a wrong guess breaks silently.
+// A `<` opens type arguments only when its matching `>` is followed by `(`;
+// otherwise it is a comparison.
 targs_ahead* = (p :: Parser) bool {
     j = p.angles_end_at(p.at);
     (j > p.at) && p.live_kind(j) == TokenKind.ParenOpen
@@ -111,8 +123,7 @@ group_items_at = (p :: Parser, from: usize, to: usize) usize {
     });
 }
 
-// Clamp unmatched closers at depth zero; lookahead never traps on malformed
-// input.
+// Unmatched closers clamp at depth zero.
 delim_step* = (kind: TokenKind, depth: usize) usize {
     kind.match({
         ParenOpen    => depth + 1,
@@ -149,7 +160,6 @@ down = (d: usize) usize {
     });
 }
 
-// Classify a declaration value with bounded lookahead.
 value_shape* = (p :: Parser, module_level: bool) ValueShape {
     p.peek().kind.match({
         BraceOpen => ValueShape.StructValue,
@@ -161,7 +171,6 @@ value_shape* = (p :: Parser, module_level: bool) ValueShape {
     });
 }
 
-// A block or return type after `)` selects a function value.
 paren_shape = (p :: Parser) ValueShape {
     p.live_kind(p.group_end_at(p.at)).fn_value_after().match({
         true  => ValueShape.FnValue,
@@ -177,7 +186,6 @@ angle_shape = (p :: Parser) ValueShape {
     });
 }
 
-// Classify name-led enum, import, alias, or expression values.
 ident_shape = (p :: Parser, module_level: bool) ValueShape {
     p.variant_ahead().match({
         true  => ValueShape.EnumValue,
@@ -196,17 +204,15 @@ variant_ahead = (p :: Parser) bool {
     p.variant_bar_at(j)
 }
 
-// A plain enum places `|` after the payload. A represented enum places an
-// integer expression between `=` and that bar; `|` is not an expression
-// operator, so the first top-level bar closes the classification fork.
+// A plain enum places `|` after the payload; a represented enum places an
+// integer expression between `=` and that bar. `|` is not an expression
+// operator, so the first top-level bar decides.
 variant_bar_at = (p :: Parser, from: usize) bool {
-    (p.token_kind_at(from) == TokenKind.Bar).match({
-        true  => true,
-        false => (p.token_kind_at(from) == TokenKind.Eq).match({
-            true  => p.discriminant_bar_after(p.live_at(from + 1)),
-            false => false,
-        }),
-    })
+    kind = p.token_kind_at(from);
+    kind == TokenKind.Bar
+        || (kind == TokenKind.Eq && p.discriminant_bar_after(p.live_at(
+            from + 1
+        )))
 }
 
 discriminant_bar_after = (p :: Parser, from: usize) bool {
@@ -253,7 +259,6 @@ path_or_alias = (p :: Parser) ValueShape {
     });
 }
 
-// Whether the token at `j` ends a declaration value.
 closes_value = (p :: Parser, j: usize) bool {
     !p.token_kind_at(j).continues_expr()
 }
@@ -288,19 +293,17 @@ decl_head_ahead* = (p :: Parser) bool {
     p.at_kind(TokenKind.Ident) && p.head_shape_ahead()
 }
 
-// `*` is an export marker only when a declaration binder follows it;
-// otherwise it remains multiplication. `:` denotes a binding inside a body,
-// so this check accepts only assignment binders.
+// `*` is an export marker only when a binder follows it; otherwise it is
+// multiplication. `:` inside a body is a binding, except the typed enum head
+// that `enum_decl` rejects.
 head_shape_ahead = (p :: Parser) bool {
     j ::= p.live_at(p.at + 1);
     (p.token_kind_at(j) == TokenKind.Star).then(() { j = p.live_at(j + 1); });
     after = p.token_kind_at(j);
-    (after == TokenKind.Lt).match({
-        true  => p.generic_head_ahead(j),
-        false => (after == TokenKind.Colon).match({
-            true  => p.typed_enum_head_ahead(j),
-            false => p.assign_head_ahead(after, j),
-        }),
+    after.match({
+        Lt    => p.generic_head_ahead(j),
+        Colon => p.typed_enum_head_ahead(j),
+        _     => p.assign_head_ahead(after, j),
     });
 }
 
@@ -346,7 +349,6 @@ assigns = (kind: TokenKind) bool {
     kind.is_in([TokenKind.Eq, TokenKind.ColonColonEq])
 }
 
-// Whether the value shape makes this body item a declaration.
 declares_value = (p :: Parser, j: usize) bool {
     kind = p.token_kind_at(j);
     kind.is_in([TokenKind.BraceOpen, TokenKind.Bar])
@@ -382,7 +384,7 @@ ret_ahead* = (p :: Parser) bool {
 
 // Recognize a member head through its optional export/type parameters and
 // required binder.
-member_head_ahead* = (p :: Parser) bool {
+member_head_ahead = (p :: Parser) bool {
     p.at_kind(TokenKind.Ident) && p.binder_after_head()
 }
 
