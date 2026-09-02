@@ -4,7 +4,6 @@ Vec = std.collections
 TyId, TyRes, ResForm = sema.sema_ty
 SemaFault, TypeFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
-absence_into_failure, both_failures = sema.sema_check
 type_of = sema.sema_type
 block_type = sema.sema_type
 param_type, type_from_ast = sema.sema_denote
@@ -25,7 +24,7 @@ try_type* = (
     })
 }
 
-try_not_res* = (c :: Checker, at: Span, got: TyId, ctx: Ctx)
+try_not_res = (c :: Checker, at: Span, got: TyId, ctx: Ctx)
               Res<TyId, AllocError> {
     // poison: no second diagnostic
     c.is_unknown(got).match({
@@ -34,7 +33,7 @@ try_not_res* = (c :: Checker, at: Span, got: TyId, ctx: Ctx)
     })
 }
 
-try_needs_res* = (c :: Checker, at: Span, got: TyId)
+try_needs_res = (c :: Checker, at: Span, got: TyId)
                 Res<TyId, AllocError> {
     want = c.types.unknown().try();
     c.report(
@@ -45,7 +44,7 @@ try_needs_res* = (c :: Checker, at: Span, got: TyId)
     c.types.unknown()
 }
 
-try_res* = (
+try_res = (
     c     :: Checker,
     at    : Span,
     r     : TyRes,
@@ -60,7 +59,7 @@ try_res* = (
     })
 }
 
-try_outside_res* = (c :: Checker, at: Span, got: TyId)
+try_outside_res = (c :: Checker, at: Span, got: TyId)
                   Res<TyId, AllocError> {
     want = c.types.unknown().try();
     c.report(
@@ -73,7 +72,7 @@ try_outside_res* = (c :: Checker, at: Span, got: TyId)
 
 // The enclosing function returns a Res; which one decides whether this
 // propagation is legal at all.
-try_into* = (
+try_into = (
     c     :: Checker,
     at    : Span,
     r     : TyRes,
@@ -101,14 +100,10 @@ try_transform = (
     got  : TyId,
     ctx  : Ctx
 ) Res<TyId, AllocError> {
-    (failure_form(r.form) && failure_form(want.form)).match({
+    both_failures(r.form, want.form).match({
         false => c.try_transform_needs_failure(at, got, ctx.ret, r.value),
         true  => c.try_transform_expr(id, r.error, want.error, r.value, ctx),
     })
-}
-
-failure_form = (form: ResForm) bool {
-    form.match({ Failure => true, _ => false })
 }
 
 try_transform_needs_failure = (
@@ -231,11 +226,9 @@ bind_try_mapper_param = (c :: Checker, p: Param, from: TyId, ctx: Ctx)
     Ok(())
 }
 
-try_merge* = (c :: Checker, at: Span, r: TyRes, want: TyRes, got: TyId)
+try_merge = (c :: Checker, at: Span, r: TyRes, want: TyRes, got: TyId)
             Res<TyId, AllocError> {
-    // absence into failure is the shape law 4 names outright: "a None
-    // never becomes an Err. You name the reason" — `.ok_or(..)` is
-    // where that's written.
+    // A None never becomes an Err; `.ok_or(..)` names the reason.
     absence_into_failure(r.form, want.form).match({
         true  => c.try_absence(at, got, r.value, want.error),
         false => c.try_set(at, r, want),
@@ -243,7 +236,7 @@ try_merge* = (c :: Checker, at: Span, r: TyRes, want: TyRes, got: TyId)
 }
 
 // `expected` is the enclosing function's Res, built with its failure set.
-try_absence* = (c :: Checker, at: Span, got: TyId, value: TyId, err: TyId)
+try_absence = (c :: Checker, at: Span, got: TyId, value: TyId, err: TyId)
               Res<TyId, AllocError> {
     want = c.types.res_failure(value, err).try();
     c.report(
@@ -258,7 +251,7 @@ try_absence* = (c :: Checker, at: Span, got: TyId, value: TyId, err: TyId)
     Ok(value)
 }
 
-try_set* = (c :: Checker, at: Span, r: TyRes, want: TyRes)
+try_set = (c :: Checker, at: Span, r: TyRes, want: TyRes)
           Res<TyId, AllocError> {
     both_failures(r.form, want.form).match({
         true  => c.try_contained(at, r, want),
@@ -266,7 +259,7 @@ try_set* = (c :: Checker, at: Span, r: TyRes, want: TyRes)
     })
 }
 
-try_into_absence* = (c :: Checker, at: Span, r: TyRes, want: TyRes)
+try_into_absence = (c :: Checker, at: Span, r: TyRes, want: TyRes)
                    Res<TyId, AllocError> {
     failure_into_absence(r.form, want.form).match({
         true  => c.try_no_conversion(at, r, want),
@@ -281,7 +274,21 @@ failure_into_absence = (got: ResForm, want: ResForm) bool {
     })
 }
 
-try_contained* = (c :: Checker, at: Span, r: TyRes, want: TyRes)
+absence_into_failure = (got: ResForm, want: ResForm) bool {
+    got.match({
+        Absence => want.match({ Failure => true, _ => false }),
+        _       => false,
+    })
+}
+
+both_failures = (got: ResForm, want: ResForm) bool {
+    got.match({
+        Failure => want.match({ Failure => true, _ => false }),
+        _       => false,
+    })
+}
+
+try_contained = (c :: Checker, at: Span, r: TyRes, want: TyRes)
                 Res<TyId, AllocError> {
     c.is_infer(want.error).match({
         true  => c.try_raises(r),
@@ -289,12 +296,12 @@ try_contained* = (c :: Checker, at: Span, r: TyRes, want: TyRes)
     })
 }
 
-try_raises* = (c :: Checker, r: TyRes) Res<TyId, AllocError> {
+try_raises = (c :: Checker, r: TyRes) Res<TyId, AllocError> {
     c.raise(c.set_of(r.error)).try();
     Ok(r.value);
 }
 
-try_declared* = (c :: Checker, at: Span, r: TyRes, want: TyRes)
+try_declared = (c :: Checker, at: Span, r: TyRes, want: TyRes)
                Res<TyId, AllocError> {
     c.types.set_within(c.set_of(r.error), c.set_of(want.error)).match({
         false => c.try_no_conversion(at, r, want),
@@ -302,7 +309,7 @@ try_declared* = (c :: Checker, at: Span, r: TyRes, want: TyRes)
     })
 }
 
-try_no_conversion* = (c :: Checker, at: Span, r: TyRes, want: TyRes)
+try_no_conversion = (c :: Checker, at: Span, r: TyRes, want: TyRes)
                     Res<TyId, AllocError> {
     c.report(
         at.file,

@@ -5,6 +5,8 @@ TyId = sema.sema_ty
 Checker = sema.sema_check
 SemaFault, TypeFault = sema.sema_diag
 
+// A statement whose value nothing reads is refused when the expression
+// is a pure read: a literal, a name, a member, or a match over those.
 check_statement* = (
     c     :: Checker,
     block : Block,
@@ -23,7 +25,6 @@ is_tail = (block: Block, i: usize, n: usize) bool {
     block.value.match({ Ok(_) => false, None => i + 1 == n })
 }
 
-// A statement that is a pure expression computes a value nothing reads.
 check_discarded = (c :: Checker, s: Stmt, ty: TyId) Res<(), AllocError> {
     s.kind.match({
         Expr(e) => c.discarded_expr(s, e, ty),
@@ -56,26 +57,20 @@ pure_read = (c :: Checker, id: ExprId) bool {
         Name(_)    => true,
         Access(a)  => c.pure_read(a.base),
         Paren(p)   => c.pure_read(p.inner),
-        Match(m)   => c.pure_match(m),
+        Match(m)   => c.pure_read(m.scrutinee) && c.pure_arms(m.arms),
         Meta(_)    => true,
         _          => false,
     })
 }
 
-pure_match = (c :: Checker, m: Match) bool {
-    (c.pure_read(m.scrutinee) && c.pure_arms(m.arms))
-}
-
 pure_arms = (c :: Checker, arms: Vec<Arm>) bool {
-    every ::= true;
-    arms.loop((h, a) { every = every && c.pure_read(a.body); });
-    every;
+    arms.find((a) { c.pure_read(a.body) == false })
+        .match({ Ok(_) => false, None => true })
 }
 
 report_discarded = (c :: Checker, s: Stmt, ty: TyId) Res<(), AllocError> {
     unit = c.types.prim("()").try();
-    c.report(
-        s.span.file,
+    c.refuse(
         s.span,
         SemaFault.DiscardedValue(TypeFault(name: "", expected: unit, found: ty))
     )

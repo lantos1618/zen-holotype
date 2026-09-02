@@ -34,11 +34,7 @@ divisor_is = (c :: Checker, b: Binary, ty: TyId, d: i64)
 }
 
 divide_by_zero = (c :: Checker, b: Binary) Res<(), AllocError> {
-    c.report(
-        b.op_span.file,
-        b.op_span,
-        SemaFault.ProvenDivideByZero(NameFault(name: "0"))
-    )
+    c.refuse(b.op_span, SemaFault.ProvenDivideByZero(NameFault(name: "0")))
 }
 
 // `i32.MIN / -1` is overflow, not division by zero.
@@ -58,20 +54,10 @@ check_min_numerator = (c :: Checker, b: Binary, ty: TyId)
     })
 }
 
+// `min_of` declines a non-integer name, which proves nothing.
 numerator_is_min = (c :: Checker, b: Binary, ty: TyId, n: i64)
                    Res<(), AllocError> {
     name = c.prim_name(ty);
-    // min_of declines a name its table does not hold, and a
-    // refusal here is not "not the minimum" — it is nothing proved, so
-    // nothing reported.
-    (is_integer(name)).match({
-        false => Ok(()),
-        true  => c.numerator_matches_min(b, ty, n, name),
-    })
-}
-
-numerator_matches_min = (c :: Checker, b: Binary, ty: TyId, n: i64, name: str)
-                        Res<(), AllocError> {
     min_of(name).match({
         None   => Ok(()),
         Ok(lo) => (n == lo).match({
@@ -106,14 +92,6 @@ with_both = (c :: Checker, b: Binary, ty: TyId, x: i64, y: i64)
 check_fits = (c :: Checker, b: Binary, ty: TyId, v: i64)
              Res<(), AllocError> {
     name = c.prim_name(ty);
-    (is_integer(name)).match({
-        false => Ok(()),
-        true  => c.fits_or_say(b, ty, v, name),
-    })
-}
-
-fits_or_say = (c :: Checker, b: Binary, ty: TyId, v: i64, name: str)
-              Res<(), AllocError> {
     fits(v, name).match({
         None      => Ok(()),
         Ok(false) => c.overflow(b, name),
@@ -121,18 +99,12 @@ fits_or_say = (c :: Checker, b: Binary, ty: TyId, v: i64, name: str)
     })
 }
 
-// Position is the operator token, matching where a runtime trap prints
-// — one rule, one position, whichever side it's caught on.
+// The position is the operator token, where a runtime trap prints.
 overflow = (c :: Checker, b: Binary, name: str) Res<(), AllocError> {
-    c.report(
-        b.op_span.file,
-        b.op_span,
-        SemaFault.ProvenOverflow(NameFault(name: name))
-    )
+    c.refuse(b.op_span, SemaFault.ProvenOverflow(NameFault(name: name)))
 }
 
-// Only `want` matters: the literal's own type is always `int` (nothing
-// else folds), so no caller needs to pass it.
+// The literal's own type is always `int`; only `want` matters.
 check_literal* = (c :: Checker, id: ExprId, want: TyId)
                  Res<(), AllocError> {
     is_integer(c.prim_name(want)).match({
@@ -174,10 +146,7 @@ arm_arrays = (c :: Checker, m: Match, a: TyArray) Res<(), AllocError> {
 elem_literals = (c :: Checker, lit: ArrayLit, elem: TyId)
                 Res<(), AllocError> {
     lit.elems.loop((h, i, e) {
-        (i > 0).match({
-            true  => c.element_agrees(e, elem),
-            false => Ok(()),
-        }).try();
+        (i > 0).then(() { c.element_agrees(e, elem).try() });
         c.check_literal(e, elem).try();
     });
     Ok(());
@@ -242,8 +211,7 @@ out_of_range = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
     node  = c.tree.expr_at(id);
     found = c.types.prim("int").try();
     name  = c.written_literal(node).try();
-    c.report(
-        node.span.file,
+    c.refuse(
         node.span,
         SemaFault.LiteralOutOfRange(TypeFault(
             name: name,
@@ -254,26 +222,13 @@ out_of_range = (c :: Checker, id: ExprId, want: TyId) Res<(), AllocError> {
 }
 
 literal_overflows* = (c: Checker, id: ExprId, want: TyId) bool {
-    name = c.prim_name(want);
-    is_integer(name).match({
-        false => false,
-        true  => c.int_literal_overflows(id, name),
-    })
-}
-
-int_literal_overflows = (c: Checker, id: ExprId, name: str) bool {
     c.literal_int(c.tree.expr_at(id)).match({
         None  => false,
-        Ok(v) => c.fits_says(v, name),
-    })
-}
-
-// A failed proof is not evidence that the value fits.
-fits_says = (c: Checker, v: i64, name: str) bool {
-    fits(v, name).match({
-        None      => false,
-        Ok(false) => true,
-        Ok(true)  => false,
+        Ok(v) => fits(v, c.prim_name(want)).match({
+            None      => false,
+            Ok(false) => true,
+            Ok(true)  => false,
+        }),
     })
 }
 
@@ -336,8 +291,7 @@ index_within = (c :: Checker, node: Expr, x: Index, i: i64, count: usize)
 // Points at the whole index expression, not the `[` a runtime trap
 // prints: a compile error can point at what the author must change.
 out_of_bounds = (c :: Checker, node: Expr, x: Index) Res<(), AllocError> {
-    c.report(
-        node.span.file,
+    c.refuse(
         node.span,
         SemaFault.ProvenIndexOutOfBounds(NameFault(name: c.written_index(x)))
     )

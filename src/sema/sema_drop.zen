@@ -1,6 +1,4 @@
 Expr, Bind, Impl, Span = std.ast
-Record = std.ast.ast_node
-ExprId = std.ast.ast_id
 AllocError = std.mem
 Vec = std.collections
 str = std.text
@@ -8,8 +6,9 @@ ImplId = sema.sema_id
 TyId, TyNamed = sema.sema_ty
 Checker, Ctx = sema.sema_check
 SemaFault, NameFault = sema.sema_diag
-Own, find_var, var_type, refuse = sema.sema_own
+Own = sema.sema_own
 
+// `g = f` on a value with a `Drop` impl would drop it twice.
 check_drop_copy* = (c :: Checker, o :: Own, b: Bind, ctx: Ctx)
                    Res<(), AllocError> {
     node = c.tree.expr_at(b.value);
@@ -20,53 +19,19 @@ check_drop_copy* = (c :: Checker, o :: Own, b: Bind, ctx: Ctx)
     })
 }
 
-// Every field value of a brace literal is copied into the new value.
-drop_copy_of_record* = (c :: Checker, o :: Own, r: Record)
-                        Res<(), AllocError> {
-    ids ::= c.alloc.Vec<ExprId>();
-    r.entries.loop((h, m) {
-        m.kind.match({
-            Field(f)    => f.value.match({
-                Ok(v) => ids.add(v),
-                None  => Ok(()),
-            }),
-            Const(_)    => Ok(()),
-            Function(_) => Ok(()),
-        }).try()
-    });
-    c.drop_copy_of_elems(o, ids)
-}
-
-// Every element of an array literal is copied into the new array.
-drop_copy_of_elems* = (c :: Checker, o :: Own, elems: Vec<ExprId>)
-                       Res<(), AllocError> {
-    elems.loop((h, e) { c.drop_copy_of_elem(o, e).try() });
-    Ok(())
-}
-
-drop_copy_of_elem = (c :: Checker, o :: Own, id: ExprId)
-                     Res<(), AllocError> {
-    node = c.tree.expr_at(id);
-    node.kind.match({
-        Name(n) => c.refuse_if_drop(node.span, var_type(o, n.text), n.text),
-        _       => Ok(()),
-    })
-}
-
 // A name this frame does not bind is a global or a constant, and it is
 // not a place this rule has an opinion about.
 drop_copy_of_name = (c :: Checker, o :: Own, node: Expr, text: str)
                     Res<(), AllocError> {
-    find_var(o, text).match({
+    o.find_var(text).match({
         None  => Ok(()),
-        Ok(_) => c.refuse_if_drop(node.span, var_type(o, text), text),
+        Ok(_) => c.refuse_if_drop(node.span, o.var_type(text), text),
     })
 }
 
 refuse_if_drop = (c :: Checker, span: Span, ty: TyId, text: str)
                  Res<(), AllocError> {
-    drops = c.is_drop_type(ty).try();
-    drops.match({
+    c.is_drop_type(ty).try().match({
         false => Ok(()),
         true  => c.refuse(
             span,
@@ -75,7 +40,7 @@ refuse_if_drop = (c :: Checker, span: Span, ty: TyId, text: str)
     })
 }
 
-// Whether an impl OF Drop exists for this type.
+// Whether the type's own module holds an impl of `Drop` for it.
 is_drop_type* = (c :: Checker, ty: TyId) Res<bool, AllocError> {
     c.types.at(ty).match({
         Named(n) => c.named_is_drop(n),
@@ -86,38 +51,18 @@ is_drop_type* = (c :: Checker, ty: TyId) Res<bool, AllocError> {
 named_is_drop = (c :: Checker, n: TyNamed) Res<bool, AllocError> {
     ids ::= c.alloc.Vec<ImplId>();
     c.world.impls_named(c.tree, n.name, ids).try();
-    hits ::= c.alloc.Vec<bool>();
-    ids.loop((h, id) { c.keep_drop_impl(n, id, hits).try() });
-    Ok(hits.len > 0);
+    Ok(ids.find((id) { c.is_drop_impl(n, id) }).match({
+        Ok(_) => true,
+        None  => false,
+    }));
 }
 
-keep_drop_impl = (c :: Checker, n: TyNamed, id: ImplId, hits :: Vec<bool>)
-                 Res<(), AllocError> {
-    (n.decl.module == id.decl.module).match({
-        false => Ok(()),
-        true  => c.note_drop_impl(id, hits),
-    })
-}
-
-note_drop_impl = (c :: Checker, id: ImplId, hits :: Vec<bool>)
-                 Res<(), AllocError> {
-    c.world.impl_at(c.tree, id).match({
-        None   => Ok(()),
-        Ok(im) => c.add_if_drop(im, hits),
-    })
-}
-
-add_if_drop = (c :: Checker, im: Impl, hits :: Vec<bool>)
-              Res<(), AllocError> {
-    c.bound_named_drop(im).match({
-        false => Ok(()),
-        true  => hits.add(true),
-    })
-}
-
-bound_named_drop = (c :: Checker, im: Impl) bool {
-    c.tree.type_at(im.bound).kind.match({
-        Named(n) => n.name.text.eq("Drop"),
-        _        => false,
+is_drop_impl = (c: Checker, n: TyNamed, id: ImplId) bool {
+    (n.decl.module == id.decl.module) && c.world.impl_at(c.tree, id).match({
+        None   => false,
+        Ok(im) => c.tree.type_at(im.bound).kind.match({
+            Named(b) => b.name.text.eq("Drop"),
+            _        => false,
+        }),
     })
 }

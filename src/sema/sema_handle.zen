@@ -2,10 +2,13 @@ Arg, ExprId = std.ast
 AllocError = std.mem
 str = std.text
 Vec = std.collections
-Range = std.core
 TyId = sema.sema_ty
 Checker, Ctx = sema.sema_check
 SemaFault, NameFault = sema.sema_diag
+
+// A loop handle names its loop and has no storage: it may be read only as
+// `h.break(..)` or `h.next()`, and passed only to a parameter that takes
+// a handle.
 
 HANDLE_MODULE* : str = "std.core.loop.loop_handle"
 HANDLE_NAME* : str = "LoopHandle"
@@ -17,27 +20,26 @@ is_handle_ty* = (c :: Checker, ty: TyId) bool {
     })
 }
 
-is_handle_decl* = (c :: Checker, mi: usize, name: str) bool {
+is_handle_decl = (c :: Checker, mi: usize, name: str) bool {
     c.world.table_at(mi).match({
         None  => false,
         Ok(t) => t.name.eq(HANDLE_MODULE) && name.eq(HANDLE_NAME),
     })
 }
 
-handle_spelling* = (c :: Checker, id: ExprId) str {
+// The name an expression spells, through any parentheses; "" otherwise.
+spelled_name* = (c :: Checker, id: ExprId) str {
     c.tree.expr_at(id).kind.match({
         Name(n)  => n.text,
-        Paren(p) => c.handle_spelling(p.inner),
+        Paren(p) => c.spelled_name(p.inner),
         _        => "",
     })
 }
 
 refuse_handle_at* = (c :: Checker, id: ExprId) Res<(), AllocError> {
-    node = c.tree.expr_at(id);
-    c.report(
-        node.span.file,
-        node.span,
-        SemaFault.HandleNotAValue(NameFault(name: c.handle_spelling(id))),
+    c.refuse(
+        c.tree.expr_at(id).span,
+        SemaFault.HandleNotAValue(NameFault(name: c.spelled_name(id))),
     )
 }
 
@@ -53,38 +55,20 @@ refuse_handle_argument* = (c :: Checker, a: Arg, want: TyId, ctx: Ctx)
                           Res<(), AllocError> {
     c.type_of(a.value, ctx).match({
         Err(_) => Ok(()),
-        Ok(ty) => c.is_handle_ty(ty).match({
-            false => Ok(()),
-            true  => c.refuse_unless_inward(a, want),
-        }),
+        Ok(ty) => (c.is_handle_ty(ty) && (c.formal_takes_handle(want) == false))
+            .match({
+                false => Ok(()),
+                true  => c.refuse_handle_at(a.value),
+            }),
     })
 }
 
-refuse_unless_inward* = (c :: Checker, a: Arg, want: TyId)
-                        Res<(), AllocError> {
-    inward = c.formal_takes_handle(want).try();
-    inward.match({
-        true  => Ok(()),
-        false => c.refuse_handle_at(a.value),
-    })
-}
-
-formal_takes_handle* = (c :: Checker, ty: TyId) Res<bool, AllocError> {
+formal_takes_handle = (c :: Checker, ty: TyId) bool {
     c.types.at(ty).match({
-        Fn(f) => c.fn_param_has_handle(f.params),
-        _     => Ok(false),
-    })
-}
-
-fn_param_has_handle* = (c :: Checker, ps: Vec<TyId>) Res<bool, AllocError> {
-    at = Range(0, ps.len).find((i) {
-        ps.get(i).match({
-            Ok(p) => c.is_handle_ty(p),
+        Fn(f) => f.params.find((p) { c.is_handle_ty(p) }).match({
+            Ok(_) => true,
             None  => false,
-        })
-    });
-    at.match({
-        Ok(_) => Ok(true),
-        None  => Ok(false),
+        }),
+        _     => false,
     })
 }

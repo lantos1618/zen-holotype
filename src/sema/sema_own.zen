@@ -8,7 +8,7 @@ Vec = std.collections
 str, String = std.text
 Range = std.core
 TyId = sema.sema_ty
-Checker, Ctx = sema.sema_check
+Checker, Ctx, UNRESOLVED, truncate = sema.sema_check
 SemaFault, NameFault = sema.sema_diag
 check_receiver, check_write_place = sema.sema_recv
 check_scope_returned, check_scope_stored = sema.sema_scope
@@ -17,7 +17,7 @@ check_arena_returned, is_arena_backed = sema.sema_scope
 scope_alias = sema.sema_scope
 Pin, pin_captured, refuse_pinned, refuse_pinned_at = sema.sema_pin
 check_drop_copy = sema.sema_drop
-is_handle_ty, refuse_handle_at = sema.sema_handle
+is_handle_ty, refuse_handle_at, spelled_name = sema.sema_handle
 spelled_lambda = sema.sema_call
 
 OwnVar* = {
@@ -30,12 +30,16 @@ OwnVar* = {
     span*: Span,
 }
 
+// A moved-out place: a binding, or one field of it.
 Place* = {
     root*: usize,
     field*: str,
     span*: Span,
 }
 
+// One body's ownership frame. `vars` is a scope stack indexed by
+// declaration order; `escaped` is the index above which bindings were
+// declared inside an escaping closure, 0 while no closure is open.
 Own* = {
     vars :: Vec<OwnVar>,
     dead :: Vec<Place>,
@@ -44,6 +48,105 @@ Own* = {
     method* :: str,
     body* :: BlockId,
     alloc*: Alloc,
+
+    // The innermost binding of `text`, as an index into `vars`.
+    find_var* = (self: @Self, text: str) Res<usize> {
+        n = self.vars.len;
+        Range(0, n).find((k) {
+            self.vars.get(n - k - 1).match({
+                Ok(v) => v.name.eq(text),
+                None  => false,
+            })
+        }).match({
+            None  => None,
+            Ok(k) => Ok(n - k - 1),
+        })
+    }
+
+    var_at = (self: @Self, text: str) Res<OwnVar> {
+        self.find_var(text).match({ None => None, Ok(i) => self.vars.get(i) })
+    }
+
+    // A name this frame does not bind is a global, which is writable.
+    var_mutable* = (self: @Self, text: str) bool {
+        self.var_at(text).match({ None => true, Ok(v) => v.mutable })
+    }
+
+    var_type* = (self: @Self, text: str) TyId {
+        self.var_at(text).match({ None => UNRESOLVED, Ok(v) => v.ty })
+    }
+
+    scoped_var* = (self: @Self, text: str) bool {
+        self.var_at(text).match({ None => false, Ok(v) => v.scoped })
+    }
+
+    // Whether this name is, or views into, an arena this frame made.
+    arena_var* = (self: @Self, text: str) bool {
+        self.var_at(text).match({ None => false, Ok(v) => v.arena })
+    }
+
+    // A `@scope` binding read from inside an escaping closure.
+    captures_scope* = (self: @Self, text: str) bool {
+        self.find_var(text).match({
+            None  => false,
+            Ok(i) => (i < self.escaped) && self.scoped_at(i),
+        })
+    }
+
+    scoped_at = (self: @Self, i: usize) bool {
+        self.vars.get(i).match({ Ok(v) => v.scoped, None => false })
+    }
+
+    owned_at* = (self: @Self, root: usize) bool {
+        self.vars.get(root).match({ Ok(v) => v.owned, None => false })
+    }
+
+    is_dead = (self: @Self, root: usize, field: str) bool {
+        self.dead.find((p) { (p.root == root) && p.field.eq(field) })
+            .match({ Ok(_) => true, None => false })
+    }
+
+    has_dead_field = (self: @Self, root: usize) bool {
+        self.dead.find((p) { (p.root == root) && (p.field.len > 0) })
+            .match({ Ok(_) => true, None => false })
+    }
+
+    kill = (self :: @Self, root: usize, field: str, span: Span)
+           Res<(), AllocError> {
+        self.dead.add(Place(root: root, field: field, span: span))
+    }
+
+    // A write fills the hole.
+    revive = (self :: @Self, root: usize, field: str) Res<(), AllocError> {
+        self.dead = self.dead.filter(self.alloc, (p) {
+            ((p.root == root) && p.field.eq(field)) == false
+        }).ok_or(AllocError.OutOfMemory).try();
+        Ok(());
+    }
+
+    // Move out every place killed since `mark`.
+    take_dead = (self :: @Self, mark: usize, out :: Vec<Place>)
+                Res<(), AllocError> {
+        Range(mark, self.dead.len).loop((h, i) {
+            self.dead.get(i).match({
+                Ok(p) => out.add(p).try(),
+                None  => (),
+            });
+        });
+        self.dead.truncate(mark);
+        Ok(());
+    }
+
+    // Drop the bindings declared since `mark`, and every dead place or
+    // pin rooted at one of them.
+    release = (self :: @Self, mark: usize) Res<(), AllocError> {
+        self.dead   = self.dead.filter(self.alloc, (p) { p.root < mark })
+            .ok_or(AllocError.OutOfMemory).try();
+        self.pinned = self.pinned.filter(self.alloc, (p) { p.root < mark })
+            .ok_or(AllocError.OutOfMemory).try();
+        self.vars.truncate(mark);
+        Ok(());
+    }
 }
 
 Own* = (a: Alloc) Res<Own, AllocError> {
@@ -64,7 +167,6 @@ check_own* = (c :: Checker, f: Function, body: BlockId, ctx: Ctx)
     o.method = receiver_method(f, ctx);
     o.body   = body;
     c.own_params(o, f).try();
-    // Check returned scoped values while this frame's bindings are visible.
     c.own_block(o, body, ctx).try();
     Ok(());
 }
@@ -90,7 +192,7 @@ own_params = (c :: Checker, o :: Own, f: Function) Res<(), AllocError> {
 
 own_param = (c :: Checker, o :: Own, p: Param) Res<(), AllocError> {
     text = p.name.text;
-    ty   = c.lookup(text).match({ Ok(b) => b.ty, None => UNTYPED });
+    ty   = c.lookup(text).match({ Ok(b) => b.ty, None => UNRESOLVED });
     o.vars.add(OwnVar(
         name: text,
         ty: ty,
@@ -115,7 +217,7 @@ own_block = (c :: Checker, o :: Own, id: BlockId, ctx: Ctx)
     c.check_scope_returned(o, id, b).try();
     c.check_arena_returned(o, id, b).try();
     c.check_partial_moves(o, mark).try();
-    own_release(o, mark).try();
+    o.release(mark).try();
     Ok(());
 }
 
@@ -142,7 +244,7 @@ own_target = (c :: Checker, o :: Own, b: Bind, ctx: Ctx)
     node = c.tree.expr_at(b.target);
     c.check_write_place(o, b.target).try();
     node.kind.match({
-        Name(n)   => bind_name(c, o, b, n.text, node.span, ctx),
+        Name(n)   => c.bind_name(o, b, n.text, node.span, ctx),
         Access(a) => c.revive_field(o, a, ctx),
         _         => c.own_expr(o, b.target, ctx),
     })
@@ -156,8 +258,8 @@ bind_name = (
     span : Span,
     ctx  : Ctx
 ) Res<(), AllocError> {
-    find_var(o, text).match({
-        Ok(i) => revive(o, i, ""),
+    o.find_var(text).match({
+        Ok(i) => o.revive(i, ""),
         None  => c.declare_var(o, b, text, span, ctx),
     })
 }
@@ -185,7 +287,7 @@ revive_field = (c :: Checker, o :: Own, a: Access, ctx: Ctx)
                Res<(), AllocError> {
     c.path_root(o, a.base).match({
         None  => Ok(()),
-        Ok(i) => revive(o, i, a.name.text),
+        Ok(i) => o.revive(i, a.name.text),
     }).try();
     c.own_expr(o, a.base, ctx).try();
     Ok(());
@@ -214,6 +316,7 @@ own_expr = (c :: Checker, o :: Own, id: ExprId, ctx: Ctx)
     })
 }
 
+// A left-leaning operator chain is walked iteratively, leftmost first.
 own_binary = (c :: Checker, o :: Own, first: Binary, ctx: Ctx)
              Res<(), AllocError> {
     rights ::= o.alloc.Vec<ExprId>();
@@ -280,8 +383,8 @@ use_name = (c :: Checker, o :: Own, node: Expr, id: ExprId, text: str)
            Res<(), AllocError> {
     c.check_scope_captured(o, node.span, text).try();
     c.pin_captured(o, node, text).try();
-    c.refuse_handle_captured(o, node, id, text).try();
-    find_var(o, text).match({
+    c.refuse_handle_captured(o, id, text).try();
+    o.find_var(text).match({
         None  => Ok(()),
         Ok(i) => c.report_if_dead(o, node.span, i, ""),
     })
@@ -295,24 +398,13 @@ use_access = (
     a    : Access,
     ctx  : Ctx
 ) Res<(), AllocError> {
-    c.refuse_handle_captured(o, node, id, c.access_base_text(a.base)).try();
+    c.refuse_handle_captured(o, id, c.spelled_name(a.base)).try();
     c.path_root(o, a.base).match({
         None  => Ok(()),
         Ok(i) => c.report_if_dead(o, node.span, i, a.name.text),
     }).try();
     c.own_expr(o, a.base, ctx).try();
     Ok(());
-}
-
-access_base_text = (c :: Checker, base: ExprId) str {
-    c.tree.expr_at(base).kind.match({
-        Name(n)  => n.text,
-        Paren(p) => c.tree.expr_at(p.inner).kind.match({
-            Name(n) => n.text,
-            _       => "",
-        }),
-        _        => "",
-    })
 }
 
 report_if_dead = (
@@ -322,7 +414,7 @@ report_if_dead = (
     root  : usize,
     field : str
 ) Res<(), AllocError> {
-    is_dead(o, root, field).match({
+    o.is_dead(root, field).match({
         false => Ok(()),
         true  => c.report_consumed(o, span, root, field),
     })
@@ -336,7 +428,7 @@ report_consumed = (
     field : str
 ) Res<(), AllocError> {
     name = c.place_name(o, root, field).try();
-    c.report(span.file, span, SemaFault.ConsumedUse(NameFault(name: name)))
+    c.refuse(span, SemaFault.ConsumedUse(NameFault(name: name)))
 }
 
 // `consume` moves only a place owned by the current frame.
@@ -359,9 +451,9 @@ consume_name = (c :: Checker, o :: Own, id: ExprId, text: str)
     node = c.tree.expr_at(id);
     c.use_name(o, node, id, text).try();
     c.refuse_pinned(o, node.span, text).try();
-    find_var(o, text).match({
+    o.find_var(text).match({
         None  => Ok(()),
-        Ok(i) => kill(o, i, "", node.span),
+        Ok(i) => o.kill(i, "", node.span),
     }).try();
     Ok(());
 }
@@ -381,7 +473,7 @@ consume_field_of = (
     a    : Access,
     root : usize
 ) Res<(), AllocError> {
-    owned_at(o, root).match({
+    o.owned_at(root).match({
         false => c.refuse(
             node.span,
             SemaFault.ConsumeThroughHandle(NameFault(name: a.name.text))
@@ -394,7 +486,7 @@ kill_field = (c :: Checker, o :: Own, node: Expr, a: Access, root: usize)
              Res<(), AllocError> {
     c.report_if_dead(o, node.span, root, a.name.text).try();
     c.refuse_pinned_at(o, node.span, root).try();
-    kill(o, root, a.name.text, node.span).try();
+    o.kill(root, a.name.text, node.span).try();
     Ok(());
 }
 
@@ -408,7 +500,7 @@ check_partial_moves = (c :: Checker, o :: Own, mark: usize)
 
 check_partial_move = (c :: Checker, o :: Own, i: usize)
                      Res<(), AllocError> {
-    (has_dead_field(o, i) && (is_dead(o, i, "") == false)).match({
+    (o.has_dead_field(i) && (o.is_dead(i, "") == false)).match({
         false => Ok(()),
         true  => c.report_partial(o, i),
     })
@@ -417,21 +509,11 @@ check_partial_move = (c :: Checker, o :: Own, i: usize)
 report_partial = (c :: Checker, o :: Own, i: usize) Res<(), AllocError> {
     o.vars.get(i).match({
         None  => Ok(()),
-        Ok(v) => c.report(
-            v.span.file,
+        Ok(v) => c.refuse(
             v.span,
             SemaFault.PartiallyMoved(NameFault(name: v.name))
         ),
     })
-}
-
-has_dead_field = (o: Own, root: usize) bool {
-    Range(0, o.dead.len).find((i) {
-        o.dead.get(i).match({
-            Ok(p) => (p.root == root) && (p.field.len > 0),
-            None  => false,
-        })
-    }).match({ Ok(_) => true, None => false })
 }
 
 // calls: the receiver rule, `@scope` as an argument, and closure bodies
@@ -466,6 +548,7 @@ own_arg = (
     })
 }
 
+// Every lambda argument but a `.then` body may run more than once.
 repeating_body = (c :: Checker, k: Call) bool {
     c.tree.expr_at(k.callee).kind.match({
         Access(a) => a.name.text.eq("then") == false,
@@ -491,13 +574,13 @@ own_lambda = (
     l.params.loop((h, p) { c.own_param(o, p).try() });
     c.own_block(o, l.body, ctx).try();
     o.escaped = outer;
-    own_release(o, vmark).try();
+    o.release(vmark).try();
     repeats.then(() { c.report_back_edge(o, dmark).try() });
     Ok(());
 }
 
 // Everything moved inside the body that outlives it names a binding the
-// body did not declare — `own_release` already dropped the ones it did.
+// body did not declare, and a second run would read it dead.
 report_back_edge = (c :: Checker, o :: Own, dmark: usize)
                    Res<(), AllocError> {
     Range(dmark, o.dead.len).loop((h, i) {
@@ -514,53 +597,19 @@ report_moved_again = (c :: Checker, o :: Own, i: usize)
     })
 }
 
-// match: alternative paths, joined
+// match: each arm starts from the scrutinee's state, and a place any arm
+// moved is dead after the match.
 own_match = (c :: Checker, o :: Own, m: Match, ctx: Ctx)
             Res<(), AllocError> {
     c.own_expr(o, m.scrutinee, ctx).try();
     dmark = o.dead.len;
     joined ::= c.alloc.Vec<Place>();
-    m.arms.loop((h, a) { c.own_arm(o, a, dmark, joined, ctx).try() });
+    m.arms.loop((h, a) {
+        c.own_expr(o, a.body, ctx).try();
+        o.take_dead(dmark, joined).try();
+    });
     joined.loop((h, p) { o.dead.add(p).try() });
     Ok(());
-}
-
-own_arm = (
-    c      :: Checker,
-    o      :: Own,
-    a      : Arm,
-    dmark  : usize,
-    joined :: Vec<Place>,
-    ctx    : Ctx
-) Res<(), AllocError> {
-    c.own_expr(o, a.body, ctx).try();
-    take_dead(o, dmark, joined).try();
-    Ok(());
-}
-
-take_dead = (o :: Own, mark: usize, out :: Vec<Place>)
-            Res<(), AllocError> {
-    extra = o.dead.len - mark;
-    Range(0, extra).loop((h, i) {
-        o.dead.take(o.dead.len - 1).match({
-            Ok(p) => out.add(p).try(),
-            None  => (),
-        });
-    });
-    Ok(());
-}
-
-find_var* = (o: Own, text: str) Res<usize> {
-    n = o.vars.len;
-    Range(0, n).find((k) {
-        o.vars.get(n - k - 1).match({
-            Ok(v) => v.name.eq(text),
-            None  => false,
-        })
-    }).match({
-        None  => None,
-        Ok(k) => Ok(n - k - 1),
-    })
 }
 
 // The binding a place path is rooted at, or nothing when the path is not
@@ -568,138 +617,27 @@ find_var* = (o: Own, text: str) Res<usize> {
 path_root* = (c :: Checker, o :: Own, id: ExprId) Res<usize> {
     node = c.tree.expr_at(id);
     node.kind.match({
-        Name(n)   => find_var(o, n.text),
+        Name(n)   => o.find_var(n.text),
         Paren(p)  => c.path_root(o, p.inner),
         Access(a) => c.path_root(o, a.base),
         _         => None,
     })
 }
 
-var_mutable* = (o: Own, text: str) bool {
-    find_var(o, text).match({
-        None  => true,
-        Ok(i) => o.vars.get(i).match({ Ok(v) => v.mutable, None => true }),
-    })
-}
-
-captures_scope* = (o: Own, text: str) bool {
-    find_var(o, text).match({
-        None  => false,
-        Ok(i) => (i < o.escaped) && scoped_at(o, i),
-    })
-}
-
-refuse_handle_captured* = (
-    c    :: Checker,
-    o    :: Own,
-    node : Expr,
-    id   : ExprId,
-    text : str
-) Res<(), AllocError> {
-    find_var(o, text).match({
+// A loop handle read from inside an escaping closure.
+refuse_handle_captured = (c :: Checker, o :: Own, id: ExprId, text: str)
+                         Res<(), AllocError> {
+    o.find_var(text).match({
         None  => Ok(()),
-        Ok(i) => ((i < o.escaped)
-                    && c.is_handle_ty(c.memo_type(id)))
-                   .match({
-                       false => Ok(()),
-                       true  => c.refuse_handle_at(id),
-                   }),
+        Ok(i) => ((i < o.escaped) && c.is_handle_ty(c.memo_type(id))).match({
+            false => Ok(()),
+            true  => c.refuse_handle_at(id),
+        }),
     })
 }
 
-// Whether this name is, or views into, an arena this frame made — read
-// by `sema_scope.zen`'s escape rule, which owns the walk that sets it.
-arena_var* = (o: Own, text: str) bool {
-    find_var(o, text).match({
-        None  => false,
-        Ok(i) => o.vars.get(i).match({ Ok(v) => v.arena, None => false }),
-    })
-}
-
-scoped_var* = (o: Own, text: str) bool {
-    find_var(o, text).match({
-        None  => false,
-        Ok(i) => o.vars.get(i).match({ Ok(v) => v.scoped, None => false }),
-    })
-}
-
-scoped_at = (o: Own, i: usize) bool {
-    o.vars.get(i).match({ Ok(v) => v.scoped, None => false })
-}
-
-owned_at* = (o: Own, root: usize) bool {
-    o.vars.get(root).match({ Ok(v) => v.owned, None => false })
-}
-
-is_dead = (o: Own, root: usize, field: str) bool {
-    Range(0, o.dead.len).find((i) {
-        o.dead.get(i).match({
-            Ok(p) => (p.root == root) && p.field.eq(field),
-            None  => false,
-        })
-    }).match({ Ok(_) => true, None => false })
-}
-
-kill = (o :: Own, root: usize, field: str, span: Span)
-       Res<(), AllocError> {
-    o.dead.add(Place(root: root, field: field, span: span))
-}
-
-// A write fills the hole. Implemented as a rebuild rather than a removal
-// because `Vec` has no remove and order in this list means nothing.
-revive = (o :: Own, root: usize, field: str) Res<(), AllocError> {
-    kept ::= o.alloc.Vec<Place>();
-    o.dead.loop((h, p) { keep_other(p, root, field, kept).try() });
-    take_all(o).try();
-    kept.loop((h, p) { o.dead.add(p).try() });
-    Ok(());
-}
-
-keep_other = (p: Place, root: usize, field: str, kept :: Vec<Place>)
-             Res<(), AllocError> {
-    ((p.root == root) && p.field.eq(field)).match({
-        true  => Ok(()),
-        false => kept.add(p),
-    })
-}
-
-take_all = (o :: Own) Res<(), AllocError> {
-    n = o.dead.len;
-    Range(0, n).loop((h, i) { o.dead.take(o.dead.len - 1); });
-    Ok(());
-}
-
-own_release = (o :: Own, mark: usize) Res<(), AllocError> {
-    kept ::= o.alloc.Vec<Place>();
-    o.dead.loop((h, p) { keep_below(p, mark, kept).try() });
-    take_all(o).try();
-    kept.loop((h, p) { o.dead.add(p).try() });
-    kept_pins ::= o.alloc.Vec<Pin>();
-    o.pinned.loop((h, p) { keep_pin(p, mark, kept_pins).try() });
-    take_all_pins(o).try();
-    kept_pins.loop((h, p) { o.pinned.add(p).try() });
-    extra = o.vars.len - mark;
-    Range(0, extra).loop((h, i) { o.vars.take(o.vars.len - 1); });
-    Ok(());
-}
-
-keep_below = (p: Place, mark: usize, kept :: Vec<Place>)
-             Res<(), AllocError> {
-    (p.root < mark).match({ false => Ok(()), true => kept.add(p) })
-}
-
-keep_pin = (p: Pin, mark: usize, kept :: Vec<Pin>) Res<(), AllocError> {
-    (p.root < mark).match({ false => Ok(()), true => kept.add(p) })
-}
-
-take_all_pins = (o :: Own) Res<(), AllocError> {
-    n = o.pinned.len;
-    Range(0, n).loop((h, i) { o.pinned.take(o.pinned.len - 1); });
-    Ok(());
-}
-
-// `p.left`, joined, because that is the place the author wrote and the
-// only spelling that tells them which half of `p` is gone.
+// `p.left`, joined: the place the author wrote, and the only spelling
+// that says which half of `p` is gone.
 place_name* = (c :: Checker, o :: Own, root: usize, field: str)
              Res<str, AllocError> {
     base = o.vars.get(root).match({ Ok(v) => v.name, None => "" });
@@ -715,28 +653,15 @@ dotted_name = (c :: Checker, base: str, field: str) Res<str, AllocError> {
 }
 
 memo_type = (c :: Checker, id: ExprId) TyId {
-    c.expr_memo.get(id).match({ Ok(ty) => ty, None => UNTYPED })
+    c.expr_memo.get(id).match({ Ok(ty) => ty, None => UNRESOLVED })
 }
 
 // A place's type: recorded for a name, memoized for everything else.
 place_type* = (c :: Checker, o :: Own, id: ExprId) TyId {
     node = c.tree.expr_at(id);
     node.kind.match({
-        Name(n)  => var_type(o, n.text),
+        Name(n)  => o.var_type(n.text),
         Paren(p) => c.place_type(o, p.inner),
         _        => c.memo_type(id),
     })
-}
-
-var_type* = (o: Own, text: str) TyId {
-    find_var(o, text).match({
-        None  => UNTYPED,
-        Ok(i) => o.vars.get(i).match({ Ok(v) => v.ty, None => UNTYPED }),
-    })
-}
-
-UNTYPED* : TyId = TyId(index: 0)
-
-refuse* = (c :: Checker, span: Span, fault: SemaFault) Res<(), AllocError> {
-    c.report(span.file, span, fault)
 }

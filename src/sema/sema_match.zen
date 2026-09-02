@@ -10,7 +10,7 @@ member_of = sema.sema_union
 SemaFault, NameFault = sema.sema_diag
 Checker, Ctx, UNRESOLVED = sema.sema_check
 Case, cases_of, case_payload, case_arity = sema.sema_case
-find_case = sema.sema_case
+is_case = sema.sema_case
 type_of, lambda_type = sema.sema_type
 join = sema.sema_join
 const_def = sema.sema_const
@@ -37,8 +37,8 @@ Pats* = {
         Ok(i);
     }
 
-    // Traps on an index this arena never handed out, for the reason
-    // `Ast.expr_at` does: that is a compiler bug, not input.
+    // Traps on an index this arena never handed out: a compiler bug, not
+    // input.
     at* = (self: @Self, i: usize) Pat {
         self.rows.len - i - 1;
         self.rows.ptr().read(i);
@@ -117,7 +117,7 @@ norm_arms = (
     Ok(());
 }
 
-norm_pattern* = (c :: Checker, ps :: Pats, pid: PatternId, ty: TyId, ctx: Ctx)
+norm_pattern = (c :: Checker, ps :: Pats, pid: PatternId, ty: TyId, ctx: Ctx)
                 Res<usize, AllocError> {
     node = c.tree.pattern_at(pid);
     node.kind.match({
@@ -248,41 +248,28 @@ norm_binder = (
 ) Res<usize, AllocError> {
     is_const = c.names_const(text, ctx).try();
     is_const.then(() {
-        c.report(
-            node.span.file,
+        c.refuse(
             node.span,
             SemaFault.ConstPattern(NameFault(name: text))
         ).try();
     });
     // Constants already receive the more specific constant-pattern diagnostic.
-    (is_const == false && c.not_a_case(ty, text).try()).then(() {
-        c.report(
-            node.span.file,
-            node.span,
-            SemaFault.NotACase(NameFault(name: text))
-        ).try();
+    (is_const == false && c.not_a_case(ty, text)).then(() {
+        c.refuse(node.span, SemaFault.NotACase(NameFault(name: text))).try();
     });
     ps.add(binder_pat(text, node.span)).try()
 }
 
-not_a_case = (c :: Checker, ty: TyId, text: str) Res<bool, AllocError> {
-    c.checkable(ty).match({
-        false => Ok(false),
-        true  => text.get(0).match({
-            None  => Ok(false),
-            Ok(b) => Ok(b.is_upper()),
-        }),
+// An upper-case binder on a checkable type: spelled like a case, and none.
+not_a_case = (c :: Checker, ty: TyId, text: str) bool {
+    c.checkable(ty) && text.get(0).match({
+        None  => false,
+        Ok(b) => b.is_upper(),
     })
 }
 
 names_const = (c :: Checker, text: str, ctx: Ctx) Res<bool, AllocError> {
     Ok(c.const_def(text, ctx).try().match({ Ok(_) => true, None => false }))
-}
-
-is_case* = (c :: Checker, ty: TyId, name: str) Res<bool, AllocError> {
-    cases ::= c.alloc.Vec<Case>();
-    c.cases_of(ty, cases).try();
-    Ok(find_case(cases, name).match({ Ok(_) => true, None => false }));
 }
 
 // the checks
@@ -303,7 +290,7 @@ check_coverage = (
 }
 
 // Poison, holes, and unsubstituted parameters have no reliable case list.
-checkable* = (c: Checker, sty: TyId) bool {
+checkable = (c: Checker, sty: TyId) bool {
     (c.is_unknown(sty) || c.is_infer(sty) || c.is_var(sty)) == false
 }
 
@@ -313,10 +300,6 @@ pick_name = (take: bool, name: str, so_far: str) str {
 
 head_is_ctor = (p: Pat, name: str) bool {
     p.kind.match({ CtorPat => p.name.eq(name), _ => false })
-}
-
-payload_arity = (cs: Case) usize {
-    cs.has_payload.match({ true => 1, false => 0 })
 }
 
 keeps_lit = (p: Pat, text: str) bool {
@@ -376,7 +359,7 @@ MatchCoverage = {
         rows : Vec<usize>,
         i    : usize
     ) Res<(), AllocError> {
-        p = self.pats.at(row_at(rows, i));
+        p = self.pats.at(rows.get(i).value_or(0));
         c.report(
             p.span.file,
             p.span,
@@ -474,7 +457,7 @@ MatchCoverage = {
         q     : Vec<usize>,
         types : Vec<TyId>
     ) Res<bool, AllocError> {
-        head = self.pats.at(row_at(q, 0));
+        head = self.pats.at(q.get(0).value_or(0));
         head.kind.match({
             CtorPat => self.useful_ctor(c, m, q, types, head),
             LitPat  => self.useful_lit(c, m, q, types, head),
@@ -492,7 +475,7 @@ MatchCoverage = {
         types : Vec<TyId>,
         head  : Pat
     ) Res<bool, AllocError> {
-        ty0     = head_ty(types);
+        ty0     = types.get(0).value_or(UNRESOLVED);
         arity   = c.case_arity(ty0, head.name, head.has_sub).try();
         payload = c.case_payload(ty0, head.name).try();
         sub     = self.pats.sub_index(head).try();
@@ -531,7 +514,7 @@ MatchCoverage = {
         q     : Vec<usize>,
         types : Vec<TyId>
     ) Res<bool, AllocError> {
-        ty0 = head_ty(types);
+        ty0 = types.get(0).value_or(UNRESOLVED);
         cases ::= c.alloc.Vec<Case>();
         has = c.cases_of(ty0, cases).try();
         self.complete(has, m, cases).match({
@@ -583,7 +566,7 @@ MatchCoverage = {
         types : Vec<TyId>,
         cs    : Case
     ) Res<bool, AllocError> {
-        arity = payload_arity(cs);
+        arity = cs.arity();
         hole  = self.pats.wild(nowhere()).try();
         sm    = self.specialise(m, cs.name, arity).try();
         q2 ::= c.alloc.Vec<usize>();
@@ -747,7 +730,7 @@ MatchCoverage = {
         out ::= self.pats.alloc.PatMatrix(1);
         Range(0, k).loop((h, i) {
             row ::= self.pats.alloc.Vec<usize>();
-            row.add(row_at(rows, i)).try();
+            row.add(rows.get(i).value_or(0)).try();
             out.add_row(row).try();
         });
         Ok(out)
@@ -756,7 +739,7 @@ MatchCoverage = {
     one_row = (self :: @Self, rows: Vec<usize>, i: usize)
               Res<Vec<usize>, AllocError> {
         out ::= self.pats.alloc.Vec<usize>();
-        out.add(row_at(rows, i)).try();
+        out.add(rows.get(i).value_or(0)).try();
         Ok(out)
     }
 
@@ -771,19 +754,6 @@ MatchCoverage = (pats :: Pats, sty: TyId) MatchCoverage {
     MatchCoverage(pats: pats, sty: sty)
 }
 
-useful* = (
-    c     :: Checker,
-    ps    :: Pats,
-    m     : PatMatrix,
-    q     : Vec<usize>,
-    types : Vec<TyId>
-) Res<bool, AllocError> {
-    coverage ::= MatchCoverage(ps, head_ty(types));
-    got = coverage.useful(c, m, q, types).try();
-    ps  = coverage.pats;
-    Ok(got)
-}
-
 arm_types = (
     c    :: Checker,
     ps   :: Pats,
@@ -795,7 +765,7 @@ arm_types = (
     got ::= c.types.unknown().try();
     Range(0, mt.arms.len).loop((h, i) {
         t   = c.arm_type(ps, mt, sty, rows, i, ctx).try();
-        got = join(c, got, t).try();
+        got = c.join(got, t).try();
     });
     Ok(got);
 }
@@ -810,7 +780,7 @@ arm_type = (
     ctx  : Ctx
 ) Res<TyId, AllocError> {
     mark = c.mark();
-    c.bind_pattern(ps, row_at(rows, i), sty).try();
+    c.bind_pattern(ps, rows.get(i).value_or(0), sty).try();
     got = c.arm_body_type(mt, i, ctx).try();
     c.release(mark).try();
     Ok(got);
@@ -854,7 +824,7 @@ arm_closure_type = (c :: Checker, id: ExprId, l: Lambda, ctx: Ctx)
 
 // The names a pattern introduces, in the arm's own scope: `Ok(n)` binds
 // `n` to the payload type.
-bind_pattern* = (c :: Checker, ps: Pats, i: usize, ty: TyId)
+bind_pattern = (c :: Checker, ps: Pats, i: usize, ty: TyId)
                 Res<(), AllocError> {
     p = ps.at(i);
     p.kind.match({
@@ -871,7 +841,7 @@ bind_binder = (c :: Checker, p: Pat, ty: TyId) Res<(), AllocError> {
 }
 
 bind_sub = (c :: Checker, ps: Pats, p: Pat, ty: TyId) Res<(), AllocError> {
-    p.has_sub.then(() { bind_payload(c, ps, p, ty).try() });
+    p.has_sub.then(() { c.bind_payload(ps, p, ty).try() });
     Ok(());
 }
 
@@ -882,7 +852,7 @@ bind_payload = (c :: Checker, ps: Pats, p: Pat, ty: TyId)
 }
 
 // the small pieces
-wild_pat* = (span: Span) Pat {
+wild_pat = (span: Span) Pat {
     Pat(
         kind: PatKind.WildPat,
         name: "",
@@ -926,7 +896,7 @@ sub_pat = (name: str, sub: usize, span: Span) Pat {
     )
 }
 
-dot_pat* = (c :: Checker, ps :: Pats, member: str, leaf: str, span: Span)
+dot_pat = (c :: Checker, ps :: Pats, member: str, leaf: str, span: Span)
            Res<usize, AllocError> {
     hole = c.leaf_hole(ps, leaf, span).try();
     ps.add(sub_pat(member, hole, span))
@@ -950,8 +920,8 @@ member_leaf = (c :: Checker, ps :: Pats, mty: TyId, text: str, span: Span)
     ps.add(sub_pat(name, hole, span))
 }
 
-// The name a set member's constructor uses in a pattern.
-// member carries. `sym_union_member` spells the same thing in C.
+// The name a set member's constructor uses in a pattern;
+// `sym_union_member` spells the same in C.
 member_name = (c :: Checker, mty: TyId) str {
     c.types.at(mty).match({
         Named(n) => n.name.after_last('.'),
@@ -970,22 +940,15 @@ lit_pat = (text: str, span: Span) Pat {
     )
 }
 
-row_at = (v: Vec<usize>, i: usize) usize {
-    v.get(i).match({ Ok(x) => x, None => 0 })
-}
-
-head_ty = (types: Vec<TyId>) TyId {
-    types.get(0).match({ Ok(t) => t, None => UNRESOLVED })
-}
-
+// `src` without its first column.
 append_tail = (out :: Vec<usize>, src: Vec<usize>) Res<(), AllocError> {
-    Range(1, src.len).loop((h, i) { out.add(row_at(src, i)).try() });
+    Range(1, src.len).loop((h, i) { out.add(src.get(i).value_or(0)).try() });
     Ok(());
 }
 
 append_tys = (out :: Vec<TyId>, src: Vec<TyId>) Res<(), AllocError> {
     Range(1, src.len).loop((h, i) {
-        out.add(src.get(i).match({ Ok(t) => t, None => UNRESOLVED })).try();
+        out.add(src.get(i).value_or(UNRESOLVED)).try();
     });
     Ok(());
 }

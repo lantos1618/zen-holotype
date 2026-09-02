@@ -58,11 +58,7 @@ report_if_exported = (c :: Checker, f: Function) Res<(), AllocError> {
 
 report_hole = (c :: Checker, f: Function) Res<(), AllocError> {
     span = c.hole_span(f).match({ None => f.name.span, Ok(s) => s });
-    c.report(
-        span.file,
-        span,
-        SemaFault.InferredSetExported(NameFault(name: f.name.text))
-    )
+    c.refuse(span, SemaFault.InferredSetExported(NameFault(name: f.name.text)))
 }
 
 hole_span = (c :: Checker, f: Function) Res<Span> {
@@ -102,22 +98,14 @@ keep_error = (c :: Checker, r: TyRes, raised :: Vec<TyId>)
     })
 }
 
+// A settled failure set; a hole or poison is not one.
 carries_error = (c :: Checker, r: TyRes) bool {
-    c.is_infer(r.error).match({
-        true  => false,
-        false => c.real_error(r),
-    })
+    ((c.is_infer(r.error) || c.is_unknown(r.error)) == false)
+        && r.form.match({ Failure => true, _ => false })
 }
 
-real_error = (c :: Checker, r: TyRes) bool {
-    c.is_unknown(r.error).match({
-        true  => false,
-        false => r.form.match({ Failure => true, _ => false }),
-    })
-}
-
-// The memo for the return type's own node, rewritten in place — everyone
-// who asks what this signature means asks that node.
+// The return type's own node is what every reader of the signature asks,
+// so its memo is rewritten in place.
 write_ret = (c :: Checker, f: Function, ctx: Ctx, set: TyId)
             Res<(), AllocError> {
     f.ret.match({

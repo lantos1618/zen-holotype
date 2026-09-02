@@ -79,12 +79,12 @@ SemaFault* =
     | TryAbsenceIntoFailure(TypeFault) // a None never becomes an Err
     | TryArgNeedsErr(TypeFault)         // `.try(arg)` maps an Err, not None
     | NoErrorConversion(TypeFault)     // there is no From
-    | InferredSetExported(NameFault)   // law 6: a `*` boundary writes its set
+    | InferredSetExported(NameFault)   // an exported function writes its error set
     | HoistAmbiguous(TypeFault)        // two variants carry the type
     | HoistNotSuccess(NameFault)       // only success lifts
 
     // vararg — the pack's one legal position, and its one type argument
-    | VarargNotLast(NameFault)         // a pack borrows the caller's frame, so it may not outlive the call
+    | VarargNotLast(NameFault)         // a pack borrows the caller's frame
     | VarargElement(NameFault)         // a run of T, and never a run of runs
 
     // match
@@ -103,9 +103,9 @@ SemaFault* =
     | InstantiationDepth(NameFault)    // the instantiation set is infinite
 
     // comptime
-    | MetaNotImplemented(NameFault)    // `.name` folds (M3); every other form is still the wall
+    | MetaNotImplemented(NameFault)    // every `@meta` form but `.name`
     | CountNotComptime(NameFault)      // an array's count folds, or it is refused
-    | ComptimeBudget(NameFault)        // the evaluator's fuel ran out — the build fails, it never hangs
+    | ComptimeBudget(NameFault)        // the evaluator's step budget ran out
 
     // ownership
     | ConsumedUse(NameFault)           // a place that was moved out of
@@ -125,6 +125,15 @@ Diag* = {
     file*: str,
     span*: Span,
     fault*: SemaFault,
+
+    // `file:line:col: message`, then the fault's own detail.
+    render* = (self: @Self, types: Types, out :: String)
+              Res<(), AllocError> {
+        out.fmt("{}:{}: {}", self.file, self.span.start, message(self.fault))
+            .try();
+        self.fault.write_detail(types, out).try();
+        Ok(());
+    }
 }
 
 message* = (fault: SemaFault) str {
@@ -199,27 +208,21 @@ message* = (fault: SemaFault) str {
     });
 }
 
-render* = (self: Diag, types: Types, out :: String) Res<(), AllocError> {
-    out.fmt("{}:{}: {}", self.file, self.span.start, message(self.fault)).try();
-    write_detail(self.fault, types, out).try();
-    Ok(());
-}
-
 write_detail* = (fault: SemaFault, types: Types, out :: String)
                 Res<(), AllocError> {
     fault.match({
         UndefinedName(f)             => out.write_name(f),
-        NotExported(f)               => write_export(out, f),
-        NotWritable(f)               => write_unwritable(out, f),
-        ModuleNotAValue(f)           => write_module(out, f),
+        NotExported(f)               => out.write_export(f),
+        NotWritable(f)               => out.write_unwritable(f),
+        ModuleNotAValue(f)           => out.write_module(f),
         NoOverload(f)                => out.write_name(f),
-        ImplMissingField(f)          => write_missing(out, f),
-        CtorMissingField(f)          => write_ctor_missing(out, f),
-        CtorNamesNoMember(f)         => write_member(out, types, f),
-        CtorSurplusArgument(f)       => write_ctor_surplus(out, types, f),
-        CtorNamesConstant(f)         => write_ctor_constant(out, types, f),
-        OrphanImpl(f)                => write_orphan(out, f),
-        Rebound(f)                   => write_pair(out, f),
+        ImplMissingField(f)          => out.write_missing(f),
+        CtorMissingField(f)          => out.write_ctor_missing(f),
+        CtorNamesNoMember(f)         => out.write_member(types, f),
+        CtorSurplusArgument(f)       => out.write_ctor_surplus(types, f),
+        CtorNamesConstant(f)         => out.write_ctor_constant(types, f),
+        OrphanImpl(f)                => out.write_orphan(f),
+        Rebound(f)                   => out.write_pair(f),
         ComputedFieldAssign(f)       => out.write_name(f),
         ComputedFieldAddress(f)      => out.write_name(f),
         InferredSetExported(f)       => out.write_name(f),
@@ -229,7 +232,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         NotExhaustive(f)             => out.write_name(f),
         UnreachableArm(f)            => out.write_name(f),
         NotACase(f)                  => out.write_name(f),
-        ConstPattern(f)              => write_const_pattern(out, f),
+        ConstPattern(f)              => out.write_const_pattern(f),
         ProvenOverflow(f)            => out.write_name(f),
         ProvenDivideByZero(f)        => out.write_name(f),
         ProvenIndexOutOfBounds(f)    => out.write_name(f),
@@ -245,76 +248,69 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         ArenaEscapes(f)              => out.write_name(f),
         HandleNotAValue(f)           => out.write_name(f),
 
-        ConsumedUse(f)               => write_place(
-            out,
+        ConsumedUse(f)               => out.write_place(
             f,
             " was consumed, and a binding is dead from the move onwards"
         ),
-        NeedsMutableReceiver(f)      => write_place(
-            out,
+        NeedsMutableReceiver(f)      => out.write_place(
             f,
             " needs a mutable receiver, so every link from the binding to it must permit the write"
         ),
-        ImmutableWrite(f)            => write_place(
-            out,
+        ImmutableWrite(f)            => out.write_place(
             f,
             " is declared `:`, so it is set at construction and never reassigned — `::` is what permits a write"
         ),
-        SnapshottedReceiver(f)       => write_place(
-            out,
+        SnapshottedReceiver(f)       => out.write_place(
             f,
             " writes the same place through a `::` method, so the write lands in the copy — hoist this call to a local, or declare the receiver `::`"
         ),
-        PartiallyMoved(f)            => write_place(
-            out,
+        PartiallyMoved(f)            => out.write_place(
             f,
             " is partially moved, so the drop has a hole: move the whole value or none of it"
         ),
-        ConsumedByCapture(f)         => write_capture(out, f),
+        ConsumedByCapture(f)         => out.write_capture(f),
 
-        NoSuchField(f)               => write_member(out, types, f),
-        MemberNeedsValue(f)          => write_needs_value(out, types, f),
-        EqNeedsImpl(f)               => write_needs_eq(out, types, f),
-        DiscardedValue(f)            => write_discarded(out, types, f),
-        TypeMismatch(f)              => write_types(out, types, f),
-        ArmsDisagree(f)              => write_arms(out, types, f),
-        NotCallable(f)               => write_types(out, types, f),
-        MethodNotValue(f)            => write_method_value(out, types, f),
-        BoundNotSatisfied(f)         => write_types(out, types, f),
-        TryOutsideRes(f)             => write_types(out, types, f),
-        TryNeedsRes(f)               => write_types(out, types, f),
-        TryAbsenceIntoFailure(f)     => write_types(out, types, f),
-        TryArgNeedsErr(f)            => write_types(out, types, f),
-        NoErrorConversion(f)         => write_types(out, types, f),
-        HoistAmbiguous(f)            => write_types(out, types, f),
-        LiteralOutOfRange(f)         => write_literal(out, types, f),
+        NoSuchField(f)               => out.write_member(types, f),
+        MemberNeedsValue(f)          => out.write_needs_value(types, f),
+        EqNeedsImpl(f)               => out.write_needs_eq(types, f),
+        DiscardedValue(f)            => out.write_discarded(types, f),
+        TypeMismatch(f)              => out.write_types(types, f),
+        ArmsDisagree(f)              => out.write_arms(types, f),
+        NotCallable(f)               => out.write_types(types, f),
+        MethodNotValue(f)            => out.write_method_value(types, f),
+        BoundNotSatisfied(f)         => out.write_types(types, f),
+        TryOutsideRes(f)             => out.write_types(types, f),
+        TryNeedsRes(f)               => out.write_types(types, f),
+        TryAbsenceIntoFailure(f)     => out.write_types(types, f),
+        TryArgNeedsErr(f)            => out.write_types(types, f),
+        NoErrorConversion(f)         => out.write_types(types, f),
+        HoistAmbiguous(f)            => out.write_types(types, f),
+        LiteralOutOfRange(f)         => out.write_literal(types, f),
         ActorPayload(f)              => out.write_name(f),
         InvalidEnumRepresentation(f) => out.write_name(f),
         InvalidEnumDiscriminant(f)   => out.write_name(f),
-        DuplicateEnumDiscriminant(f) => write_pair(out, f),
+        DuplicateEnumDiscriminant(f) => out.write_pair(f),
         CatchAllConstruction(f)      => out.write_name(f),
 
-        DuplicateSignature(f)        => write_pair(out, f),
-        DuplicateField(f)            => write_pair(out, f),
-        AmbiguousOverload(f)         => write_pair(out, f),
-        AmbiguousMember(f)           => write_pair(out, f),
+        DuplicateSignature(f)        => out.write_pair(f),
+        DuplicateField(f)            => out.write_pair(f),
+        AmbiguousOverload(f)         => out.write_pair(f),
+        AmbiguousMember(f)           => out.write_pair(f),
     }).try();
     Ok(());
 }
 
 write_name = (out :: String, f: NameFault) Res<(), AllocError> {
-    quote(out, f.name)
+    out.quote(f.name)
 }
 
-// Explain why a missing constructor field is required.
 write_ctor_missing = (out :: String, f: NameFault) Res<(), AllocError> {
-    quote(out, f.name).try();
+    out.quote(f.name).try();
     out.add(
         ": a field with no default and no Res is required, and one left out is a zero nobody wrote"
     )
 }
 
-// A constant exists on the type but cannot be supplied as storage.
 write_ctor_constant = (out :: String, types: Types, f: TypeFault)
                       Res<(), AllocError> {
     found ::= types.name_of(f.found).try();
@@ -331,14 +327,13 @@ write_ctor_constant = (out :: String, types: Types, f: TypeFault)
 }
 
 write_missing = (out :: String, f: NameFault) Res<(), AllocError> {
-    quote(out, f.name).try();
+    out.quote(f.name).try();
     out.add(
         ": an impl supplies a value for every field the bound declares"
     ).try();
     Ok(());
 }
 
-// Name the constant and the comparison spelling the author can use.
 write_const_pattern = (out :: String, f: NameFault) Res<(), AllocError> {
     out.fmt(
         " — `{}` names a constant in scope: compare it with `==`, or rename the binder",
@@ -347,7 +342,6 @@ write_const_pattern = (out :: String, f: NameFault) Res<(), AllocError> {
     Ok(());
 }
 
-// Name the module that owns the impl target.
 write_orphan = (out :: String, f: ExportFault) Res<(), AllocError> {
     out.fmt(
         ": {} is declared in module {}, so the impl belongs there",
@@ -357,8 +351,7 @@ write_orphan = (out :: String, f: ExportFault) Res<(), AllocError> {
     Ok(());
 }
 
-// Include both the requested member and receiver type.
-write_member* = (out :: String, types: Types, f: TypeFault)
+write_member = (out :: String, types: Types, f: TypeFault)
                 Res<(), AllocError> {
     found ::= types.name_of(f.found).try();
     out.fmt(": no `{}` on `{}`", f.name, found.view()).try();
@@ -372,7 +365,6 @@ write_ctor_surplus = (out :: String, types: Types, f: TypeFault)
     Ok(())
 }
 
-// A method used as a value needs an explicit call.
 write_method_value = (out :: String, types: Types, f: TypeFault)
                      Res<(), AllocError> {
     sig ::= types.name_of(f.found).try();
@@ -385,7 +377,6 @@ write_method_value = (out :: String, types: Types, f: TypeFault)
     Ok(());
 }
 
-// Show the payload type required by a carried union member.
 write_needs_value = (out :: String, types: Types, f: TypeFault)
                     Res<(), AllocError> {
     found   ::= types.name_of(f.found).try();
@@ -401,7 +392,6 @@ write_needs_value = (out :: String, types: Types, f: TypeFault)
     Ok(());
 }
 
-// Name the type missing an `Eq` implementation.
 write_needs_eq = (out :: String, types: Types, f: TypeFault)
                  Res<(), AllocError> {
     found ::= types.name_of(f.found).try();
@@ -409,7 +399,6 @@ write_needs_eq = (out :: String, types: Types, f: TypeFault)
     Ok(());
 }
 
-// Name the type of a discarded value.
 write_discarded = (out :: String, types: Types, f: TypeFault)
                   Res<(), AllocError> {
     found ::= types.name_of(f.found).try();
@@ -426,27 +415,23 @@ write_place = (out :: String, f: NameFault, tail: str) Res<(), AllocError> {
     Ok(());
 }
 
-// Include the capture position that keeps the consumed place alive.
 write_capture = (out :: String, f: CaptureFault) Res<(), AllocError> {
     out.fmt(" {} was consumed by a closure that captured it", f.place).try();
     out.add(" — the capture keeps it alive here: ").try();
-    write_at(out, f.at).try();
+    out.write_at(f.at).try();
     Ok(());
 }
 
-// Name both the blocked name and the module that did not export it.
 write_export = (out :: String, f: ExportFault) Res<(), AllocError> {
     out.fmt(": {} is not exported by module {}", f.name, f.module).try();
     Ok(());
 }
 
-// Export grants reading, not cross-module writes.
 write_unwritable = (out :: String, f: ExportFault) Res<(), AllocError> {
     out.fmt(": {} is not writable outside module {}", f.name, f.module).try();
     Ok(());
 }
 
-// Explain that the name denotes a module and requires member access.
 write_module = (out :: String, f: ExportFault) Res<(), AllocError> {
     out.fmt(
         ": `{}` names module `{}`, so write `{}.<name>`",
@@ -475,7 +460,7 @@ write_types = (out :: String, types: Types, f: TypeFault)
               Res<(), AllocError> {
     expected ::= types.name_of(f.expected).try();
     found    ::= types.name_of(f.found).try();
-    quote(out, f.name).try();
+    out.quote(f.name).try();
     out.fmt(": expected {}, found {}", expected.view(), found.view()).try();
     Ok(());
 }
@@ -491,13 +476,13 @@ write_literal = (out :: String, types: Types, f: TypeFault)
     Ok(());
 }
 
-// Include full paths because the declarations may be in different files.
+// The two declarations may be in different files.
 write_pair = (out :: String, f: PairFault) Res<(), AllocError> {
-    quote(out, f.name).try();
+    out.quote(f.name).try();
     out.add(": ").try();
-    write_at(out, f.first).try();
+    out.write_at(f.first).try();
     out.add(" and ").try();
-    write_at(out, f.second).try();
+    out.write_at(f.second).try();
     Ok(());
 }
 
