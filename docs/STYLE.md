@@ -40,6 +40,12 @@ A record is not a bag for shortening signatures. Its fields must be created
 together, share a lifetime, and describe one concept. Values that vary per
 operation remain method parameters.
 
+A compiler phase value must also say whether its facts are authoritative or
+only support diagnostic recovery. A recovery candidate may supply expected
+types so nested expressions can be checked, but it may not be consumed as a
+successful sema choice or backend input. Encode that distinction in the type,
+not in a comment or a boolean whose false branch is easy to forget.
+
 ### Methods, context records, and free functions
 
 Use a method when the operation is a fact about its receiver:
@@ -237,19 +243,24 @@ site.
 
 ## Comments
 
-Comments are for a reader maintaining the finished code.
+Code comments are part of Zen's user-facing surface. Write them for someone
+using the language, or for an AI helping that person understand and change a
+Zen program. They describe the observable contract and the constraint a safe
+change must preserve; they do not transcribe how the implementation was built.
 
 Keep comments that explain:
 
 - a public contract;
 - a non-obvious invariant or ownership rule;
 - a protocol or ABI requirement;
+- observable language behavior whose implementation is easy to misread;
 - why an apparently simpler change would be incorrect;
 - a failure policy that callers must preserve.
 
 Remove comments that record:
 
 - the conversation that produced the code;
+- an agent's audit, plan, task assignment, or completed refactor;
 - estimates, chronology, issue archaeology, or previous implementations;
 - rejected alternatives that no longer constrain the implementation;
 - a paraphrase of the next statement;
@@ -268,12 +279,41 @@ code first, then keep only the invariant the code cannot express.
 - Name tests as behaviors, without a redundant `test_` prefix.
 - Keep one behavior per test.
 - Add a corpus program for every diagnostic and runtime trap.
+- An active correctness issue owns an executable minimal reproducer and its
+  expected classification. Move or delete the issue when that reproducer
+  passes; an issue queue is not the archive for fixed work.
 - Before trusting a new gate, break its target deliberately and verify the gate
   fails.
 - A check that scanned no files is a harness failure, not a clean result.
 - For pipelines, preserve the producer's exit status. The repository Makefile
   uses `bash -o pipefail`; ad-hoc commands must do the same or record status
   before displaying truncated output.
+
+One aggregate verification target defines whether the repository is green.
+CI, release automation, and local pre-release checks call that target instead
+of maintaining parallel lists. Formatting, determinism, generated-artifact
+freshness, and required file counts belong inside it rather than in optional
+side commands.
+
+Every program accepted by sema must lower to valid C under the supported C
+compilers. A C rejection is a compiler correctness failure, not a user
+diagnostic. Generated-C warning flags are project policy; a temporary warning
+baseline must be named, measured, and monotonically shrink.
+
+## Builder plans and budgets
+
+Build files describe a graph; planning them must not execute project code.
+Keep import/link dependencies distinct from execution-order dependencies, and
+declare every target's inputs and predecessors. An example that uses builder
+surface the planner does not implement is labelled `proposed`, never presented
+as a working build file.
+
+A benchmark belongs to the subsystem whose regression it detects. Benchmark
+real compiler and tool paths before isolated container operations, record the
+input and environment, and give timing budgets an explicit tolerance.
+Allocation budgets are exact; timing budgets use repeated samples and a stable
+summary such as a rolling median. Like every gate, a budget is trusted only
+after a deliberate regression makes it fail.
 
 The formatter is the authority on whitespace, wrapping, alignment, trailing
 commas, and comment placement. Run it instead of maintaining a second layout
@@ -292,8 +332,11 @@ For every new or moved function, ask:
 7. Is a one-sided boolean still written as a two-arm match?
 8. Can failure or refusal leave before the successful path is nested?
 9. Does an actor own a real mailbox and lifecycle, or only add indirection?
-7. Would a proposed file split remove coupling or merely relocate it?
-8. Does each comment help a new maintainer understand the current contract?
+10. Would a proposed file split remove coupling or merely relocate it?
+11. Does each comment help a new maintainer understand the current contract?
+12. Is a recovery value prevented from becoming an authoritative result?
+13. Which executable gate proves this change, and has that gate gone red under
+    a deliberate mutation?
 
 Do this while writing the function. A later cleanup has less context and more
 callers to migrate.

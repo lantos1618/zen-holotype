@@ -17,14 +17,14 @@ The corresponding decisions are in
 | Item | Count |
 | --- | ---: |
 | Zen files | 227 |
-| Top-level declarations | 6685 |
-| Types | 394 |
-| Enums | 102 |
+| Top-level declarations | 6688 |
+| Types | 399 |
+| Enums | 103 |
 | Aliases | 0 |
 | Implementations | 79 |
-| Functions | 3523 |
+| Functions | 3519 |
 | Constants | 167 |
-| Imports and re-exports | 2420 |
+| Imports and re-exports | 2421 |
 
 ## Files
 
@@ -540,7 +540,7 @@ C_STANDARD*, comment* = gen.gen_c.gen_c_runtime
 
 ### `src/gen/gen_c/gen_c_actor.zen`
 
-70 declarations (types: 4, functions: 43, imports and re-exports: 23).
+69 declarations (types: 6, functions: 40, imports and re-exports: 23).
 
 #### Types
 
@@ -575,6 +575,35 @@ ActorLifecycle = {
     record: str,
     started: str,
     stopped: str,
+}
+
+ActorSend = {
+    id: ExprId,
+    call: Call,
+    access: Access,
+    receiver_ty: TyId,
+    actor_ty: TyId,
+    hit: BehaviorHit,
+    ctx: Ctx,
+    lower = (self: @Self, be :: CBackend, out :: String)
+            Res<(), AllocError>
+    write_turn = (
+        self    : @Self,
+        be      :: CBackend,
+        n       : usize,
+        payload : str,
+        sig     : Vec<TyId>
+    ) Res<String, AllocError>
+}
+
+ActorSendEmission = {
+    send: ActorSend,
+    result_ty: TyId,
+    signature: Vec<TyId>,
+    payload: str,
+    turn: str,
+    write = (self: @Self, be :: CBackend, out :: String)
+            Res<(), AllocError>
 }
 ```
 
@@ -667,43 +696,8 @@ lower_actor_send* = (
     out      :: String
 ) Res<(), AllocError>
 
-write_actor_send = (
-    be       :: CBackend,
-    id       : ExprId,
-    c        : Call,
-    a        : Access,
-    rty      : TyId,
-    actor_ty : TyId,
-    hit      : BehaviorHit,
-    ctx      : Ctx,
-    out      :: String
-) Res<(), AllocError>
-
 write_message_record = (be :: CBackend, n: usize, sig: Vec<TyId>)
                        Res<String, AllocError>
-
-write_behavior_turn = (
-    be       :: CBackend,
-    n        : usize,
-    payload  : str,
-    actor_ty : TyId,
-    hit      : BehaviorHit,
-    sig      : Vec<TyId>
-) Res<String, AllocError>
-
-write_send_value = (
-    be      :: CBackend,
-    c       : Call,
-    a       : Access,
-    rty     : TyId,
-    ret     : TyId,
-    payload : str,
-    turn    : str,
-    f       : Function,
-    sig     : Vec<TyId>,
-    ctx     : Ctx,
-    out     :: String
-) Res<(), AllocError>
 
 direct_str_count = (be: CBackend, sig: Vec<TyId>) usize
 
@@ -1928,7 +1922,7 @@ Call = std.ast
 
 ### `src/gen/gen_c/gen_c_call.zen`
 
-94 declarations (types: 3, functions: 48, imports and re-exports: 43).
+90 declarations (types: 4, functions: 43, imports and re-exports: 43).
 
 #### Types
 
@@ -1986,6 +1980,22 @@ CallSite = {
                      Res<usize, AllocError>
     emit = (self: @Self, be :: CBackend, f: Function, sig: Vec<TyId>,
             sym: str, out :: String) Res<(), AllocError>
+}
+
+NamedCallSite = {
+    site: CallSite,
+    name: str,
+    want: TyId,
+    lower = (self: @Self, be :: CBackend, out :: String)
+            Res<(), AllocError>
+    named = (self: @Self, be :: CBackend, out :: String)
+            Res<(), AllocError>
+    lower_res = (self: @Self, be :: CBackend, out :: String)
+                Res<(), AllocError>
+    write_res = (self: @Self, be :: CBackend, r: TyRes, out :: String)
+                Res<(), AllocError>
+    sugar_or_plain = (self: @Self, be :: CBackend, out :: String)
+                     Res<(), AllocError>
 }
 
 CallArgs = {
@@ -2089,17 +2099,6 @@ lower_call* = (
     out  :: String
 ) Res<(), AllocError>
 
-lower_name_callee = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    name : str,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-)
-                    Res<(), AllocError>
-
 lower_indirect = (
     be  :: CBackend,
     id  : ExprId,
@@ -2126,52 +2125,11 @@ write_indirect_arg = (
     out    :: String
 ) Res<(), AllocError>
 
-lower_named_call = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    name : str,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError>
-
-lower_sugar_or_plain = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    name : str,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError>
-
 is_sugar = (be :: CBackend, name: str, ctx: Ctx) Res<bool, AllocError>
 
 undeclared = (be :: CBackend, name: str, ctx: Ctx) Res<bool, AllocError>
 
 is_res_ctor* = (name: str) bool
-
-lower_res_ctor = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    name : str,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError>
-
-lower_res_arg = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    name : str,
-    r    : TyRes,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError>
 
 lower_plain_call* = (
     be   :: CBackend,
@@ -14527,11 +14485,27 @@ res_sugar = sema.sema_denote
 
 ### `src/sema/sema_call.zen`
 
-103 declarations (types: 1, functions: 68, imports and re-exports: 34).
+108 declarations (types: 3, enums: 1, functions: 69, imports and re-exports: 35).
 
 #### Types
 
 ```zen
+RecoverySig = {
+    ty: TyId,
+    off: usize,
+}
+
+SignatureUse = {
+    node: Expr,
+    call: Call,
+    ctx: Ctx,
+    ty: TyId,
+    params: Vec<TyId>,
+    off: usize,
+    fit: SignatureFit,
+    finish = (self: @Self, c :: Checker) Res<TyId, AllocError>
+}
+
 CallCheck = {
     id: ExprId,
     node: Expr,
@@ -14544,6 +14518,10 @@ CallCheck = {
             Res<TyId, AllocError>
     print_or_call = (self :: @Self, c :: Checker, name: str)
                     Res<TyId, AllocError>
+    print_or_decl = (self :: @Self, c :: Checker, name: str)
+                    Res<TyId, AllocError>
+    print_or_module_decl = (self :: @Self, c :: Checker, name: str)
+                           Res<TyId, AllocError>
     local_or_decl = (self :: @Self, c :: Checker, name: str)
                     Res<TyId, AllocError>
     local_signature = (self :: @Self, c :: Checker, ty: TyId)
@@ -14553,14 +14531,16 @@ CallCheck = {
         c       :: Checker,
         name    : str,
         recv    : Res<TyId>,
-        actuals : Vec<Actual>
+        actuals : Vec<Actual>,
+        recovery: Res<RecoverySig>
     ) Res<TyId, AllocError>
     construct_or_fail = (
         self  :: @Self,
         c     :: Checker,
         name  : str,
         recv  : Res<TyId>,
-        cands : Vec<Cand>
+        cands : Vec<Cand>,
+        recovery: Res<RecoverySig>
     ) Res<TyId, AllocError>
     construct_def = (self :: @Self, c :: Checker, d: Def)
                     Res<TyId, AllocError>
@@ -14583,18 +14563,68 @@ CallCheck = {
         b     : Base,
         found : Vec<Found>
     ) Res<TyId, AllocError>
-    method = (self :: @Self, c :: Checker, found: Vec<Found>)
+    method = (
+        self  :: @Self,
+        c     :: Checker,
+        ac    : Access,
+        b     : Base,
+        found : Vec<Found>
+    )
              Res<TyId, AllocError>
-    by_arity = (self :: @Self, c :: Checker, found: Vec<Found>)
+    by_arity = (
+        self  :: @Self,
+        c     :: Checker,
+        ac    : Access,
+        b     : Base,
+        found : Vec<Found>,
+        off   : usize
+    )
                Res<TyId, AllocError>
-    first_found = (self :: @Self, c :: Checker, found: Vec<Found>)
+    first_found = (
+        self  :: @Self,
+        c     :: Checker,
+        ac    : Access,
+        b     : Base,
+        found : Vec<Found>,
+        off   : usize
+    )
                   Res<TyId, AllocError>
     ufcs = (self :: @Self, c :: Checker, ac: Access, b: Base)
            Res<TyId, AllocError>
+    ufcs_with_recovery = (
+        self     :: @Self,
+        c        :: Checker,
+        ac       : Access,
+        b        : Base,
+        recovery : Res<RecoverySig>
+    ) Res<TyId, AllocError>
     indirect = (self :: @Self, c :: Checker) Res<TyId, AllocError>
-    signature = (self :: @Self, c :: Checker, ty: TyId, off: usize)
-                Res<TyId, AllocError>
+    fitted_signature = (self :: @Self, c :: Checker, ty: TyId, off: usize)
+                       Res<TyId, AllocError>
+    recovery_signature = (self :: @Self, c :: Checker, ty: TyId, off: usize)
+                         Res<TyId, AllocError>
+    signature = (
+        self :: @Self,
+        c     :: Checker,
+        ty    : TyId,
+        off   : usize,
+        fit   : SignatureFit
+    ) Res<TyId, AllocError>
+    signature_with_params = (
+        self   :: @Self,
+        c      :: Checker,
+        ty     : TyId,
+        params : Vec<TyId>,
+        off    : usize,
+        fit    : SignatureFit
+    ) Res<TyId, AllocError>
 }
+```
+
+#### Enums
+
+```zen
+SignatureFit = Exact | Recovery(str)
 ```
 
 #### Functions
@@ -14606,6 +14636,8 @@ CallCheck = (a: Alloc, id: ExprId, node: Expr, call: Call, ctx: Ctx)
 call_callee* = (tree: Ast, call: Call) Expr
 
 call_callee_at = (tree: Ast, id: ExprId) Expr
+
+call_name = (c: Checker, call: Call) str
 
 call_type* = (c :: Checker, id: ExprId, node: Expr, call: Call, ctx: Ctx)
              Res<TyId, AllocError>
@@ -14731,13 +14763,19 @@ refuse_actor_payloads = (c :: Checker, recv: TyId, actuals: Vec<Actual>)
 
 actor_payload_unsafe = (c: Checker, ty: TyId) bool
 
-pick_fitting = (c :: Checker, found: Vec<Found>, actuals: Vec<Actual>)
+pick_fitting = (
+    c       :: Checker,
+    found   : Vec<Found>,
+    actuals : Vec<Actual>,
+    off     : usize
+)
                Res<Res<Found>, AllocError>
 
 found_fits = (
     c       :: Checker,
     f       : Found,
-    actuals : Vec<Actual>
+    actuals : Vec<Actual>,
+    off     : usize
 ) Res<bool, AllocError>
 
 fn_params = (c :: Checker, ty: TyId, out :: Vec<TyId>)
@@ -14877,12 +14915,14 @@ alias_module, module_not_a_value = sema.sema_module
 
 Cand, TBound, Actual, cands_of, travelled_cands, matches = sema.sema_cand
 
-ty_at, is_tvar, recv_sig_fits, omittable_tail = sema.sema_cand
+ty_at, is_tvar, sig_fits, signature_matches = sema.sema_cand
+
+omittable_tail = sema.sema_cand
 ```
 
 ### `src/sema/sema_cand.zen`
 
-54 declarations (types: 3, functions: 37, imports and re-exports: 14).
+57 declarations (types: 3, functions: 40, imports and re-exports: 14).
 
 #### Types
 
@@ -15026,7 +15066,28 @@ value_fits = (c :: Checker, a: Actual, p: TyId) Res<bool, AllocError>
 recv_sig_fits* = (c :: Checker, ps: Vec<TyId>, actuals: Vec<Actual>)
                  Res<bool, AllocError>
 
+signature_matches* = (
+    c       :: Checker,
+    ps      : Vec<TyId>,
+    actuals : Vec<Actual>,
+    off     : usize
+) Res<bool, AllocError>
+
 sig_fits* = (
+    c       :: Checker,
+    ps      : Vec<TyId>,
+    actuals : Vec<Actual>,
+    off     : usize
+) Res<bool, AllocError>
+
+marker_or_fixed_fits = (
+    c       :: Checker,
+    ps      : Vec<TyId>,
+    actuals : Vec<Actual>,
+    off     : usize
+) Res<bool, AllocError>
+
+marker_sig_fits = (
     c       :: Checker,
     ps      : Vec<TyId>,
     actuals : Vec<Actual>,

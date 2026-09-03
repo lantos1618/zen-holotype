@@ -1,0 +1,37 @@
+Probe = {}
+
+Probe.impl(Actor, {
+    show = (self :: @Self, ctx: Context, left: str, n: i64, right: str) {
+        ctx.env.out.println("{} {} {}", left, n, right)
+    }
+
+    ping = (self :: @Self, ctx: Context) {
+        ctx.env.out.println("ping")
+    }
+})
+
+Error = AllocError | ActorStartError | ActorError
+
+send_words = (env: Env, probe: Ref<Probe>) Res<(), AllocError | ActorError> {
+    arena ::= env.mem.alloc();
+    left  = arena.String("left").try();
+    right = arena.String("right").try();
+    probe.show(left.view(), 7, right.view()).try();
+    Ok(())
+}
+
+main = (env: Env) Res<i32, Error> {
+    probe = env.spawn(Probe()).try();
+    send_words(env, probe).try();
+    probe.ping().try();
+    probe.stop();
+    probe.join();
+    probe.ping().match({
+        Ok(_)  => println("open"),
+        Err(e) => e.match({
+            Closed => println("closed"),
+            Full   => println("full"),
+        }),
+    });
+    Ok(0)
+}

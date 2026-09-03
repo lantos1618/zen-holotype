@@ -33,7 +33,11 @@ J       ?= $(shell nproc 2>/dev/null || echo 4)
 CACHE   ?= $(shell command -v ccache 2>/dev/null)
 ZCC      = $(CACHE) $(CC)
 
-.PHONY: all build seed test lint parse cap dupcomments faults lextile determinism grammar fmt asan leak profile clean help
+.PHONY: all build seed test verify lint parse cap dupcomments faults lextile determinism grammar fmt asan leak profile clean help
+
+# These gates share ./zen, build/, and grammar/zen.so. Keep their dependency
+# graphs serial even when an operator invokes `make -j verify`.
+.NOTPARALLEL: verify test fmt determinism
 
 all: test
 
@@ -81,6 +85,13 @@ seed: build
 ##
 test: build lint parse cap dupcomments faults lextile
 	$(PY) tests/run.py
+
+## verify: the authoritative repository-green door used by CI and releases.
+##
+## Keep this target as the single list of required gates. Shared prerequisites
+## are built once per invocation, then formatting and determinism inspect the
+## same compiler that ran the test suite.
+verify: test fmt determinism
 
 ## faults: every fault the compiler declares must have a site that raises
 ## it. Green here does NOT mean every diagnostic works — it means none is

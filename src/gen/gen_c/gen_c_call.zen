@@ -369,6 +369,73 @@ CallSite = {
     }
 }
 
+// A bare call name follows visible language precedence: a local closure wins,
+// `Ok` and `Err` construct the destination `Res`, a declared `println` shadows
+// print sugar, and every other name uses ordinary resolution.
+NamedCallSite = {
+    site: CallSite,
+    name: str,
+    want: TyId,
+
+    lower = (self: @Self, be :: CBackend, out :: String)
+            Res<(), AllocError> {
+        be.closure_slot(self.name).match({
+            Ok(s) => be.lower_closure_call(
+                self.site.id,
+                self.site.c,
+                s,
+                self.site.ctx,
+                self.want,
+                out
+            ),
+            None  => self.named(be, out),
+        })
+    }
+
+    named = (self: @Self, be :: CBackend, out :: String)
+            Res<(), AllocError> {
+        is_res_ctor(self.name).match({
+            true  => self.lower_res(be, out),
+            false => self.sugar_or_plain(be, out),
+        })
+    }
+
+    lower_res = (self: @Self, be :: CBackend, out :: String)
+                Res<(), AllocError> {
+        be.check.types.at(self.want).match({
+            Res(r) => self.write_res(be, r, out),
+            _      => be.untyped(self.site.id, self.name, out),
+        })
+    }
+
+    write_res = (self: @Self, be :: CBackend, r: TyRes, out :: String)
+                Res<(), AllocError> {
+        payload = self.name.eq("Ok").match({
+            true => r.value, false => r.error,
+        });
+        self.site.c.args.get(0).match({
+            None  => be.write_res_tagged(self.want, self.name, out),
+            Ok(a) => be.write_res_payload(
+                self.site.id,
+                self.want,
+                self.name,
+                a.value,
+                payload,
+                self.site.ctx,
+                out
+            ),
+        })
+    }
+
+    sugar_or_plain = (self: @Self, be :: CBackend, out :: String)
+                     Res<(), AllocError> {
+        be.is_sugar(self.name, self.site.ctx).try().match({
+            true  => be.lower_print(self.site.c, self.name, self.site.ctx, out),
+            false => self.site.resolve(be, self.name, self.want, out),
+        })
+    }
+}
+
 // The immutable facts shared by one direct argument emission. They become a
 // phase only after the receiver has decided `first`; backend and destination
 // remain borrowed by each write.
@@ -728,27 +795,9 @@ lower_call* = (
     out  :: String
 ) Res<(), AllocError> {
     call_callee(be.tree, c).kind.match({
-        Name(n)   => be.lower_name_callee(id, c, n.text, ctx, want, out),
+        Name(n)   => NamedCallSite(site: CallSite(id: id, c: c, recv: None, ctx: ctx), name: n.text, want: want).lower(be, out),
         Access(a) => be.lower_dot_call(id, c, a, ctx, want, out),
         _         => be.lower_indirect(id, c, ctx, out),
-    })
-}
-
-// A name bound to a non-escaping lambda is inlined because it has no boxed C
-// callable value.
-lower_name_callee = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    name : str,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-)
-                    Res<(), AllocError> {
-    be.closure_slot(name).match({
-        Ok(s) => be.lower_closure_call(id, c, s, ctx, want, out),
-        None  => be.lower_named_call(id, c, name, ctx, want, out),
     })
 }
 
@@ -817,37 +866,6 @@ write_indirect_arg = (
     be.value_held(a.value, ctx, want, hold, out)
 }
 
-lower_named_call = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    name : str,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError> {
-    is_res_ctor(name).match({
-        true  => be.lower_res_ctor(id, c, name, ctx, want, out),
-        false => be.lower_sugar_or_plain(id, c, name, ctx, want, out),
-    })
-}
-
-// `println` is sugar only when ordinary name resolution finds no declaration.
-lower_sugar_or_plain = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    name : str,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError> {
-    be.is_sugar(name, ctx).try().match({
-        true  => be.lower_print(c, name, ctx, out),
-        false => be.lower_plain_call(id, c, name, None, ctx, want, out),
-    })
-}
-
 is_sugar = (be :: CBackend, name: str, ctx: Ctx) Res<bool, AllocError> {
     is_print(name).match({
         false => Ok(false),
@@ -862,46 +880,6 @@ undeclared = (be :: CBackend, name: str, ctx: Ctx) Res<bool, AllocError> {
 }
 
 is_res_ctor* = (name: str) bool { name.eq("Ok") || name.eq("Err") }
-
-lower_res_ctor = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    name : str,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError> {
-    be.check.types.at(want).match({
-        Res(r) => be.lower_res_arg(id, c, name, r, ctx, want, out),
-        _      => be.untyped(id, name, out),
-    })
-}
-
-lower_res_arg = (
-    be   :: CBackend,
-    id   : ExprId,
-    c    : Call,
-    name : str,
-    r    : TyRes,
-    ctx  : Ctx,
-    want : TyId,
-    out  :: String
-) Res<(), AllocError> {
-    payload = name.eq("Ok").match({ true => r.value, false => r.error });
-    c.args.get(0).match({
-        None  => be.write_res_tagged(want, name, out),
-        Ok(a) => be.write_res_payload(
-            id,
-            want,
-            name,
-            a.value,
-            payload,
-            ctx,
-            out
-        ),
-    })
-}
 
 // `recv` is the receiver a UFCS call reached this name through — "a free
 // function whose first param is the type is callable as a method", so

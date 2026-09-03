@@ -351,6 +351,20 @@ recv_sig_fits* = (c :: Checker, ps: Vec<TyId>, actuals: Vec<Actual>)
     c.sig_fits(ps, actuals, 1)
 }
 
+// Function parameters are positional. A named argument cannot become a
+// positional one merely because its value has the expected type.
+signature_matches* = (
+    c       :: Checker,
+    ps      : Vec<TyId>,
+    actuals : Vec<Actual>,
+    off     : usize
+) Res<bool, AllocError> {
+    actuals.find((a) { a.named }).match({
+        Ok(_) => Ok(false),
+        None  => c.sig_fits(ps, actuals, off),
+    })
+}
+
 sig_fits* = (
     c       :: Checker,
     ps      : Vec<TyId>,
@@ -358,11 +372,37 @@ sig_fits* = (
     off     : usize
 ) Res<bool, AllocError> {
     c.types.pack_slot(ps).match({
-        None     => c.fixed_arity_fits(ps, actuals.len, off).match({
+        None     => c.marker_or_fixed_fits(ps, actuals, off),
+        Ok(slot) => c.pack_sig_fits(ps, actuals, off, slot),
+    })
+}
+
+marker_or_fixed_fits = (
+    c       :: Checker,
+    ps      : Vec<TyId>,
+    actuals : Vec<Actual>,
+    off     : usize
+) Res<bool, AllocError> {
+    marker = (ps.len > off) && c.prim_name(ps.ty_at(ps.len - 1)).eq("...");
+    marker.match({
+        true  => c.marker_sig_fits(ps, actuals, off),
+        false => c.fixed_arity_fits(ps, actuals.len, off).match({
             false => Ok(false),
             true  => c.each_fits(ps, actuals, actuals.len, off),
         }),
-        Ok(slot) => c.pack_sig_fits(ps, actuals, off, slot),
+    })
+}
+
+marker_sig_fits = (
+    c       :: Checker,
+    ps      : Vec<TyId>,
+    actuals : Vec<Actual>,
+    off     : usize
+) Res<bool, AllocError> {
+    fixed = ps.len - off - 1;
+    (actuals.len >= fixed).match({
+        false => Ok(false),
+        true  => c.each_fits(ps, actuals, fixed, off),
     })
 }
 

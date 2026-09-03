@@ -7,6 +7,8 @@ the language, implementation stages, source style, and verification rules.
 
 - `design_fmt.md`, `design_json.md`, `design_lsp.md`, `design_meta.md`, and
   `design_vararg.md` record feature-specific decisions and remaining gaps.
+- `QUALITY_PLAN.md` maps the path to one authoritative release gate in proposed
+  builder-language terms, with a red-capable exit for every build card.
 - `GEN_C_SHAPE.md` defines the current compiler-structure migration.
 - `SOURCE_OWNERSHIP_AUDIT.md` records the ownership decisions behind that
   migration.

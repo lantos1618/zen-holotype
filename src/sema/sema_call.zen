@@ -31,7 +31,50 @@ push_tparams, module_name = sema.sema_inst
 param_type, type_from_ast = sema.sema_denote
 alias_module, module_not_a_value = sema.sema_module
 Cand, TBound, Actual, cands_of, travelled_cands, matches = sema.sema_cand
-ty_at, is_tvar, recv_sig_fits, omittable_tail = sema.sema_cand
+ty_at, is_tvar, sig_fits, signature_matches = sema.sema_cand
+omittable_tail = sema.sema_cand
+
+// A recovery signature supplies expected types to argument diagnostics, but
+// it cannot make a call valid when its declared parameters do not match.
+SignatureFit = Exact | Recovery(str)
+
+RecoverySig = {
+    ty: TyId,
+    off: usize,
+}
+
+SignatureUse = {
+    node: Expr,
+    call: Call,
+    ctx: Ctx,
+    ty: TyId,
+    params: Vec<TyId>,
+    off: usize,
+    fit: SignatureFit,
+
+    finish = (self: @Self, c :: Checker) Res<TyId, AllocError> {
+        c.arg_literals(self.call.args, self.params, self.off, self.ctx).try();
+        c.arg_lambdas(self.call.args, self.params, self.off, self.ctx).try();
+        c.sig_args_handle_check(
+            self.node,
+            self.call,
+            self.ty,
+            self.off,
+            self.ctx
+        ).try();
+        self.fit.match({
+            Exact          => c.fn_ret(self.node, self.ty),
+            Recovery(name) => {
+                c.report(
+                    self.node.span.file,
+                    self.node.span,
+                    SemaFault.NoOverload(NameFault(name: name))
+                ).try();
+                c.types.unknown()
+            },
+        })
+    }
+}
 
 CallCheck = {
     id: ExprId,
@@ -68,15 +111,35 @@ CallCheck = {
     print_or_call = (self :: @Self, c :: Checker, name: str)
                     Res<TyId, AllocError> {
         name.is_print_sugar().match({
-            true  => c.print_type(self.call),
+            true  => self.print_or_decl(c, name),
             false => self.local_or_decl(c, name),
+        })
+    }
+
+    // `print` and `println` are sugar only when lexical resolution finds no
+    // binding with that name.
+    print_or_decl = (self :: @Self, c :: Checker, name: str)
+                    Res<TyId, AllocError> {
+        c.lookup(name).match({
+            Ok(b) => self.local_signature(c, b.ty),
+            None  => self.print_or_module_decl(c, name),
+        })
+    }
+
+    print_or_module_decl = (self :: @Self, c :: Checker, name: str)
+                           Res<TyId, AllocError> {
+        found ::= c.alloc.Vec<Def>();
+        c.world.defs_of(self.ctx.module, name, found).try();
+        (found.len == 0).match({
+            true  => c.print_type(self.call),
+            false => self.decl(c, name, None, self.actuals, None),
         })
     }
 
     local_or_decl = (self :: @Self, c :: Checker, name: str)
                     Res<TyId, AllocError> {
         c.lookup(name).match({
-            None  => self.decl(c, name, None, self.actuals),
+            None  => self.decl(c, name, None, self.actuals, None),
             Ok(b) => self.local_signature(c, b.ty),
         })
     }
@@ -84,7 +147,7 @@ CallCheck = {
     local_signature = (self :: @Self, c :: Checker, ty: TyId)
                       Res<TyId, AllocError> {
         settled = c.instantiate_sig(self.id, ty, self.actuals).try();
-        self.signature(c, settled, 0)
+        self.fitted_signature(c, settled, 0)
     }
 
     decl = (
@@ -92,7 +155,8 @@ CallCheck = {
         c       :: Checker,
         name    : str,
         recv    : Res<TyId>,
-        actuals : Vec<Actual>
+        actuals : Vec<Actual>,
+        recovery: Res<RecoverySig>
     ) Res<TyId, AllocError> {
         cands ::= c.alloc.Vec<Cand>();
         c.cands_of(self.ctx.module, name, cands).try();
@@ -107,7 +171,7 @@ CallCheck = {
         }).try();
         c.first_matching(cands, actuals).try().match({
             Ok(k) => self.chosen(c, k, actuals),
-            None  => self.construct_or_fail(c, name, recv, cands),
+            None  => self.construct_or_fail(c, name, recv, cands, recovery),
         })
     }
 
@@ -116,14 +180,18 @@ CallCheck = {
         c     :: Checker,
         name  : str,
         recv  : Res<TyId>,
-        cands : Vec<Cand>
+        cands : Vec<Cand>,
+        recovery: Res<RecoverySig>
     ) Res<TyId, AllocError> {
         defs ::= c.alloc.Vec<Def>();
         c.world.defs_of(self.ctx.module, name, defs).try();
         defs.find((d) { d.kind.is_type_def() }).match({
-            None  => recv.match({
-                Ok(ty) => c.no_such_method(self.call, name, ty),
-                None   => c.no_overload(self.node, name, cands),
+            None  => recovery.match({
+                Ok(sig) => self.recovery_signature(c, sig.ty, sig.off),
+                None    => recv.match({
+                    Ok(ty) => c.no_such_method(self.call, name, ty),
+                    None   => c.no_overload(self.node, name, cands),
+                }),
             }),
             Ok(d) => self.construct_def(c, d),
         })
@@ -242,7 +310,7 @@ CallCheck = {
         c.refuse_actor_payloads(b.ty, self.actuals).try();
         (found.len > 0).match({
             true  => {
-                got = self.method(c, found).try();
+                got = self.method(c, ac, b, found).try();
                 self.actuals.get(0).match({
                     None    => Ok(got),
                     Ok(arg) => c.actor_spawn_ret(
@@ -257,32 +325,78 @@ CallCheck = {
         })
     }
 
-    method = (self :: @Self, c :: Checker, found: Vec<Found>)
+    method = (
+        self  :: @Self,
+        c     :: Checker,
+        ac    : Access,
+        b     : Base,
+        found : Vec<Found>
+    )
              Res<TyId, AllocError> {
-        c.pick_fitting(found, self.actuals).try().match({
-            Ok(f) => self.signature(c, f.ty, 1),
-            None  => self.by_arity(c, found),
+        c.pick_fitting(found, self.actuals, 1).try().match({
+            Ok(f) => self.signature(c, f.ty, 1, SignatureFit.Exact),
+            None  => c.ref_of_actor(b.ty).try().match({
+                None  => self.by_arity(c, ac, b, found, 1),
+                Ok(_) => c.pick_fitting(found, self.actuals, 0).try().match({
+                    Ok(f) => self.signature(c, f.ty, 0, SignatureFit.Exact),
+                    None  => self.by_arity(c, ac, b, found, 1),
+                }),
+            }),
         })
     }
 
-    by_arity = (self :: @Self, c :: Checker, found: Vec<Found>)
+    by_arity = (
+        self  :: @Self,
+        c     :: Checker,
+        ac    : Access,
+        b     : Base,
+        found : Vec<Found>,
+        off   : usize
+    )
                Res<TyId, AllocError> {
-        c.pick_arity(found, self.actuals.len + 1).match({
-            None  => self.first_found(c, found),
-            Ok(f) => self.signature(c, f.ty, 1),
+        c.pick_arity(found, self.actuals.len + off).match({
+            None  => self.first_found(c, ac, b, found, off),
+            Ok(f) => self.ufcs_with_recovery(
+                c,
+                ac,
+                b,
+                Ok(RecoverySig(ty: f.ty, off: off))
+            ),
         })
     }
 
-    first_found = (self :: @Self, c :: Checker, found: Vec<Found>)
+    first_found = (
+        self  :: @Self,
+        c     :: Checker,
+        ac    : Access,
+        b     : Base,
+        found : Vec<Found>,
+        off   : usize
+    )
                   Res<TyId, AllocError> {
         found.get(0).match({
             None  => c.types.unknown(),
-            Ok(f) => self.signature(c, f.ty, 1),
+            Ok(f) => self.ufcs_with_recovery(
+                c,
+                ac,
+                b,
+                Ok(RecoverySig(ty: f.ty, off: off))
+            ),
         })
     }
 
     ufcs = (self :: @Self, c :: Checker, ac: Access, b: Base)
            Res<TyId, AllocError> {
+        self.ufcs_with_recovery(c, ac, b, None)
+    }
+
+    ufcs_with_recovery = (
+        self     :: @Self,
+        c        :: Checker,
+        ac       : Access,
+        b        : Base,
+        recovery : Res<RecoverySig>
+    ) Res<TyId, AllocError> {
         all ::= c.alloc.Vec<Actual>();
         all.add(Actual(
             ty: b.ty,
@@ -292,22 +406,69 @@ CallCheck = {
             span: self.node.span
         )).try();
         self.actuals.loop((h, a) { all.add(a).try() });
-        self.decl(c, ac.name.text, Ok(b.ty), all)
+        self.decl(c, ac.name.text, Ok(b.ty), all, recovery)
     }
 
     indirect = (self :: @Self, c :: Checker) Res<TyId, AllocError> {
+        self.load_actuals(c).try();
         ty = c.type_of(self.call.callee, self.ctx).try();
-        self.signature(c, ty, 0)
+        self.fitted_signature(c, ty, 0)
     }
 
-    signature = (self :: @Self, c :: Checker, ty: TyId, off: usize)
-                Res<TyId, AllocError> {
+    fitted_signature = (self :: @Self, c :: Checker, ty: TyId, off: usize)
+                       Res<TyId, AllocError> {
         params ::= c.alloc.Vec<TyId>();
         c.fn_params(ty, params).try();
-        c.arg_literals(self.call.args, params, off, self.ctx).try();
-        c.sig_lambdas(self.call, ty, off, self.ctx).try();
-        c.sig_args_handle_check(self.node, self.call, ty, off, self.ctx).try();
-        c.fn_ret(self.node, ty)
+        fit = c.types.at(ty).match({
+            Fn(_) => c.signature_matches(params, self.actuals, off),
+            _     => Ok(true),
+        }).try().match({
+            true  => SignatureFit.Exact,
+            false => SignatureFit.Recovery(c.call_name(self.call)),
+        });
+        self.signature_with_params(c, ty, params, off, fit)
+    }
+
+    recovery_signature = (self :: @Self, c :: Checker, ty: TyId, off: usize)
+                         Res<TyId, AllocError> {
+        self.signature(
+            c,
+            ty,
+            off,
+            SignatureFit.Recovery(c.call_name(self.call))
+        )
+    }
+
+    signature = (
+        self :: @Self,
+        c     :: Checker,
+        ty    : TyId,
+        off   : usize,
+        fit   : SignatureFit
+    ) Res<TyId, AllocError> {
+        params ::= c.alloc.Vec<TyId>();
+        c.fn_params(ty, params).try();
+        self.signature_with_params(c, ty, params, off, fit)
+    }
+
+    signature_with_params = (
+        self   :: @Self,
+        c      :: Checker,
+        ty     : TyId,
+        params : Vec<TyId>,
+        off    : usize,
+        fit    : SignatureFit
+    ) Res<TyId, AllocError> {
+        use = SignatureUse(
+            node: self.node,
+            call: self.call,
+            ctx: self.ctx,
+            ty: ty,
+            params: params,
+            off: off,
+            fit: fit
+        );
+        use.finish(c)
     }
 }
 
@@ -332,6 +493,14 @@ call_callee_at = (tree: Ast, id: ExprId) Expr {
     node.kind.match({
         Paren(p) => tree.call_callee_at(p.inner),
         _        => node,
+    })
+}
+
+call_name = (c: Checker, call: Call) str {
+    c.tree.call_callee(call).kind.match({
+        Name(n)   => n.text,
+        Access(a) => a.name.text,
+        _         => "",
     })
 }
 
@@ -706,11 +875,16 @@ actor_payload_unsafe = (c: Checker, ty: TyId) bool {
 
 // First member whose declared parameters accept these arguments. Duplicate
 // matching signatures are diagnosed at their declarations.
-pick_fitting = (c :: Checker, found: Vec<Found>, actuals: Vec<Actual>)
+pick_fitting = (
+    c       :: Checker,
+    found   : Vec<Found>,
+    actuals : Vec<Actual>,
+    off     : usize
+)
                Res<Res<Found>, AllocError> {
     hit: Res<Found> = None;
     found.loop((h, f) {
-        c.found_fits(f, actuals).try().then(() {
+        c.found_fits(f, actuals, off).try().then(() {
             hit.match({
                 None  => { hit = Ok(f); },
                 Ok(_) => {},
@@ -723,11 +897,12 @@ pick_fitting = (c :: Checker, found: Vec<Found>, actuals: Vec<Actual>)
 found_fits = (
     c       :: Checker,
     f       : Found,
-    actuals : Vec<Actual>
+    actuals : Vec<Actual>,
+    off     : usize
 ) Res<bool, AllocError> {
     params ::= c.alloc.Vec<TyId>();
     c.fn_params(f.ty, params).try();
-    c.recv_sig_fits(params, actuals)
+    c.sig_fits(params, actuals, off)
 }
 
 // A member that is not a function has no parameters and fits no call.

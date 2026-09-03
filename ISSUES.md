@@ -393,15 +393,6 @@ by propagation rather than by writing `Error.Torn(..)` at the call site". So the
 direct form is untested rather than merely unlucky, and `DESIGN.md:137-164`
 spends five paragraphs specifying it.
 
-**`make fmt` is in no gate, and there is no CI.** `PLAN.md:321` requires
-"`zen fmt --check` over the whole tree, in CI, failing the build". `Makefile:64`
-is `test: build parse design cap dupcomments faults lextile ufcs style
-grammar-test editors bench-allocs` — no `fmt` — and the repository has no `.github/`, no
-`.gitlab-ci.yml`, no CI configuration at all. The per-file guard inside
-`fmt.zen` still runs on every invocation, so losslessness is protected; what is
-not protected is the tree staying formatted. `Makefile:53-63` has diagnosed this
-exact disease three times about three other targets.
-
 **A diagnostic naming a rule the code stopped enforcing.**
 `gen_c_const.zen:158` refuses with *"a constant whose value is not a literal"*,
 but the gate actually applied is `is_pure_value` (`:170`), which admits
