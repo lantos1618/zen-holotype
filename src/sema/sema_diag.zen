@@ -56,6 +56,7 @@ SemaFault* =
 
     // overloading
     | NoOverload(NameFault)            // no candidate of that arity or those types
+    | InvalidInstantiation(NameFault)   // written or inferred type arguments do not fit
     | DuplicateSignature(PairFault)    // param names are not identity
     | AmbiguousOverload(PairFault)     // two signatures accept the same call
 
@@ -71,6 +72,7 @@ SemaFault* =
     | AmbiguousMember(PairFault)       // two impls, no bound in scope to choose
     | BoundNotSatisfied(TypeFault)     // no impl of the bound
     | EqNeedsImpl(TypeFault)           // `==` dispatches to `Eq`, and there is none
+    | InvalidOperator(TypeFault)       // these operands are outside the built-in operator's domain
     | ComputedFieldAssign(NameFault)   // no storage, so nothing to assign into
     | ComputedFieldAddress(NameFault)  // no storage, so no address exists
 
@@ -158,6 +160,7 @@ message* = (fault: SemaFault) str {
         DuplicateEnumDiscriminant(_) => "duplicate enum discriminant: decoding one integer must select exactly one variant",
         CatchAllConstruction(_)      => "a represented enum's catch-all is constructed only by `from_discriminant`, which preserves the canonical known variants",
         NoOverload(_)                => "no overload matches: resolution is on declared parameter types and arity",
+        InvalidInstantiation(_)      => "invalid generic instantiation: type arguments must match the declaration and every use of one parameter must agree",
         DuplicateSignature(_)        => "duplicate signature: parameter names are documentation, not identity",
         AmbiguousOverload(_)         => "ambiguous overload: these two signatures accept the same call",
         ImplMissingField(_)          => "impl is missing field",
@@ -171,6 +174,7 @@ message* = (fault: SemaFault) str {
         AmbiguousMember(_)           => "ambiguous: two impls supply this name and no bound in scope selects one",
         BoundNotSatisfied(_)         => "bound not satisfied: this type has no impl of the bound, so it has none of the fields the bound promises",
         EqNeedsImpl(_)               => "`==` needs an `Eq`: equality dispatches to the impl, so write one or compare the parts",
+        InvalidOperator(_)           => "operator is not defined for these operands: arithmetic and ordering require numbers; remainder and wrapping require integers",
         ComputedFieldAssign(_)       => "cannot assign to a computed field: an impl-supplied field has no storage, so there is nothing to assign into",
         ComputedFieldAddress(_)      => "cannot take the address of a computed field: there is no storage, so no address exists",
         TryOutsideRes(_)             => "`.try()` in a function that does not return Res: try unwraps Ok or returns the failure from the enclosing function, so there must be somewhere to return it to",
@@ -220,6 +224,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         NotWritable(f)               => out.write_unwritable(f),
         ModuleNotAValue(f)           => out.write_module(f),
         NoOverload(f)                => out.write_name(f),
+        InvalidInstantiation(f)      => out.write_name(f),
         ImplMissingField(f)          => out.write_missing(f),
         CtorMissingField(f)          => out.write_ctor_missing(f),
         CtorNamesNoMember(f)         => out.write_member(types, f),
@@ -279,6 +284,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         NoSuchField(f)               => out.write_member(types, f),
         MemberNeedsValue(f)          => out.write_needs_value(types, f),
         EqNeedsImpl(f)               => out.write_needs_eq(types, f),
+        InvalidOperator(f)           => out.write_operator_types(types, f),
         DiscardedValue(f)            => out.write_discarded(types, f),
         TypeMismatch(f)              => out.write_types(types, f),
         ArmsDisagree(f)              => out.write_arms(types, f),
@@ -469,6 +475,17 @@ write_types = (out :: String, types: Types, f: TypeFault)
     out.quote(f.name).try();
     out.fmt(": expected {}, found {}", expected.view(), found.view()).try();
     Ok(());
+}
+
+write_operator_types = (out :: String, types: Types, f: TypeFault)
+                       Res<(), AllocError> {
+    left  ::= types.name_of(f.expected).try();
+    right ::= types.name_of(f.found).try();
+    f.expected.eq(f.found).match({
+        true  => out.fmt(" — `{}`", left.view()),
+        false => out.fmt(" — `{}` and `{}`", left.view(), right.view()),
+    }).try();
+    Ok(())
 }
 
 // Include source text only when the rejected value is a direct literal.

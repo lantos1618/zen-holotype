@@ -10,7 +10,7 @@ Def, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 Inst, InstEdge, subst, unify, tparam_vars, zip = sema.sema_inst
 has_var, inst_of_named, decl_tparam_vars = sema.sema_inst
-Cand, TBound, Actual, ty_at = sema.sema_cand
+Cand, TBound, Actual, ty_at, signature_matches = sema.sema_cand
 impl_bound_type, LocalImpl, local_impls = sema.sema_supply
 type_of = sema.sema_type
 type_from_ast = sema.sema_denote
@@ -25,6 +25,17 @@ catch_all_named = sema.sema_discriminant
 
 construct* = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
             Res<TyId, AllocError> {
+    c.ctor_type_arg_arity_fits(call, d).try().match({
+        false => {
+            c.invalid_instantiation(id, d.name).try();
+            c.types.unknown()
+        },
+        true  => c.valid_construct(id, call, d, ctx),
+    })
+}
+
+valid_construct = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
+                  Res<TyId, AllocError> {
     c.resolve_call(id, d.id).try();
     args ::= c.alloc.Vec<TyId>();
     c.ctor_args(call, d, ctx, args).try();
@@ -33,6 +44,21 @@ construct* = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
     c.check_ctor_fields(call, ty, ctx).try();
     c.check_ctor_shape(call, ty, c.tree.expr_at(id).span).try();
     Ok(ty);
+}
+
+ctor_type_arg_arity_fits = (c :: Checker, call: Call, d: Def)
+                           Res<bool, AllocError> {
+    (call.targs.len == 0).match({
+        true  => Ok(true),
+        false => c.tree.decl_at(d.id).match({
+            None     => Ok(false),
+            Ok(decl) => {
+                vars ::= c.alloc.Vec<TyId>();
+                c.decl_tparam_vars(decl, d.qname, vars).try();
+                Ok(call.targs.len == vars.len)
+            },
+        }),
+    })
 }
 
 settled_ctor_type = (
@@ -104,6 +130,37 @@ unify_ctor_field = (
 }
 
 variant_call_type* = (
+    c    :: Checker,
+    call : Call,
+    ty   : TyId,
+    name : str,
+    ctx  : Ctx
+) Res<TyId, AllocError> {
+    own = c.applied_at_own_vars(ty).try();
+    c.variant_type_arg_arity_fits(call, own).match({
+        false => c.invalid_variant_instantiation(call, name),
+        true  => c.valid_variant_call(call, ty, name, ctx),
+    })
+}
+
+variant_type_arg_arity_fits = (c: Checker, call: Call, own: TyId) bool {
+    (call.targs.len == 0) || c.types.at(own).match({
+        Named(n) => call.targs.len == n.args.len,
+        _        => false,
+    })
+}
+
+invalid_variant_instantiation = (c :: Checker, call: Call, name: str)
+                                Res<TyId, AllocError> {
+    c.report(
+        call.args_span.file,
+        call.args_span,
+        SemaFault.InvalidInstantiation(NameFault(name: name))
+    ).try();
+    c.types.unknown()
+}
+
+valid_variant_call = (
     c    :: Checker,
     call : Call,
     ty   : TyId,
@@ -319,11 +376,18 @@ instantiate* = (
     k       : Cand,
     actuals : Vec<Actual>,
     ctx     : Ctx
-) Res<TyId, AllocError> {
-    k.generic.match({
-        false => Ok(k.ret),
-        true  => c.instantiated_ret(id, call, k, actuals, ctx),
+) Res<Res<TyId>, AllocError> {
+    c.type_arg_arity_fits(call, k).match({
+        false => c.invalid_instantiation(id, k.name),
+        true  => k.generic.match({
+            false => Ok(Ok(k.ret)),
+            true  => c.instantiated_ret(id, call, k, actuals, ctx),
+        }),
     })
+}
+
+type_arg_arity_fits = (c: Checker, call: Call, k: Cand) bool {
+    (call.targs.len == 0) || (call.targs.len == k.tvars.len)
 }
 
 instantiated_ret = (
@@ -334,11 +398,29 @@ instantiated_ret = (
     actuals : Vec<Actual>,
     ctx     : Ctx
 )
-                   Res<TyId, AllocError> {
+                   Res<Res<TyId>, AllocError> {
     inst = c.call_inst(call, k, actuals, ctx).try();
-    c.resolve_inst(id, inst).try();
-    c.note_call_edge(id, k, inst).try();
-    c.subst(k.ret, inst)
+    params ::= c.alloc.Vec<TyId>();
+    c.subst_list(k.params, inst, params).try();
+    c.signature_matches(params, actuals, 0).try().match({
+        false => c.invalid_instantiation(id, k.name),
+        true  => {
+            c.resolve_inst(id, inst).try();
+            c.note_call_edge(id, k, inst).try();
+            Ok(Ok(c.subst(k.ret, inst).try()))
+        },
+    })
+}
+
+invalid_instantiation = (c :: Checker, id: ExprId, name: str)
+                        Res<Res<TyId>, AllocError> {
+    at = c.tree.expr_at(id).span;
+    c.report(
+        at.file,
+        at,
+        SemaFault.InvalidInstantiation(NameFault(name: name))
+    ).try();
+    Ok(None)
 }
 
 note_call_edge = (c :: Checker, id: ExprId, k: Cand, inst: Inst)

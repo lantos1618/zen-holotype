@@ -208,16 +208,21 @@ CallCheck = {
 
     chosen = (self :: @Self, c :: Checker, k: Cand, actuals: Vec<Actual>)
              Res<TyId, AllocError> {
-        c.resolve_call(self.id, k.id).try();
-        c.check_bounds(k, actuals, self.node.span).try();
         off = self.call.recv_off(actuals);
         c.arg_literals(self.call.args, k.params, off, self.ctx).try();
-        ret = c.instantiate(self.id, self.call, k, actuals, self.ctx).try();
-        params ::= c.alloc.Vec<TyId>();
-        c.settled_params(self.id, k, params).try();
-        c.arg_lambdas(self.call.args, params, off, self.ctx).try();
-        c.args_handle_check(self.call.args, params, off, self.ctx).try();
-        Ok(ret)
+        c.instantiate(self.id, self.call, k, actuals, self.ctx).try().match({
+            None    => c.types.unknown(),
+            Ok(ret) => {
+                c.resolve_call(self.id, k.id).try();
+                c.check_bounds(k, actuals, self.node.span).try();
+                params ::= c.alloc.Vec<TyId>();
+                c.settled_params(self.id, k, params).try();
+                c.arg_lambdas(self.call.args, params, off, self.ctx).try();
+                c.args_handle_check(self.call.args, params, off, self.ctx)
+                    .try();
+                Ok(ret)
+            },
+        })
     }
 
     member = (self :: @Self, c :: Checker, ac: Access)
@@ -360,23 +365,55 @@ CallCheck = {
                       f: Found) Res<TyId, AllocError> {
         (self.call.targs.len == 0).match({
             true  => Ok(f.ty),
-            false => c.member_fn(b.ty, ac.name.text).match({
+            false => c.member_fn(b.ty, ac.name.text, f.span).match({
                 None   => Ok(f.ty),
-                Ok(fn) => {
-                    owner = c.owner_of(f.module, fn.name.text).try();
-                    vars ::= c.alloc.Vec<TyId>();
-                    c.tparam_vars(fn.tparams, owner, vars).try();
-                    tys ::= c.alloc.Vec<TyId>();
-                    self.call.targs.loop((h, t) {
-                        tys.add(c.type_from_ast(t, self.ctx).try()).try();
-                    });
-                    inst ::= c.alloc.Inst();
-                    c.zip(vars, tys, inst).try();
-                    c.resolve_inst(self.id, inst).try();
-                    c.subst(f.ty, inst)
-                },
+                Ok(fn) => self.instantiate_member(c, ac, f, fn),
             }),
         })
+    }
+
+    instantiate_member = (self: @Self, c :: Checker, ac: Access, f: Found,
+                          fn: Function) Res<TyId, AllocError> {
+        owner = c.owner_of(f.module, fn.name.text).try();
+        vars ::= c.alloc.Vec<TyId>();
+        c.tparam_vars(fn.tparams, owner, vars).try();
+        ((self.call.targs.len > 0)
+            && (self.call.targs.len != vars.len)).match({
+            true  => self.invalid_member_instantiation(c, ac.name.text),
+            false => self.settled_member(c, ac.name.text, f.ty, vars),
+        })
+    }
+
+    settled_member = (self: @Self, c :: Checker, name: str, ty: TyId,
+                      vars: Vec<TyId>) Res<TyId, AllocError> {
+        tys ::= c.alloc.Vec<TyId>();
+        self.call.targs.loop((h, t) {
+            tys.add(c.type_from_ast(t, self.ctx).try()).try();
+        });
+        inst ::= c.alloc.Inst();
+        c.zip(vars, tys, inst).try();
+        settled = c.subst(ty, inst).try();
+        fitted ::= c.alloc.Vec<TyId>();
+        c.fn_params(settled, fitted).try();
+        c.signature_matches(fitted, self.actuals, 1).try().match({
+            false => self.invalid_member_instantiation(c, name),
+            true  => {
+                (inst.len() > 0).then(() {
+                    c.resolve_inst(self.id, inst).try();
+                });
+                Ok(settled)
+            },
+        })
+    }
+
+    invalid_member_instantiation = (self: @Self, c :: Checker, name: str)
+                                   Res<TyId, AllocError> {
+        c.report(
+            self.node.span.file,
+            self.node.span,
+            SemaFault.InvalidInstantiation(NameFault(name: name))
+        ).try();
+        c.types.unknown()
     }
 
     by_arity = (
@@ -1188,11 +1225,13 @@ ambiguous = (c :: Checker, name: str, a: Cand, b: Cand) Res<(), AllocError> {
 }
 
 // The function a struct declares under `name`, for its parameter list.
-member_fn = (c: Checker, ty: TyId, name: str) Res<Function> {
+member_fn = (c: Checker, ty: TyId, name: str, at: Span) Res<Function> {
     c.types.at(ty).match({
         Named(n) => c.tree.decl_at(n.decl).match({
             Ok(decl) => decl.kind.match({
-                Struct(st) => st.members.find((m) { m.named(name) }).match({
+                Struct(st) => st.members.find((m) {
+                    m.named(name) && member_span_eq(m.span, at)
+                }).match({
                     Ok(m) => m.kind.match({
                         Function(fn) => Ok(fn),
                         _            => None,
@@ -1205,4 +1244,12 @@ member_fn = (c: Checker, ty: TyId, name: str) Res<Function> {
         }),
         _        => None,
     })
+}
+
+member_span_eq = (a: Span, b: Span) bool {
+    a.file.eq(b.file)
+        && (a.start.line == b.start.line)
+        && (a.start.col == b.start.col)
+        && (a.end.line == b.end.line)
+        && (a.end.col == b.end.col)
 }

@@ -1,12 +1,45 @@
-Binary = std.ast
+Binary, BinOp, ExprId, Unary = std.ast
 AllocError = std.mem
 str = std.text
-TyId, is_integer = sema.sema_ty
+TyId, is_integer, c_integer, is_float = sema.sema_ty
 Checker = sema.sema_check
+SemaFault, TypeFault = sema.sema_diag
 check_literal = sema.sema_trap
 
+// An operator first asks whether both operands belong to its domain, then
+// asks whether the pair settles to one type. Literal families take the other
+// side's type and are checked by value; poison and open generic variables
+// decline so an earlier mistake does not cascade.
 operands_agree* = (c :: Checker, b: Binary, lhs: TyId, rhs: TyId)
                   Res<(), AllocError> {
+    logical(b.op).match({
+        true  => Ok(()),
+        false => c.nonlogical_operands(b, lhs, rhs),
+    })
+}
+
+nonlogical_operands = (c :: Checker, b: Binary, lhs: TyId, rhs: TyId)
+                      Res<(), AllocError> {
+    (c.written_operand(b.lhs) && c.written_operand(b.rhs)
+        && c.askable_operand(lhs) && c.askable_operand(rhs)).match({
+        false => Ok(()),
+        true  => c.operator_accepts(b.op, lhs, rhs).match({
+            false => c.invalid_operator(b, lhs, rhs),
+            true  => c.pair_agrees(b, lhs, rhs),
+        }),
+    })
+}
+
+// Parser recovery inserts an empty-span unit expression after `2 +;`.
+// Its parse diagnostic already owns the site; the placeholder is not an
+// operand the author wrote and must not create a semantic cascade.
+written_operand = (c: Checker, id: ExprId) bool {
+    span = c.tree.expr_at(id).span;
+    (span.start.line != span.end.line) || (span.start.col != span.end.col)
+}
+
+pair_agrees = (c :: Checker, b: Binary, lhs: TyId, rhs: TyId)
+              Res<(), AllocError> {
     c.is_literal_ty(lhs).match({
         true  => c.check_literal(b.lhs, rhs),
         false => c.rhs_operand(b, lhs, rhs),
@@ -25,14 +58,52 @@ rhs_operand = (c :: Checker, b: Binary, lhs: TyId, rhs: TyId)
 
 settled_agree = (c :: Checker, b: Binary, lhs: TyId, rhs: TyId)
                 Res<(), AllocError> {
-    left: str  = c.prim_name(lhs);
-    right: str = c.prim_name(rhs);
-    disagree   = is_integer(left) && is_integer(right)
-        && (left.eq(right) == false);
-    disagree.match({
-        true  => c.mixed_operands(b, lhs, rhs),
-        false => Ok(()),
+    lhs.eq(rhs).match({
+        true  => Ok(()),
+        false => c.mixed_operands(b, lhs, rhs),
     })
+}
+
+// Equality owns its domain through `Eq`; logical operators are checked by
+// `check_logical`. The remaining built-ins have closed numeric domains.
+operator_accepts = (c: Checker, op: BinOp, lhs: TyId, rhs: TyId) bool {
+    op.match({
+        Rem       => c.integer_operand(lhs) && c.integer_operand(rhs),
+        AddWrap   => c.integer_operand(lhs) && c.integer_operand(rhs),
+        SubWrap   => c.integer_operand(lhs) && c.integer_operand(rhs),
+        MulWrap   => c.integer_operand(lhs) && c.integer_operand(rhs),
+        Add       => c.numeric_operand(lhs) && c.numeric_operand(rhs),
+        Sub       => c.numeric_operand(lhs) && c.numeric_operand(rhs),
+        Mul       => c.numeric_operand(lhs) && c.numeric_operand(rhs),
+        Div       => c.numeric_operand(lhs) && c.numeric_operand(rhs),
+        Less      => c.numeric_operand(lhs) && c.numeric_operand(rhs),
+        LessEq    => c.numeric_operand(lhs) && c.numeric_operand(rhs),
+        Greater   => c.numeric_operand(lhs) && c.numeric_operand(rhs),
+        GreaterEq => c.numeric_operand(lhs) && c.numeric_operand(rhs),
+        _         => true,
+    })
+}
+
+numeric_operand = (c: Checker, ty: TyId) bool {
+    c.integer_operand(ty) || c.float_operand(ty)
+}
+
+integer_operand = (c: Checker, ty: TyId) bool {
+    name: str = c.prim_name(ty);
+    is_integer(name) || c_integer(name) || name.eq("c_char") || name.eq("int")
+}
+
+float_operand = (c: Checker, ty: TyId) bool {
+    name: str = c.prim_name(ty);
+    is_float(name) || name.eq("float")
+}
+
+askable_operand = (c: Checker, ty: TyId) bool {
+    (c.is_unknown(ty) || c.is_infer(ty) || c.is_var(ty)) == false
+}
+
+logical = (op: BinOp) bool {
+    op.match({ And => true, Or => true, _ => false })
 }
 
 // The position is the operand whose type is refused: the left half is
@@ -41,4 +112,44 @@ mixed_operands = (c :: Checker, b: Binary, lhs: TyId, rhs: TyId)
                  Res<(), AllocError> {
     at = c.tree.expr_at(b.rhs).span;
     c.coerce(at.file, at, rhs, lhs, "")
+}
+
+invalid_operator = (c :: Checker, b: Binary, lhs: TyId, rhs: TyId)
+                   Res<(), AllocError> {
+    c.report(
+        b.op_span.file,
+        b.op_span,
+        SemaFault.InvalidOperator(TypeFault(
+            name: "",
+            expected: lhs,
+            found: rhs
+        ))
+    )
+}
+
+// Unary minus has the ordinary numeric domain, but no pair from which to
+// infer a literal family. Bare numeric literals remain open until context
+// settles them; all other settled nonnumeric operands are refused at `-`.
+check_neg* = (c :: Checker, u: Unary, inner: TyId)
+             Res<TyId, AllocError> {
+    (c.askable_operand(inner) == false
+        || c.is_literal_ty(inner)
+        || c.numeric_operand(inner)).match({
+        true  => Ok(inner),
+        false => c.invalid_neg(u, inner),
+    })
+}
+
+invalid_neg = (c :: Checker, u: Unary, inner: TyId)
+              Res<TyId, AllocError> {
+    c.report(
+        u.op_span.file,
+        u.op_span,
+        SemaFault.InvalidOperator(TypeFault(
+            name: "",
+            expected: inner,
+            found: inner
+        ))
+    ).try();
+    Ok(inner)
 }
