@@ -9,7 +9,7 @@ Vec = std.collections
 str = std.text
 Range = std.core
 DeclId = sema.sema_id
-TyId, TyNamed, TyRes = sema.sema_ty
+TyId, TyNamed, TyRes, literal_default = sema.sema_ty
 Def, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 Inst, subst, has_var, inst_of_named, owner_of = sema.sema_inst
@@ -247,7 +247,17 @@ settle_one = (
 settle_bound = (be :: CBackend, v: TyId, t: TyId, out :: Inst)
                Res<(), AllocError> {
     arg = sub(be, t).try();
-    out.bind(v, arg)
+    // A literal family is useful while sema looks for context, but a queued C
+    // instantiation needs one concrete identity. Use the same language
+    // defaults as other materialized literals so `<T>(value: T)` called with
+    // `41` emits its parameter, return, and nested `Opt<T>` as i32 together.
+    concrete = be.check.is_literal_ty(arg).match({
+        true  => be.check.types.prim(literal_default(be.check.prim_name(
+            arg
+        ))).try(),
+        false => arg,
+    });
+    out.bind(v, concrete)
 }
 
 // what the arguments say a parameter became
