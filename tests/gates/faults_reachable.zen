@@ -57,10 +57,9 @@ GEN_FILE:   str = "src/gen/gen_diag.zen"
 // here is the enum reading complete while it is not, which is the state this
 // gate was written to end.
 //
-// THE LEDGER IS EMPTY, and `owed` is kept rather than deleted so that the
-// first hole anyone opens has somewhere to be written down. A name in it that
-// gains a raise site is an error too (see `paid` below), so it cannot drift
-// back into the fiction it replaced.
+// THE LEDGER CURRENTLY HAS ONE ENTRY. A name in it that gains a raise site is
+// an error too (see `stale` below), so paid debt cannot drift back into the
+// fiction this gate replaced.
 owed = (name: str) bool {
     // `SemaFault.ComptimeBudget` (#768): the META_STEPS counter it belonged
     // to could never reach zero — three spends on a straight line, and the
@@ -94,11 +93,14 @@ run = (env: Env, alloc: Alloc) Res<i32, AllocError> {
     (bad > 0).match({
         true  => Ok(1),
         false => {
-            total = a.declared + b.declared;
+            total       = a.declared + b.declared;
+            constructed = a.constructed + b.constructed;
+            debt        = a.owed + b.owed;
             println(
-                "faults: {} declared, {} constructed, 0 owed and written down",
+                "faults: {} declared, {} constructed, {} owed and written down",
                 total,
-                total
+                constructed,
+                debt
             );
             Ok(0);
         },
@@ -109,6 +111,8 @@ run = (env: Env, alloc: Alloc) Res<i32, AllocError> {
 // constructs now — a hole someone closed and did not delete.
 Tally = {
     declared*: usize,
+    constructed*: usize,
+    owed*: usize,
     missing*: usize,
     stale*: usize,
 }
@@ -128,7 +132,7 @@ check = (env: Env, alloc: Alloc, enum: str, decl: str) Res<Tally, AllocError> {
 
 gone = (decl: str, e: FsError) Res<Tally, AllocError> {
     println("faults: {} is gone; this gate names it ({})", decl, fs_word(e));
-    Ok(Tally(declared: 0, missing: 1, stale: 0));
+    Ok(Tally(declared: 0, constructed: 0, owed: 0, missing: 1, stale: 0));
 }
 
 // The declaration moved or changed shape, and this check just stopped
@@ -139,25 +143,31 @@ moved = (enum: str, decl: str) Res<Tally, AllocError> {
         enum,
         decl
     );
-    Ok(Tally(declared: 0, missing: 1, stale: 0));
+    Ok(Tally(declared: 0, constructed: 0, owed: 0, missing: 1, stale: 0));
 }
 
 weigh = (env: Env, alloc: Alloc, enum: str, decl: str, names: Vec<str>)
         Res<Tally, AllocError> {
     missing ::= 0;
     stale   ::= 0;
+    built_n ::= 0;
+    owed_n  ::= 0;
     names.loop((h, name) {
         built = constructed(env, alloc, name, decl);
+        built.then(() { built_n = built_n + 1; });
         owed(name).match({
             // in the ledger: constructing it means the debt is paid and the
             // line should be gone
-            true  => built.then(() {
-                stale = stale + 1;
-                println(
-                    "faults: {} is in the ledger and something constructs it now. Delete it from `owed` in tests/gates/faults_reachable.zen — the debt is paid.",
-                    name
-                );
-            }),
+            true  => {
+                owed_n = owed_n + 1;
+                built.then(() {
+                    stale = stale + 1;
+                    println(
+                        "faults: {} is in the ledger and something constructs it now. Delete it from `owed` in tests/gates/faults_reachable.zen — the debt is paid.",
+                        name
+                    );
+                });
+            },
             false => built.match({
                 true  => (),
                 false => {
@@ -175,7 +185,13 @@ weigh = (env: Env, alloc: Alloc, enum: str, decl: str, names: Vec<str>)
             }),
         });
     });
-    Ok(Tally(declared: names.len, missing: missing, stale: stale));
+    Ok(Tally(
+        declared: names.len,
+        constructed: built_n,
+        owed: owed_n,
+        missing: missing,
+        stale: stale
+    ));
 }
 
 // THE VARIANT NAMES, off the real parse tree. A file that does not lex or does

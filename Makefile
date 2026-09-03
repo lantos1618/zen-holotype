@@ -109,8 +109,8 @@ warnings: build
 ## it. Green here does NOT mean every diagnostic works — it means none is
 ## silently absent. Any that are absent are written down in the script's
 ## OWED ledger, so the debt can shrink and cannot quietly grow; the
-## ledger is empty today, and a name in it that gains a raise site is an
-## error too, so it cannot drift back into fiction.
+## ledger currently records ComptimeBudget, and a name in it that gains a
+## raise site is an error too, so it cannot drift back into fiction.
 ##
 ## A Zen gate — tests/gates/faults_reachable.zen; see `gate` above. It reads
 ## the variant list off `std.parse`, where the python it replaced matched a
