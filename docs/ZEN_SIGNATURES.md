@@ -16,15 +16,15 @@ The corresponding decisions are in
 
 | Item | Count |
 | --- | ---: |
-| Zen files | 227 |
-| Top-level declarations | 6688 |
-| Types | 399 |
-| Enums | 103 |
+| Zen files | 233 |
+| Top-level declarations | 6868 |
+| Types | 410 |
+| Enums | 109 |
 | Aliases | 0 |
 | Implementations | 79 |
-| Functions | 3519 |
-| Constants | 167 |
-| Imports and re-exports | 2421 |
+| Functions | 3618 |
+| Constants | 176 |
+| Imports and re-exports | 2476 |
 
 ## Files
 
@@ -1097,6 +1097,178 @@ declare_temp = gen.gen_c.gen_c_flow
 address_of = gen.gen_c.gen_c_fat
 ```
 
+### `src/gen/gen_c/gen_c_args.zen`
+
+37 declarations (types: 2, enums: 1, functions: 14, constants: 1, imports and re-exports: 19).
+
+#### Types
+
+```zen
+Slot = {
+    name:    str,
+    ty:      TyId,
+    ask:     Ask,
+    raw:     String,
+    default: Res<ExprId>,
+    positional = (self: @Self) bool
+}
+
+ArgsLower = {
+    id:        ExprId,
+    ret:       TyId,
+    record_ty: TyId,
+    dst:       String,
+    value:     String,
+    envv:      String,
+    mask:      String,
+    done:      usize,
+    slots ::   Vec<Slot>,
+    emit = (
+        self   :: @Self,
+        be     :: CBackend,
+        a      : Access,
+        rty    : TyId,
+        n      : TyNamed,
+        record : Struct,
+        ctx    : Ctx
+    ) Res<(), AllocError>
+    collect = (
+        self   :: @Self,
+        be     :: CBackend,
+        record : Struct,
+        dctx   : Ctx,
+        inst   : Inst
+    ) Res<(), AllocError>
+    flags = (self: @Self, be :: CBackend) Res<(), AllocError>
+    positionals = (self: @Self, be :: CBackend) Res<(), AllocError>
+    positional = (self: @Self, be :: CBackend, slot: Slot)
+                 Res<(), AllocError>
+    fill = (self: @Self, be :: CBackend, dctx: Ctx) Res<(), AllocError>
+    fill_text = (self: @Self, be :: CBackend, slot: Slot, place: str, dctx: Ctx)
+                Res<(), AllocError>
+    fill_num = (self: @Self, be :: CBackend, slot: Slot, prim: str, place: str,
+                dctx: Ctx) Res<(), AllocError>
+    fill_opt_num = (self: @Self, be :: CBackend, slot: Slot, prim: str,
+                    place: str) Res<(), AllocError>
+    required = (self: @Self, be :: CBackend, slot: Slot)
+               Res<String, AllocError>
+    parsed = (self: @Self, be :: CBackend, slot: Slot, prim: str, res: str)
+             Res<String, AllocError>
+    assign_default = (self: @Self, be :: CBackend, slot: Slot, d: ExprId,
+                      place: str, dctx: Ctx) Res<(), AllocError>
+    finish = (self: @Self, be :: CBackend) Res<(), AllocError>
+    fail_unless_ok = (self: @Self, be :: CBackend, res: str)
+                     Res<(), AllocError>
+    place = (self: @Self, be :: CBackend, field: str) Res<String, AllocError>
+}
+```
+
+#### Enums
+
+```zen
+Ask = Switch | Text | OptText | Num(str) | OptNum(str) | Unknown
+```
+
+#### Functions
+
+```zen
+lower_env_args* = (
+    be       :: CBackend,
+    id       : ExprId,
+    c        : Call,
+    a        : Access,
+    rty      : TyId,
+    declared : TyId,
+    ctx      : Ctx,
+    out      :: String
+) Res<(), AllocError>
+
+args_named = (
+    be  :: CBackend,
+    id  : ExprId,
+    a   : Access,
+    rty : TyId,
+    ret : TyId,
+    t   : TyId,
+    n   : TyNamed,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError>
+
+ask_of = (be :: CBackend, ty: TyId) Ask
+
+flag_of = (be :: CBackend, field: str) Res<String, AllocError>
+
+env_only = (field: str) bool
+
+env_of = (be :: CBackend, field: str) Res<String, AllocError>
+
+lit = (be :: CBackend, text: str, out :: String) Res<(), AllocError>
+
+ok_of = (be :: CBackend, res: str) Res<String, AllocError>
+
+open_absent = (be :: CBackend, res: str) Res<(), AllocError>
+
+open_else = (be :: CBackend) Res<(), AllocError>
+
+close = (be :: CBackend) Res<(), AllocError>
+
+call_into = (be :: CBackend, dst: str, helper: str, args: str)
+            Res<(), AllocError>
+
+args_helper = (be :: CBackend, name: str) Res<Res<Def>, AllocError>
+
+helper_ret = (be :: CBackend, name: str) Res<TyId, AllocError>
+```
+
+#### Constants
+
+```zen
+ARGS_MODULE: str = "std.env.env_args"
+```
+
+#### Imports and re-exports
+
+```zen
+Struct, Member, Function, ExprId, Call, Access = std.ast
+
+AllocError = std.mem
+
+Vec = std.collections
+
+str, String = std.text
+
+Range = std.core
+
+TyId, TyNamed, is_failure = sema.sema_ty
+
+Def, decl_at = sema.sema_def
+
+Ctx = sema.sema_check
+
+Inst = sema.sema_inst
+
+GenFault = gen.gen_diag
+
+CBackend = gen.gen_c.gen_c_state
+
+expr, res_type_of = gen.gen_c.gen_c_expr
+
+declare_temp, write_assign_ok, payload_type = gen.gen_c.gen_c_flow
+
+write_goto, write_done, call_symbol = gen.gen_c.gen_c_sink
+
+field_type, request_type, decl_ctx, decl_inst = gen.gen_c.gen_c_type
+
+write_none, write_zero, ctype = gen.gen_c.gen_c_type
+
+enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
+
+sym_member, sym_variant, RES_PATH = gen.gen_name
+
+unsupported = gen.gen_c.gen_c_report
+```
+
 ### `src/gen/gen_c/gen_c_array.zen`
 
 34 declarations (functions: 16, constants: 1, imports and re-exports: 17).
@@ -1446,6 +1618,8 @@ BoundDispatch = {
     slot: Slot,
     ctx: Ctx,
     settle = (self: @Self, be :: CBackend) Res<BoundCall, AllocError>
+    explicit_targs = (self: @Self, be :: CBackend, owner: str, out :: Inst)
+                     Res<(), AllocError>
     lower = (self: @Self, be :: CBackend, id: ExprId, a: Access,
              out :: String) Res<(), AllocError>
     result_type = (self: @Self, be :: CBackend)
@@ -1681,11 +1855,11 @@ TyId, TyNamed, TyRes, is_failure = sema.sema_ty
 
 Ctx = sema.sema_check
 
-Inst, has_var = sema.sema_inst
+Inst, has_var, tparam_vars, zip = sema.sema_inst
 
 self_ctx = sema.sema_member
 
-param_type = sema.sema_denote
+param_type, type_from_ast = sema.sema_denote
 
 impl_bound_type = sema.sema_supply
 
@@ -2366,7 +2540,7 @@ omittable = sema.sema_cand
 
 ### `src/gen/gen_c/gen_c_cap.zen`
 
-45 declarations (types: 1, enums: 1, functions: 19, imports and re-exports: 24).
+47 declarations (types: 1, enums: 1, functions: 19, imports and re-exports: 26).
 
 #### Types
 
@@ -2402,9 +2576,11 @@ CapabilityKind* = NotCapability
     | FsRead
     | FsLock
     | FsRemove
+    | FsMkdir
     | FsProbe
     | LockUnlock
     | EnvVar
+    | EnvArgs
     | ActorSpawn
     | ActorStop
     | ActorJoin
@@ -2559,9 +2735,13 @@ close_else, close_brace, open_null_test = gen.gen_c.gen_c_flow
 
 lower_probe, lower_write, lower_read, lower_remove, lower_lock, lower_unlock = gen.gen_c.gen_c_fs
 
+lower_mkdir = gen.gen_c.gen_c_fs
+
 lower_stdin_read = gen.gen_c.gen_c_stdin
 
 lower_env_var = gen.gen_c.gen_c_env
+
+lower_env_args = gen.gen_c.gen_c_args
 
 lower_console_print, lower_console_flush, is_console_print = gen.gen_c.gen_c_print
 
@@ -5002,7 +5182,7 @@ Lambda = std.ast
 
 ### `src/gen/gen_c/gen_c_fs.zen`
 
-48 declarations (types: 3, functions: 27, imports and re-exports: 18).
+50 declarations (types: 3, functions: 29, imports and re-exports: 18).
 
 #### Types
 
@@ -5119,6 +5299,18 @@ lower_remove* = (
 
 write_remove_call = (be :: CBackend, rc: str, yes: str, path: str)
                    Res<(), AllocError>
+
+lower_mkdir* = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    ret : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError>
+
+write_mkdir_call = (be :: CBackend, rc: str, yes: str, path: str)
+                  Res<(), AllocError>
 
 lower_read* = (
     be  :: CBackend,
@@ -5714,7 +5906,7 @@ array_of, write_array_index = gen.gen_c.gen_c_array
 
 ### `src/gen/gen_c/gen_c_infer.zen`
 
-31 declarations (types: 5, functions: 5, imports and re-exports: 21).
+35 declarations (types: 5, functions: 7, imports and re-exports: 23).
 
 #### Types
 
@@ -5755,6 +5947,16 @@ ReturnCall = {
     resolve = (self: @Self, be :: CBackend) Res<TyId, AllocError>
     accessed = (self: @Self, be :: CBackend, a: Access)
                Res<TyId, AllocError>
+    resolved_door = (self: @Self, be :: CBackend, name: str)
+                    Res<Res<Def>, AllocError>
+    explicit = (self: @Self, be :: CBackend, f: Function, owner: str,
+                settled: Inst) Res<Inst, AllocError>
+    bind_written = (self: @Self, be :: CBackend, f: Function, owner: str,
+                    out :: Inst) Res<(), AllocError>
+    door_at = (self: @Self, be :: CBackend, a: Access)
+              Res<Res<TyId>, AllocError>
+    door_ret = (self: @Self, be :: CBackend, site: Site, rty: TyId,
+                f: Function) Res<TyId, AllocError>
     with_recv = (self: @Self, recv: Res<ExprId>) ReturnCall
     named = (self: @Self, be :: CBackend, name: str)
             Res<TyId, AllocError>
@@ -5803,6 +6005,10 @@ written_param = (be :: CBackend, p: Param, dctx: Ctx, out :: Vec<TyId>)
 
 against_pack = (be: CBackend, pack: TyId, actual: TyId) TyId
 
+door_fn = (found: Vec<Member>) Res<Function>
+
+is_door = (be :: CBackend, d: Def) bool
+
 call_ret_type* = (
     be   :: CBackend,
     id   : ExprId,
@@ -5829,9 +6035,11 @@ TyId = sema.sema_ty
 
 Def, decl_at = sema.sema_def
 
+GenFault = gen.gen_diag
+
 Ctx = sema.sema_check
 
-Inst = sema.sema_inst
+Inst, tparam_vars, zip = sema.sema_inst
 
 type_from_ast = sema.sema_denote
 
@@ -5839,9 +6047,9 @@ pack_slot, pack_elem = sema.sema_vararg
 
 CBackend = gen.gen_c.gen_c_state
 
-declared_ret = gen.gen_c.gen_c_type
+declared_ret, struct_decl = gen.gen_c.gen_c_type
 
-inst_at, inst_open, settled_inst = gen.gen_c.gen_c_mono
+inst_at, inst_open, settled_inst, enter_struct_tparams = gen.gen_c.gen_c_mono
 
 sub_with, unify, arg_type = gen.gen_c.gen_c_mono
 
@@ -5850,6 +6058,8 @@ enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
 fat_ret_type = gen.gen_c.gen_c_bound
 
 impl_member_at, bodied_fn = gen.gen_c.gen_c_impl
+
+bodyless = gen.gen_c.gen_c_sink
 
 site_of, method_sig = gen.gen_c.gen_c_member
 
@@ -7622,7 +7832,7 @@ spelled_lambda = gen.gen_c.gen_c_inline
 
 ### `src/gen/gen_c/gen_c_mono.zen`
 
-53 declarations (functions: 40, imports and re-exports: 13).
+54 declarations (functions: 41, imports and re-exports: 13).
 
 #### Functions
 
@@ -7697,6 +7907,8 @@ settle_one = (
 settle_bound = (be :: CBackend, v: TyId, t: TyId, out :: Inst)
                Res<(), AllocError>
 
+materialize_literal* = (be :: CBackend, t: TyId) Res<TyId, AllocError>
+
 unify* = (be :: CBackend, declared: TyId, actual: TyId, out :: Inst)
          Res<(), AllocError>
 
@@ -7760,7 +7972,7 @@ Range = std.core
 
 DeclId = sema.sema_id
 
-TyId, TyNamed, TyRes = sema.sema_ty
+TyId, TyNamed, TyRes, literal_default = sema.sema_ty
 
 Def, decl_at = sema.sema_def
 
@@ -9341,7 +9553,7 @@ LocalSlot = gen.gen_c.gen_c_frame
 
 ### `src/gen/gen_c/gen_c_runtime.zen`
 
-61 declarations (functions: 55, constants: 1, imports and re-exports: 5).
+62 declarations (functions: 56, constants: 1, imports and re-exports: 5).
 
 #### Functions
 
@@ -9405,6 +9617,8 @@ write_fs_size = (out :: Emit) Res<(), AllocError>
 write_fs_write = (out :: Emit) Res<(), AllocError>
 
 write_fs_remove = (out :: Emit) Res<(), AllocError>
+
+write_fs_mkdir = (out :: Emit) Res<(), AllocError>
 
 write_fs_read = (out :: Emit) Res<(), AllocError>
 
@@ -10005,7 +10219,7 @@ param_type, type_from_ast = sema.sema_denote
 
 CBackend = gen.gen_c.gen_c_state
 
-sub_with, inst_at, settled_inst = gen.gen_c.gen_c_mono
+sub_with, inst_at, settled_inst, materialize_literal = gen.gen_c.gen_c_mono
 
 enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
 
@@ -11348,6 +11562,8 @@ TryPropagation = {
                       Res<(), AllocError>
     propagate_wider = (self: @Self, be :: CBackend)
                       Res<(), AllocError>
+    copy_or_widen = (self: @Self, be :: CBackend)
+                    Res<(), AllocError>
     widen_or_report = (self: @Self, be :: CBackend)
                       Res<(), AllocError>
     widen_into_enum = (self: @Self, be :: CBackend)
@@ -14083,15 +14299,136 @@ check_varargs*, pack_elem*, pack_slot*   = sema.sema_vararg
 tail_is_pack*                            = sema.sema_vararg
 ```
 
+### `src/sema/sema_actor_payload.zen`
+
+25 declarations (functions: 15, imports and re-exports: 10).
+
+#### Functions
+
+```zen
+actor_payload_unsafe* = (c :: Checker, ty: TyId)
+                        Res<bool, AllocError>
+
+actor_type_unsafe = (
+    c    :: Checker,
+    ty   : TyId,
+    seen :: Vec<TyId>,
+    root : bool
+)
+                    Res<bool, AllocError>
+
+actor_fresh_unsafe = (
+    c    :: Checker,
+    ty   : TyId,
+    seen :: Vec<TyId>,
+    root : bool
+)
+                     Res<bool, AllocError>
+
+actor_array_unsafe = (c :: Checker, a: TyArray, seen :: Vec<TyId>)
+                     Res<bool, AllocError>
+
+actor_res_unsafe = (c :: Checker, r: TyRes, seen :: Vec<TyId>)
+                   Res<bool, AllocError>
+
+actor_list_unsafe = (c :: Checker, tys: Vec<TyId>, seen :: Vec<TyId>)
+                    Res<bool, AllocError>
+
+actor_named_unsafe = (
+    c    :: Checker,
+    ty   : TyId,
+    n    : TyNamed,
+    seen :: Vec<TyId>
+) Res<bool, AllocError>
+
+actor_known_unsafe = (c: Checker, n: TyNamed) bool
+
+actor_named_decl_unsafe = (
+    c    :: Checker,
+    ty   : TyId,
+    n    : TyNamed,
+    seen :: Vec<TyId>
+) Res<bool, AllocError>
+
+actor_decl_unsafe = (
+    c    :: Checker,
+    ty   : TyId,
+    n    : TyNamed,
+    dec  : Decl,
+    seen :: Vec<TyId>
+) Res<bool, AllocError>
+
+actor_struct_unsafe = (
+    c    :: Checker,
+    ty   : TyId,
+    n    : TyNamed,
+    s    : Struct,
+    seen :: Vec<TyId>
+) Res<bool, AllocError>
+
+actor_member_unsafe = (
+    c       :: Checker,
+    self_ty : TyId,
+    mi      : usize,
+    m       : Member,
+    inst    : Inst,
+    seen    :: Vec<TyId>
+) Res<bool, AllocError>
+
+actor_enum_unsafe = (c :: Checker, n: TyNamed, e: Enum, seen :: Vec<TyId>)
+                    Res<bool, AllocError>
+
+actor_variant_unsafe = (
+    c    :: Checker,
+    v    : Variant,
+    ctx  : Ctx,
+    inst : Inst,
+    seen :: Vec<TyId>
+) Res<bool, AllocError>
+
+actor_alias_unsafe = (c :: Checker, n: TyNamed, a: Alias, seen :: Vec<TyId>)
+                     Res<bool, AllocError>
+```
+
+#### Imports and re-exports
+
+```zen
+Decl, Struct, Enum, Alias, Member, Variant = std.ast
+
+AllocError = std.mem
+
+Vec = std.collections
+
+TyId, TyNamed, TyRes, TyArray = sema.sema_ty
+
+Checker, Ctx = sema.sema_check
+
+decl_at = sema.sema_def
+
+member_type, enter_struct_tvars, named_as = sema.sema_member
+
+Inst, inst_of_named, subst, push_tparams, owner_of = sema.sema_inst
+
+variant_payload = sema.sema_case
+
+type_from_ast = sema.sema_denote
+```
+
 ### `src/sema/sema_apply.zen`
 
-56 declarations (functions: 32, imports and re-exports: 24).
+63 declarations (functions: 39, imports and re-exports: 24).
 
 #### Functions
 
 ```zen
 construct* = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
             Res<TyId, AllocError>
+
+valid_construct = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
+                  Res<TyId, AllocError>
+
+ctor_type_arg_arity_fits = (c :: Checker, call: Call, d: Def)
+                           Res<bool, AllocError>
 
 settled_ctor_type = (
     c       :: Checker,
@@ -14134,6 +14471,19 @@ unify_ctor_field = (
 ) Res<(), AllocError>
 
 variant_call_type* = (
+    c    :: Checker,
+    call : Call,
+    ty   : TyId,
+    name : str,
+    ctx  : Ctx
+) Res<TyId, AllocError>
+
+variant_type_arg_arity_fits = (c: Checker, call: Call, own: TyId) bool
+
+invalid_variant_instantiation = (c :: Checker, call: Call, name: str)
+                                Res<TyId, AllocError>
+
+valid_variant_call = (
     c    :: Checker,
     call : Call,
     ty   : TyId,
@@ -14195,7 +14545,9 @@ instantiate* = (
     k       : Cand,
     actuals : Vec<Actual>,
     ctx     : Ctx
-) Res<TyId, AllocError>
+) Res<Res<TyId>, AllocError>
+
+type_arg_arity_fits = (c: Checker, call: Call, k: Cand) bool
 
 instantiated_ret = (
     c       :: Checker,
@@ -14205,7 +14557,10 @@ instantiated_ret = (
     actuals : Vec<Actual>,
     ctx     : Ctx
 )
-                   Res<TyId, AllocError>
+                   Res<Res<TyId>, AllocError>
+
+invalid_instantiation = (c :: Checker, id: ExprId, name: str)
+                        Res<Res<TyId>, AllocError>
 
 note_call_edge = (c :: Checker, id: ExprId, k: Cand, inst: Inst)
                  Res<(), AllocError>
@@ -14277,7 +14632,7 @@ Inst, InstEdge, subst, unify, tparam_vars, zip = sema.sema_inst
 
 has_var, inst_of_named, decl_tparam_vars = sema.sema_inst
 
-Cand, TBound, Actual, ty_at = sema.sema_cand
+Cand, TBound, Actual, ty_at, signature_matches = sema.sema_cand
 
 impl_bound_type, LocalImpl, local_impls = sema.sema_supply
 
@@ -14485,7 +14840,7 @@ res_sugar = sema.sema_denote
 
 ### `src/sema/sema_call.zen`
 
-108 declarations (types: 3, enums: 1, functions: 69, imports and re-exports: 35).
+111 declarations (types: 3, enums: 1, functions: 70, imports and re-exports: 37).
 
 #### Types
 
@@ -14571,6 +14926,14 @@ CallCheck = {
         found : Vec<Found>
     )
              Res<TyId, AllocError>
+    written_member = (self: @Self, c :: Checker, ac: Access, b: Base,
+                      f: Found) Res<TyId, AllocError>
+    instantiate_member = (self: @Self, c :: Checker, ac: Access, f: Found,
+                          fn: Function) Res<TyId, AllocError>
+    settled_member = (self: @Self, c :: Checker, name: str, ty: TyId,
+                      vars: Vec<TyId>) Res<TyId, AllocError>
+    invalid_member_instantiation = (self: @Self, c :: Checker, name: str)
+                                   Res<TyId, AllocError>
     by_arity = (
         self  :: @Self,
         c     :: Checker,
@@ -14761,8 +15124,6 @@ settled_param = (c: Checker, want: TyId) bool
 refuse_actor_payloads = (c :: Checker, recv: TyId, actuals: Vec<Actual>)
                          Res<(), AllocError>
 
-actor_payload_unsafe = (c: Checker, ty: TyId) bool
-
 pick_fitting = (
     c       :: Checker,
     found   : Vec<Found>,
@@ -14844,12 +15205,18 @@ all_eats = (c: Checker, xs: Vec<TyId>, ys: Vec<TyId>, owner: str) bool
 duplicate = (c :: Checker, name: str, a: Cand, b: Cand) Res<(), AllocError>
 
 ambiguous = (c :: Checker, name: str, a: Cand, b: Cand) Res<(), AllocError>
+
+member_fn = (c: Checker, ty: TyId, name: str, at: Span) Res<Function>
+
+member_span_eq = (a: Span, b: Span) bool
 ```
 
 #### Imports and re-exports
 
 ```zen
 Expr, ExprId, Call, Arg, Access, Lambda, Param, Span, Paren, nowhere = std.ast
+
+Struct, Function = std.ast
 
 Ast = std.ast.ast_arena
 
@@ -14885,7 +15252,7 @@ construct, instantiate, variant_call_type = sema.sema_apply
 
 refuse_variant_surplus = sema.sema_apply
 
-Inst, subst, subst_list, unify_list = sema.sema_inst
+Inst, subst, subst_list, unify_list, tparam_vars, zip, owner_of = sema.sema_inst
 
 is_case = sema.sema_case
 
@@ -14895,7 +15262,7 @@ is_type_def, opaque, first_found, named_as = sema.sema_member
 
 static_access = sema.sema_static
 
-first_hidden, hidden_member = sema.sema_member
+filter_visible, hidden_member = sema.sema_member
 
 check_bounds = sema.sema_bound
 
@@ -14918,6 +15285,8 @@ Cand, TBound, Actual, cands_of, travelled_cands, matches = sema.sema_cand
 ty_at, is_tvar, sig_fits, signature_matches = sema.sema_cand
 
 omittable_tail = sema.sema_cand
+
+actor_payload_unsafe = sema.sema_actor_payload
 ```
 
 ### `src/sema/sema_cand.zen`
@@ -15471,13 +15840,16 @@ VariantNameCall = sema.sema_variant_name
 
 ### `src/sema/sema_const.zen`
 
-46 declarations (functions: 33, constants: 4, imports and re-exports: 9).
+47 declarations (functions: 34, constants: 4, imports and re-exports: 9).
 
 #### Functions
 
 ```zen
 counted_array* = (c :: Checker, elem: TyId, id: ExprId, ctx: Ctx)
                 Res<TyId, AllocError>
+
+negative_array_count = (c :: Checker, id: ExprId)
+                       Res<TyId, AllocError>
 
 count_refused = (c :: Checker, id: ExprId) Res<TyId, AllocError>
 
@@ -15699,7 +16071,7 @@ World, Def, DefKind, dotted, module_display = sema.sema_def
 
 ### `src/sema/sema_decl.zen`
 
-68 declarations (functions: 39, imports and re-exports: 29).
+77 declarations (functions: 47, imports and re-exports: 30).
 
 #### Functions
 
@@ -15750,6 +16122,38 @@ struct_bodies = (c :: Checker, s: Struct, m: Module, mi: usize)
                 Res<(), AllocError>
 
 check_member_overloads = (c :: Checker, s: Struct, self_ty: TyId, mi: usize)
+                         Res<(), AllocError>
+
+check_free_member_overloads = (
+    c       :: Checker,
+    m       : Member,
+    self_ty : TyId,
+    mi      : usize
+) Res<(), AllocError>
+
+is_receiver_fn = (c: Checker, f: Function) bool
+
+compare_free_member = (
+    c   :: Checker,
+    m   : Member,
+    f   : Function,
+    mty : TyId,
+    k   : Cand
+) Res<(), AllocError>
+
+free_takes_receiver = (c :: Checker, k: Cand, self_ty: TyId)
+                      Res<bool, AllocError>
+
+cross_signatures_overlap = (c: Checker, mty: TyId, f: Function, k: Cand)
+                           bool
+
+cross_prefix_overlaps = (c: Checker, a: Vec<TyId>, b: Vec<TyId>, n: usize)
+                        bool
+
+report_cross_duplicate = (c :: Checker, m: Member, k: Cand)
+                         Res<(), AllocError>
+
+report_cross_ambiguous = (c :: Checker, m: Member, k: Cand)
                          Res<(), AllocError>
 
 compare_member_signatures = (
@@ -15852,9 +16256,11 @@ Checker, Ctx = sema.sema_check
 
 SemaFault, NameFault, PairFault = sema.sema_diag
 
-check_impl = sema.sema_bound
+check_impl, satisfies_bound = sema.sema_bound
 
 check_overloads, same_fn_signature, fn_signatures_overlap = sema.sema_call
+
+Cand, cands_of, omittable_tail = sema.sema_cand
 
 check_depth = sema.sema_depth
 
@@ -16503,7 +16909,7 @@ enter_struct_tvars, member_type = sema.sema_member
 
 ### `src/sema/sema_diag.zen`
 
-36 declarations (types: 6, enums: 1, functions: 25, imports and re-exports: 4).
+37 declarations (types: 6, enums: 1, functions: 26, imports and re-exports: 4).
 
 #### Types
 
@@ -16561,6 +16967,7 @@ SemaFault* =
     | DuplicateEnumDiscriminant(PairFault)
     | CatchAllConstruction(NameFault)
     | NoOverload(NameFault)
+    | InvalidInstantiation(NameFault)
     | DuplicateSignature(PairFault)
     | AmbiguousOverload(PairFault)
     | ImplMissingField(NameFault)
@@ -16574,6 +16981,7 @@ SemaFault* =
     | AmbiguousMember(PairFault)
     | BoundNotSatisfied(TypeFault)
     | EqNeedsImpl(TypeFault)
+    | InvalidOperator(TypeFault)
     | ComputedFieldAssign(NameFault)
     | ComputedFieldAddress(NameFault)
     | TryOutsideRes(TypeFault)
@@ -16597,6 +17005,7 @@ SemaFault* =
     | InstantiationDepth(NameFault)
     | MetaNotImplemented(NameFault)
     | CountNotComptime(NameFault)
+    | NegativeArrayCount(NameFault)
     | ComptimeBudget(NameFault)
     | ConsumedUse(NameFault)
     | NeedsMutableReceiver(NameFault)
@@ -16666,6 +17075,9 @@ write_arms = (out :: String, types: Types, f: TypeFault)
 
 write_types = (out :: String, types: Types, f: TypeFault)
               Res<(), AllocError>
+
+write_operator_types = (out :: String, types: Types, f: TypeFault)
+                       Res<(), AllocError>
 
 write_literal = (out :: String, types: Types, f: TypeFault)
                 Res<(), AllocError>
@@ -18020,7 +18432,7 @@ push_tparams, module_name = sema.sema_inst
 
 ### `src/sema/sema_member.zen`
 
-85 declarations (types: 2, functions: 61, imports and re-exports: 22).
+86 declarations (types: 2, functions: 62, imports and re-exports: 22).
 
 #### Types
 
@@ -18095,6 +18507,9 @@ known_access = (
     ty   : TyId,
     ctx  : Ctx
 ) Res<TyId, AllocError>
+
+filter_visible* = (found: Vec<Found>, mi: usize, out :: Vec<Found>)
+                  Res<Res<Found>, AllocError>
 
 first_hidden* = (found: Vec<Found>, mi: usize) Res<Found>
 
@@ -18679,7 +19094,7 @@ signature_type = sema.sema_denote
 
 ### `src/sema/sema_operand.zen`
 
-10 declarations (functions: 4, imports and re-exports: 6).
+23 declarations (functions: 16, imports and re-exports: 7).
 
 #### Functions
 
@@ -18687,28 +19102,59 @@ signature_type = sema.sema_denote
 operands_agree* = (c :: Checker, b: Binary, lhs: TyId, rhs: TyId)
                   Res<(), AllocError>
 
+nonlogical_operands = (c :: Checker, b: Binary, lhs: TyId, rhs: TyId)
+                      Res<(), AllocError>
+
+written_operand = (c: Checker, id: ExprId) bool
+
+pair_agrees = (c :: Checker, b: Binary, lhs: TyId, rhs: TyId)
+              Res<(), AllocError>
+
 rhs_operand = (c :: Checker, b: Binary, lhs: TyId, rhs: TyId)
               Res<(), AllocError>
 
 settled_agree = (c :: Checker, b: Binary, lhs: TyId, rhs: TyId)
                 Res<(), AllocError>
 
+operator_accepts = (c: Checker, op: BinOp, lhs: TyId, rhs: TyId) bool
+
+numeric_operand = (c: Checker, ty: TyId) bool
+
+integer_operand = (c: Checker, ty: TyId) bool
+
+float_operand = (c: Checker, ty: TyId) bool
+
+askable_operand = (c: Checker, ty: TyId) bool
+
+logical = (op: BinOp) bool
+
 mixed_operands = (c :: Checker, b: Binary, lhs: TyId, rhs: TyId)
                  Res<(), AllocError>
+
+invalid_operator = (c :: Checker, b: Binary, lhs: TyId, rhs: TyId)
+                   Res<(), AllocError>
+
+check_neg* = (c :: Checker, u: Unary, inner: TyId)
+             Res<TyId, AllocError>
+
+invalid_neg = (c :: Checker, u: Unary, inner: TyId)
+              Res<TyId, AllocError>
 ```
 
 #### Imports and re-exports
 
 ```zen
-Binary = std.ast
+Binary, BinOp, ExprId, Unary = std.ast
 
 AllocError = std.mem
 
 str = std.text
 
-TyId, is_integer = sema.sema_ty
+TyId, is_integer, c_integer, is_float = sema.sema_ty
 
 Checker = sema.sema_check
+
+SemaFault, TypeFault = sema.sema_diag
 
 check_literal = sema.sema_trap
 ```
@@ -20251,7 +20697,7 @@ check_statement = sema.sema_effect
 
 check_eq = sema.sema_bound
 
-operands_agree = sema.sema_operand
+operands_agree, check_neg = sema.sema_operand
 
 seed_left_spine, spine_ahead = sema.sema_spine
 
@@ -21602,6 +22048,267 @@ Options, options = std.cli
 
 ### `src/std/cli/cli.zen`
 
+2 declarations (imports and re-exports: 2).
+
+#### Imports and re-exports
+
+```zen
+Spec*, Item*, Options*, Args*, options*, is_flag*, is_word*, arg_at*,
+    OPTIONS_END* = std.cli.cli_scan
+
+ValueType*, ParameterKind*, CliValue*, DiagnosticKind*, Diagnostic*,
+    Parameter*, Match*, Matches*, Command*, command* = std.cli.cli_command
+```
+
+### `src/std/cli/cli_command.zen`
+
+23 declarations (types: 7, enums: 4, functions: 7, imports and re-exports: 5).
+
+#### Types
+
+```zen
+Diagnostic* = {
+    kind*: DiagnosticKind,
+    command*: str,
+    word*: str,
+    other*: str,
+    message* = (self: @Self, a: Alloc) Res<String, AllocError>
+}
+
+Parameter*<T> = {
+    name*: str,
+    id*: T,
+    kind*: ParameterKind,
+    value_name*: str,
+    help*: str,
+    aliases :: Vec<str>,
+    conflicts :: Vec<str>,
+    dependencies :: Vec<str>,
+    required :: bool = false,
+    repeatable :: bool = false,
+    default :: str = "",
+    has_default :: bool = false,
+}
+
+Match*<T> = {
+    id*: T,
+    name*: str,
+    raw*: str,
+    value*: CliValue,
+    command*: str,
+    defaulted*: bool,
+}
+
+Matches*<T> = {
+    command*: str,
+    values*: Vec<Match<T>>,
+    error*: Res<Diagnostic>,
+    options_end*: Res<usize>,
+    clean* = (self: @Self) bool
+    count* = (self: @Self, name: str) usize
+    present* = (self: @Self, name: str) bool
+    count_in* = (self: @Self, command: str, name: str) usize
+    last* = (self: @Self, name: str) Res<Match<T>>
+    last_in* = (self: @Self, command: str, name: str) Res<Match<T>>
+}
+
+Command*<T> = {
+    name*: str,
+    about*: str,
+    release* :: str,
+    alloc: Alloc,
+    parameters :: Vec<Parameter<T>>,
+    commands :: Vec<Command<T>>,
+    require_command :: bool = false,
+    allow_trailing :: bool = false,
+    set_version* = (self :: @Self, value: str) ()
+    flag* = (self :: @Self, name: str, id: T, help: str)
+        Res<(), AllocError>
+    option* = (
+        self       :: @Self,
+        name       : str,
+        id         : T,
+        value_name : str,
+        value_type : ValueType,
+        help       : str
+    ) Res<(), AllocError>
+    positional* = (
+        self       :: @Self,
+        name       : str,
+        id         : T,
+        value_name : str,
+        value_type : ValueType,
+        help       : str
+    ) Res<(), AllocError>
+    subcommand* = (self :: @Self, child: Command<T>) Res<(), AllocError>
+    subcommand_required* = (self :: @Self) ()
+    trailing_args* = (self :: @Self) ()
+    alias* = (self :: @Self, name: str, alias: str)
+        Res<bool, AllocError>
+    required* = (self :: @Self, name: str) bool
+    repeatable* = (self :: @Self, name: str) bool
+    default_value* = (self :: @Self, name: str, value: str) bool
+    conflicts* = (self :: @Self, name: str, other: str)
+        Res<bool, AllocError>
+    requires* = (self :: @Self, name: str, other: str)
+        Res<bool, AllocError>
+    parse* = (self: @Self, argv: Vec<str>, start: usize)
+        Res<Matches<T>, AllocError>
+    help* = (self: @Self) Res<String, AllocError>
+    help_for* = (self: @Self, command_name: str) Res<String, AllocError>
+    help_path = (self: @Self, path: str, prefix: str)
+        Res<String, AllocError>
+    add_parameter = (
+        self       :: @Self,
+        name       : str,
+        id         : T,
+        kind       : ParameterKind,
+        value_name : str,
+        help       : str
+    ) Res<(), AllocError>
+    parameter_index = (self: @Self, name: str) Res<usize>
+    set_required = (self :: @Self, name: str, value: bool) bool
+    set_repeatable = (self :: @Self, name: str, value: bool) bool
+    command_named = (self: @Self, name: str) Res<Command<T>>
+    declaration_error* = (self: @Self) Res<Diagnostic>
+    local_declaration_error = (self: @Self) Res<Diagnostic>
+    check_parameter_links = (self: @Self, parameter: Parameter<T>)
+        Res<Diagnostic>
+    parameters_collide = (
+        self: @Self,
+        left: Parameter<T>,
+        right: Parameter<T>
+    ) bool
+    has_alias = (self: @Self, parameter: Parameter<T>, name: str) bool
+    has_parameter = (self: @Self, name: str) bool
+    bad_declaration = (self: @Self, word: str, why: str) Res<Diagnostic>
+    help_named = (self: @Self, display_name: str) Res<String, AllocError>
+    has_options = (self: @Self) bool
+    write_positionals = (self: @Self, out :: String)
+        Res<(), AllocError>
+    write_options = (self: @Self, out :: String) Res<(), AllocError>
+    write_parameter = (self: @Self, out :: String, parameter: Parameter<T>)
+        Res<(), AllocError>
+    write_commands = (self: @Self, out :: String) Res<(), AllocError>
+}
+
+Located<T> = { parameter: Parameter<T>, index: usize, inline: Res<str> }
+
+Parser<T> = {
+    argv: Vec<str>,
+    at :: usize,
+    root_name: str,
+    root_parameters: Vec<Parameter<T>>,
+    scope_parameters :: Vec<Parameter<T>>,
+    scope_commands :: Vec<Command<T>>,
+    scope_release :: str,
+    scope_requires_command :: bool,
+    scope_allows_trailing :: bool,
+    alloc: Alloc,
+    values :: Vec<Match<T>>,
+    command :: str,
+    positional :: usize = 0,
+    stopped :: bool = false,
+    selected :: bool = false,
+    error :: Res<Diagnostic> = None,
+    options_end :: Res<usize> = None,
+    run = (self :: @Self) Res<(), AllocError>
+    accept = (self :: @Self, word: str) Res<(), AllocError>
+    consume_parameter = (self :: @Self, word: str) Res<(), AllocError>
+    option = (self :: @Self, word: str) Res<(), AllocError>
+    setting = (self :: @Self, located: Located<T>, value_type: ValueType)
+        Res<(), AllocError>
+    positional_value = (self :: @Self, word: str) Res<(), AllocError>
+    positional_parameter = (self: @Self) Res<Parameter<T>>
+    locate_option = (self: @Self, word: str) Res<Located<T>>
+    record = (
+        self      :: @Self,
+        parameter : Parameter<T>,
+        raw       : str,
+        value     : CliValue,
+        defaulted : bool
+    ) Res<(), AllocError>
+    add_defaults = (
+        self :: @Self,
+        parameters: Vec<Parameter<T>>,
+        command_name: str
+    ) Res<(), AllocError>
+    validate = (
+        self :: @Self,
+        parameters: Vec<Parameter<T>>,
+        command_name: str
+    ) Res<(), AllocError>
+    count_in_scope = (self: @Self, name: str, command: str) usize
+    count_explicit = (self: @Self, name: str, command: str) usize
+    accepts_value = (self: @Self, kind: ValueType, word: str) bool
+    locate_command = (self: @Self, name: str) Res<Command<T>>
+    fail = (self :: @Self, kind: DiagnosticKind, word: str, other: str) ()
+    no_error = (self: @Self) bool
+}
+```
+
+#### Enums
+
+```zen
+ValueType* = Text | I32 | I64 | U16 | Usize
+
+ParameterKind* = Switch | Setting(ValueType) | Positional(ValueType)
+
+CliValue* = On
+    | TextValue(str)
+    | I32Value(i32)
+    | I64Value(i64)
+    | U16Value(u16)
+    | UsizeValue(usize)
+
+DiagnosticKind* = HelpRequested
+    | VersionRequested
+    | UnknownOption
+    | UnknownCommand
+    | MissingValue
+    | InvalidValue
+    | UnexpectedArgument
+    | MissingRequired
+    | RequiredBy
+    | Conflict
+    | Duplicate
+    | InvalidDeclaration
+```
+
+#### Functions
+
+```zen
+command* = <T>(a: Alloc, name: str, about: str) Command<T>
+
+option_value = (word: str, name: str) Res<Res<str>>
+
+alias_value = (word: str, alias: str) Res<Res<str>>
+
+parse_cli_value = (kind: ValueType, raw: str) Res<CliValue>
+
+valid_cli_value = (kind: ValueType, raw: str) bool
+
+negative_usize = (word: str) bool
+
+valid_option_name = (name: str) bool
+```
+
+#### Imports and re-exports
+
+```zen
+Alloc, AllocError = std.mem
+
+str, String = std.text
+
+Vec = std.collections
+
+Range = std.core
+
+OPTIONS_END, is_flag, arg_at = std.cli.cli_scan
+```
+
+### `src/std/cli/cli_scan.zen`
+
 13 declarations (types: 4, functions: 4, constants: 1, imports and re-exports: 4).
 
 #### Types
@@ -21677,7 +22384,7 @@ Range = std.core
 #### Imports and re-exports
 
 ```zen
-Vec* = std.collections.collections_vec
+Vec*, OutOfBounds* = std.collections.collections_vec
 
 Map* = std.collections.collections_map
 
@@ -21832,11 +22539,16 @@ Range = std.core.range
 
 ### `src/std/collections/collections_vec.zen`
 
-5 declarations (types: 1, implementations: 1, functions: 1, imports and re-exports: 2).
+6 declarations (types: 2, implementations: 1, functions: 1, imports and re-exports: 2).
 
 #### Types
 
 ```zen
+OutOfBounds* = {
+    index*: usize,
+    len*:   usize,
+}
+
 Vec*<T> = {
     data :: Ptr<T> = null_ptr<T>(),
     len* :: usize = 0,
@@ -21844,6 +22556,7 @@ Vec*<T> = {
     alloc: Alloc,
     add* = (self :: @Self, value: T) Res<(), AllocError>
     get* = (self: @Self, i: usize) Res<T>
+    require* = (self: @Self, i: usize) Res<T, OutOfBounds>
     ptr* = (self: @Self) Ptr<T>
     set* = (self :: @Self, i: usize, value: T) Res<()>
     take* = (self :: @Self, i: usize) Res<T>
@@ -21861,7 +22574,7 @@ Vec*<T> = {
 Vec.impl(Range<T>, {
     start: 0,
     end: self.len,
-    at ::= (self: @Self, index: usize) Res<T>
+    at ::= (self: Vec<T>, index: usize) Res<T>
 })
 ```
 
@@ -21987,12 +22700,16 @@ HEX_BASE*   : u8 = 16
 
 ### `src/std/core/core.zen`
 
-24 declarations (imports and re-exports: 24).
+26 declarations (imports and re-exports: 26).
 
 #### Imports and re-exports
 
 ```zen
 Res*, Ok*, Err*, None*, ok_or*, value_or*, map_err*, replace_err* = std.core.result
+
+ignore*, without_err*, when_ok* = std.core.result
+
+Rng* = std.core.rand
 
 then*, ensure*, bool* = std.core.bool
 
@@ -22034,7 +22751,7 @@ Duration* = std.core.time
 
 str*, String* = std.text
 
-Vec*, Map*, Ordered*, vararg* = std.collections
+Vec*, Map*, Ordered*, vararg*, OutOfBounds* = std.collections
 
 Alloc*, AllocError*, Arena*, Mem*, Ptr*, null_ptr* = std.mem
 
@@ -22505,6 +23222,23 @@ Path* = (a: Alloc, fmt: str, args: ...) Res<Path, AllocError>
 join_path* = (a: Alloc, dir: str, file: str) Res<String, AllocError>
 ```
 
+### `src/std/core/rand.zen`
+
+1 declarations (types: 1).
+
+#### Types
+
+```zen
+Rng* = {
+    state :: u64,
+    seeded* = (seed: u64) Rng
+    next_u64* = (self :: @Self) u64
+    next_word = (self :: @Self) u64
+    below* = (self :: @Self, n: u64) u64
+    below_nonzero = (self :: @Self, n: u64) u64
+}
+```
+
 ### `src/std/core/range.zen`
 
 2 declarations (types: 1, imports and re-exports: 1).
@@ -22527,7 +23261,7 @@ Res = std.core.result
 
 ### `src/std/core/result.zen`
 
-6 declarations (enums: 2, functions: 4).
+9 declarations (enums: 2, functions: 7).
 
 #### Enums
 
@@ -22547,6 +23281,12 @@ value_or* = <T>(r: Res<T>, fallback: T) T
 map_err* = <T, E, F>(r: Res<T, E>, f: (error: E) F) Res<T, F>
 
 replace_err* = <T, E, F>(r: Res<T, E>, reason: F) Res<T, F>
+
+when_ok* = <T, U>(r: Res<T>, f: (value: T) U) Res<U>
+
+ignore* = <T, E>(r: Res<T, E>) ()
+
+without_err* = <T, E>(r: Res<T, E>) Res<T>
 ```
 
 ### `src/std/core/scope.zen`
@@ -22624,7 +23364,7 @@ Res = std.core.result
 
 ### `src/std/env/env.zen`
 
-20 declarations (types: 9, enums: 3, implementations: 1, functions: 1, imports and re-exports: 6).
+20 declarations (types: 9, enums: 2, implementations: 1, functions: 1, imports and re-exports: 7).
 
 #### Types
 
@@ -22645,6 +23385,7 @@ Fs* = {
     is_dir* = (self: @Self, path: str) bool
     write* = (self: @Self, path: str, bytes: str) Res<(), FsError>
     remove* = (self: @Self, path: str) Res<bool, FsError>
+    mkdir* = (self: @Self, path: str) Res<bool, FsError>
     lock* = (self: @Self, path: str) Res<Lock, FsError>
 }
 
@@ -22691,8 +23432,6 @@ Env* = {
 #### Enums
 
 ```zen
-ArgError* = Missing(str) | Parse(str)
-
 FsError* = NotFound | Denied | IsDir | Exists | Failed | OutOfMemory
 
 ThreadError* = SpawnFailed | Panicked
@@ -22726,6 +23465,78 @@ HttpClient = std.net.http
 Actor, Ref, ActorStartError = std.actor.actor_core
 
 ProcError, ProcOutput, Process = std.proc
+
+ArgError* = std.env.env_args
+```
+
+### `src/std/env/env_args.zen`
+
+25 declarations (enums: 1, functions: 20, constants: 1, imports and re-exports: 3).
+
+#### Enums
+
+```zen
+ArgError* = Missing(str) | Parse(str)
+```
+
+#### Functions
+
+```zen
+is_flag = (word: str) bool
+
+is_word = (word: str) bool
+
+is_signed_number = (word: str) bool
+
+is_flag_value = (word: str) bool
+
+arg_at = (argv: Vec<str>, index: usize) str
+
+flag_at = (env: Env, flag: str) Res<usize>
+
+bit = (i: usize) u64
+
+has = (mask: u64, i: usize) bool
+
+set = (mask: u64, i: usize) u64
+
+claim* = (env: Env, mask: u64, flag: str, takes_value: bool) u64
+
+text* = (env: Env, flag: str, name: str) Res<str>
+
+switch* = (env: Env, flag: str, name: str) bool
+
+next_word = (env: Env, mask: u64) Res<usize>
+
+word* = (env: Env, mask: u64) Res<str>
+
+take* = (env: Env, mask: u64) u64
+
+finish* = (env: Env, mask: u64, field: str) Res<(), ArgError>
+
+required* = (raw: Res<str>, field: str) Res<str, ArgError>
+
+as_usize* = (text: str, field: str) Res<usize, ArgError>
+
+as_u64* = (text: str, field: str) Res<u64, ArgError>
+
+as_i64* = (text: str, field: str) Res<i64, ArgError>
+```
+
+#### Constants
+
+```zen
+ARGV_CAP*: usize = 64
+```
+
+#### Imports and re-exports
+
+```zen
+str = std.text
+
+Vec = std.collections
+
+Range = std.core
 ```
 
 ### `src/std/json/json.zen`
@@ -23108,6 +23919,10 @@ Jsons* = {
     scan = (self: @Self, run: Run, name: str) Res<JsonId>
     item* = (self: @Self, id: JsonId, i: usize) Res<JsonId>
     text* = (self: @Self, id: JsonId) Res<str>
+    text_at* = (self: @Self, id: JsonId, name: str) Res<str>
+    text_or* = (self: @Self, id: JsonId, name: str, fallback: str) str
+    whole_or* = (self: @Self, id: JsonId, name: str, fallback: usize) usize
+    count* = (self: @Self, id: JsonId) usize
     whole* = (self: @Self, id: JsonId) Res<usize>
     write* = (self: @Self, id: JsonId, out :: String) Res<(), AllocError>
     write_items = (self: @Self, run: Run, out :: String) Res<(), AllocError>
@@ -24595,7 +25410,7 @@ TlsError = std.net.tls
 
 ### `src/std/net/socket/socket.zen`
 
-29 declarations (types: 4, enums: 1, implementations: 1, functions: 11, constants: 7, imports and re-exports: 5).
+30 declarations (types: 4, enums: 1, implementations: 1, functions: 11, constants: 8, imports and re-exports: 5).
 
 #### Types
 
@@ -24717,6 +25532,8 @@ AF_UNSPEC: i32 = 0
 AF_INET6: i32 = 10
 
 SOCK_STREAM: i32 = 1
+
+SOCK_CLOEXEC: i32 = 524288
 
 IPPROTO_TCP: i32 = 6
 
@@ -26136,12 +26953,14 @@ Res, ok_or = std.core
 
 ### `src/std/std.zen`
 
-27 declarations (imports and re-exports: 27).
+30 declarations (imports and re-exports: 30).
 
 #### Imports and re-exports
 
 ```zen
 Res*, Ok*, Err*, None*, ok_or*, value_or*, map_err*, replace_err*, then*, ensure*, bool* = std.core
+
+ignore*, without_err*, when_ok*, Rng* = std.core
 
 Drop*, Scope* = std.core
 
@@ -26162,9 +26981,13 @@ AllocError*, Alloc*, Arena*, Mem*, Ptr*, null_ptr* = std.mem
 str*, String*, replace_once*, dup*, truncate_with*,
     parse_i32*, parse_i64*, parse_u16*, parse_usize* = std.text
 
-Vec*, Map* = std.collections
+Vec*, Map*, OutOfBounds* = std.collections
 
 Spec*, Item*, Options*, Args*, options*, is_flag*, is_word*, arg_at*, OPTIONS_END* = std.cli
+
+ValueType*, ParameterKind*, CliValue*, DiagnosticKind*, Diagnostic* = std.cli
+
+Parameter*, Match*, Matches*, Command*, command* = std.cli
 
 JsonId*, Run*, Pair*, Json*, Jsons*,
     write_text*, written*, Nest*, obj*, arr*,
@@ -26669,9 +27492,9 @@ unreadable = (path: str, e: FsError) Res<i32, AllocError>
 
 unwritable = (path: str, e: FsError) Res<i32, AllocError>
 
-usage = (word: str) Res<i32, AllocError>
+usage = (a: Alloc, word: str) Res<i32, AllocError>
 
-missing = (flag: str) Res<i32, AllocError>
+missing = (a: Alloc, flag: str) Res<i32, AllocError>
 ```
 
 #### Imports and re-exports
@@ -26685,7 +27508,7 @@ FsError = std.env
 
 BuildArgs, ProjectArgs = std.build
 
-Cli*, FmtJob*, cli*, USAGE = zen.zen_cli
+Cli*, FmtJob*, cli*, USAGE, help = zen.zen_cli
 
 Build* = zen.zen_build
 
@@ -27257,7 +28080,7 @@ CImportRequest, CImportModule = zen.zen_c_import
 
 ### `src/zen/zen_cli.zen`
 
-24 declarations (types: 1, enums: 2, functions: 9, constants: 3, imports and re-exports: 9).
+36 declarations (types: 1, enums: 3, functions: 12, constants: 9, imports and re-exports: 11).
 
 #### Types
 
@@ -27280,16 +28103,37 @@ Cli* = Build(BuildArgs)
      | Usage(str)
      | Missing(str)
 
+HelpArg = Root
+    | BuildRoot
+    | EmitC
+    | EmitDir
+    | Out
+    | Entry
+    | StdRoot
+    | SymbolMap
+    | Ffi
+    | Project
+    | Path
+    | Check
+    | Request
+    | Reply
+
 FmtFlag = | Check
 ```
 
 #### Functions
 
 ```zen
+help* = (a: Alloc, command_name: str) Res<String, AllocError>
+
+help_model = (a: Alloc) Res<Command<HelpArg>, AllocError>
+
 cli* = (env: Env, argv: Vec<str>) Res<Cli, AllocError>
 
 command = (env: Env, a: Alloc, argv: Vec<str>, name: str)
           Res<Cli, AllocError>
+
+help_requested = (argv: Vec<str>) bool
 
 fmt_of = (a: Alloc, argv: Vec<str>) Res<Cli, AllocError>
 
@@ -27315,6 +28159,18 @@ ARGS*: usize = 2
 USAGE*: str = "usage: zen build [<project-or-target>]\n       zen run [<project-or-target>] [-- <args>...]\n       zen build <root> [--entry <file>] [--std <path>] [--ffi] [--symbol-map <file>] --emit-c -o <file.c>\n       zen build <root> [--entry <file>] [--std <path>] [--ffi] [--symbol-map <file>] --emit-c-dir <dir>\n       zen fmt [--check] <file.zen>..."
 
 FLAG_FMT_CHECK: str = "--check"
+
+HELP_ROOT: str = "@help/root"
+
+HELP_BUILD: str = "@help/build"
+
+HELP_RUN: str = "@help/run"
+
+HELP_FMT: str = "@help/fmt"
+
+HELP_TEST: str = "@help/test"
+
+HELP_LSP: str = "@help/lsp"
 ```
 
 #### Imports and re-exports
@@ -27335,6 +28191,10 @@ BuildArgs, ProjectArgs, BuildFlags, build_options = std.build
 FLAG_EMIT_C, ZEN_STD_ENV = std.build
 
 Options, options, is_word, arg_at, OPTIONS_END = std.cli
+
+Command, command, ValueType = std.cli
+
+String = std.text
 
 holds_build_zen = zen.zen_path
 ```
