@@ -1,0 +1,31 @@
+// Nested value-only fields remain transferable. This is the positive boundary
+// for the recursive actor-payload classifier.
+
+SafeFault = SafeFault
+Leaf = { number: i32, ready: bool }
+SafePayload = {
+    leaf: Leaf,
+    values: [u16, 2],
+    result: Res<i32, SafeFault>,
+}
+
+Worker = {}
+
+Worker.impl(Actor, {
+    process = (self :: @Self, ctx: Context, payload: SafePayload) {
+        ctx.env.out.println("safe nested {}", payload.leaf.number)
+    }
+})
+
+Error = IoError | ActorStartError | ActorError
+
+main = (env: Env) Res<i32, Error> {
+    payload = SafePayload(
+        leaf: Leaf(number: 37, ready: true),
+        values: [4, 9],
+        result: Ok(12),
+    );
+    worker  = env.spawn(Worker()).try();
+    worker.process(payload).try();
+    Ok(0)
+}
