@@ -9,8 +9,9 @@ TyId = sema.sema_ty
 Def, DefKind, ModuleTable = sema.sema_def
 Checker, Ctx = sema.sema_check
 SemaFault, NameFault, PairFault = sema.sema_diag
-check_impl = sema.sema_bound
+check_impl, satisfies_bound = sema.sema_bound
 check_overloads, same_fn_signature, fn_signatures_overlap = sema.sema_call
+Cand, cands_of, omittable_tail = sema.sema_cand
 check_depth = sema.sema_depth
 check_varargs = sema.sema_vararg
 check_layout = sema.sema_layout
@@ -230,7 +231,135 @@ check_member_overloads = (c :: Checker, s: Struct, self_ty: TyId, mi: usize)
             _           => Ok(()),
         }).try();
     });
+    s.members.loop((h, m) {
+        c.check_free_member_overloads(m, self_ty, mi).try();
+    });
     Ok(())
+}
+
+check_free_member_overloads = (
+    c       :: Checker,
+    m       : Member,
+    self_ty : TyId,
+    mi      : usize
+) Res<(), AllocError> {
+    m.kind.match({
+        Function(f) => c.is_receiver_fn(f).match({
+            false => Ok(()),
+            true  => {
+                cands ::= c.alloc.Vec<Cand>();
+                c.cands_of(mi, f.name.text, cands).try();
+                local ::= c.alloc.Vec<Cand>();
+                cands.loop((h, k) {
+                    (k.id.module.to_usize() == mi).then(() {
+                        c.free_takes_receiver(k, self_ty).try().then(() {
+                            local.add(k).try();
+                        });
+                    });
+                });
+                (local.len == 0).match({
+                    true  => Ok(()),
+                    false => {
+                        mty = c.member_type(m, mi, self_ty).try();
+                        local.loop((h, k) {
+                            c.compare_free_member(m, f, mty, k).try();
+                        });
+                        Ok(())
+                    },
+                })
+            },
+        }),
+        _           => Ok(()),
+    })
+}
+
+is_receiver_fn = (c: Checker, f: Function) bool {
+    f.params.get(0).match({
+        None  => false,
+        Ok(p) => p.name.text.eq("self"),
+    })
+}
+
+compare_free_member = (
+    c   :: Checker,
+    m   : Member,
+    f   : Function,
+    mty : TyId,
+    k   : Cand
+) Res<(), AllocError> {
+    fty = c.types.fn_ty(k.params, k.ret).try();
+    c.same_fn_signature(mty, fty).match({
+        true  => c.report_cross_duplicate(m, k),
+        false => c.cross_signatures_overlap(mty, f, k).match({
+            false => Ok(()),
+            true  => c.report_cross_ambiguous(m, k),
+        }),
+    })
+}
+
+free_takes_receiver = (c :: Checker, k: Cand, self_ty: TyId)
+                      Res<bool, AllocError> {
+    k.params.get(0).match({
+        None  => Ok(false),
+        Ok(p) => (c.assignable(self_ty, p)).match({
+            true  => Ok(true),
+            false => c.satisfies_bound(self_ty, p),
+        }),
+    })
+}
+
+cross_signatures_overlap = (c: Checker, mty: TyId, f: Function, k: Cand)
+                           bool {
+    c.types.at(mty).match({
+        Fn(mt) => (mt.params.len == k.params.len).match({
+            true  => (f.tparams.len > 0 || k.generic)
+                && c.cross_prefix_overlaps(mt.params, k.params, mt.params.len),
+            false => (mt.params.len < k.params.len).match({
+                true  => c.cross_prefix_overlaps(mt.params, k.params, mt.params.len) && c.omittable_tail(k.params, mt.params.len),
+                false => c.cross_prefix_overlaps(mt.params, k.params, k.params.len) && c.omittable_tail(mt.params, k.params.len),
+            }),
+        }),
+        _      => false,
+    })
+}
+
+cross_prefix_overlaps = (c: Checker, a: Vec<TyId>, b: Vec<TyId>, n: usize)
+                        bool {
+    Range(0, n).find((i) {
+        a.get(i).match({
+            None  => true,
+            Ok(x) => b.get(i).match({
+                None  => true,
+                Ok(y) => (c.assignable(x, y) || c.assignable(y, x)) == false,
+            }),
+        })
+    }).match({ Ok(_) => false, None => true })
+}
+
+report_cross_duplicate = (c :: Checker, m: Member, k: Cand)
+                         Res<(), AllocError> {
+    c.report(
+        m.span.file,
+        m.span,
+        SemaFault.DuplicateSignature(PairFault(
+            name: m.name().text,
+            first: m.span,
+            second: k.span,
+        ))
+    )
+}
+
+report_cross_ambiguous = (c :: Checker, m: Member, k: Cand)
+                         Res<(), AllocError> {
+    c.report(
+        m.span.file,
+        m.span,
+        SemaFault.AmbiguousOverload(PairFault(
+            name: m.name().text,
+            first: m.span,
+            second: k.span,
+        ))
+    )
 }
 
 compare_member_signatures = (

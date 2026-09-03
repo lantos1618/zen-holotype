@@ -15,9 +15,6 @@ path -- the one-line compiler change that breaks it.
 - dot_dispatch_projects_the_field_first.zen -- emit the OUTER value as the
   receiver instead of re-basing onto `.inner`: reads Inner's field through
   B's layout and stops answering 12.
-- free_fn_direct_call_is_the_ufcs_call.zen -- keep methods and top-level
-  names in two tables so `scale(w, 2)` binds a different symbol than
-  `w.scale(2)` (or finds none): "direct" rejects or answers another body.
 - free_fn_extends_the_method_at_another_arity.zen -- key the candidate
   table by NAME without arity: second `mix` overwrites the first, one line
   answers the other's body (5003/512 collapse).
@@ -59,45 +56,14 @@ path -- the one-line compiler change that breaks it.
 - paren_wrapped_lambda_keeps_its_arity/ -- punctuation cannot hide a
   closure's arity from method overload filtering.
 
-## A TEST WRITTEN, RUN, AND WITHDRAWN
+## CROSS-DOMAIN OVERLOADS
 
-method_and_free_fn_are_one_overload_set.zen stays in the directory but is
-NOT a passing expectation: see the bug report below. Its `.expected`
-records what the compiler prints today; if that file ever goes red, the
-shadowing bug is fixed -- and until it is, no corpus program may place a
-same-name/same-arity method and free function on one type and assert which
-body answers, because today's answer is the bug's answer.
-
-## COMPILER BUG FOUND
-
-Same name + same arity + same receiver type, one method one free function:
-DESIGN.md says this cannot happen ("Zen has no overloading -- one name, one
-function, always"), but the compiler accepts it silently and resolves every
-spelling to the METHOD:
-
-    W = {
-        v: i32,
-        scale = (self: @Self, k: i32) i32 { self.v + k }
-    }
-    scale = (w: W, k: i32) i32 { w.v * k }
-
-    w.scale(7)   // prints 14 -- the method's answer
-    scale(w, 2)  // ALSO prints 14 -- must be the free function's 21
-
-No diagnostic at either declaration or call. Two shapes:
-
-1. The dot call answers the method body; the free function is silently
-   unreachable by dot at that arity.
-2. The DIRECT call also answers the method body -- so a bare call does not
-   reach top-level names when a method shadows them, contradicting "a free
-   function whose first parameter is the type is callable as a method ...
-   either way".
-
-The gate cannot see it (ufcs_collisions.py scans src/ only), the
-differential oracle is gone, and every wrong output is still a plausible
-number -- exactly the class STAGE warns about. An expectation encoding
-today's behaviour would encode the bug, so the pair was withdrawn from the
-suite; the withdrawn file stands as the canary.
+Method and free-function declarations are checked as one overload set when
+the free function's first parameter accepts the method's receiver. Exact,
+generic-swallowing, and optional-suffix collisions are must-fail tests in the
+sema lane. `method_and_free_fn_split_on_later_type.zen` keeps the legal edge:
+same name and arity remain valid when a later parameter makes the calls
+disjoint.
 
 Also verified while probing (behaviour, not bugs):
 
