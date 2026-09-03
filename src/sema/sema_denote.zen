@@ -1,4 +1,4 @@
-Type, TypeId, Ident, Alias, Decl, Function = std.ast
+Type, TypeId, Ident, Alias, Decl, Function, TParam = std.ast
 Param, ArrayType, FnType = std.ast
 AllocError = std.mem
 Vec = std.collections
@@ -10,7 +10,9 @@ Checker, Ctx, UNRESOLVED = sema.sema_check
 alias_module = sema.sema_module
 counted_array = sema.sema_const
 def_type = sema.sema_type
-push_tparams, module_name = sema.sema_inst
+Inst, push_tparams, module_name, tparam_vars, zip = sema.sema_inst
+TBound = sema.sema_cand
+inst_bounds_hold = sema.sema_bound
 
 type_from_ast* = (c :: Checker, id: TypeId, ctx: Ctx)
                  Res<TyId, AllocError> {
@@ -203,8 +205,88 @@ lookup_named = (
 ) Res<TyId, AllocError> {
     c.world.first_def_of(ctx.module, name.text).try().match({
         None  => c.unresolved_type(node, name),
-        Ok(d) => c.declared_or_alias(d, args),
+        Ok(d) => c.checked_declared_type(node, d, args),
     })
+}
+
+// A written nominal application is complete: unlike a constructor call,
+// there are no value arguments from which omitted type arguments can be
+// inferred. Declaration-internal open applications still write each `T`, and
+// a type variable deliberately carries no concrete answer for a bound yet.
+checked_declared_type = (
+    c    :: Checker,
+    node : Type,
+    d    : Def,
+    args : Vec<TyId>
+) Res<TyId, AllocError> {
+    decl_at(c.tree, d.id).match({
+        None     => c.declared_or_alias(d, args),
+        Ok(decl) => decl.kind.match({
+            Struct(s) => c.checked_nominal_args(node, d, args, s.tparams),
+            Enum(e)   => c.checked_nominal_args(node, d, args, e.tparams),
+            _         => c.declared_or_alias(d, args),
+        }),
+    })
+}
+
+checked_nominal_args = (
+    c       :: Checker,
+    node    : Type,
+    d       : Def,
+    args    : Vec<TyId>,
+    tparams : Vec<TParam>
+) Res<TyId, AllocError> {
+    (args.len == tparams.len).match({
+        false => c.invalid_nominal_instantiation(node, d.name),
+        true  => c.checked_nominal_bounds(node, d, args, tparams),
+    })
+}
+
+invalid_nominal_instantiation = (c :: Checker, node: Type, name: str)
+                                Res<TyId, AllocError> {
+    c.report(
+        node.span.file,
+        node.span,
+        SemaFault.InvalidInstantiation(NameFault(name: name))
+    ).try();
+    c.types.unknown()
+}
+
+checked_nominal_bounds = (
+    c       :: Checker,
+    node    : Type,
+    d       : Def,
+    args    : Vec<TyId>,
+    tparams : Vec<TParam>
+) Res<TyId, AllocError> {
+    vars ::= c.alloc.Vec<TyId>();
+    c.tparam_vars(tparams, d.qname, vars).try();
+    inst ::= c.alloc.Inst();
+    c.zip(vars, args, inst).try();
+    bounds ::= c.nominal_bounds(d, tparams).try();
+    c.inst_bounds_hold(bounds, d.qname, inst, node.span).try().match({
+        false => c.types.unknown(),
+        true  => c.declared_or_alias(d, args),
+    })
+}
+
+nominal_bounds = (c :: Checker, d: Def, tparams: Vec<TParam>)
+                 Res<Vec<TBound>, AllocError> {
+    mark = c.tvar_mark();
+    c.push_tparams(tparams, d.qname).try();
+    poison = c.types.unknown().try();
+    ctx    = Ctx(d.id.module.to_usize(), poison);
+    out ::= c.alloc.Vec<TBound>();
+    tparams.loop((h, tp) {
+        tp.bounds.loop((h2, b) {
+            out.add(TBound(
+                name: tp.name.text,
+                bound: c.type_from_ast(b, ctx).try()
+            )).try();
+        });
+    });
+    c.release_tvars(mark).try();
+    Ok(out)
 }
 
 declared_or_alias* = (c :: Checker, d: Def, args: Vec<TyId>)
