@@ -247,17 +247,19 @@ settle_one = (
 settle_bound = (be :: CBackend, v: TyId, t: TyId, out :: Inst)
                Res<(), AllocError> {
     arg = sub(be, t).try();
-    // A literal family is useful while sema looks for context, but a queued C
-    // instantiation needs one concrete identity. Use the same language
-    // defaults as other materialized literals so `<T>(value: T)` called with
-    // `41` emits its parameter, return, and nested `Opt<T>` as i32 together.
-    concrete = be.check.is_literal_ty(arg).match({
+    out.bind(v, be.materialize_literal(arg).try())
+}
+
+// A literal family is useful while sema looks for context, but every generic
+// instantiation that reaches C needs one concrete identity. Keep recorded and
+// backend-inferred bindings on the same language defaults.
+materialize_literal* = (be :: CBackend, t: TyId) Res<TyId, AllocError> {
+    be.check.is_literal_ty(t).match({
         true  => be.check.types.prim(literal_default(be.check.prim_name(
-            arg
+            t
         ))).try(),
-        false => arg,
-    });
-    out.bind(v, concrete)
+        false => Ok(t),
+    })
 }
 
 // what the arguments say a parameter became
