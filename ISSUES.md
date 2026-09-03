@@ -258,8 +258,9 @@ Worst files: `sema_diag.zen` 53, `gen_c_try.zen` 41, `gen_c_ptr.zen` 37,
 line fits in 80 columns (`gen_c_floor.zen:56-57` merges to 79). 125 split-module
 imports in non-root files total; the other 58 genuinely exceed 80.
 
-**`[u8, -1]` silently floors to `[u8, 0]`.** Same family as the array count that
-was just fixed, wrong sentence for it.
+**~~`[u8, -1]` silently floors to `[u8, 0]`~~ — CLOSED.** Negative literal,
+named-constant, and folded array counts are rejected by SEMA; zero remains a
+valid fixed-array size.
 
 **`gen_c_print.zen` holds two subjects** at 543 lines — `println`'s lowering and
 the shared format classifier. A split is owed, and it carries the UFCS
