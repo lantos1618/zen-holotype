@@ -17,14 +17,14 @@ The corresponding decisions are in
 | Item | Count |
 | --- | ---: |
 | Zen files | 233 |
-| Top-level declarations | 6868 |
+| Top-level declarations | 6885 |
 | Types | 410 |
 | Enums | 109 |
 | Aliases | 0 |
 | Implementations | 79 |
-| Functions | 3618 |
+| Functions | 3631 |
 | Constants | 176 |
-| Imports and re-exports | 2476 |
+| Imports and re-exports | 2480 |
 
 ## Files
 
@@ -14416,7 +14416,7 @@ type_from_ast = sema.sema_denote
 
 ### `src/sema/sema_apply.zen`
 
-63 declarations (functions: 39, imports and re-exports: 24).
+66 declarations (functions: 41, imports and re-exports: 25).
 
 #### Functions
 
@@ -14491,13 +14491,27 @@ valid_variant_call = (
     ctx  : Ctx
 ) Res<TyId, AllocError>
 
+nominal_bounds_hold = (c :: Checker, ty: TyId, at: Span)
+                      Res<bool, AllocError>
+
+decl_bounds_hold = (
+    c      :: Checker,
+    decl   : Decl,
+    args   : Vec<TyId>,
+    owner  : str,
+    module : usize,
+    at     : Span
+)
+                   Res<bool, AllocError>
+
 variant_has_type = (c: Checker, call: Call, ty: TyId) bool
 
-variant_literal = (
+variant_payload_fits = (
     c    :: Checker,
     call : Call,
     ty   : TyId,
     name : str,
+    ctx  : Ctx,
     inst : Inst
 ) Res<(), AllocError>
 
@@ -14608,7 +14622,7 @@ impl_bound_at = (c :: Checker, bound: TyId, n: TyNamed)
 #### Imports and re-exports
 
 ```zen
-Expr, ExprId, Call, Arg = std.ast
+Expr, ExprId, Call, Arg, Span = std.ast
 
 Decl, Enum, Struct, TypeId, Impl = std.ast
 
@@ -14628,11 +14642,13 @@ Def, decl_at = sema.sema_def
 
 Checker, Ctx = sema.sema_check
 
-Inst, InstEdge, subst, unify, tparam_vars, zip = sema.sema_inst
+Inst, InstEdge, subst, unify, tparam_vars, zip, push_tparams = sema.sema_inst
 
 has_var, inst_of_named, decl_tparam_vars = sema.sema_inst
 
 Cand, TBound, Actual, ty_at, signature_matches = sema.sema_cand
+
+tparam_bounds = sema.sema_cand
 
 impl_bound_type, LocalImpl, local_impls = sema.sema_supply
 
@@ -14642,7 +14658,7 @@ type_from_ast = sema.sema_denote
 
 check_literal = sema.sema_trap
 
-array_range_shape = sema.sema_bound
+array_range_shape, check_inst_bounds, inst_bounds_hold = sema.sema_bound
 
 case_payload, Case, cases_of, find_case = sema.sema_case
 
@@ -14659,7 +14675,7 @@ catch_all_named = sema.sema_discriminant
 
 ### `src/sema/sema_bound.zen`
 
-64 declarations (functions: 47, imports and re-exports: 17).
+67 declarations (functions: 50, imports and re-exports: 17).
 
 #### Functions
 
@@ -14766,6 +14782,25 @@ named_impls_bound = (c :: Checker, n: TyNamed, bound: TyId)
 check_bounds* = (c :: Checker, cand: Cand, actuals: Vec<Actual>, at: Span)
                 Res<(), AllocError>
 
+check_inst_bounds* = (c :: Checker, cand: Cand, inst: Inst, at: Span)
+                     Res<bool, AllocError>
+
+inst_bounds_hold* = (
+    c      :: Checker,
+    bounds : Vec<TBound>,
+    owner  : str,
+    inst   : Inst,
+    at     : Span
+) Res<bool, AllocError>
+
+inst_bound_holds = (
+    c      :: Checker,
+    tb     : TBound,
+    actual : TyId,
+    inst   : Inst,
+    at     : Span
+) Res<bool, AllocError>
+
 check_one_bound = (
     c       :: Checker,
     cand    : Cand,
@@ -14833,14 +14868,14 @@ storage_seat_name, LocalImpl, local_impls, prim_named = sema.sema_supply
 
 Cand, TBound, Actual, ty_at, is_tvar = sema.sema_cand
 
-module_name = sema.sema_inst
+Inst, module_name, subst = sema.sema_inst
 
 res_sugar = sema.sema_denote
 ```
 
 ### `src/sema/sema_call.zen`
 
-111 declarations (types: 3, enums: 1, functions: 70, imports and re-exports: 37).
+112 declarations (types: 3, enums: 1, functions: 71, imports and re-exports: 37).
 
 #### Types
 
@@ -14907,6 +14942,8 @@ CallCheck = {
                       Res<TyId, AllocError>
     static_member = (self :: @Self, c :: Checker, ac: Access, ty: TyId)
                     Res<TyId, AllocError>
+    written_associated = (self: @Self, c :: Checker, ac: Access, ty: TyId,
+                          got: TyId) Res<TyId, AllocError>
     receiver = (self :: @Self, c :: Checker, ac: Access, b: Base)
                Res<TyId, AllocError>
     known_receiver = (self :: @Self, c :: Checker, ac: Access, b: Base)
@@ -14926,12 +14963,16 @@ CallCheck = {
         found : Vec<Found>
     )
              Res<TyId, AllocError>
-    written_member = (self: @Self, c :: Checker, ac: Access, b: Base,
-                      f: Found) Res<TyId, AllocError>
+    written_member = (self: @Self, c :: Checker, ac: Access, f: Found)
+                     Res<TyId, AllocError>
+    written_found = (self: @Self, c :: Checker, ac: Access, f: Found,
+                     off: usize) Res<TyId, AllocError>
     instantiate_member = (self: @Self, c :: Checker, ac: Access, f: Found,
-                          fn: Function) Res<TyId, AllocError>
+                          fn: Function, off: usize) Res<TyId, AllocError>
     settled_member = (self: @Self, c :: Checker, name: str, ty: TyId,
-                      vars: Vec<TyId>) Res<TyId, AllocError>
+                      vars: Vec<TyId>, bounds: Vec<TBound>, owner: str,
+                      off: usize)
+                      Res<TyId, AllocError>
     invalid_member_instantiation = (self: @Self, c :: Checker, name: str)
                                    Res<TyId, AllocError>
     by_arity = (
@@ -15044,6 +15085,14 @@ instantiate_fn_sig = (
     f       : TyFn,
     actuals : Vec<Actual>
 ) Res<TyId, AllocError>
+
+infer_member_inst = (
+    c       :: Checker,
+    ty      : TyId,
+    actuals : Vec<Actual>,
+    off     : usize,
+    inst    :: Inst
+) Res<(), AllocError>
 
 first_matching = (
     c       :: Checker,
@@ -15264,7 +15313,7 @@ static_access = sema.sema_static
 
 filter_visible, hidden_member = sema.sema_member
 
-check_bounds = sema.sema_bound
+check_bounds, inst_bounds_hold = sema.sema_bound
 
 check_literal = sema.sema_trap
 
@@ -15284,7 +15333,7 @@ Cand, TBound, Actual, cands_of, travelled_cands, matches = sema.sema_cand
 
 ty_at, is_tvar, sig_fits, signature_matches = sema.sema_cand
 
-omittable_tail = sema.sema_cand
+omittable_tail, collect_bounds = sema.sema_cand
 
 actor_payload_unsafe = sema.sema_actor_payload
 ```
@@ -15353,11 +15402,11 @@ cand_of = (c :: Checker, d: Def, out :: Vec<Cand>) Res<(), AllocError>
 make_cand = (c :: Checker, d: Def, dec: Decl, f: Function)
             Res<Cand, AllocError>
 
-collect_bounds = (c :: Checker, f: Function, ctx: Ctx, out :: Vec<TBound>)
-                 Res<(), AllocError>
+collect_bounds* = (c :: Checker, f: Function, ctx: Ctx, out :: Vec<TBound>)
+                  Res<(), AllocError>
 
-tparam_bounds = (c :: Checker, tp: TParam, ctx: Ctx, out :: Vec<TBound>)
-                Res<(), AllocError>
+tparam_bounds* = (c :: Checker, tp: TParam, ctx: Ctx, out :: Vec<TBound>)
+                 Res<(), AllocError>
 
 matches* = (c :: Checker, cand: Cand, actuals: Vec<Actual>)
            Res<bool, AllocError>
@@ -16564,7 +16613,7 @@ DeclId, ImplId = sema.sema_id
 
 ### `src/sema/sema_denote.zen`
 
-40 declarations (functions: 27, imports and re-exports: 13).
+47 declarations (functions: 32, imports and re-exports: 15).
 
 #### Functions
 
@@ -16639,6 +16688,35 @@ lookup_named = (
     ctx  : Ctx
 ) Res<TyId, AllocError>
 
+checked_declared_type = (
+    c    :: Checker,
+    node : Type,
+    d    : Def,
+    args : Vec<TyId>
+) Res<TyId, AllocError>
+
+checked_nominal_args = (
+    c       :: Checker,
+    node    : Type,
+    d       : Def,
+    args    : Vec<TyId>,
+    tparams : Vec<TParam>
+) Res<TyId, AllocError>
+
+invalid_nominal_instantiation = (c :: Checker, node: Type, name: str)
+                                Res<TyId, AllocError>
+
+checked_nominal_bounds = (
+    c       :: Checker,
+    node    : Type,
+    d       : Def,
+    args    : Vec<TyId>,
+    tparams : Vec<TParam>
+) Res<TyId, AllocError>
+
+nominal_bounds = (c :: Checker, d: Def, tparams: Vec<TParam>)
+                 Res<Vec<TBound>, AllocError>
+
 declared_or_alias* = (c :: Checker, d: Def, args: Vec<TyId>)
                     Res<TyId, AllocError>
 
@@ -16664,7 +16742,7 @@ unresolved_type = (c :: Checker, node: Type, name: Ident)
 #### Imports and re-exports
 
 ```zen
-Type, TypeId, Ident, Alias, Decl, Function = std.ast
+Type, TypeId, Ident, Alias, Decl, Function, TParam = std.ast
 
 Param, ArrayType, FnType = std.ast
 
@@ -16688,7 +16766,11 @@ counted_array = sema.sema_const
 
 def_type = sema.sema_type
 
-push_tparams, module_name = sema.sema_inst
+Inst, push_tparams, module_name, tparam_vars, zip = sema.sema_inst
+
+TBound = sema.sema_cand
+
+inst_bounds_hold = sema.sema_bound
 ```
 
 ### `src/sema/sema_depth.zen`
@@ -17705,7 +17787,7 @@ Eq, Hash, Hasher = std.core
 
 ### `src/sema/sema_inst.zen`
 
-37 declarations (types: 2, functions: 27, imports and re-exports: 8).
+39 declarations (types: 2, functions: 29, imports and re-exports: 8).
 
 #### Types
 
@@ -17741,6 +17823,9 @@ Inst* = (a: Alloc) Inst
 subst* = (c :: Checker, ty: TyId, inst: Inst) Res<TyId, AllocError>
 
 subst_kind = (c :: Checker, ty: TyId, inst: Inst) Res<TyId, AllocError>
+
+subst_array = (c :: Checker, a: TyArray, ty: TyId, inst: Inst)
+              Res<TyId, AllocError>
 
 subst_named = (c :: Checker, n: TyNamed, ty: TyId, inst: Inst)
               Res<TyId, AllocError>
@@ -17795,6 +17880,9 @@ zip* = (c :: Checker, vars: Vec<TyId>, args: Vec<TyId>, inst :: Inst)
 unify* = (c :: Checker, param: TyId, actual: TyId, inst :: Inst)
          Res<(), AllocError>
 
+unify_array = (c :: Checker, a: TyArray, actual: TyId, inst :: Inst)
+              Res<(), AllocError>
+
 bind_actual = (c :: Checker, param: TyId, actual: TyId, inst :: Inst)
               Res<(), AllocError>
 
@@ -17830,7 +17918,7 @@ str, String = std.text
 
 Range = std.core
 
-TyId, TyNamed, TyRes, TyFn, ResForm = sema.sema_ty
+TyId, TyNamed, TyRes, TyFn, TyArray, ResForm = sema.sema_ty
 
 decl_at = sema.sema_def
 
@@ -18432,7 +18520,7 @@ push_tparams, module_name = sema.sema_inst
 
 ### `src/sema/sema_member.zen`
 
-86 declarations (types: 2, functions: 62, imports and re-exports: 22).
+87 declarations (types: 2, functions: 62, imports and re-exports: 23).
 
 #### Types
 
@@ -18446,6 +18534,8 @@ Found* = {
     exported*: bool,
     module*: usize,
     bound*: TyId,
+    decl_owner*: TyId,
+    decl_span*: Span,
     span*: Span,
     hidden_from* = (self: @Self, mi: usize) bool
 }
@@ -18459,7 +18549,15 @@ Base* = {
 #### Functions
 
 ```zen
-supplied_found* = (name: str, ty: TyId, bound: TyId, span: Span) Found
+supplied_found* = (
+    name       : str,
+    ty         : TyId,
+    bound      : TyId,
+    decl_owner : TyId,
+    decl_span  : Span,
+    module     : usize,
+    span       : Span
+) Found
 
 named_as* = (c: Checker, n: TyNamed, name: str, module: str) bool
 
@@ -18732,6 +18830,8 @@ Inst, subst, inst_of_named, owner_of, push_tparams = sema.sema_inst
 is_prim = sema.sema_ty
 
 impl_members, bound_member_types, LocalImpl, local_impls = sema.sema_supply
+
+bound_module = sema.sema_supply
 
 impl_bound_type, impl_span, prim_named = sema.sema_supply
 
@@ -19990,7 +20090,8 @@ supplied_types = (
     bound   : TyId,
     name    : str,
     self_ty : TyId,
-    out     :: Vec<TyId>
+    out     :: Vec<TyId>,
+    kept    :: Vec<Member>
 ) Res<(), AllocError>
 
 keep_reachable = (
@@ -20040,7 +20141,7 @@ storage_seat_name* = (c :: Checker, ty: TyId, i: usize)
 
 storage_member = (m: Member) bool
 
-bound_module = (c: Checker, bound: TyId) usize
+bound_module* = (c: Checker, bound: TyId) usize
 
 bound_declares* = (c :: Checker, ty: TyId, name: str)
                   Res<bool, AllocError>
