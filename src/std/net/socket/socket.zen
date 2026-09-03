@@ -9,6 +9,7 @@ Vec = std.collections
 AF_UNSPEC: i32 = 0
 AF_INET6: i32 = 10
 SOCK_STREAM: i32 = 1
+SOCK_CLOEXEC: i32 = 524288
 IPPROTO_TCP: i32 = 6
 MSG_NOSIGNAL: i32 = 16384
 NI_MAXHOST: u32 = 1025
@@ -205,11 +206,17 @@ Socket* = {
         head = run.ptr().read(0);
         @scope.defer(() { freeaddrinfo(head) });
 
+        // Socket descriptors can outlive calls that spawn child processes.
+        // Close-on-exec keeps those children from inheriting the connection.
         raw ::= -1;
         at  ::= head;
         loop(() { !at.is_null() && raw < 0 }, (h) {
             info      = at.read(0);
-            candidate = socket(info.family, info.socktype, info.protocol);
+            candidate = socket(
+                info.family,
+                info.socktype + SOCK_CLOEXEC,
+                info.protocol
+            );
             (candidate >= 0).then(() {
                 (connect(
                     candidate,
