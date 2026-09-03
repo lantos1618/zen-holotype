@@ -1,0 +1,36 @@
+// Inner and Outer flatten to the same semantic set, but Outer carries Inner
+// as a nested C variant. Widening must wrap that carrier, not copy the larger
+// destination payload from the smaller source object.
+A = | AValue(i32)
+B = | BValue(str)
+Inner = A | B
+Outer = A | Inner
+
+raise = () Res<(), Inner> {
+    Err(Inner.B(B.BValue("bee")))
+}
+
+widen = () Res<(), Outer> {
+    raise().try();
+    Ok(())
+}
+
+show = (result: Res<(), Outer>) () {
+    result.match({
+        Ok(_)  => println("ok"),
+        Err(e) => e.match({
+            A(a)         => a.match({
+                AValue(n) => println("a {}", n),
+            }),
+            Inner(inner) => inner.match({
+                A(a) => a.match({ AValue(n) => println("inner a {}", n) }),
+                B(b) => b.match({ BValue(text) => println("{}", text) }),
+            }),
+        }),
+    })
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    show(widen());
+    (env.argv.len > 0).match({ true => Ok(0), false => Ok(9) })
+}

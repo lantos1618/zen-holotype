@@ -226,6 +226,19 @@ TryPropagation = {
 
     propagate_wider = (self: @Self, be :: CBackend)
                       Res<(), AllocError> {
+        // A declared destination may carry the whole source set as one nested
+        // variant even when flattening says their semantic member sets are
+        // equal. Its C representation is then a wrapper, not a byte-compatible
+        // spelling of the source. Prefer that exact carrier before the
+        // canonical-set copy path.
+        be.carrier(self.target.error, self.source.error).match({
+            Ok(var) => self.write(be, Carry.Variant(var)),
+            None    => self.copy_or_widen(be),
+        })
+    }
+
+    copy_or_widen = (self: @Self, be :: CBackend)
+                    Res<(), AllocError> {
         be.same_set(self.source.error, self.target.error).match({
             true  => self.write(be, Carry.Copy),
             false => self.widen_or_report(be),
