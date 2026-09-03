@@ -21,7 +21,9 @@ tests/
 ├── must-fail/     programs that must be rejected, with the diagnostic
 │   ├── lex/  parse/  modules/  sema/  own/  traps/               run.py
 ├── parse/         tree-sitter corpus (stage 0.1)              tree-sitter test
-├── bench/         sanitizer and leak harnesses                    make asan/leak
+├── bench/         sanitizer and leak harnesses              make asan/ubsan/leak
+├── differential/  Zen -> C -> process outcome classifier       make differential
+├── quality/       generated-C warning ratchet                       make warnings
 └── determinism/   gen_c emits the same bytes twice               check.sh
 ```
 

@@ -33,11 +33,11 @@ J       ?= $(shell nproc 2>/dev/null || echo 4)
 CACHE   ?= $(shell command -v ccache 2>/dev/null)
 ZCC      = $(CACHE) $(CC)
 
-.PHONY: all build seed test verify lint parse cap dupcomments faults lextile determinism grammar fmt asan leak profile clean help
+.PHONY: all build seed test verify differential warnings lint parse cap dupcomments faults lextile determinism grammar fmt asan ubsan leak profile clean help
 
 # These gates share ./zen, build/, and grammar/zen.so. Keep their dependency
 # graphs serial even when an operator invokes `make -j verify`.
-.NOTPARALLEL: verify test fmt determinism
+.NOTPARALLEL: verify test fmt determinism differential warnings ubsan
 
 all: test
 
@@ -91,7 +91,19 @@ test: build lint parse cap dupcomments faults lextile
 ## Keep this target as the single list of required gates. Shared prerequisites
 ## are built once per invocation, then formatting and determinism inspect the
 ## same compiler that ran the test suite.
-verify: test fmt determinism
+verify: test fmt determinism differential warnings ubsan
+
+## differential: classify maintained programs at the Zen, C, and process
+## boundaries. Zen-accepted C rejection is always red; the manifest cannot
+## bless it as an expected result.
+differential: build
+	$(PY) tests/differential/run.py --zen ./zen
+
+## warnings: ratchet generated-C warnings under GCC and Clang. The gate proves
+## both compilers diagnose its positive control before trusting recorded
+## warning counts for the seed and a representative emitted program.
+warnings: build
+	tests/quality/generated_c_warnings.sh
 
 ## faults: every fault the compiler declares must have a site that raises
 ## it. Green here does NOT mean every diagnostic works — it means none is
@@ -292,6 +304,15 @@ asan: seed/zen.c
 	$(CC) -fsanitize=address,leak build/obj/seed-asan.o build/obj/proc-asan.o -o zen-asan
 	tests/bench/asan.sh ./zen-asan
 
+## ubsan: the compiler under UndefinedBehaviorSanitizer. A signed-overflow
+## canary must report before a clean representative compile can pass.
+ubsan: seed/zen.c
+	@mkdir -p build/obj
+	$(ZCC) -std=c99 -O1 -g -fno-omit-frame-pointer -fsanitize=undefined -fno-sanitize-recover=undefined -c seed/zen.c -o build/obj/seed-ubsan.o
+	$(ZCC) -std=c99 -O1 -g -fno-omit-frame-pointer -fsanitize=undefined -fno-sanitize-recover=undefined -c src/std/proc/proc.c -o build/obj/proc-ubsan.o
+	$(CC) -fsanitize=undefined -fno-sanitize-recover=undefined build/obj/seed-ubsan.o build/obj/proc-ubsan.o -o zen-ubsan
+	tests/bench/ubsan.sh ./zen-ubsan
+
 ## leak: valgrind's answer to the same question. definite leaks only --
 ## still-reachable memory is where the deliberate argv rows land, and
 ## reporting them would fail every run on a known-non-bug.
@@ -307,7 +328,7 @@ profile: build
 	$(CC) build/c/*.c.profile.o build/obj/proc.o -o zen-fp
 
 clean:
-	rm -f zen zen-new zen-asan zen-fp grammar/zen.so
+	rm -f zen zen-new zen-asan zen-ubsan zen-fp grammar/zen.so
 	rm -rf build/ tests/bench/out/
 
 help:

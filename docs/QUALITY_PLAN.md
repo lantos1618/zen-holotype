@@ -238,6 +238,12 @@ Add `Step` to `std.build`; make `exe`, `test`, and `bench` return it; teach
 Planning records a graph and never executes project code. Port Make targets one
 at a time, retaining one `make verify` adapter.
 
+Extend `std.cli` from typed scanning into the terminal-facing builder surface:
+generated help and usage, subcommands, defaults, required/conflicting options,
+repeatable values, and typed value parsing. Build declarations own their command
+shape; terminal rendering consumes that declaration instead of maintaining a
+second handwritten usage string.
+
 `verify` owns the list: build, corpus/must-fail, format, determinism, full
 fixpoint, generated-C warnings, sanitizers, benchmarks, editor checks, and
 release-state checks. CI and releases call only this aggregate.

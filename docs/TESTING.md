@@ -208,9 +208,10 @@ workload and records wall time, peak RSS, emitted-byte hashes, and a `perf` prof
 A change is accepted only when output is byte-identical and the same workload gets
 faster.
 
-`make asan` and `make leak` remain explicit slow diagnostics for compiler memory
-safety. They are not part of `make test`; a machine without their platform tools
-must not turn an ordinary correctness run into a harness failure.
+`make asan`, `make ubsan`, and `make leak` are slow diagnostics for compiler
+memory and undefined-behavior safety. UBSan is part of the release-facing
+`make verify` door; ASan and Valgrind remain explicit because their platform
+support is less uniform. None is part of the ordinary `make test` door.
 
 ## Fuzzing, once the grammar is stable
 
