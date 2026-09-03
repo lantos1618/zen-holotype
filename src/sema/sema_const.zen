@@ -18,9 +18,23 @@ FOLD_LIMIT* : i64 = 2147483647
 counted_array* = (c :: Checker, elem: TyId, id: ExprId, ctx: Ctx)
                 Res<TyId, AllocError> {
     c.count_int(id, ctx).try().match({
-        Ok(v) => c.types.array(elem, len_of(v)),
+        Ok(v) => (v < 0).match({
+            true  => c.negative_array_count(id),
+            false => c.types.array(elem, len_of(v)),
+        }),
         None  => c.count_refused(id),
     })
+}
+
+negative_array_count = (c :: Checker, id: ExprId)
+                       Res<TyId, AllocError> {
+    node = c.tree.expr_at(id);
+    c.report(
+        node.span.file,
+        node.span,
+        SemaFault.NegativeArrayCount(NameFault(name: written_count(node)))
+    ).try();
+    c.types.unknown()
 }
 
 count_refused = (c :: Checker, id: ExprId) Res<TyId, AllocError> {
