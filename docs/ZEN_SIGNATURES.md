@@ -17,14 +17,14 @@ The corresponding decisions are in
 | Item | Count |
 | --- | ---: |
 | Zen files | 233 |
-| Top-level declarations | 6885 |
+| Top-level declarations | 6887 |
 | Types | 410 |
 | Enums | 109 |
 | Aliases | 0 |
 | Implementations | 79 |
-| Functions | 3631 |
+| Functions | 3632 |
 | Constants | 176 |
-| Imports and re-exports | 2480 |
+| Imports and re-exports | 2481 |
 
 ## Files
 
@@ -14852,7 +14852,7 @@ Range = std.core
 
 ImplId = sema.sema_id
 
-TyId, TyNamed, Prim, is_prim = sema.sema_ty
+TyId, TyNamed, Prim, is_prim, literal_default = sema.sema_ty
 
 Def, decl_at = sema.sema_def
 
@@ -14868,14 +14868,14 @@ storage_seat_name, LocalImpl, local_impls, prim_named = sema.sema_supply
 
 Cand, TBound, Actual, ty_at, is_tvar = sema.sema_cand
 
-Inst, module_name, subst = sema.sema_inst
+Inst, module_name, subst, inst_of_named = sema.sema_inst
 
 res_sugar = sema.sema_denote
 ```
 
 ### `src/sema/sema_call.zen`
 
-112 declarations (types: 3, enums: 1, functions: 71, imports and re-exports: 37).
+113 declarations (types: 3, enums: 1, functions: 71, imports and re-exports: 38).
 
 #### Types
 
@@ -14942,6 +14942,12 @@ CallCheck = {
                       Res<TyId, AllocError>
     static_member = (self :: @Self, c :: Checker, ac: Access, ty: TyId)
                     Res<TyId, AllocError>
+    module_static = (self :: @Self, c :: Checker, ac: Access, module: usize,
+                     ty: TyId) Res<TyId, AllocError>
+    module_static_type = (self :: @Self, c :: Checker, ac: Access, ty: TyId)
+                         Res<TyId, AllocError>
+    module_function = (self :: @Self, c :: Checker, ac: Access, module: usize)
+                      Res<TyId, AllocError>
     written_associated = (self: @Self, c :: Checker, ac: Access, ty: TyId,
                           got: TyId) Res<TyId, AllocError>
     receiver = (self :: @Self, c :: Checker, ac: Access, b: Base)
@@ -15327,9 +15333,11 @@ push_tparams, module_name = sema.sema_inst
 
 param_type, type_from_ast = sema.sema_denote
 
-alias_module, module_not_a_value = sema.sema_module
+alias_module, module_not_a_value, module_named_by = sema.sema_module
 
-Cand, TBound, Actual, cands_of, travelled_cands, matches = sema.sema_cand
+Cand, TBound, Actual, cands_of, exported_cands = sema.sema_cand
+
+travelled_cands, matches = sema.sema_cand
 
 ty_at, is_tvar, sig_fits, signature_matches = sema.sema_cand
 
@@ -15340,7 +15348,7 @@ actor_payload_unsafe = sema.sema_actor_payload
 
 ### `src/sema/sema_cand.zen`
 
-57 declarations (types: 3, functions: 40, imports and re-exports: 14).
+58 declarations (types: 3, functions: 41, imports and re-exports: 14).
 
 #### Types
 
@@ -15396,6 +15404,9 @@ has_cand = (out: Vec<Cand>, id: DeclId) bool
 
 cands_of* = (c :: Checker, mi: usize, name: str, out :: Vec<Cand>)
             Res<(), AllocError>
+
+exported_cands* = (c :: Checker, mi: usize, name: str, out :: Vec<Cand>)
+                  Res<(), AllocError>
 
 cand_of = (c :: Checker, d: Def, out :: Vec<Cand>) Res<(), AllocError>
 
