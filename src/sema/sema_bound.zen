@@ -13,7 +13,7 @@ opaque, Found, members_of, member_type, named_as = sema.sema_member
 bound_members, bound_member_type, has_member, impl_span, impl_bound_type = sema.sema_supply
 storage_seat_name, LocalImpl, local_impls, prim_named = sema.sema_supply
 Cand, TBound, Actual, ty_at, is_tvar = sema.sema_cand
-module_name = sema.sema_inst
+Inst, module_name, subst = sema.sema_inst
 res_sugar = sema.sema_denote
 
 check_impl* = (c :: Checker, id: ImplId, mi: usize) Res<(), AllocError> {
@@ -382,6 +382,66 @@ check_bounds* = (c :: Checker, cand: Cand, actuals: Vec<Actual>, at: Span)
         c.check_one_bound(cand, tb, actuals, at).try();
     });
     Ok(());
+}
+
+// Bounds belong to type parameters, not only to parameters whose complete
+// type is that variable. Validate the resolved substitution so explicit,
+// return-only and nested occurrences all take the same path.
+check_inst_bounds* = (c :: Checker, cand: Cand, inst: Inst, at: Span)
+                     Res<bool, AllocError> {
+    c.inst_bounds_hold(cand.tbounds, cand.owner, inst, at)
+}
+
+inst_bounds_hold* = (
+    c      :: Checker,
+    bounds : Vec<TBound>,
+    owner  : str,
+    inst   : Inst,
+    at     : Span
+) Res<bool, AllocError> {
+    hold ::= true;
+    bounds.loop((h, tb) {
+        v = c.types.var(tb.name, owner).try();
+        inst.lookup(v).match({
+            None       => (),
+            Ok(actual) => c.inst_bound_holds(tb, actual, inst, at)
+                .try().match({
+                    true  => (),
+                    false => { hold = false; },
+                }),
+        });
+    });
+    Ok(hold)
+}
+
+inst_bound_holds = (
+    c      :: Checker,
+    tb     : TBound,
+    actual : TyId,
+    inst   : Inst,
+    at     : Span
+) Res<bool, AllocError> {
+    c.unbounded(actual).match({
+        true  => Ok(true),
+        false => {
+            bound = c.subst(tb.bound, inst).try();
+            c.satisfies_bound(actual, bound).try().match({
+                true  => Ok(true),
+                false => {
+                    c.report(
+                        at.file,
+                        at,
+                        SemaFault.BoundNotSatisfied(TypeFault(
+                            name: tb.name,
+                            expected: bound,
+                            found: actual
+                        ))
+                    ).try();
+                    Ok(false)
+                },
+            })
+        },
+    })
 }
 
 check_one_bound = (

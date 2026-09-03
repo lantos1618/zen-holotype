@@ -1,4 +1,4 @@
-Expr, ExprId, Call, Arg = std.ast
+Expr, ExprId, Call, Arg, Span = std.ast
 Decl, Enum, Struct, TypeId, Impl = std.ast
 AllocError = std.mem
 Vec = std.collections
@@ -8,14 +8,15 @@ ImplId = sema.sema_id
 TyId, TyNamed, literal_default = sema.sema_ty
 Def, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
-Inst, InstEdge, subst, unify, tparam_vars, zip = sema.sema_inst
+Inst, InstEdge, subst, unify, tparam_vars, zip, push_tparams = sema.sema_inst
 has_var, inst_of_named, decl_tparam_vars = sema.sema_inst
 Cand, TBound, Actual, ty_at, signature_matches = sema.sema_cand
+tparam_bounds = sema.sema_cand
 impl_bound_type, LocalImpl, local_impls = sema.sema_supply
 type_of = sema.sema_type
 type_from_ast = sema.sema_denote
 check_literal = sema.sema_trap
-array_range_shape = sema.sema_bound
+array_range_shape, check_inst_bounds, inst_bounds_hold = sema.sema_bound
 case_payload, Case, cases_of, find_case = sema.sema_case
 check_ctor_fields = sema.sema_hoist
 check_ctor_shape = sema.sema_bound
@@ -41,9 +42,14 @@ valid_construct = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
     c.ctor_args(call, d, ctx, args).try();
     applied = c.types.named(d.id, d.qname, d.name, args).try();
     ty      = c.settled_ctor_type(call, d, ctx, args, applied).try();
-    c.check_ctor_fields(call, ty, ctx).try();
-    c.check_ctor_shape(call, ty, c.tree.expr_at(id).span).try();
-    Ok(ty);
+    c.nominal_bounds_hold(ty, c.tree.expr_at(id).span).try().match({
+        false => c.types.unknown(),
+        true  => {
+            c.check_ctor_fields(call, ty, ctx).try();
+            c.check_ctor_shape(call, ty, c.tree.expr_at(id).span).try();
+            Ok(ty)
+        },
+    })
 }
 
 ctor_type_arg_arity_fits = (c :: Checker, call: Call, d: Def)
@@ -189,7 +195,7 @@ valid_variant_call = (
         Ok(cs) => c.payload_says(call, ty, cs, ctx, inst),
     })).try();
     c.variant_has_type(call, ty).match({
-        true  => c.variant_literal(call, ty, name, inst),
+        true  => c.variant_payload_fits(call, ty, name, ctx, inst),
         false => Ok(()),
     }).try();
     settled = (inst.len() == 0).match({
@@ -197,7 +203,10 @@ valid_variant_call = (
         false => c.subst(own, inst),
     }).try();
     catch_all.match({
-        false => Ok(settled),
+        false => c.nominal_bounds_hold(settled, call.args_span).try().match({
+            true  => Ok(settled),
+            false => c.types.unknown(),
+        }),
         true  => {
             c.report(
                 call.args_span.file,
@@ -209,6 +218,56 @@ valid_variant_call = (
     })
 }
 
+nominal_bounds_hold = (c :: Checker, ty: TyId, at: Span)
+                      Res<bool, AllocError> {
+    c.types.at(ty).match({
+        Named(n) => c.tree.decl_at(n.decl).match({
+            None     => Ok(true),
+            Ok(decl) => c.decl_bounds_hold(
+                decl,
+                n.args,
+                c.owner_of(n.decl.module.to_usize(), n.name).try(),
+                n.decl.module.to_usize(),
+                at
+            ),
+        }),
+        _        => Ok(true),
+    })
+}
+
+decl_bounds_hold = (
+    c      :: Checker,
+    decl   : Decl,
+    args   : Vec<TyId>,
+    owner  : str,
+    module : usize,
+    at     : Span
+)
+                   Res<bool, AllocError> {
+    tmark  = c.tvar_mark();
+    poison = c.types.unknown().try();
+    ctx    = Ctx(module, poison);
+    bounds ::= c.alloc.Vec<TBound>();
+    vars   ::= c.alloc.Vec<TyId>();
+    decl.kind.match({
+        Struct(s) => {
+            c.push_tparams(s.tparams, owner).try();
+            c.tparam_vars(s.tparams, owner, vars).try();
+            s.tparams.loop((h, tp) { c.tparam_bounds(tp, ctx, bounds).try() });
+        },
+        Enum(e)   => {
+            c.push_tparams(e.tparams, owner).try();
+            c.tparam_vars(e.tparams, owner, vars).try();
+            e.tparams.loop((h, tp) { c.tparam_bounds(tp, ctx, bounds).try() });
+        },
+        _         => (),
+    });
+    c.release_tvars(tmark).try();
+    inst ::= c.alloc.Inst();
+    c.zip(vars, args, inst).try();
+    c.inst_bounds_hold(bounds, owner, inst, at)
+}
+
 variant_has_type = (c: Checker, call: Call, ty: TyId) bool {
     (call.targs.len > 0) || c.types.at(ty).match({
         Named(n) => n.args.len > 0,
@@ -216,11 +275,12 @@ variant_has_type = (c: Checker, call: Call, ty: TyId) bool {
     })
 }
 
-variant_literal = (
+variant_payload_fits = (
     c    :: Checker,
     call : Call,
     ty   : TyId,
     name : str,
+    ctx  : Ctx,
     inst : Inst
 ) Res<(), AllocError> {
     call.args.get(0).match({
@@ -228,7 +288,12 @@ variant_literal = (
         Ok(arg) => {
             payload = c.case_payload(ty, name).try();
             want    = c.subst(payload, inst).try();
-            c.check_literal(arg.value, want)
+            c.check_literal(arg.value, want).try();
+            got = c.type_of(arg.value, ctx).try();
+            c.is_literal_ty(got).match({
+                true  => Ok(()),
+                false => c.coerce(arg.span.file, arg.span, got, want, ""),
+            })
         },
     })
 }
@@ -400,14 +465,19 @@ instantiated_ret = (
 )
                    Res<Res<TyId>, AllocError> {
     inst = c.call_inst(call, k, actuals, ctx).try();
-    params ::= c.alloc.Vec<TyId>();
-    c.subst_list(k.params, inst, params).try();
-    c.signature_matches(params, actuals, 0).try().match({
-        false => c.invalid_instantiation(id, k.name),
+    c.check_inst_bounds(k, inst, c.tree.expr_at(id).span).try().match({
+        false => Ok(None),
         true  => {
-            c.resolve_inst(id, inst).try();
-            c.note_call_edge(id, k, inst).try();
-            Ok(Ok(c.subst(k.ret, inst).try()))
+            params ::= c.alloc.Vec<TyId>();
+            c.subst_list(k.params, inst, params).try();
+            c.signature_matches(params, actuals, 0).try().match({
+                false => c.invalid_instantiation(id, k.name),
+                true  => {
+                    c.resolve_inst(id, inst).try();
+                    c.note_call_edge(id, k, inst).try();
+                    Ok(Ok(c.subst(k.ret, inst).try()))
+                },
+            })
         },
     })
 }

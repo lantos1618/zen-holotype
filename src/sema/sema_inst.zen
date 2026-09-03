@@ -3,7 +3,7 @@ Alloc, AllocError = std.mem
 Vec = std.collections
 str, String = std.text
 Range = std.core
-TyId, TyNamed, TyRes, TyFn, ResForm = sema.sema_ty
+TyId, TyNamed, TyRes, TyFn, TyArray, ResForm = sema.sema_ty
 decl_at = sema.sema_def
 Checker = sema.sema_check
 
@@ -84,7 +84,17 @@ subst_kind = (c :: Checker, ty: TyId, inst: Inst) Res<TyId, AllocError> {
         Res(r)   => c.subst_res(r, ty, inst),
         Fn(f)    => c.subst_fn(f, ty, inst),
         Union(u) => c.subst_union(u.members, ty, inst),
+        Array(a) => c.subst_array(a, ty, inst),
         _        => Ok(ty),
+    })
+}
+
+subst_array = (c :: Checker, a: TyArray, ty: TyId, inst: Inst)
+              Res<TyId, AllocError> {
+    elem = c.subst(a.elem, inst).try();
+    elem.eq(a.elem).match({
+        true  => Ok(ty),
+        false => c.types.array(elem, a.count),
     })
 }
 
@@ -153,6 +163,7 @@ has_var* = (c: Checker, ty: TyId) bool {
         Res(r)   => c.has_var(r.value) || c.has_var(r.error),
         Fn(f)    => c.any_has_var(f.params) || c.has_var(f.ret),
         Union(u) => c.any_has_var(u.members),
+        Array(a) => c.has_var(a.elem),
         _        => false,
     })
 }
@@ -243,6 +254,18 @@ unify* = (c :: Checker, param: TyId, actual: TyId, inst :: Inst)
         Named(n) => c.unify_named(n, actual, inst),
         Res(r)   => c.unify_res(r, actual, inst),
         Fn(f)    => c.unify_fn(f, actual, inst),
+        Array(a) => c.unify_array(a, actual, inst),
+        _        => Ok(()),
+    })
+}
+
+unify_array = (c :: Checker, a: TyArray, actual: TyId, inst :: Inst)
+              Res<(), AllocError> {
+    c.types.at(actual).match({
+        Array(b) => (a.count == b.count).match({
+            true  => c.unify(a.elem, b.elem, inst),
+            false => Ok(()),
+        }),
         _        => Ok(()),
     })
 }

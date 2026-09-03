@@ -13,6 +13,7 @@ Checker, Ctx, Binding = sema.sema_check
 Inst, subst, inst_of_named, owner_of, push_tparams = sema.sema_inst
 is_prim = sema.sema_ty
 impl_members, bound_member_types, LocalImpl, local_impls = sema.sema_supply
+bound_module = sema.sema_supply
 impl_bound_type, impl_span, prim_named = sema.sema_supply
 type_of = sema.sema_type
 type_from_ast, param_type = sema.sema_denote
@@ -30,7 +31,9 @@ Found* = {
     exported*: bool,  // `*` on the member itself
     module*: usize,   // the declaring module
     bound*: TyId,   // the bound that supplies it; poison when the type owns it
-    span*: Span,    // the declaration or the impl
+    decl_owner*: TyId, // type whose member declaration owns the signature
+    decl_span*: Span,  // authoritative member declaration
+    span*: Span,       // diagnostic origin: the declaration or the impl
 
     // Every member is reachable inside its declaring module.
     hidden_from* = (self: @Self, mi: usize) bool {
@@ -40,7 +43,15 @@ Found* = {
 
 // A member an impl or a bound supplies: computed, and as visible as the
 // bound that required it.
-supplied_found* = (name: str, ty: TyId, bound: TyId, span: Span) Found {
+supplied_found* = (
+    name       : str,
+    ty         : TyId,
+    bound      : TyId,
+    decl_owner : TyId,
+    decl_span  : Span,
+    module     : usize,
+    span       : Span
+) Found {
     Found(
         name: name,
         ty: ty,
@@ -48,8 +59,10 @@ supplied_found* = (name: str, ty: TyId, bound: TyId, span: Span) Found {
         constant: false,
         mutable: false,
         exported: true,
-        module: 0,
+        module: module,
         bound: bound,
+        decl_owner: decl_owner,
+        decl_span: decl_span,
         span: span,
     )
 }
@@ -441,7 +454,19 @@ behavior_bounds = (
     c.bound_reachable(owner, a, name, declared).try();
     declared.loop((h, f) {
         send = c.message_type(f.ty).try();
-        out.add(supplied_found(f.name, send, f.bound, f.span)).try();
+        out.add(Found(
+            name: f.name,
+            ty: send,
+            computed: f.computed,
+            constant: f.constant,
+            mutable: f.mutable,
+            exported: f.exported,
+            module: f.module,
+            bound: f.bound,
+            decl_owner: f.decl_owner,
+            decl_span: f.decl_span,
+            span: f.span,
+        )).try();
     });
     Ok(())
 }
@@ -478,7 +503,15 @@ send_found = (
                 full = c.member_type(m, mi, a).try();
                 send = c.message_type(full).try();
                 span = c.impl_span(li.id);
-                out.add(supplied_found(m.name().text, send, li.bound, span))
+                out.add(supplied_found(
+                    m.name().text,
+                    send,
+                    li.bound,
+                    a,
+                    m.span,
+                    mi,
+                    span
+                ))
             },
         }),
         _           => Ok(()),
@@ -611,8 +644,26 @@ bound_member = (
 ) Res<(), AllocError> {
     tys ::= c.alloc.Vec<TyId>();
     c.bound_member_types(bound, name, ty, tys).try();
-    span = c.bound_span(bound);
-    tys.loop((h, t) { out.add(supplied_found(name, t, bound, span)).try() });
+    all ::= c.alloc.Vec<Member>();
+    c.bound_members(bound, all).try();
+    kept ::= c.alloc.Vec<Member>();
+    all.loop((h, m) { m.named(name).then(() { kept.add(m).try() }); });
+    span   = c.bound_span(bound);
+    module = c.bound_module(bound);
+    tys.loop((h, i, t) {
+        kept.get(i).match({
+            None    => Ok(()),
+            Ok(mem) => out.add(supplied_found(
+                name,
+                t,
+                bound,
+                bound,
+                mem.span,
+                module,
+                span
+            )),
+        }).try();
+    });
     Ok(());
 }
 
@@ -705,6 +756,8 @@ add_own = (
         exported: m.exported(),
         module: mi,
         bound: poison,
+        decl_owner: ty,
+        decl_span: m.span,
         span: m.span,
     ))
 }

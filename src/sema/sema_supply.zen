@@ -72,10 +72,25 @@ impl_members* = (
 
 supplied = (c :: Checker, li: LocalImpl, ty: TyId, name: str, out :: Vec<Found>)
            Res<(), AllocError> {
-    tys ::= c.alloc.Vec<TyId>();
-    c.supplied_types(li.im, li.bound, name, ty, tys).try();
-    span = c.impl_span(li.id);
-    tys.loop((h, t) { out.add(supplied_found(name, t, li.bound, span)).try() });
+    tys     ::= c.alloc.Vec<TyId>();
+    members ::= c.alloc.Vec<Member>();
+    c.supplied_types(li.im, li.bound, name, ty, tys, members).try();
+    span   = c.impl_span(li.id);
+    module = c.bound_module(li.bound);
+    tys.loop((h, i, t) {
+        members.get(i).match({
+            None    => Ok(()),
+            Ok(mem) => out.add(supplied_found(
+                name,
+                t,
+                li.bound,
+                li.bound,
+                mem.span,
+                module,
+                span
+            )),
+        }).try();
+    });
     Ok(());
 }
 
@@ -85,12 +100,12 @@ supplied_types = (
     bound   : TyId,
     name    : str,
     self_ty : TyId,
-    out     :: Vec<TyId>
+    out     :: Vec<TyId>,
+    kept    :: Vec<Member>
 ) Res<(), AllocError> {
     supplied_here = im.members.has_member(name);
     all ::= c.alloc.Vec<Member>();
     c.bound_members(bound, all).try();
-    kept ::= c.alloc.Vec<Member>();
     all.loop((h, m) { m.keep_reachable(name, supplied_here, kept).try() });
     c.member_types(bound, kept, self_ty, out)
 }
@@ -236,7 +251,7 @@ storage_member = (m: Member) bool {
     })
 }
 
-bound_module = (c: Checker, bound: TyId) usize {
+bound_module* = (c: Checker, bound: TyId) usize {
     c.types.at(bound).match({
         Named(n) => n.decl.module.to_usize(),
         _        => 0,
