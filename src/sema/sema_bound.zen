@@ -5,7 +5,7 @@ Vec = std.collections
 str = std.text
 Range = std.core
 ImplId = sema.sema_id
-TyId, TyNamed, Prim, is_prim = sema.sema_ty
+TyId, TyNamed, Prim, is_prim, literal_default = sema.sema_ty
 Def, decl_at = sema.sema_def
 SemaFault, NameFault, TypeFault, ExportFault = sema.sema_diag
 Checker = sema.sema_check
@@ -13,7 +13,7 @@ opaque, Found, members_of, member_type, named_as = sema.sema_member
 bound_members, bound_member_type, has_member, impl_span, impl_bound_type = sema.sema_supply
 storage_seat_name, LocalImpl, local_impls, prim_named = sema.sema_supply
 Cand, TBound, Actual, ty_at, is_tvar = sema.sema_cand
-Inst, module_name, subst = sema.sema_inst
+Inst, module_name, subst, inst_of_named = sema.sema_inst
 res_sugar = sema.sema_denote
 
 check_impl* = (c :: Checker, id: ImplId, mi: usize) Res<(), AllocError> {
@@ -291,13 +291,17 @@ actor_impl_receives = (
     bound : TyId
 ) Res<bool, AllocError> {
     expected = c.bound_member_type(bound, "receive", ty).try();
+    settled  = c.types.at(bound).match({
+        Named(b) => c.subst(expected, c.inst_of_named(b).try()),
+        _        => Ok(expected),
+    }).try();
     impls ::= c.alloc.Vec<LocalImpl>();
     c.local_impls(n, impls).try();
     hit ::= false;
     impls.loop((h, li) {
         c.actor_bound(li.bound).then(() {
             li.im.members.loop((h2, m) {
-                (m.named("receive") && c.member_is(expected, m, n, ty).try())
+                (m.named("receive") && c.member_is(settled, m, n, ty).try())
                     .then(() { hit = true; });
             });
         });
@@ -421,11 +425,15 @@ inst_bound_holds = (
     inst   : Inst,
     at     : Span
 ) Res<bool, AllocError> {
-    c.unbounded(actual).match({
+    settled = c.is_literal_ty(actual).match({
+        true  => c.types.prim(c.prim_name(actual).literal_default()),
+        false => Ok(actual),
+    }).try();
+    c.unbounded(settled).match({
         true  => Ok(true),
         false => {
             bound = c.subst(tb.bound, inst).try();
-            c.satisfies_bound(actual, bound).try().match({
+            c.satisfies_bound(settled, bound).try().match({
                 true  => Ok(true),
                 false => {
                     c.report(
@@ -434,7 +442,7 @@ inst_bound_holds = (
                         SemaFault.BoundNotSatisfied(TypeFault(
                             name: tb.name,
                             expected: bound,
-                            found: actual
+                            found: settled
                         ))
                     ).try();
                     Ok(false)

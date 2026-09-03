@@ -30,8 +30,9 @@ bound_declares = sema.sema_supply
 type_of, block_type = sema.sema_type
 push_tparams, module_name = sema.sema_inst
 param_type, type_from_ast = sema.sema_denote
-alias_module, module_not_a_value = sema.sema_module
-Cand, TBound, Actual, cands_of, travelled_cands, matches = sema.sema_cand
+alias_module, module_not_a_value, module_named_by = sema.sema_module
+Cand, TBound, Actual, cands_of, exported_cands = sema.sema_cand
+travelled_cands, matches = sema.sema_cand
 ty_at, is_tvar, sig_fits, signature_matches = sema.sema_cand
 omittable_tail, collect_bounds = sema.sema_cand
 actor_payload_unsafe = sema.sema_actor_payload
@@ -280,22 +281,69 @@ CallCheck = {
     static_member = (self :: @Self, c :: Checker, ac: Access, ty: TyId)
                     Res<TyId, AllocError> {
         self.load_actuals(c).try();
-        got = c.static_access(
-            self.call.callee,
-            self.node,
-            ac,
-            ty,
-            self.ctx
-        ).try();
-        c.is_case(ty, ac.name.text).try().match({
-            true  => {
-                c.refuse_variant_surplus(self.call, ty, ac.name.text).try();
-                c.variant_call_type(self.call, ty, ac.name.text, self.ctx)
+        c.module_named_by(ty).match({
+            Ok(module) => self.module_static(c, ac, module, ty),
+            None       => {
+                got = c.static_access(
+                    self.call.callee,
+                    self.node,
+                    ac,
+                    ty,
+                    self.ctx
+                ).try();
+                c.is_case(ty, ac.name.text).try().match({
+                    true  => {
+                        c.refuse_variant_surplus(self.call, ty, ac.name.text)
+                            .try();
+                        c.variant_call_type(
+                            self.call,
+                            ty,
+                            ac.name.text,
+                            self.ctx
+                        )
+                    },
+                    false => {
+                        settled = self.written_associated(c, ac, ty, got)
+                            .try();
+                        self.fitted_signature(c, settled, 0)
+                    },
+                })
             },
-            false => {
-                settled = self.written_associated(c, ac, ty, got).try();
-                self.fitted_signature(c, settled, 0)
-            },
+        })
+    }
+
+    module_static = (self :: @Self, c :: Checker, ac: Access, module: usize,
+                     ty: TyId) Res<TyId, AllocError> {
+        defs ::= c.alloc.Vec<Def>();
+        c.world.exported_defs(module, ac.name.text, defs).try();
+        defs.get(0).match({
+            None    => self.module_static_type(c, ac, ty),
+            Ok(def) => def.kind.match({
+                StructDef   => c.fn_ret(
+                    self.node,
+                    self.module_static_type(c, ac, ty).try()
+                ),
+                FunctionDef => self.module_function(c, ac, module),
+                _           => c.fn_ret(
+                    self.node,
+                    self.module_static_type(c, ac, ty).try()
+                ),
+            }),
+        })
+    }
+
+    module_static_type = (self :: @Self, c :: Checker, ac: Access, ty: TyId)
+                         Res<TyId, AllocError> {
+        c.static_access(self.call.callee, self.node, ac, ty, self.ctx)
+    }
+
+    module_function = (self :: @Self, c :: Checker, ac: Access, module: usize)
+                      Res<TyId, AllocError> {
+        cands ::= c.alloc.Vec<Cand>();
+        c.exported_cands(module, ac.name.text, cands).try();
+        c.first_matching(cands, self.actuals).try().match({
+            Ok(cand) => self.chosen(c, cand, self.actuals),
+            None     => c.no_overload(self.node, ac.name.text, cands),
         })
     }
 
