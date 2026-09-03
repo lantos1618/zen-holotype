@@ -194,10 +194,27 @@ known_access = (
 ) Res<TyId, AllocError> {
     found ::= c.alloc.Vec<Found>();
     c.members_of(ty, ac.name.text, found).try();
-    found.first_hidden(ctx.module).match({
+    visible ::= c.alloc.Vec<Found>();
+    found.filter_visible(ctx.module, visible).try().match({
         Ok(f) => c.hidden_member(ac, f),
-        None  => c.pick(id, node, ac, ty, found, ctx),
+        None  => c.pick(id, node, ac, ty, visible, ctx),
     })
+}
+
+// Copy the candidates visible from `mi`. A hidden member blocks lookup only
+// when no visible overload remains; otherwise it is not a candidate at all.
+filter_visible* = (found: Vec<Found>, mi: usize, out :: Vec<Found>)
+                  Res<Res<Found>, AllocError> {
+    found.loop((h, f) {
+        f.hidden_from(mi).match({
+            true  => (),
+            false => out.add(f).try(),
+        });
+    });
+    Ok((out.len == 0).match({
+        true  => found.first_hidden(mi),
+        false => None,
+    }))
 }
 
 first_hidden* = (found: Vec<Found>, mi: usize) Res<Found> {
