@@ -44,6 +44,9 @@ corpus/<area>/<name>.zen         the program
 corpus/<area>/<name>.expected    exact stdout, compared byte for byte
 corpus/<area>/<name>.exit        expected exit code; OMIT the file when it is 0
 corpus/<area>/<name>.stderr      substring(s) that must appear on stderr; omit when none
+corpus/<area>/<name>.stdin       exact bytes fed to the program's stdin
+corpus/<area>/<name>.args        argv words after argv[0], one per line
+corpus/<area>/<name>.env         environment additions, KEY=VALUE per line
 
 must-fail/<area>/<name>.zen      must be rejected
 must-fail/<area>/<name>.expected the diagnostic, below
@@ -62,7 +65,8 @@ corpus/<area>/<name>/.expected        the expectation, at the directory root
 ```
 
 The directory is the compilation root, so `alpha/alpha.zen` is imported as
-`alpha`. `.exit` and `.stderr` sit beside `.expected`.
+`alpha`. Runtime sidecars (`.exit`, `.stderr`, `.stdin`, `.args`, `.env`) sit
+beside `.expected`.
 
 **`must-fail/*.expected` is a message line, then one position per line:**
 

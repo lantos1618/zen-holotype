@@ -36,12 +36,14 @@ tests/corpus/<area>/<name>.expected    exact stdout, compared byte for byte
 tests/corpus/<area>/<name>.exit        expected exit code; omit the file when it is 0
 tests/corpus/<area>/<name>.stderr      expected stderr substring; omit when none
 tests/corpus/<area>/<name>.stdin       bytes fed to the PROGRAM's stdin; omit when it reads none
+tests/corpus/<area>/<name>.args        PROGRAM argv after argv[0], one word per line
+tests/corpus/<area>/<name>.env         PROGRAM environment additions, KEY=VALUE per line
 
 tests/must-fail/<area>/<name>.zen      must be rejected
 tests/must-fail/<area>/<name>.expected the diagnostic, see below
 ```
 
-A test needing several source files is a **directory** of the same name, holding its module tree plus `.expected` / `.exit` / `.stderr` / `.stdin` at the directory root. Module trees inside it follow `<folder>/<folder>.zen`, and the entry point is `main.zen`.
+A test needing several source files is a **directory** of the same name, holding its module tree plus `.expected` / `.exit` / `.stderr` / `.stdin` / `.args` / `.env` at the directory root. Module trees inside it follow `<folder>/<folder>.zen`, and the entry point is `main.zen`.
 
 **`.expected` in `must-fail` is line one, then one position per line after it:**
 
@@ -60,9 +62,15 @@ Positions are 1-based line, 1-based **byte** column, and point at the first byte
 
 **A test's compilation root is its own directory.** Every asserted path is relative to that, and so is every path the compiler emits — which is what makes the determinism check comparing two copies of a tree at different absolute paths meaningful.
 
-**A directory test names its expectation `main.expected`**, matching the `main.zen` it already requires, and visible to `ls` in a way a dotfile is not. `.exit`, `.stderr`, `.stdin`, `.count` and `.stage` follow the same rule.
+**A directory test names its expectation `main.expected`**, matching the `main.zen` it already requires, and visible to `ls` in a way a dotfile is not. `.exit`, `.stderr`, `.stdin`, `.args`, `.env`, `.count` and `.stage` follow the same rule.
 
 **`.stdin` is the program's standard input, and it is the program's alone** — the compiler is never fed it. `std.env.Stdin` is a capability, and a capability is only tested by a program that exercises it, so without this file `zen lsp`'s transport would be gated by nothing. An **absent** `.stdin` is `/dev/null`; an **empty** one is a pipe that closes immediately, which is a different thing and the one a test of end-of-input needs.
+
+**`.args` and `.env` are the program's process inputs, not the compiler's.**
+`.args` contributes one exact argv word per line after argv[0]; a final newline
+does not add an empty word. `.env` contributes one `KEY=VALUE` entry per line
+to the inherited environment. Blank `.env` lines are ignored, while duplicate
+or empty names are test-format errors.
 
 **A must-fail test asserts a NUMBER of diagnostics: the count is bounded at the number of positions `.expected` asserts.** One complaint written down means one complaint emitted — one mistake must not cascade (`parse/one_error_no_cascade` exists to police exactly this), and an extra diagnostic nobody expected is a finding, not noise: it is either a compiler emitting something wrong beside the right answer, or a genuine multi-diagnostic case whose `.expected` should have said so. **`.count` states the number where it genuinely differs from the asserted positions** — several distinct mistakes of one kind, or a cascade the test deliberately tolerates. It overrides the default; absent it, the positions are the bound. On any breach the captured diagnostics are reported rather than discarded, so what else the compiler said is always on the record.
 

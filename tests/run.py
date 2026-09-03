@@ -115,6 +115,8 @@ DIR_STDERR_NAMES = (".stderr", "{name}.stderr", "main.stderr")
 DIR_COUNT_NAMES = (".count", "{name}.count", "main.count")
 DIR_STAGE_NAMES = (".stage", "{name}.stage", "main.stage")
 DIR_STDIN_NAMES = (".stdin", "{name}.stdin", "main.stdin")
+DIR_ARGS_NAMES = (".args", "{name}.args", "main.args")
+DIR_ENV_NAMES = (".env", "{name}.env", "main.env")
 
 # What the compiler prints once it is done: `zen: 3 diagnostic(s)`.
 # Every must-fail test asserts against it -- the bound defaults to the number
@@ -198,6 +200,12 @@ class Test:
     # is what every test that does not read stdin still gets.
     stdin_bytes: bytes | None = None
     stdin_path: Path | None = None
+    # `.args` is the PROGRAM's argv after argv[0], one word per line, and
+    # `.env` is KEY=VALUE lines added to its environment: the two inputs
+    # `env.args<T>()` reads, and the only way a corpus test can hand a
+    # program a command line. Absent means no words and nothing added.
+    args_words: tuple[str, ...] = ()
+    env_pairs: tuple[tuple[str, str], ...] = ()
     is_dir: bool = False
 
     @property
@@ -327,6 +335,8 @@ def _make_test(
     stage_path: Path | None,
     stdin_path: Path | None,
     is_dir: bool,
+    args_path: Path | None = None,
+    env_path: Path | None = None,
 ) -> Test:
     return Test(
         tid=tid,
@@ -346,8 +356,40 @@ def _make_test(
         stage_path=stage_path,
         stdin_bytes=_read_bytes(stdin_path) if stdin_path else None,
         stdin_path=stdin_path,
+        args_words=_read_lines(args_path) if args_path else (),
+        env_pairs=_read_env(env_path) if env_path else (),
         is_dir=is_dir,
     )
+
+
+def _read_lines(path: Path) -> tuple[str, ...]:
+    """One argv word per line; the trailing newline does not add a word."""
+    text = path.read_text(encoding="utf-8")
+    if "\0" in text:
+        raise HarnessError(f"{path}: `.args` cannot contain a NUL byte")
+    if text.endswith("\n"):
+        text = text[:-1]
+    return tuple(text.split("\n")) if text else ()
+
+
+def _read_env(path: Path) -> tuple[tuple[str, str], ...]:
+    pairs = []
+    names: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            raise HarnessError(f"{path}: `.env` lines are KEY=VALUE, got {line!r}")
+        if not key:
+            raise HarnessError(f"{path}: `.env` variable names cannot be empty")
+        if "\0" in key or "\0" in value:
+            raise HarnessError(f"{path}: `.env` cannot contain a NUL byte")
+        if key in names:
+            raise HarnessError(f"{path}: duplicate `.env` variable {key!r}")
+        names.add(key)
+        pairs.append((key, value))
+    return tuple(pairs)
 
 
 def _suite_of(base: Path, path: Path) -> str:
@@ -395,6 +437,8 @@ def collect(tests_dir: Path, into: Collection, kind: str) -> None:
                             _first_existing(child, DIR_STAGE_NAMES, child.name),
                             _first_existing(child, DIR_STDIN_NAMES, child.name),
                             is_dir=True,
+                            args_path=_first_existing(child, DIR_ARGS_NAMES, child.name),
+                            env_path=_first_existing(child, DIR_ENV_NAMES, child.name),
                         )
                     )
                     continue
@@ -416,6 +460,8 @@ def collect(tests_dir: Path, into: Collection, kind: str) -> None:
                     count_path = child.with_suffix(".count")
                     stage_path = child.with_suffix(".stage")
                     stdin_path = child.with_suffix(".stdin")
+                    args_path = child.with_suffix(".args")
+                    env_path = child.with_suffix(".env")
                     into.tests.append(
                         _make_test(
                             f"{kind}/{rel}",
@@ -430,6 +476,8 @@ def collect(tests_dir: Path, into: Collection, kind: str) -> None:
                             stage_path if stage_path.is_file() else None,
                             stdin_path if stdin_path.is_file() else None,
                             is_dir=False,
+                            args_path=args_path if args_path.is_file() else None,
+                            env_path=env_path if env_path.is_file() else None,
                         )
                     )
                 else:
@@ -1084,6 +1132,9 @@ def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace
     if isinstance(loopback, TlsLoopbackPeer):
         prog_env = dict(os.environ)
         prog_env["SSL_CERT_FILE"] = str(loopback.cert)
+    if test.env_pairs:
+        prog_env = dict(prog_env if prog_env is not None else os.environ)
+        prog_env.update(test.env_pairs)
 
     if test.tid == "corpus/file-io/symlink_loop_is_failed":
         try:
@@ -1093,7 +1144,7 @@ def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace
 
     if loopback is not None:
         loopback.start(args.run_timeout)
-    prog = run_process([str(binary)], args.run_timeout, cwd=work,
+    prog = run_process([str(binary), *test.args_words], args.run_timeout, cwd=work,
                        feed=test.stdin_bytes, env=prog_env)
     peer_problem = loopback.finish(args.run_timeout) if loopback is not None else ""
     if prog.timed_out:
