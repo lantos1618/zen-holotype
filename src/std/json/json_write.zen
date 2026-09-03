@@ -97,6 +97,30 @@ Jsons* = {
         self.at(id).match({ Text(s) => Ok(s), _ => None })
     }
 
+    // The named member's text: None when id is not an object, the member is
+    // absent, or it is not a string.
+    text_at* = (self: @Self, id: JsonId, name: str) Res<str> {
+        self.text(self.field(id, name).try())
+    }
+
+    // `text_at` with a fallback, the shape a wire reader wants when absent
+    // means empty rather than stop.
+    text_or* = (self: @Self, id: JsonId, name: str, fallback: str) str {
+        self.text_at(id, name).value_or(fallback)
+    }
+
+    whole_or* = (self: @Self, id: JsonId, name: str, fallback: usize) usize {
+        self.field(id, name).match({
+            Ok(member) => self.whole(member).value_or(fallback),
+            None       => fallback,
+        })
+    }
+
+    // Number of items when id is an array; anything else counts as empty.
+    count* = (self: @Self, id: JsonId) usize {
+        self.at(id).match({ Arr(run) => run.len, _ => 0 })
+    }
+
     // A JSON number read as a non-negative integer. None unless the complete
     // lexeme is decimal digits; signs, fractions, and exponents are rejected.
     whole* = (self: @Self, id: JsonId) Res<usize> {

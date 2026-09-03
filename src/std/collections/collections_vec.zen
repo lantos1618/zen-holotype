@@ -3,6 +3,13 @@
 Alloc, AllocError, Ptr, null_ptr = std.mem
 Range = std.core.range
 
+// An index at or past `len`, named so a caller can propagate the miss
+// honestly instead of borrowing an unrelated error such as OutOfMemory.
+OutOfBounds* = {
+    index*: usize,
+    len*:   usize,
+}
+
 Vec*<T> = {
     data :: Ptr<T> = null_ptr<T>(),
     len* :: usize = 0,
@@ -24,6 +31,12 @@ Vec*<T> = {
             true  => Ok(self.data.read(i)),
             false => None,
         });
+    }
+
+    // `get` with the miss named; `.try()` it into any error set that
+    // lists OutOfBounds.
+    require* = (self: @Self, i: usize) Res<T, OutOfBounds> {
+        self.get(i).ok_or(OutOfBounds(index: i, len: self.len))
     }
 
     // Raw storage access; callers own bounds and lifetime checks.
@@ -90,7 +103,15 @@ Vec.impl(Range<T>, {
     start: 0,
     end: self.len,
 
-    at ::= (self: @Self, index: usize) Res<T> { self.get(index) }
+    // Keep the Range adapter independent of generic method lookup. Once Vec
+    // has another method returning T, `@Self.get` does not settle T in the
+    // current backend even though the interface already names it.
+    at ::= (self: Vec<T>, index: usize) Res<T> {
+        (index < self.len).match({
+            true  => Ok(self.data.read(index)),
+            false => None,
+        })
+    }
 })
 
 Vec* = <T>(a: Alloc) Vec<T> {

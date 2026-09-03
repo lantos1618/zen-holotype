@@ -1,0 +1,38 @@
+// Deterministic pseudo-random numbers. The std has no entropy source; the
+// caller seeds from whatever it trusts (a clock, a counter, a fleet slot).
+// A full-period 64-bit linear congruential generator with the MMIX constants.
+// Answers join the high halves of two states rather than expose the LCG's
+// weak low bits. This is suitable for repeatable sampling, not cryptography.
+
+Rng* = {
+    state :: u64,
+
+    seeded* = (seed: u64) Rng { Rng(state: seed) }
+
+    next_u64* = (self :: @Self) u64 {
+        high = self.next_word();
+        low  = self.next_word();
+        high * 4294967296 + low
+    }
+
+    next_word = (self :: @Self) u64 {
+        self.state = self.state *% 6364136223846793005 +% 1442695040888963407;
+        self.state / 4294967296
+    }
+
+    // A value in 0 ..< n. Rejection avoids the modulo bias that appears when
+    // n does not divide the 2^64-sized output domain. Zero answers zero and
+    // does not advance the generator.
+    below* = (self :: @Self, n: u64) u64 {
+        (n == 0).match({ true => 0, false => self.below_nonzero(n) })
+    }
+
+    below_nonzero = (self :: @Self, n: u64) u64 {
+        threshold = (0 -% n) % n;
+        value ::= self.next_u64();
+        loop(() { value < threshold }, (h) {
+            value = self.next_u64();
+        });
+        value % n
+    }
+}

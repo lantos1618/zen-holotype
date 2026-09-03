@@ -1,0 +1,31 @@
+// The accessors a wire reader reaches for: a member's text with a fallback,
+// a member's whole number with a fallback, an array's count. Each answers
+// with the fallback (or zero) for the wrong shape instead of stopping.
+
+Jsons = std.json.json_write
+read = std.json.json_read
+
+TEXT: str = "{\"name\":\"zen\",\"n\":7,\"calls\":[1,2,3],\"nested\":{\"k\":\"v\"}}"
+
+main = (env: Env) Res<i32, AllocError> {
+    a = env.mem.alloc();
+    tree ::= a.Jsons();
+    root = read(a, tree, TEXT).replace_err(AllocError.OutOfMemory).try();
+
+    println("name {}", tree.text_or(root, "name", "?"));
+    println("missing {}", tree.text_or(root, "missing", "?"));
+    println("number as text {}", tree.text_or(root, "n", "not text"));
+    println("n {}", tree.whole_or(root, "n", 0));
+    println("absent whole {}", tree.whole_or(root, "zzz", 42));
+    println("calls {}", tree.count(tree.field(root, "calls").value_or(root)));
+    println("count of an object {}", tree.count(root));
+    tree.text_at(root, "name").match({
+        Ok(s) => println("text_at {}", s),
+        None  => println("text_at none"),
+    });
+    tree.text_at(root, "n").match({
+        Ok(s) => println("text_at {}", s),
+        None  => println("text_at none for a number"),
+    });
+    Ok(0);
+}

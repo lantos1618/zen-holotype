@@ -39,3 +39,27 @@ map_err* = <T, E, F>(r: Res<T, E>, f: (error: E) F) Res<T, F> {
 replace_err* = <T, E, F>(r: Res<T, E>, reason: F) Res<T, F> {
     r.map_err((_) { reason })
 }
+
+// Run `f` on a present value; absence passes through. This is the
+// one-sided match whose None arm is empty, and a map when `f` answers
+// something. It would be `then`, overloading the bool form by receiver
+// type, but the backend does not yet resolve two generic free functions
+// of one name.
+when_ok* = <T, U>(r: Res<T>, f: (value: T) U) Res<U> {
+    r.match({
+        Ok(value) => Ok(f(value)),
+        None      => None,
+    });
+}
+
+// Discard a result whose failure the caller has decided not to act on: a
+// best-effort flush, a log line on a path that is already failing. A bare
+// expression statement would discard it too, but silently.
+ignore* = <T, E>(r: Res<T, E>) () {
+    r.match({ Ok(_) => (), Err(_) => () });
+}
+
+// Forget the reason: a Res<T, E> becomes a Res<T>, so `value_or` applies.
+without_err* = <T, E>(r: Res<T, E>) Res<T> {
+    r.match({ Ok(value) => Ok(value), Err(_) => None })
+}
