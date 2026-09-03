@@ -12,9 +12,9 @@ str, String = std.text
 Range = std.core
 TyId, TyNamed, TyRes, is_failure = sema.sema_ty
 Ctx = sema.sema_check
-Inst, has_var = sema.sema_inst
+Inst, has_var, tparam_vars, zip = sema.sema_inst
 self_ctx = sema.sema_member
-param_type = sema.sema_denote
+param_type, type_from_ast = sema.sema_denote
 impl_bound_type = sema.sema_supply
 sym_member, sym_variant = gen.gen_name
 qualify = gen.gen_name
@@ -403,6 +403,7 @@ BoundDispatch = {
         ret = be.declared_ret(self.slot.f, sctx).try();
         targs ::= be.alloc.Inst();
         infer_targs(be, self.call, declared, self.ctx, targs).try();
+        self.explicit_targs(be, owner.view(), targs).try();
         be.leave_tparams(mark).try();
         Ok(BoundCall(
             dispatch: self,
@@ -410,6 +411,25 @@ BoundDispatch = {
             ret: ret,
             targs: targs,
         ));
+    }
+
+    // `env.args<T>()` says T outright, and a bodiless member has no body
+    // or argument to say it any other way: the written type arguments
+    // bind the member's own parameters, in order.
+    explicit_targs = (self: @Self, be :: CBackend, owner: str, out :: Inst)
+                     Res<(), AllocError> {
+        (self.call.targs.len > 0).match({
+            false => Ok(()),
+            true  => {
+                vars ::= be.alloc.Vec<TyId>();
+                tparam_vars(be.check, self.slot.f.tparams, owner, vars).try();
+                tys ::= be.alloc.Vec<TyId>();
+                self.call.targs.loop((h, t) {
+                    tys.add(be.check.type_from_ast(t, self.ctx).try()).try();
+                });
+                zip(be.check, vars, tys, out)
+            },
+        })
     }
 
     lower = (self: @Self, be :: CBackend, id: ExprId, a: Access,

@@ -8,17 +8,19 @@ Vec = std.collections
 str = std.text
 TyId = sema.sema_ty
 Def, decl_at = sema.sema_def
+GenFault = gen.gen_diag
 Ctx = sema.sema_check
-Inst = sema.sema_inst
+Inst, tparam_vars, zip = sema.sema_inst
 type_from_ast = sema.sema_denote
 pack_slot, pack_elem = sema.sema_vararg
 CBackend = gen.gen_c.gen_c_state
-declared_ret = gen.gen_c.gen_c_type
-inst_at, inst_open, settled_inst = gen.gen_c.gen_c_mono
+declared_ret, struct_decl = gen.gen_c.gen_c_type
+inst_at, inst_open, settled_inst, enter_struct_tparams = gen.gen_c.gen_c_mono
 sub_with, unify, arg_type = gen.gen_c.gen_c_mono
 enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
 fat_ret_type = gen.gen_c.gen_c_bound
 impl_member_at, bodied_fn = gen.gen_c.gen_c_impl
+bodyless = gen.gen_c.gen_c_sink
 site_of, method_sig = gen.gen_c.gen_c_member
 Site = gen.gen_c.gen_c_member
 recv_inst = gen.gen_c.gen_c_mono
@@ -170,16 +172,116 @@ ReturnCall = {
         })
     }
 
-    // Bound members have no `Def`; their dedicated rule runs first.
+    // Bound members have no `Def`; their dedicated rule runs first. A
+    // bodiless member with type parameters of its own (`env.args<T>()`)
+    // has no body to settle from, but sema resolved the call to its Def
+    // and recorded the explicit `<T>`, which `definition` reads back.
     accessed = (self: @Self, be :: CBackend, a: Access)
                Res<TyId, AllocError> {
         be.fat_ret_type(self.call, a, self.ctx).try().match({
             Ok(t) => Ok(t),
             None  => ImplAccess(access: a, ctx: self.ctx).resolve(be).try().match({
                 Ok(t) => Ok(t),
-                None  => self.with_recv(Ok(a.base)).named(be, a.name.text),
+                None  => self.resolved_door(be, a.name.text).try().match({
+                    Ok(d) => self.definition(be, d),
+                    None  => self.door_at(be, a).try().match({
+                        Ok(t) => Ok(t),
+                        None  => self.with_recv(Ok(a.base)).named(be, a.name.text),
+                    }),
+                }),
             }),
         })
+    }
+
+    // The Def sema resolved this call to, when it is a door: a member
+    // with no body, found by its id among the exported names (a member
+    // is not in `defs_of`, which lists a module's free functions). A
+    // bodied callee keeps the rule below, whose `want` fallback the
+    // `.try()` error-set merge depends on.
+    resolved_door = (self: @Self, be :: CBackend, name: str)
+                    Res<Res<Def>, AllocError> {
+        be.check.resolved_call(self.id).match({
+            None     => Ok(None),
+            Ok(want) => {
+                found ::= be.alloc.Vec<Def>();
+                be.check.world.exported_named(name, found).try();
+                Ok(found.find((d) { d.id.eq(want) && be.is_door(d) }))
+            },
+        })
+    }
+
+    // `x.f<T>()` says T outright. Sema records that for the candidates it
+    // instantiates; a bodiless door has no candidate, so what was written
+    // binds the parameters here, under the owner the declared return
+    // will be read with.
+    explicit = (self: @Self, be :: CBackend, f: Function, owner: str,
+                settled: Inst) Res<Inst, AllocError> {
+        (self.call.targs.len == 0 || !be.inst_open(settled)).match({
+            true  => Ok(settled),
+            false => {
+                out ::= be.alloc.Inst();
+                self.bind_written(be, f, owner, out).try();
+                Ok(out)
+            },
+        })
+    }
+
+    // The written type arguments, bound to the member's parameters as
+    // interned under `owner`.
+    bind_written = (self: @Self, be :: CBackend, f: Function, owner: str,
+                    out :: Inst) Res<(), AllocError> {
+        vars ::= be.alloc.Vec<TyId>();
+        tparam_vars(be.check, f.tparams, owner, vars).try();
+        tys ::= be.alloc.Vec<TyId>();
+        self.call.targs.loop((h, t) {
+            tys.add(be.check.type_from_ast(t, self.ctx).try()).try();
+        });
+        zip(be.check, vars, tys, out)
+    }
+
+    // A door reached through its receiver's type when the name index does
+    // not list it: the struct's own bodiless member, typed at the receiver
+    // with the written <T> bound.
+    door_at = (self: @Self, be :: CBackend, a: Access)
+              Res<Res<TyId>, AllocError> {
+        unknown = be.check.types.unknown().try();
+        rty     = be.ty_of(a.base, self.ctx, unknown).try();
+        be.site_of(rty).try().match({
+            None     => Ok(None),
+            Ok(site) => be.struct_decl(site.decl).match({
+                None  => Ok(None),
+                Ok(s) => {
+                    found ::= be.alloc.Vec<Member>();
+                    s.members.loop((h, m) {
+                        m.named(a.name.text).then(() { found.add(m).try(); });
+                    });
+                    door_fn(found).match({
+                        None  => Ok(None),
+                        Ok(f) => Ok(Ok(self.door_ret(be, site, rty, f).try())),
+                    })
+                },
+            }),
+        })
+    }
+
+    door_ret = (self: @Self, be :: CBackend, site: Site, rty: TyId,
+                f: Function) Res<TyId, AllocError> {
+        // The declared return may carry `T` under either spelling of the
+        // member's owner (sema's `owner_of` or the qualified one), so the
+        // written arguments are bound under both.
+        mi = site.decl.module.to_usize();
+        owner ::= be.alloc.String("{}.", site.qname).try();
+        owner.add(f.name.text).try();
+        sctx = be.check.self_ctx(mi, rty).try();
+        mark = be.enter_struct_tparams(site.decl).try();
+        be.enter_tparams(f.tparams, owner.view()).try();
+        ret = be.declared_ret(f, sctx).try();
+        be.leave_tparams(mark).try();
+        inst ::= be.alloc.Inst();
+        self.bind_written(be, f, owner.view(), inst).try();
+        self.bind_written(be, f, be.check.owner_of(mi, f.name.text).try(), inst)
+            .try();
+        be.sub_with(ret, inst)
     }
 
     with_recv = (self: @Self, recv: Res<ExprId>) ReturnCall {
@@ -220,7 +322,12 @@ ReturnCall = {
     function = (self: @Self, be :: CBackend, d: Def, f: Function)
                Res<TyId, AllocError> {
         raw      = be.inst_at(self.id).try();
-        settled  = be.settled_inst(f.tparams, d.qname, raw).try();
+        settled  = self.explicit(
+            be,
+            f,
+            d.qname,
+            be.settled_inst(f.tparams, d.qname, raw).try()
+        ).try();
         inst     = InferCall(call: self.call, recv: self.recv, ctx: self.ctx)
             .complete(be, d, f, settled).try();
         mark     = be.enter_tparams(f.tparams, d.qname).try();
@@ -228,6 +335,32 @@ ReturnCall = {
         be.leave_tparams(mark).try();
         be.sub_with(declared, inst)
     }
+}
+
+// The bodiless function among a member lookup's answers, if any.
+door_fn = (found: Vec<Member>) Res<Function> {
+    found.find((m) {
+        m.kind.match({
+            Function(f) => bodyless(f),
+            _           => false,
+        })
+    }).match({
+        None  => None,
+        Ok(m) => m.kind.match({
+            Function(f) => Ok(f),
+            _           => None,
+        }),
+    })
+}
+
+is_door = (be :: CBackend, d: Def) bool {
+    decl_at(be.tree, d.id).match({
+        None     => false,
+        Ok(decl) => decl.kind.match({
+            Function(f) => bodyless(f),
+            _           => false,
+        }),
+    })
 }
 
 // Impl-supplied member return at the receiver's concrete instantiation.

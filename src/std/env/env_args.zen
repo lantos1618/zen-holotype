@@ -1,0 +1,171 @@
+// The scanner behind `env.args<T>()`. The backend knows T's fields and emits
+// one call per field into these; they know argv and the environment. Every
+// function is pure over (env, mask): a flag claims the argv slots it used
+// through a bitmask the backend threads between calls, so the words that
+// nothing claimed are the positionals.
+//
+// Spelling, from a field name: `fleet_size` is `--fleet-size` and
+// `FLEET_SIZE`; a one-letter field `C` is `-C`; an all-uppercase field
+// `API_KEY` is that variable and nothing else. A flag wins over its
+// variable. A `bool` field is a switch: present, or its variable set to 1,
+// true, or yes. A `str` or `Res<str>` field with no default that no flag
+// or variable filled takes the next positional word, in declaration
+// order; a defaulted field never does. Failures name the field
+// (`Missing`, `Parse`); an unknown flag is `Parse` of the flag word itself,
+// and a positional word past the last field that takes one is `Parse` of
+// that field.
+
+str = std.text
+Vec = std.collections
+Range = std.core
+
+// Two faces and no third: a required field was absent, or it was there
+// and did not parse as its type. The payload is the field name.
+ArgError* = Missing(str) | Parse(str)
+
+// argv is bounded at this many words for the door: the claim mask is one
+// u64. Longer command lines answer `Parse("argv")`.
+ARGV_CAP*: usize = 64
+
+// The three word facts the scanner needs, kept here so the door depends on
+// nothing but argv: a flag starts with `-`, a word is anything else that
+// is not empty, and a slot past the end reads as empty.
+is_flag = (word: str) bool { !word.is_empty() && word.index(0) == '-' }
+
+is_word = (word: str) bool { !word.is_empty() && !word.is_flag() }
+
+// A signed numeric flag value starts like an option, but is data when the
+// field parser asks for it. Keep this lexical: overflow and the exact i64
+// range remain the typed parser's job, while `--another-option` stays a flag.
+is_signed_number = (word: str) bool {
+    word.len > 1 && word.index(0) == '-' && Range(1, word.len).find((i) {
+        b = word.index(i);
+        b < '0' || b > '9'
+    }).match({ Ok(_) => false, None => true })
+}
+
+is_flag_value = (word: str) bool {
+    word.is_word() || word.is_signed_number()
+}
+
+arg_at = (argv: Vec<str>, index: usize) str {
+    argv.get(index).value_or("")
+}
+
+// An empty flag is a field with no flag spelling; nothing matches it.
+flag_at = (env: Env, flag: str) Res<usize> {
+    flag.is_empty().match({
+        true  => None,
+        false => Range(1, env.argv.len).find((i) {
+            env.argv.arg_at(i).eq(flag)
+        }),
+    })
+}
+
+// 2^i, spelled by doubling: the number floor has no shift.
+bit = (i: usize) u64 {
+    b: u64 = 1;
+    Range(0, i).loop((h, k) { b = b * 2; });
+    b
+}
+
+has = (mask: u64, i: usize) bool { (mask / i.bit()) % 2 == 1 }
+
+set = (mask: u64, i: usize) u64 {
+    mask.has(i).match({ true => mask, false => mask + i.bit() })
+}
+
+// Claim the flag's slot, and its value's when it takes one.
+claim* = (env: Env, mask: u64, flag: str, takes_value: bool) u64 {
+    env.flag_at(flag).match({
+        None  => mask,
+        Ok(i) => {
+            with_flag = mask.set(i);
+            (takes_value && env.argv.arg_at(i + 1).is_flag_value()).match({
+                true  => with_flag.set(i + 1),
+                false => with_flag,
+            })
+        },
+    })
+}
+
+// The flag's value, else the variable's; None when neither is there. A
+// flag with no word after it counts as absent.
+text* = (env: Env, flag: str, name: str) Res<str> {
+    env.flag_at(flag).match({
+        Ok(i) => {
+            value = env.argv.arg_at(i + 1);
+            value.is_flag_value().match({ true => Ok(value), false => None })
+        },
+        None  => env.var(name),
+    })
+}
+
+// A switch: the flag is present, or its variable says so.
+switch* = (env: Env, flag: str, name: str) bool {
+    env.flag_at(flag).match({
+        Ok(_) => true,
+        None  => env.var(name).match({
+            Ok(v) => v.eq("1") || v.eq("true") || v.eq("yes"),
+            None  => false,
+        }),
+    })
+}
+
+// The first word after argv[0] that nothing claimed and is not a flag.
+next_word = (env: Env, mask: u64) Res<usize> {
+    Range(1, env.argv.len).find((i) {
+        !mask.has(i) && env.argv.arg_at(i).is_word()
+    })
+}
+
+word* = (env: Env, mask: u64) Res<str> {
+    env.next_word(mask).match({
+        Ok(i) => Ok(env.argv.arg_at(i)),
+        None  => None,
+    })
+}
+
+// Claim the word `word` answered, so the next positional field sees the
+// one after it.
+take* = (env: Env, mask: u64) u64 {
+    env.next_word(mask).match({
+        Ok(i) => mask.set(i),
+        None  => mask,
+    })
+}
+
+// What nothing consumed. An unknown flag is Parse of the flag word; a
+// word left over is Parse of the last positional field.
+finish* = (env: Env, mask: u64, field: str) Res<(), ArgError> {
+    (env.argv.len <= ARGV_CAP).ensure(ArgError.Parse("argv")).try();
+    unknown ::= "";
+    Range(1, env.argv.len).loop((h, i) {
+        (!mask.has(i) && env.argv.arg_at(i).is_flag()).then(() {
+            unknown = env.argv.arg_at(i);
+            h.break();
+        });
+    });
+    unknown.is_empty().ensure(ArgError.Parse(unknown)).try();
+    env.next_word(mask).match({
+        Ok(_) => Err(ArgError.Parse(field)),
+        None  => Ok(()),
+    })
+}
+
+// Typed reads: absence is Missing, text of the wrong shape is Parse.
+required* = (raw: Res<str>, field: str) Res<str, ArgError> {
+    raw.ok_or(ArgError.Missing(field))
+}
+
+as_usize* = (text: str, field: str) Res<usize, ArgError> {
+    text.parse_usize().ok_or(ArgError.Parse(field))
+}
+
+as_u64* = (text: str, field: str) Res<u64, ArgError> {
+    text.parse_u64().ok_or(ArgError.Parse(field))
+}
+
+as_i64* = (text: str, field: str) Res<i64, ArgError> {
+    text.parse_i64().ok_or(ArgError.Parse(field))
+}

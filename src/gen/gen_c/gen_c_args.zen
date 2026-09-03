@@ -1,0 +1,589 @@
+// Type-directed lowering for `env.args<T>()`. The record is concrete at the
+// call site, so field walking happens here, while argv scanning and text
+// parsing are ordinary functions in std.env.env_args, called once per field
+// with a claim mask threaded between them. See that module for the
+// spelling rules; this file only decides, per field type, which of its
+// functions to call and where the answer lands.
+
+Struct, Member, Function, ExprId, Call, Access = std.ast
+AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Range = std.core
+TyId, TyNamed, is_failure = sema.sema_ty
+Def, decl_at = sema.sema_def
+Ctx = sema.sema_check
+Inst = sema.sema_inst
+GenFault = gen.gen_diag
+CBackend = gen.gen_c.gen_c_state
+expr, res_type_of = gen.gen_c.gen_c_expr
+declare_temp, write_assign_ok, payload_type = gen.gen_c.gen_c_flow
+write_goto, write_done, call_symbol = gen.gen_c.gen_c_sink
+field_type, request_type, decl_ctx, decl_inst = gen.gen_c.gen_c_type
+write_none, write_zero, ctype = gen.gen_c.gen_c_type
+enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
+sym_member, sym_variant, RES_PATH = gen.gen_name
+unsupported = gen.gen_c.gen_c_report
+
+ARGS_MODULE: str = "std.env.env_args"
+
+// What one field asks of argv, decided from its type. `Num` and `OptNum`
+// carry the std parser's name for the primitive.
+Ask = Switch | Text | OptText | Num(str) | OptNum(str) | Unknown
+
+// One field of the record, with the temporaries its lowering owns.
+Slot = {
+    name:    str,
+    ty:      TyId,
+    ask:     Ask,
+    raw:     String,
+    default: Res<ExprId>,
+
+    // Text without a fallback of its own is what the command line's bare
+    // words are for; a defaulted field already has its answer.
+    positional = (self: @Self) bool {
+        (!self.name.env_only()) && self.ask.match({
+            Text    => self.default.match({ Ok(_) => false, None => true }),
+            OptText => true,
+            _       => false,
+        })
+    }
+}
+
+lower_env_args* = (
+    be       :: CBackend,
+    id       : ExprId,
+    c        : Call,
+    a        : Access,
+    rty      : TyId,
+    declared : TyId,
+    ctx      : Ctx,
+    out      :: String
+) Res<(), AllocError> {
+    // The call names its record explicitly (`env.args<Cli>()`). The
+    // capability path binds @Self but not that <T>; `res_type_of` settles
+    // the call the way a `.try()` or `.match` around it does, so the
+    // answer is declared at the type its reader expects.
+    ret = be.res_type_of(id, ctx).try();
+    be.payload_type(ret, "Ok").match({
+        None  => be.unsupported(id, "env.args with nothing to fill", out),
+        Ok(t) => be.check.types.at(t).match({
+            Named(n) => be.args_named(id, a, rty, ret, t, n, ctx, out),
+            _        => be.unsupported(id, "env.args without its <T>", out),
+        }),
+    })
+}
+
+args_named = (
+    be  :: CBackend,
+    id  : ExprId,
+    a   : Access,
+    rty : TyId,
+    ret : TyId,
+    t   : TyId,
+    n   : TyNamed,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    decl_at(be.tree, n.decl).match({
+        None     => be.unsupported(id, "env.args of an unknown type", out),
+        Ok(decl) => decl.kind.match({
+            Struct(record) => {
+                lower ::= ArgsLower(
+                    id: id,
+                    ret: ret,
+                    record_ty: t,
+                    dst: be.fresh_name("args").try(),
+                    value: be.fresh_name("args_value").try(),
+                    envv: be.fresh_name("args_env").try(),
+                    mask: be.fresh_name("args_mask").try(),
+                    done: be.next_tmp(),
+                    slots: be.alloc.Vec<Slot>()
+                );
+                lower.emit(be, a, rty, n, record, ctx).try();
+                out.add(lower.dst.view())
+            },
+            _              => be.unsupported(
+                id,
+                "env.args of a non-record",
+                out
+            ),
+        }),
+    })
+}
+
+// Everything the per-field emitters share. Temporaries are named once and
+// declared before any field is walked, so a `goto done` from any field
+// lands on storage that exists.
+ArgsLower = {
+    id:        ExprId,
+    ret:       TyId,
+    record_ty: TyId,
+    dst:       String,
+    value:     String,
+    envv:      String,
+    mask:      String,
+    done:      usize,
+    slots ::   Vec<Slot>,
+
+    emit = (
+        self   :: @Self,
+        be     :: CBackend,
+        a      : Access,
+        rty    : TyId,
+        n      : TyNamed,
+        record : Struct,
+        ctx    : Ctx
+    ) Res<(), AllocError> {
+        be.request_type(self.ret).try();
+        be.request_type(self.record_ty).try();
+        be.declare_temp(self.ret, self.dst.view()).try();
+        be.declare_temp(self.record_ty, self.value.view()).try();
+        be.declare_temp(rty, self.envv.view()).try();
+        u64_ty = be.check.types.prim("u64").try();
+        be.declare_temp(u64_ty, self.mask.view()).try();
+
+        rendered ::= be.alloc.String().try();
+        expr(be, a.base, ctx, rty, rendered).try();
+        be.set_line(self.envv.view(), rendered.view()).try();
+        zero ::= be.alloc.String().try();
+        be.write_zero(self.record_ty, zero).try();
+        be.set_line(self.value.view(), zero.view()).try();
+        be.set_line(self.mask.view(), "0").try();
+
+        inst = be.decl_inst(n).try();
+        dctx = be.decl_ctx(n);
+        mark = be.enter_struct_tparams(n.decl).try();
+        self.collect(be, record, dctx, inst).try();
+        self.flags(be).try();
+        self.positionals(be).try();
+        self.fill(be, dctx).try();
+        self.finish(be).try();
+        be.write_assign_ok(self.ret, self.value.view(), self.dst.view()).try();
+        be.write_done(self.done).try();
+        be.leave_tparams(mark)
+    }
+
+    // One Slot per field, with its raw-text temporary declared.
+    collect = (
+        self   :: @Self,
+        be     :: CBackend,
+        record : Struct,
+        dctx   : Ctx,
+        inst   : Inst
+    ) Res<(), AllocError> {
+        raw_ty = be.helper_ret("text").try();
+        record.members.loop((h, member) {
+            member.kind.match({
+                Field(f) => be.field_type(member, dctx, inst).match({
+                    None    => (),
+                    Ok(fty) => {
+                        ask = be.ask_of(fty);
+                        raw = be.fresh_name("args_raw").try();
+                        ask.match({
+                            Switch => (),
+                            _      => be.declare_temp(raw_ty, raw.view()).try(),
+                        });
+                        self.slots.add(Slot(
+                            name: f.name.text,
+                            ty: fty,
+                            ask: ask,
+                            raw: raw,
+                            default: f.value
+                        )).try();
+                    },
+                }),
+                _        => (),
+            });
+        });
+        Ok(())
+    }
+
+    // Pass one: every flag and variable, claiming argv slots as it goes.
+    flags = (self: @Self, be :: CBackend) Res<(), AllocError> {
+        self.slots.loop((h, slot) {
+            flag = be.flag_of(slot.name).try();
+            name = be.env_of(slot.name).try();
+            args ::= be.alloc.String().try();
+            args.add(self.envv.view()).try();
+            args.add(", ").try();
+            be.lit(flag.view(), args).try();
+            args.add(", ").try();
+            be.lit(name.view(), args).try();
+            slot.ask.match({
+                Switch => {
+                    place = self.place(be, slot.name).try();
+                    be.call_into(place.view(), "switch", args.view()).try();
+                },
+                _      => be.call_into(
+                    slot.raw.view(),
+                    "text",
+                    args.view()
+                ).try(),
+            });
+            claim ::= be.alloc.String().try();
+            claim.add(self.envv.view()).try();
+            claim.add(", ").try();
+            claim.add(self.mask.view()).try();
+            claim.add(", ").try();
+            be.lit(flag.view(), claim).try();
+            claim.add(
+                slot.ask.match({ Switch => ", false", _ => ", true" })
+            ).try();
+            be.call_into(self.mask.view(), "claim", claim.view()).try();
+        });
+        Ok(())
+    }
+
+    // Pass two: a positional field nothing filled takes the next unclaimed
+    // word and claims it.
+    positionals = (self: @Self, be :: CBackend) Res<(), AllocError> {
+        self.slots.loop((h, slot) {
+            slot.positional().then(() { self.positional(be, slot).try(); });
+        });
+        Ok(())
+    }
+
+    positional = (self: @Self, be :: CBackend, slot: Slot)
+                 Res<(), AllocError> {
+        be.open_absent(slot.raw.view()).try();
+        args ::= be.alloc.String().try();
+        args.fmt("{}, {}", self.envv.view(), self.mask.view()).try();
+        be.call_into(slot.raw.view(), "word", args.view()).try();
+        be.call_into(self.mask.view(), "take", args.view()).try();
+        be.close()
+    }
+
+    // Pass three: every field lands in the record or the call fails by name.
+    fill = (self: @Self, be :: CBackend, dctx: Ctx) Res<(), AllocError> {
+        self.slots.loop((h, slot) {
+            place = self.place(be, slot.name).try();
+            slot.ask.match({
+                Switch       => (),
+                Text         => self.fill_text(
+                    be,
+                    slot,
+                    place.view(),
+                    dctx
+                ).try(),
+                OptText      => be.set_line(
+                    place.view(),
+                    slot.raw.view()
+                ).try(),
+                Num(prim)    => self.fill_num(
+                    be,
+                    slot,
+                    prim,
+                    place.view(),
+                    dctx
+                ).try(),
+                OptNum(prim) => self.fill_opt_num(
+                    be,
+                    slot,
+                    prim,
+                    place.view()
+                ).try(),
+                Unknown      => be.report_expr(
+                    self.id,
+                    GenFault.Unsupported("a field env.args cannot fill")
+                ).try(),
+            });
+        });
+        Ok(())
+    }
+
+    fill_text = (self: @Self, be :: CBackend, slot: Slot, place: str, dctx: Ctx)
+                Res<(), AllocError> {
+        slot.default.match({
+            Ok(d) => {
+                be.open_absent(slot.raw.view()).try();
+                self.assign_default(be, slot, d, place, dctx).try();
+                be.open_else().try();
+                be.set_line(
+                    place,
+                    be.ok_of(slot.raw.view()).try().view()
+                ).try();
+                be.close()
+            },
+            None  => {
+                got = self.required(be, slot).try();
+                be.set_line(place, be.ok_of(got.view()).try().view())
+            },
+        })
+    }
+
+    fill_num = (self: @Self, be :: CBackend, slot: Slot, prim: str, place: str,
+                dctx: Ctx) Res<(), AllocError> {
+        slot.default.match({
+            Ok(d) => {
+                be.open_absent(slot.raw.view()).try();
+                self.assign_default(be, slot, d, place, dctx).try();
+                be.open_else().try();
+                parsed = self.parsed(be, slot, prim, slot.raw.view()).try();
+                be.set_line(place, be.ok_of(parsed.view()).try().view()).try();
+                be.close()
+            },
+            None  => {
+                got    = self.required(be, slot).try();
+                parsed = self.parsed(be, slot, prim, got.view()).try();
+                be.set_line(place, be.ok_of(parsed.view()).try().view())
+            },
+        })
+    }
+
+    fill_opt_num = (self: @Self, be :: CBackend, slot: Slot, prim: str,
+                    place: str) Res<(), AllocError> {
+        be.open_absent(slot.raw.view()).try();
+        none ::= be.alloc.String().try();
+        be.write_none(slot.ty, none).try();
+        be.set_line(place, none.view()).try();
+        be.open_else().try();
+        parsed = self.parsed(be, slot, prim, slot.raw.view()).try();
+        be.write_assign_ok(slot.ty, be.ok_of(parsed.view()).try().view(), place)
+            .try();
+        be.close()
+    }
+
+    // `required(raw, "field")`, failing the whole call on Missing.
+    required = (self: @Self, be :: CBackend, slot: Slot)
+               Res<String, AllocError> {
+        got = be.fresh_name("args_got").try();
+        be.declare_temp(be.helper_ret("required").try(), got.view()).try();
+        args ::= be.alloc.String().try();
+        args.add(slot.raw.view()).try();
+        args.add(", ").try();
+        be.lit(slot.name, args).try();
+        be.call_into(got.view(), "required", args.view()).try();
+        self.fail_unless_ok(be, got.view()).try();
+        Ok(got)
+    }
+
+    // `as_<prim>(<res>.Ok, "field")`, failing the whole call on Parse.
+    parsed = (self: @Self, be :: CBackend, slot: Slot, prim: str, res: str)
+             Res<String, AllocError> {
+        helper ::= be.alloc.String("as_").try();
+        helper.add(prim).try();
+        parsed = be.fresh_name("args_num").try();
+        be.declare_temp(
+            be.helper_ret(helper.view()).try(),
+            parsed.view()
+        ).try();
+        args ::= be.alloc.String().try();
+        args.add(be.ok_of(res).try().view()).try();
+        args.add(", ").try();
+        be.lit(slot.name, args).try();
+        be.call_into(parsed.view(), helper.view(), args.view()).try();
+        self.fail_unless_ok(be, parsed.view()).try();
+        Ok(parsed)
+    }
+
+    assign_default = (self: @Self, be :: CBackend, slot: Slot, d: ExprId,
+                      place: str, dctx: Ctx) Res<(), AllocError> {
+        rendered ::= be.alloc.String().try();
+        expr(be, d, dctx, slot.ty, rendered).try();
+        be.set_line(place, rendered.view())
+    }
+
+    // Unknown flags and surplus words, named after the last positional field.
+    finish = (self: @Self, be :: CBackend) Res<(), AllocError> {
+        last ::= "argv";
+        self.slots.loop((h, slot) {
+            slot.positional().then(() { last = slot.name; });
+        });
+        checked = be.fresh_name("args_end").try();
+        be.declare_temp(be.helper_ret("finish").try(), checked.view()).try();
+        args ::= be.alloc.String().try();
+        args.fmt("{}, {}, ", self.envv.view(), self.mask.view()).try();
+        be.lit(last, args).try();
+        be.call_into(checked.view(), "finish", args.view()).try();
+        self.fail_unless_ok(be, checked.view())
+    }
+
+    // `if (<res>.zg_tag != Ok) { dst = Err(<res>.Err); goto done; }`. The
+    // Err payload is ArgError in every helper and in the answer, so it is
+    // copied across result types by member.
+    fail_unless_ok = (self: @Self, be :: CBackend, res: str)
+                     Res<(), AllocError> {
+        ok ::= be.alloc.String().try();
+        ok.sym_variant(RES_PATH, "Ok").try();
+        err ::= be.alloc.String().try();
+        err.sym_variant(RES_PATH, "Err").try();
+        member ::= be.alloc.String().try();
+        member.sym_member("Err").try();
+        cty ::= be.alloc.String().try();
+        be.ctype(self.ret, cty).try();
+        be.fmt("if ({}.zg_tag != {}) {{\n", res, ok.view()).try();
+        be.indent();
+        be.fmt(
+            "{} = (({}){{ .zg_tag = {}, .zg_data.{} = {}.zg_data.{} }});\n",
+            self.dst.view(),
+            cty.view(),
+            err.view(),
+            member.view(),
+            res,
+            member.view()
+        ).try();
+        be.write_goto(self.done).try();
+        be.dedent();
+        be.writeln("}")
+    }
+
+    place = (self: @Self, be :: CBackend, field: str) Res<String, AllocError> {
+        out ::= be.alloc.String("{}.", self.value.view()).try();
+        out.sym_member(field).try();
+        Ok(out)
+    }
+}
+
+// The field's ask, from its type: switches, text, numbers, and each of
+// those wrapped in a Res<T>.
+ask_of = (be :: CBackend, ty: TyId) Ask {
+    be.check.types.at(ty).match({
+        Prim(p) => p.name.match({
+            "bool"  => Switch,
+            "str"   => Text,
+            "usize" => Ask.Num("usize"),
+            "u64"   => Ask.Num("u64"),
+            "i64"   => Ask.Num("i64"),
+            _       => Unknown,
+        }),
+        Res(r)  => is_failure(r.form).match({
+            true  => Unknown,
+            false => be.check.types.at(r.value).match({
+                Prim(p) => p.name.match({
+                    "str"   => OptText,
+                    "usize" => Ask.OptNum("usize"),
+                    "u64"   => Ask.OptNum("u64"),
+                    "i64"   => Ask.OptNum("i64"),
+                    _       => Unknown,
+                }),
+                _       => Unknown,
+            }),
+        }),
+        _       => Unknown,
+    })
+}
+
+// `--fleet-size` for `fleet_size`; `-C` for `C`; nothing for
+// `OPENROUTER_API_KEY`, which is its variable and only that.
+flag_of = (be :: CBackend, field: str) Res<String, AllocError> {
+    out ::= be.alloc.String().try();
+    field.env_only().match({
+        true  => Ok(out),
+        false => {
+            out.add(
+                (field.len == 1).match({ true => "-", false => "--" })
+            ).try();
+            Range(0, field.len).loop((h, i) {
+                b = field.index(i);
+                out.add((b == '_').match({ true => '-', false => b })).try();
+            });
+            Ok(out)
+        },
+    })
+}
+
+// An all-uppercase field name of more than one letter is an environment
+// variable spelled as itself: no flag, and never a positional.
+env_only = (field: str) bool {
+    field.len > 1 && Range(0, field.len).find((i) {
+        b = field.index(i);
+        b >= 'a' && b <= 'z'
+    }).match({ Ok(_) => false, None => true })
+}
+
+// `FLEET_SIZE` for `fleet_size`.
+env_of = (be :: CBackend, field: str) Res<String, AllocError> {
+    out ::= be.alloc.String().try();
+    Range(0, field.len).loop((h, i) {
+        b = field.index(i);
+        out.add(
+            (b >= 'a' && b <= 'z').match({ true => b - 32, false => b })
+        ).try();
+    });
+    Ok(out)
+}
+
+// A borrowed str literal in C. Field names and flags are identifiers, so
+// only the quote and the backslash could need escaping, and they cannot
+// appear; the length is the byte count regardless.
+lit = (be :: CBackend, text: str, out :: String) Res<(), AllocError> {
+    out.add("(zg_str){ (unsigned char *)\"").try();
+    Range(0, text.len).loop((h, i) {
+        b = text.index(i);
+        (b == '"' || b == '\\').then(() { out.add('\\').try(); });
+        out.add(b).try();
+    });
+    out.fmt("\", {}u }", text.len)
+}
+
+// `<res>.zg_data.Ok`.
+ok_of = (be :: CBackend, res: str) Res<String, AllocError> {
+    out ::= be.alloc.String("{}.zg_data.", res).try();
+    out.sym_member("Ok").try();
+    Ok(out)
+}
+
+// `if (<res>.zg_tag != Ok) {`
+open_absent = (be :: CBackend, res: str) Res<(), AllocError> {
+    ok ::= be.alloc.String().try();
+    ok.sym_variant(RES_PATH, "Ok").try();
+    be.fmt("if ({}.zg_tag != {}) {{\n", res, ok.view()).try();
+    be.indent();
+    Ok(())
+}
+
+open_else = (be :: CBackend) Res<(), AllocError> {
+    be.dedent();
+    be.writeln("} else {").try();
+    be.indent();
+    Ok(())
+}
+
+close = (be :: CBackend) Res<(), AllocError> {
+    be.dedent();
+    be.writeln("}")
+}
+
+// `<dst> = std.env.env_args.<helper>(<args>);`, or a diagnostic naming the
+// helper the std tree no longer has.
+call_into = (be :: CBackend, dst: str, helper: str, args: str)
+            Res<(), AllocError> {
+    be.args_helper(helper).try().match({
+        None    => be.report_expr(
+            ExprId(index: 0),
+            GenFault.Unsupported("env.args without its std helpers")
+        ),
+        Ok(def) => {
+            call ::= be.alloc.String().try();
+            be.call_symbol(def, call).try();
+            call.fmt("({})", args).try();
+            be.set_line(dst, call.view())
+        },
+    })
+}
+
+args_helper = (be :: CBackend, name: str) Res<Res<Def>, AllocError> {
+    found ::= be.alloc.Vec<Def>();
+    be.check.world.exported_named(name, found).try();
+    Ok(found.find((d) {
+        d.name.eq(name)
+            && be.check.world.module_name(d.id).eq(ARGS_MODULE)
+    }))
+}
+
+helper_ret = (be :: CBackend, name: str) Res<TyId, AllocError> {
+    be.args_helper(name).try().match({
+        None  => be.check.types.unknown(),
+        Ok(d) => decl_at(be.tree, d.id).match({
+            None     => be.check.types.unknown(),
+            Ok(decl) => decl.kind.match({
+                Function(f) => be.check.type_from_ast(
+                    f.ret.ok_or(AllocError.OutOfMemory).try(),
+                    Ctx(d.id.module.to_usize(), TyId(index: 0))
+                ),
+                _           => be.check.types.unknown(),
+            }),
+        }),
+    })
+}

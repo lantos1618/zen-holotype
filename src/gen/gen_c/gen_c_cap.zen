@@ -18,8 +18,10 @@ temp, payload_type = gen.gen_c.gen_c_flow
 write_assign_ok, write_assign_err = gen.gen_c.gen_c_flow
 close_else, close_brace, open_null_test = gen.gen_c.gen_c_flow
 lower_probe, lower_write, lower_read, lower_remove, lower_lock, lower_unlock = gen.gen_c.gen_c_fs
+lower_mkdir = gen.gen_c.gen_c_fs
 lower_stdin_read = gen.gen_c.gen_c_stdin
 lower_env_var = gen.gen_c.gen_c_env
+lower_env_args = gen.gen_c.gen_c_args
 lower_console_print, lower_console_flush, is_console_print = gen.gen_c.gen_c_print
 is_defer, lower_defer = gen.gen_c.gen_c_scope
 write_position = gen.gen_c.gen_c_op
@@ -38,9 +40,11 @@ CapabilityKind* = NotCapability
     | FsRead
     | FsLock
     | FsRemove
+    | FsMkdir
     | FsProbe
     | LockUnlock
     | EnvVar
+    | EnvArgs
     | ActorSpawn
     | ActorStop
     | ActorJoin
@@ -112,9 +116,19 @@ CapabilityCall* = {
             },
             FsLock       => be.lower_lock(id, c, ret, ctx, out),
             FsRemove     => be.lower_remove(id, c, ret, ctx, out),
+            FsMkdir      => be.lower_mkdir(id, c, ret, ctx, out),
             FsProbe      => be.lower_probe(c, a.name.text, ctx, out),
             LockUnlock   => be.lower_unlock(id, c, a, rty, ret, ctx, out),
             EnvVar       => be.lower_env_var(c, ret, ctx, out),
+            EnvArgs      => be.lower_env_args(
+                self.id,
+                c,
+                a,
+                rty,
+                ret,
+                ctx,
+                out
+            ),
             ClockRead    => be.lower_clock_read(c, a.name.text, ret, ctx, out),
             ThreadsSleep => be.lower_sleep(c, ret, ctx, out),
             ThreadsSpawn => be.lower_spawn(id, c, ret, ctx, out),
@@ -166,11 +180,13 @@ capability_kind* = (be :: CBackend, rty: TyId, name: str) CapabilityKind {
         (owner.eq("Fs") && name.eq("read")).then(() { h.break(FsRead) });
         (owner.eq("Fs") && name.eq("lock")).then(() { h.break(FsLock) });
         (owner.eq("Fs") && name.eq("remove")).then(() { h.break(FsRemove) });
+        (owner.eq("Fs") && name.eq("mkdir")).then(() { h.break(FsMkdir) });
         (owner.eq("Fs") && name.is_in(["exists", "is_dir"])).then(() {
             h.break(FsProbe)
         });
         (owner.eq("Lock") && name.eq("unlock")).then(() { h.break(LockUnlock) });
         (owner.eq("Env") && name.eq("var")).then(() { h.break(EnvVar) });
+        (owner.eq("Env") && name.eq("args")).then(() { h.break(EnvArgs) });
         (owner.eq("Env") && name.eq("spawn")).then(() {
             h.break(ActorSpawn)
         });

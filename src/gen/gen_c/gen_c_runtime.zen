@@ -373,6 +373,7 @@ write_fs = (out :: Emit) Res<(), AllocError> {
     write_fs_size(out).try();
     write_fs_write(out).try();
     write_fs_remove(out).try();
+    write_fs_mkdir(out).try();
     write_fs_read(out).try();
     write_fs_lock(out).try();
     write_fs_unlock(out).try();
@@ -515,6 +516,34 @@ write_fs_remove = (out :: Emit) Res<(), AllocError> {
     out.say("if (remove(buf) == 0) { *gone = true; return ZG_FS_OK; }").try();
     out.say("if (errno == ENOENT || errno == ENOTDIR) return ZG_FS_OK;").try();
     out.say("if (errno == EISDIR) return ZG_FS_IS_DIR;").try();
+    out.say("return zg_fs_error(errno);").try();
+    out.dedent();
+    out.say("}").try();
+    out.line().try();
+    Ok(());
+}
+
+// `*made` says whether THIS call created it: an existing directory is
+// Ok(false) because "make sure it exists" is already answered, while a
+// file at that name is EXISTS and a missing parent is NOT_FOUND.
+write_fs_mkdir = (out :: Emit) Res<(), AllocError> {
+    out.say(
+        "static int zg_fs_mkdir(const unsigned char *p, size_t n, bool *made) {"
+    ).try();
+    out.indent();
+    out.say("char buf[ZG_PATH_MAX];").try();
+    out.say("struct stat st;").try();
+    out.say("*made = false;").try();
+    out.say("if (!zg_fs_path(buf, p, n)) return ZG_FS_FAILED;").try();
+    out.say(
+        "if (mkdir(buf, 0777) == 0) { *made = true; return ZG_FS_OK; }"
+    ).try();
+    out.say("if (errno == EEXIST) {").try();
+    out.say(
+        "    if (stat(buf, &st) == 0 && S_ISDIR(st.st_mode)) return ZG_FS_OK;"
+    ).try();
+    out.say("    return ZG_FS_EXISTS;").try();
+    out.say("}").try();
     out.say("return zg_fs_error(errno);").try();
     out.dedent();
     out.say("}").try();

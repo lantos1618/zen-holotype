@@ -421,6 +421,42 @@ write_remove_call = (be :: CBackend, rc: str, yes: str, path: str)
     be.fmt("{rc} = zg_fs_remove({path}, &{yes});\n")
 }
 
+// `mkdir` is `remove` in the other direction: the bool says whether THIS
+// call created the directory, and a missing parent is a real NotFound, so
+// its chain enters at 1.
+lower_mkdir* = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    ret : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    be.need_fs();
+    i32_ty  = be.check.types.prim("i32").try();
+    bool_ty = be.check.types.prim("bool").try();
+    path ::= be.alloc.String().try();
+    be.str_arg(c, 0, ctx, path).try();
+    rc  ::= be.fresh_name("t").try();
+    yes ::= be.fresh_name("t").try();
+    dst ::= be.fresh_name("t").try();
+    be.declare_temp(i32_ty, rc.view()).try();
+    be.declare_temp(bool_ty, yes.view()).try();
+    be.declare_temp(ret, dst.view()).try();
+    be.write_mkdir_call(rc.view(), yes.view(), path.view()).try();
+    be.open_rc_test(rc.view()).try();
+    be.fs_chain(ret, rc.view(), dst.view(), 1).try();
+    be.close_else().try();
+    be.write_assign_ok(ret, yes.view(), dst.view()).try();
+    be.close_brace().try();
+    out.add(dst.view())
+}
+
+write_mkdir_call = (be :: CBackend, rc: str, yes: str, path: str)
+                  Res<(), AllocError> {
+    be.fmt("{rc} = zg_fs_mkdir({path}, &{yes});\n")
+}
+
 // `fs.read(alloc, path)`: length is bytes received; capacity is bytes asked.
 
 lower_read* = (
@@ -537,8 +573,8 @@ fs_name_3 = (n: usize) str {
     (n == 3).match({ true => "IsDir", false => fs_name_4(n) })
 }
 
-// Exists is ordinal 4, and `lock` is the only floor that answers with
-// it: a stat cannot find it and an open cannot create it.
+// Exists is ordinal 4: lock found a held name, or mkdir found a
+// non-directory at the requested name.
 fs_name_4 = (n: usize) str {
     (n == 4).match({ true => "Exists", false => "Failed" })
 }

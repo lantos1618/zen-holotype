@@ -1,4 +1,5 @@
 Expr, ExprId, Call, Arg, Access, Lambda, Param, Span, Paren, nowhere = std.ast
+Struct, Function = std.ast
 Ast = std.ast.ast_arena
 Alloc, AllocError = std.mem
 Vec = std.collections
@@ -16,7 +17,7 @@ discriminant_member_call, DiscriminantAnswer = sema.sema_discriminant
 variant_name_member_call, VariantNameAnswer = sema.sema_variant_name
 construct, instantiate, variant_call_type = sema.sema_apply
 refuse_variant_surplus = sema.sema_apply
-Inst, subst, subst_list, unify_list = sema.sema_inst
+Inst, subst, subst_list, unify_list, tparam_vars, zip, owner_of = sema.sema_inst
 is_case = sema.sema_case
 Found, Base, base_of, members_of, actor_spawn_ret, ref_of_actor = sema.sema_member
 is_type_def, opaque, first_found, named_as = sema.sema_member
@@ -334,13 +335,45 @@ CallCheck = {
     )
              Res<TyId, AllocError> {
         c.pick_fitting(found, self.actuals, 1).try().match({
-            Ok(f) => self.signature(c, f.ty, 1, SignatureFit.Exact),
+            Ok(f) => self.signature(
+                c,
+                self.written_member(c, ac, b, f).try(),
+                1,
+                SignatureFit.Exact
+            ),
             None  => c.ref_of_actor(b.ty).try().match({
                 None  => self.by_arity(c, ac, b, found, 1),
                 Ok(_) => c.pick_fitting(found, self.actuals, 0).try().match({
                     Ok(f) => self.signature(c, f.ty, 0, SignatureFit.Exact),
                     None  => self.by_arity(c, ac, b, found, 1),
                 }),
+            }),
+        })
+    }
+
+    // `x.f<T>()`: a member's own type parameters bound by what was
+    // written, before the signature is fitted. A bodiless door such as
+    // `env.args<Cli>()` has no argument to infer from, and without this its
+    // `T` stays open in everything typed from the call.
+    written_member = (self: @Self, c :: Checker, ac: Access, b: Base,
+                      f: Found) Res<TyId, AllocError> {
+        (self.call.targs.len == 0).match({
+            true  => Ok(f.ty),
+            false => c.member_fn(b.ty, ac.name.text).match({
+                None   => Ok(f.ty),
+                Ok(fn) => {
+                    owner = c.owner_of(f.module, fn.name.text).try();
+                    vars ::= c.alloc.Vec<TyId>();
+                    c.tparam_vars(fn.tparams, owner, vars).try();
+                    tys ::= c.alloc.Vec<TyId>();
+                    self.call.targs.loop((h, t) {
+                        tys.add(c.type_from_ast(t, self.ctx).try()).try();
+                    });
+                    inst ::= c.alloc.Inst();
+                    c.zip(vars, tys, inst).try();
+                    c.resolve_inst(self.id, inst).try();
+                    c.subst(f.ty, inst)
+                },
             }),
         })
     }
@@ -1151,4 +1184,24 @@ ambiguous = (c :: Checker, name: str, a: Cand, b: Cand) Res<(), AllocError> {
             second: b.span
         ))
     )
+}
+
+// The function a struct declares under `name`, for its parameter list.
+member_fn = (c: Checker, ty: TyId, name: str) Res<Function> {
+    c.types.at(ty).match({
+        Named(n) => c.tree.decl_at(n.decl).match({
+            Ok(decl) => decl.kind.match({
+                Struct(st) => st.members.find((m) { m.named(name) }).match({
+                    Ok(m) => m.kind.match({
+                        Function(fn) => Ok(fn),
+                        _            => None,
+                    }),
+                    None  => None,
+                }),
+                _          => None,
+            }),
+            None     => None,
+        }),
+        _        => None,
+    })
 }
