@@ -1,0 +1,54 @@
+Alloc, AllocError = std.mem
+Vec = std.collections
+str = std.text
+Command, command, Matches, ValueType = std.cli
+
+Id = Mode | Json | Upload | Output
+
+main = (env: Env) Res<i32, AllocError> {
+    a     ::= env.mem.alloc();
+    model ::= command<Id>(a, "tool", "");
+    model.option("--mode", Id.Mode, "MODE", ValueType.Text, "").try();
+    model.default_value("--mode", "human");
+    model.flag("--json", Id.Json, "").try();
+    model.conflicts("--json", "--mode").try();
+    model.flag("--upload", Id.Upload, "").try();
+    model.option("--output", Id.Output, "FILE", ValueType.Text, "").try();
+    model.requires("--upload", "--output").try();
+
+    show(a, model.parse(line(a, "--json", "", "").try(), 1).try()).try();
+    show(
+        a,
+        model.parse(line(a, "--mode", "compact", "--json").try(), 1).try()
+    ).try();
+    show(a, model.parse(line(a, "--upload", "", "").try(), 1).try()).try();
+    show(
+        a,
+        model.parse(line(a, "--upload", "--output", "artifact").try(), 1).try()
+    ).try();
+    Ok(0)
+}
+
+show = (a: Alloc, parsed: Matches<Id>) Res<(), AllocError> {
+    parsed.error.match({
+        None           => println("clean values={}", parsed.values.len),
+        Ok(diagnostic) => {
+            message = diagnostic.message(a).try();
+            println("error: {}", message.view());
+        },
+    });
+    Ok(())
+}
+
+line = (a: Alloc, one: str, two: str, three: str) Res<Vec<str>, AllocError> {
+    argv ::= a.Vec<str>();
+    argv.add("tool").try();
+    push(argv, one).try();
+    push(argv, two).try();
+    push(argv, three).try();
+    Ok(argv)
+}
+
+push = (argv :: Vec<str>, word: str) Res<(), AllocError> {
+    word.is_empty().match({ true => Ok(()), false => argv.add(word) })
+}

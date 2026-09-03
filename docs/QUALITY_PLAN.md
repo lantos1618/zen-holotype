@@ -244,6 +244,9 @@ repeatable values, and typed value parsing. Build declarations own their command
 shape; terminal rendering consumes that declaration instead of maintaining a
 second handwritten usage string.
 
+Landed: `std.cli.Command` provides this declarative surface, validates its own
+grammar, and drives the Zen executable's runtime help. See `docs/CLI.md`.
+
 `verify` owns the list: build, corpus/must-fail, format, determinism, full
 fixpoint, generated-C warnings, sanitizers, benchmarks, editor checks, and
 release-state checks. CI and releases call only this aggregate.

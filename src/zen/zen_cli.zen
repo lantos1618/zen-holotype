@@ -9,6 +9,8 @@ Env = std.env
 BuildArgs, ProjectArgs, BuildFlags, build_options = std.build
 FLAG_EMIT_C, ZEN_STD_ENV = std.build
 Options, options, is_word, arg_at, OPTIONS_END = std.cli
+Command, command, ValueType = std.cli
+String = std.text
 holds_build_zen = zen.zen_path
 
 Cli* = Build(BuildArgs)
@@ -45,7 +47,147 @@ ARGS*: usize = 2
 
 USAGE*: str = "usage: zen build [<project-or-target>]\n       zen run [<project-or-target>] [-- <args>...]\n       zen build <root> [--entry <file>] [--std <path>] [--ffi] [--symbol-map <file>] --emit-c -o <file.c>\n       zen build <root> [--entry <file>] [--std <path>] [--ffi] [--symbol-map <file>] --emit-c-dir <dir>\n       zen fmt [--check] <file.zen>..."
 
+HelpArg = Root
+    | BuildRoot
+    | EmitC
+    | EmitDir
+    | Out
+    | Entry
+    | StdRoot
+    | SymbolMap
+    | Ffi
+    | Project
+    | Path
+    | Check
+    | Request
+    | Reply
+
+// Runtime help comes from the same declarative surface applications use.
+// USAGE remains exported above for source compatibility, but the executable
+// no longer prints that handwritten snapshot.
+help* = (a: Alloc, command_name: str) Res<String, AllocError> {
+    model = help_model(a).try();
+    command_name.is_empty().match({
+        true  => model.help(),
+        false => model.help_for(command_name),
+    })
+}
+
+help_model = (a: Alloc) Res<Command<HelpArg>, AllocError> {
+    app ::= command<HelpArg>(a, "zen", "The Zen compiler and project tool");
+    app.subcommand_required();
+
+    build ::= command<HelpArg>(
+        a,
+        "build",
+        "Build a project or compile Zen to C"
+    );
+    build.positional(
+        "root",
+        HelpArg.BuildRoot,
+        "PROJECT-OR-ROOT",
+        ValueType.Text,
+        "Project directory, target name, or compilation root"
+    ).try();
+    build.flag("--emit-c", HelpArg.EmitC, "Emit C to standard output").try();
+    build.option(
+        "--emit-c-dir",
+        HelpArg.EmitDir,
+        "DIR",
+        ValueType.Text,
+        "Emit one C file per module"
+    ).try();
+    build.option(
+        "-o",
+        HelpArg.Out,
+        "FILE",
+        ValueType.Text,
+        "Write emitted C to FILE"
+    ).try();
+    build.option(
+        "--entry",
+        HelpArg.Entry,
+        "FILE",
+        ValueType.Text,
+        "Select the entry file inside ROOT"
+    ).try();
+    build.option(
+        "--std",
+        HelpArg.StdRoot,
+        "PATH",
+        ValueType.Text,
+        "Use PATH as the standard-library root"
+    ).try();
+    build.option(
+        "--symbol-map",
+        HelpArg.SymbolMap,
+        "FILE",
+        ValueType.Text,
+        "Write the generated symbol map"
+    ).try();
+    build.flag(
+        "--ffi",
+        HelpArg.Ffi,
+        "Enable foreign-function interfaces"
+    ).try();
+    app.subcommand(build).try();
+
+    run ::= command<HelpArg>(a, "run", "Build and run a project target");
+    run.positional(
+        "project",
+        HelpArg.Project,
+        "PROJECT-OR-TARGET",
+        ValueType.Text,
+        "Project directory or target name"
+    ).try();
+    run.trailing_args();
+    app.subcommand(run).try();
+
+    fmt ::= command<HelpArg>(a, "fmt", "Format Zen source files");
+    fmt.flag("--check", HelpArg.Check, "Report files that would change").try();
+    fmt.positional(
+        "path",
+        HelpArg.Path,
+        "FILE",
+        ValueType.Text,
+        "Zen source file"
+    ).try();
+    fmt.required("path");
+    fmt.repeatable("path");
+    app.subcommand(fmt).try();
+
+    app.subcommand(command<HelpArg>(
+        a,
+        "test",
+        "Run project tests (not yet implemented)"
+    )).try();
+
+    lsp ::= command<HelpArg>(a, "lsp", "Run the language server");
+    lsp.positional(
+        "request",
+        HelpArg.Request,
+        "REQUESTS",
+        ValueType.Text,
+        "Request file; omit for stdio"
+    ).try();
+    lsp.positional(
+        "reply",
+        HelpArg.Reply,
+        "REPLIES",
+        ValueType.Text,
+        "Reply file"
+    ).try();
+    app.subcommand(lsp).try();
+    Ok(app)
+}
+
 FLAG_FMT_CHECK: str = "--check"
+HELP_ROOT: str = "@help/root"
+HELP_BUILD: str = "@help/build"
+HELP_RUN: str = "@help/run"
+HELP_FMT: str = "@help/fmt"
+HELP_TEST: str = "@help/test"
+HELP_LSP: str = "@help/lsp"
 
 FmtFlag = | Check
 
@@ -60,13 +202,40 @@ cli* = (env: Env, argv: Vec<str>) Res<Cli, AllocError> {
 command = (env: Env, a: Alloc, argv: Vec<str>, name: str)
           Res<Cli, AllocError> {
     name.match({
-        "build" => job_of(env, a, argv),
-        "run"   => project_of(env, a, argv, true),
-        "fmt"   => fmt_of(a, argv),
-        "test"  => Ok(Cli.Later(name)),
-        "lsp"   => Ok(Cli.Later(name)),
-        _       => Ok(Cli.Usage(name)),
+        "--help" => Ok(Cli.Usage(HELP_ROOT)),
+        "-h"     => Ok(Cli.Usage(HELP_ROOT)),
+        "build"  => help_requested(argv).match({
+            true => Ok(Cli.Usage(HELP_BUILD)), false => job_of(env, a, argv)
+        }),
+        "run"    => help_requested(argv).match({
+            true => Ok(Cli.Usage(HELP_RUN)), false => project_of(env, a, argv, true)
+        }),
+        "fmt"    => help_requested(argv).match({
+            true => Ok(Cli.Usage(HELP_FMT)), false => fmt_of(a, argv)
+        }),
+        "test"   => help_requested(argv).match({
+            true => Ok(Cli.Usage(HELP_TEST)), false => Ok(Cli.Later(name))
+        }),
+        "lsp"    => help_requested(argv).match({
+            true => Ok(Cli.Usage(HELP_LSP)), false => Ok(Cli.Later(name))
+        }),
+        _        => Ok(Cli.Usage(name)),
     })
+}
+
+help_requested = (argv: Vec<str>) bool {
+    found ::= false;
+    Range(ARGS, argv.len).loop((h, i) {
+        word = arg_at(argv, i);
+        word.eq(OPTIONS_END).match({
+            true  => h.break(),
+            false => (word.eq("--help") || word.eq("-h")).then(() {
+                found = true;
+                h.break();
+            }),
+        });
+    });
+    found
 }
 
 // `zen fmt [--check] <file.zen>...` requires at least one path.

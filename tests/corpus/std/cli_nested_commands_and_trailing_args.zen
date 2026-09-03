@@ -1,0 +1,80 @@
+Alloc, AllocError = std.mem
+Vec = std.collections
+str = std.text
+Command, command, Matches = std.cli
+
+Id = | Dry
+
+main = (env: Env) Res<i32, AllocError> {
+    a   ::= env.mem.alloc();
+    app ::= command<Id>(a, "tool", "");
+    app.subcommand_required();
+    deploy ::= command<Id>(a, "deploy", "");
+    deploy.subcommand_required();
+    release ::= command<Id>(a, "release", "");
+    release.flag("--dry-run", Id.Dry, "").try();
+    release.trailing_args();
+    deploy.subcommand(release).try();
+    app.subcommand(deploy).try();
+
+    show(a, app.parse(line(a, "", "", "", "", "", "").try(), 1).try()).try();
+    show(
+        a,
+        app.parse(line(a, "deploy", "", "", "", "", "").try(), 1).try()
+    ).try();
+    show(
+        a,
+        app.parse(
+            line(a, "deploy", "release", "--dry-run", "--", "x", "-y").try(),
+            1
+        ).try()
+    ).try();
+    nested_help = app.help_for("deploy release").try();
+    println(
+        "nested-help={}",
+        nested_help.view().contains(
+            "Usage: tool deploy release [OPTIONS] [-- <ARGS>...]"
+        )
+    );
+    Ok(0)
+}
+
+show = (a: Alloc, parsed: Matches<Id>) Res<(), AllocError> {
+    parsed.error.match({
+        Ok(diagnostic) => {
+            message = diagnostic.message(a).try();
+            println("{}: {}", diagnostic.command, message.view());
+        },
+        None           => parsed.options_end.match({
+            Ok(at) => println(
+                "{} values={} tail-at={}",
+                parsed.command,
+                parsed.values.len,
+                at
+            ),
+            None   => println(
+                "{} values={} no-tail",
+                parsed.command,
+                parsed.values.len
+            ),
+        }),
+    });
+    Ok(())
+}
+
+line = (a: Alloc, a0: str, a1: str, a2: str, a3: str, a4: str, a5: str)
+    Res<Vec<str>, AllocError> {
+    argv ::= a.Vec<str>();
+    argv.add("tool").try();
+    push(argv, a0).try();
+    push(argv, a1).try();
+    push(argv, a2).try();
+    push(argv, a3).try();
+    push(argv, a4).try();
+    push(argv, a5).try();
+    Ok(argv)
+}
+
+push = (argv :: Vec<str>, word: str) Res<(), AllocError> {
+    word.is_empty().match({ true => Ok(()), false => argv.add(word) })
+}

@@ -1,0 +1,218 @@
+Alloc, AllocError = std.mem
+Vec = std.collections
+str, String = std.text
+Command, command, Matches, CliValue, DiagnosticKind, ValueType = std
+
+Id = Verbose | Quiet | Jobs | Input | Define
+
+main = (env: Env) Res<i32, AllocError> {
+    a   ::= env.mem.alloc();
+    app ::= model(a).try();
+
+    show(
+        a,
+        app.parse(
+            line(a, "-v", "--jobs=4", "build", "main.zen", "-D", "one").try(),
+            1
+        ).try()
+    ).try();
+    show(
+        a,
+        app.parse(
+            line(a, "build", "main.zen", "-Dtwo", "-D", "three", "").try(),
+            1
+        ).try()
+    ).try();
+    show(
+        a,
+        app.parse(
+            line(a, "--quiet", "-v", "build", "main.zen", "", "").try(),
+            1
+        ).try()
+    ).try();
+    show(
+        a,
+        app.parse(
+            line(a, "--jobs", "nope", "build", "main.zen", "", "").try(),
+            1
+        ).try()
+    ).try();
+    show(
+        a,
+        app.parse(
+            line(a, "--jobs", "--quiet", "build", "main.zen", "", "").try(),
+            1
+        ).try()
+    ).try();
+    show(
+        a,
+        app.parse(line(a, "build", "", "", "", "", "").try(), 1).try()
+    ).try();
+    show(
+        a,
+        app.parse(
+            line(a, "-v", "-v", "build", "main.zen", "", "").try(),
+            1
+        ).try()
+    ).try();
+    show(
+        a,
+        app.parse(line(a, "--bogus", "", "", "", "", "").try(), 1).try()
+    ).try();
+    show(a, app.parse(line(a, "wat", "", "", "", "", "").try(), 1).try()).try();
+    show(
+        a,
+        app.parse(
+            line(a, "build", "main.zen", "extra", "", "", "").try(),
+            1
+        ).try()
+    ).try();
+    show(
+        a,
+        app.parse(line(a, "build", "--help", "", "", "", "").try(), 1).try()
+    ).try();
+    show(
+        a,
+        app.parse(line(a, "--version", "", "", "", "", "").try(), 1).try()
+    ).try();
+    show(
+        a,
+        app.parse(line(a, "build", "--", "-literal", "", "", "").try(), 1).try()
+    ).try();
+
+    help_text = app.help().try();
+    println("{}", help_text.view());
+    child_help = app.help_for("build").try();
+    print("{}", child_help.view());
+    Ok(0)
+}
+
+model = (a: Alloc) Res<Command<Id>, AllocError> {
+    app ::= command<Id>(a, "tool", "A deterministic example tool");
+    app.set_version("1.2.3");
+    app.flag("--verbose", Id.Verbose, "Print more detail").try();
+    app.alias("--verbose", "-v").try();
+    app.flag("--quiet", Id.Quiet, "Print no detail").try();
+    app.conflicts("--quiet", "--verbose").try();
+    app.option("--jobs", Id.Jobs, "N", ValueType.Usize, "Worker count").try();
+    app.default_value("--jobs", "2");
+
+    build ::= command<Id>(a, "build", "Build an input");
+    build.positional(
+        "input",
+        Id.Input,
+        "INPUT",
+        ValueType.Text,
+        "Input path"
+    ).try();
+    build.required("input");
+    build.option(
+        "--define",
+        Id.Define,
+        "VALUE",
+        ValueType.Text,
+        "Add a definition"
+    ).try();
+    build.alias("--define", "-D").try();
+    build.repeatable("--define");
+    app.subcommand(build).try();
+    Ok(app)
+}
+
+show = (a: Alloc, parsed: Matches<Id>) Res<(), AllocError> {
+    parsed.error.match({
+        Ok(diagnostic) => {
+            message = diagnostic.message(a).try();
+            println("error {}: {}", kind_name(diagnostic.kind), message.view());
+        },
+        None           => {
+            println(
+                "ok command={} values={} end={}",
+                parsed.command,
+                parsed.values.len,
+                end_name(parsed)
+            );
+            Range(0, parsed.values.len).loop((h, i) {
+                parsed.values.get(i).match({
+                    None      => (),
+                    Ok(value) => value.value.match({
+                        On            => println(
+                            "{}=on default={}",
+                            value.name,
+                            value.defaulted
+                        ),
+                        TextValue(v)  => println(
+                            "{}={} default={}",
+                            value.name,
+                            v,
+                            value.defaulted
+                        ),
+                        I32Value(v)   => println(
+                            "{}={} default={}",
+                            value.name,
+                            v,
+                            value.defaulted
+                        ),
+                        I64Value(v)   => println(
+                            "{}={} default={}",
+                            value.name,
+                            v,
+                            value.defaulted
+                        ),
+                        U16Value(v)   => println(
+                            "{}={} default={}",
+                            value.name,
+                            v,
+                            value.defaulted
+                        ),
+                        UsizeValue(v) => println(
+                            "{}={} default={}",
+                            value.name,
+                            v,
+                            value.defaulted
+                        ),
+                    }),
+                });
+            });
+        },
+    });
+    Ok(())
+}
+
+kind_name = (kind: DiagnosticKind) str {
+    kind.match({
+        HelpRequested      => "help",
+        VersionRequested   => "version",
+        UnknownOption      => "unknown-option",
+        UnknownCommand     => "unknown-command",
+        MissingValue       => "missing-value",
+        InvalidValue       => "invalid-value",
+        UnexpectedArgument => "unexpected-argument",
+        MissingRequired    => "missing-required",
+        RequiredBy         => "required-by",
+        Conflict           => "conflict",
+        Duplicate          => "duplicate",
+        InvalidDeclaration => "invalid-declaration",
+    })
+}
+
+end_name = (parsed: Matches<Id>) str {
+    parsed.options_end.match({ Ok(_) => "yes", None => "no" })
+}
+
+line = (a: Alloc, a0: str, a1: str, a2: str, a3: str, a4: str, a5: str)
+    Res<Vec<str>, AllocError> {
+    argv ::= a.Vec<str>();
+    argv.add("tool").try();
+    push(argv, a0).try();
+    push(argv, a1).try();
+    push(argv, a2).try();
+    push(argv, a3).try();
+    push(argv, a4).try();
+    push(argv, a5).try();
+    Ok(argv)
+}
+
+push = (argv :: Vec<str>, word: str) Res<(), AllocError> {
+    word.is_empty().match({ true => Ok(()), false => argv.add(word) })
+}

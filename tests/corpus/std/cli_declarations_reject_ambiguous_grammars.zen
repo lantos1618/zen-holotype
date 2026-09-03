@@ -1,0 +1,93 @@
+Alloc, AllocError = std.mem
+Vec = std.collections
+str = std.text
+Command, command, DiagnosticKind, ValueType = std.cli
+
+Id = A | B
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    duplicate ::= command<Id>(a, "tool", "");
+    duplicate.flag("--same", Id.A, "").try();
+    duplicate.flag("--same", Id.B, "").try();
+    show(a, duplicate).try();
+
+    aliases ::= command<Id>(a, "tool", "");
+    aliases.flag("--alpha", Id.A, "").try();
+    aliases.alias("--alpha", "-x").try();
+    aliases.flag("--beta", Id.B, "").try();
+    aliases.alias("--beta", "-x").try();
+    show(a, aliases).try();
+
+    unknown_link ::= command<Id>(a, "tool", "");
+    unknown_link.flag("--alpha", Id.A, "").try();
+    unknown_link.conflicts("--alpha", "--missing").try();
+    show(a, unknown_link).try();
+
+    self_link ::= command<Id>(a, "tool", "");
+    self_link.flag("--alpha", Id.A, "").try();
+    self_link.requires("--alpha", "--alpha").try();
+    show(a, self_link).try();
+
+    switch_default ::= command<Id>(a, "tool", "");
+    switch_default.flag("--alpha", Id.A, "").try();
+    switch_default.default_value("--alpha", "true");
+    show(a, switch_default).try();
+
+    bad_default ::= command<Id>(a, "tool", "");
+    bad_default.option("--count", Id.A, "N", ValueType.Usize, "").try();
+    bad_default.default_value("--count", "many");
+    show(a, bad_default).try();
+
+    positional_alias ::= command<Id>(a, "tool", "");
+    positional_alias.positional(
+        "input",
+        Id.A,
+        "INPUT",
+        ValueType.Text,
+        ""
+    ).try();
+    positional_alias.alias("input", "-i").try();
+    show(a, positional_alias).try();
+
+    wrong_order ::= command<Id>(a, "tool", "");
+    wrong_order.positional("maybe", Id.A, "MAYBE", ValueType.Text, "").try();
+    wrong_order.positional("needed", Id.B, "NEEDED", ValueType.Text, "").try();
+    wrong_order.required("needed");
+    show(a, wrong_order).try();
+
+    unreachable ::= command<Id>(a, "tool", "");
+    unreachable.positional("many", Id.A, "MANY", ValueType.Text, "").try();
+    unreachable.repeatable("many");
+    unreachable.positional("later", Id.B, "LATER", ValueType.Text, "").try();
+    show(a, unreachable).try();
+
+    duplicate_command ::= command<Id>(a, "tool", "");
+    duplicate_command.subcommand(command<Id>(a, "go", "")).try();
+    duplicate_command.subcommand(command<Id>(a, "go", "")).try();
+    show(a, duplicate_command).try();
+
+    ambiguous ::= command<Id>(a, "tool", "");
+    ambiguous.positional("input", Id.A, "INPUT", ValueType.Text, "").try();
+    ambiguous.subcommand(command<Id>(a, "run", "")).try();
+    show(a, ambiguous).try();
+    Ok(0)
+}
+
+show = (a: Alloc, model: Command<Id>) Res<(), AllocError> {
+    argv ::= a.Vec<str>();
+    argv.add("tool").try();
+    parsed = model.parse(argv, 1).try();
+    parsed.error.match({
+        None           => println("clean"),
+        Ok(diagnostic) => {
+            message = diagnostic.message(a).try();
+            diagnostic.kind.match({
+                InvalidDeclaration => println("{}", message.view()),
+                _                  => println("unexpected parser diagnostic"),
+            });
+        },
+    });
+    Ok(())
+}

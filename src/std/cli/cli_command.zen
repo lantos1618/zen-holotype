@@ -1,0 +1,1507 @@
+// Declarative terminal command model: one specification drives parsing,
+// validation, diagnostics, and help.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+Vec = std.collections
+Range = std.core
+OPTIONS_END, is_flag, arg_at = std.cli.cli_scan
+
+// The terminal-facing layer. `Options` above remains the small zero-policy
+// scanner used by older callers; a Command is the declarative surface for an
+// application. The same Parameter records drive parsing, validation and help,
+// so the accepted grammar cannot silently drift away from its usage text.
+
+ValueType* = Text | I32 | I64 | U16 | Usize
+
+ParameterKind* = Switch | Setting(ValueType) | Positional(ValueType)
+
+CliValue* = On
+    | TextValue(str)
+    | I32Value(i32)
+    | I64Value(i64)
+    | U16Value(u16)
+    | UsizeValue(usize)
+
+DiagnosticKind* = HelpRequested
+    | VersionRequested
+    | UnknownOption
+    | UnknownCommand
+    | MissingValue
+    | InvalidValue
+    | UnexpectedArgument
+    | MissingRequired
+    | RequiredBy
+    | Conflict
+    | Duplicate
+    | InvalidDeclaration
+
+// `word` is always the token or declaration at fault. `other` is populated
+// for Conflict and is otherwise empty. `command` names the active command.
+Diagnostic* = {
+    kind*: DiagnosticKind,
+    command*: str,
+    word*: str,
+    other*: str,
+
+    message* = (self: @Self, a: Alloc) Res<String, AllocError> {
+        self.kind.match({
+            HelpRequested      => a.String(
+                "help requested for `{}`",
+                self.command
+            ),
+            VersionRequested   => a.String(
+                "version requested for `{}`",
+                self.command
+            ),
+            UnknownOption      => a.String("unknown option `{}`", self.word),
+            UnknownCommand     => a.String("unknown command `{}`", self.word),
+            MissingValue       => a.String(
+                "option `{}` requires a value",
+                self.word
+            ),
+            InvalidValue       => a.String(
+                "invalid value `{}` for `{}`",
+                self.other,
+                self.word
+            ),
+            UnexpectedArgument => a.String(
+                "unexpected argument `{}`",
+                self.word
+            ),
+            MissingRequired    => a.String(
+                "required argument `{}` is missing",
+                self.word
+            ),
+            RequiredBy         => a.String(
+                "argument `{}` requires `{}`",
+                self.other,
+                self.word
+            ),
+            Conflict           => a.String(
+                "argument `{}` conflicts with `{}`",
+                self.word,
+                self.other
+            ),
+            Duplicate          => a.String(
+                "argument `{}` cannot be used more than once",
+                self.word
+            ),
+            InvalidDeclaration => a.String(
+                "invalid CLI declaration `{}`: {}",
+                self.word,
+                self.other
+            ),
+        })
+    }
+}
+
+Parameter*<T> = {
+    name*: str,
+    id*: T,
+    kind*: ParameterKind,
+    value_name*: str,
+    help*: str,
+    aliases :: Vec<str>,
+    conflicts :: Vec<str>,
+    dependencies :: Vec<str>,
+    required :: bool = false,
+    repeatable :: bool = false,
+    default :: str = "",
+    has_default :: bool = false,
+}
+
+Match*<T> = {
+    id*: T,
+    name*: str,
+    raw*: str,
+    value*: CliValue,
+    command*: str,
+    defaulted*: bool,
+}
+
+Matches*<T> = {
+    command*: str,
+    values*: Vec<Match<T>>,
+    error*: Res<Diagnostic>,
+    options_end*: Res<usize>,
+
+    clean* = (self: @Self) bool {
+        self.error.match({ Ok(_) => false, None => true })
+    }
+
+    count* = (self: @Self, name: str) usize {
+        hits ::= 0;
+        Range(0, self.values.len).loop((h, i) {
+            self.values.get(i).match({
+                Ok(value) => value.name.eq(name).then(() { hits = hits + 1; }),
+                None      => (),
+            });
+        });
+        hits
+    }
+
+    present* = (self: @Self, name: str) bool { self.count(name) > 0 }
+
+    count_in* = (self: @Self, command: str, name: str) usize {
+        hits ::= 0;
+        Range(0, self.values.len).loop((h, i) {
+            self.values.get(i).match({
+                Ok(value) => (value.name.eq(name) && value.command.eq(command))
+                    .then(() { hits = hits + 1; }),
+                None      => (),
+            });
+        });
+        hits
+    }
+
+    last* = (self: @Self, name: str) Res<Match<T>> {
+        found: Res<Match<T>> = None;
+        Range(0, self.values.len).loop((h, i) {
+            self.values.get(i).match({
+                Ok(value) => value.name.eq(name).then(() { found = Ok(value); }),
+                None      => (),
+            });
+        });
+        found
+    }
+
+    last_in* = (self: @Self, command: str, name: str) Res<Match<T>> {
+        found: Res<Match<T>> = None;
+        Range(0, self.values.len).loop((h, i) {
+            self.values.get(i).match({
+                Ok(value) => (value.name.eq(name) && value.command.eq(command))
+                    .then(() { found = Ok(value); }),
+                None      => (),
+            });
+        });
+        found
+    }
+}
+
+Command*<T> = {
+    name*: str,
+    about*: str,
+    release* :: str,
+    alloc: Alloc,
+    parameters :: Vec<Parameter<T>>,
+    commands :: Vec<Command<T>>,
+    require_command :: bool = false,
+    allow_trailing :: bool = false,
+
+    set_version* = (self :: @Self, value: str) () { self.release = value; }
+
+    flag* = (self :: @Self, name: str, id: T, help: str)
+        Res<(), AllocError> {
+        self.add_parameter(name, id, ParameterKind.Switch, "", help)
+    }
+
+    option* = (
+        self       :: @Self,
+        name       : str,
+        id         : T,
+        value_name : str,
+        value_type : ValueType,
+        help       : str
+    ) Res<(), AllocError> {
+        self.add_parameter(
+            name,
+            id,
+            ParameterKind.Setting(value_type),
+            value_name,
+            help
+        )
+    }
+
+    positional* = (
+        self       :: @Self,
+        name       : str,
+        id         : T,
+        value_name : str,
+        value_type : ValueType,
+        help       : str
+    ) Res<(), AllocError> {
+        self.add_parameter(
+            name,
+            id,
+            ParameterKind.Positional(value_type),
+            value_name,
+            help
+        )
+    }
+
+    subcommand* = (self :: @Self, child: Command<T>) Res<(), AllocError> {
+        self.commands.add(child)
+    }
+
+    subcommand_required* = (self :: @Self) () {
+        self.require_command = true;
+    }
+
+    trailing_args* = (self :: @Self) () {
+        self.allow_trailing = true;
+    }
+
+    // The configuration methods return false for an unknown canonical name.
+    // That makes misspelled declarations observable without introducing a
+    // second builder error channel beside allocation failure.
+    alias* = (self :: @Self, name: str, alias: str)
+        Res<bool, AllocError> {
+        self.parameter_index(name).match({
+            None   => Ok(false),
+            Ok(at) => {
+                self.parameters.get(at).match({
+                    None          => Ok(false),
+                    Ok(parameter) => {
+                        aliases ::= parameter.aliases;
+                        aliases.add(alias).try();
+                        self.parameters.set(
+                            at,
+                            Parameter<T>(
+                                name: parameter.name,
+                                id: parameter.id,
+                                kind: parameter.kind,
+                                value_name: parameter.value_name,
+                                help: parameter.help,
+                                aliases: aliases,
+                                conflicts: parameter.conflicts,
+                                dependencies: parameter.dependencies,
+                                required: parameter.required,
+                                repeatable: parameter.repeatable,
+                                default: parameter.default,
+                                has_default: parameter.has_default
+                            )
+                        );
+                        Ok(true)
+                    },
+                })
+            },
+        })
+    }
+
+    required* = (self :: @Self, name: str) bool {
+        self.set_required(name, true)
+    }
+
+    repeatable* = (self :: @Self, name: str) bool {
+        self.set_repeatable(name, true)
+    }
+
+    default_value* = (self :: @Self, name: str, value: str) bool {
+        changed ::= false;
+        self.parameter_index(name).match({
+            None   => (),
+            Ok(at) => self.parameters.get(at).match({
+                None          => (),
+                Ok(parameter) => {
+                    parameter.default     = value;
+                    parameter.has_default = true;
+                    self.parameters.set(at, parameter);
+                    changed = true;
+                },
+            }),
+        });
+        changed
+    }
+
+    conflicts* = (self :: @Self, name: str, other: str)
+        Res<bool, AllocError> {
+        self.parameter_index(name).match({
+            None   => Ok(false),
+            Ok(at) => {
+                self.parameters.get(at).match({
+                    None          => Ok(false),
+                    Ok(parameter) => {
+                        conflicts ::= parameter.conflicts;
+                        conflicts.add(other).try();
+                        self.parameters.set(
+                            at,
+                            Parameter<T>(
+                                name: parameter.name,
+                                id: parameter.id,
+                                kind: parameter.kind,
+                                value_name: parameter.value_name,
+                                help: parameter.help,
+                                aliases: parameter.aliases,
+                                conflicts: conflicts,
+                                dependencies: parameter.dependencies,
+                                required: parameter.required,
+                                repeatable: parameter.repeatable,
+                                default: parameter.default,
+                                has_default: parameter.has_default
+                            )
+                        );
+                        Ok(true)
+                    },
+                })
+            },
+        })
+    }
+
+    requires* = (self :: @Self, name: str, other: str)
+        Res<bool, AllocError> {
+        self.parameter_index(name).match({
+            None   => Ok(false),
+            Ok(at) => self.parameters.get(at).match({
+                None          => Ok(false),
+                Ok(parameter) => {
+                    dependencies ::= parameter.dependencies;
+                    dependencies.add(other).try();
+                    self.parameters.set(
+                        at,
+                        Parameter<T>(
+                            name: parameter.name,
+                            id: parameter.id,
+                            kind: parameter.kind,
+                            value_name: parameter.value_name,
+                            help: parameter.help,
+                            aliases: parameter.aliases,
+                            conflicts: parameter.conflicts,
+                            dependencies: dependencies,
+                            required: parameter.required,
+                            repeatable: parameter.repeatable,
+                            default: parameter.default,
+                            has_default: parameter.has_default
+                        )
+                    );
+                    Ok(true)
+                },
+            }),
+        })
+    }
+
+    parse* = (self: @Self, argv: Vec<str>, start: usize)
+        Res<Matches<T>, AllocError> {
+        parser ::= Parser<T>(
+            argv: argv,
+            at: start,
+            root_name: self.name,
+            root_parameters: self.parameters,
+            scope_parameters: self.parameters,
+            scope_commands: self.commands,
+            scope_release: self.release,
+            scope_requires_command: self.require_command,
+            scope_allows_trailing: self.allow_trailing,
+            alloc: self.alloc,
+            values: self.alloc.Vec<Match<T>>(),
+            command: self.name,
+            error: self.declaration_error()
+        );
+        parser.run().try();
+        Ok(Matches<T>(
+            command: parser.command,
+            values: parser.values,
+            error: parser.error,
+            options_end: parser.options_end
+        ))
+    }
+
+    help* = (self: @Self) Res<String, AllocError> {
+        self.declaration_error().match({
+            Ok(diagnostic) => diagnostic.message(self.alloc),
+            None           => self.help_named(self.name),
+        })
+    }
+
+    help_for* = (self: @Self, command_name: str) Res<String, AllocError> {
+        self.declaration_error().match({
+            Ok(diagnostic) => diagnostic.message(self.alloc),
+            None           => self.help_path(command_name, self.name),
+        })
+    }
+
+    help_path = (self: @Self, path: str, prefix: str)
+        Res<String, AllocError> {
+        space = path.find(' ');
+        head  = space.match({
+            Ok(at) => path.slice(0, at),
+            None   => path,
+        });
+        tail  = space.match({
+            Ok(at) => path.slice(at + 1, path.len),
+            None   => "",
+        });
+        self.command_named(head).match({
+            None      => self.help_named(prefix),
+            Ok(child) => {
+                display = self.alloc.String("{} {}", prefix, child.name).try();
+                tail.is_empty().match({
+                    true  => child.help_named(display.view()),
+                    false => child.help_path(tail, display.view()),
+                })
+            },
+        })
+    }
+
+    add_parameter = (
+        self       :: @Self,
+        name       : str,
+        id         : T,
+        kind       : ParameterKind,
+        value_name : str,
+        help       : str
+    ) Res<(), AllocError> {
+        self.parameters.add(Parameter<T>(
+            name: name,
+            id: id,
+            kind: kind,
+            value_name: value_name,
+            help: help,
+            aliases: self.alloc.Vec<str>(),
+            conflicts: self.alloc.Vec<str>(),
+            dependencies: self.alloc.Vec<str>()
+        ))
+    }
+
+    parameter_index = (self: @Self, name: str) Res<usize> {
+        Range(0, self.parameters.len).find((i) {
+            self.parameters.get(i).match({
+                Ok(parameter) => parameter.name.eq(name),
+                None          => false,
+            })
+        })
+    }
+
+    set_required = (self :: @Self, name: str, value: bool) bool {
+        changed ::= false;
+        self.parameter_index(name).match({
+            None   => (),
+            Ok(at) => self.parameters.get(at).match({
+                None          => (),
+                Ok(parameter) => {
+                    parameter.required = value;
+                    self.parameters.set(at, parameter);
+                    changed = true;
+                },
+            }),
+        });
+        changed
+    }
+
+    set_repeatable = (self :: @Self, name: str, value: bool) bool {
+        changed ::= false;
+        self.parameter_index(name).match({
+            None   => (),
+            Ok(at) => self.parameters.get(at).match({
+                None          => (),
+                Ok(parameter) => {
+                    parameter.repeatable = value;
+                    self.parameters.set(at, parameter);
+                    changed = true;
+                },
+            }),
+        });
+        changed
+    }
+
+    command_named = (self: @Self, name: str) Res<Command<T>> {
+        Range(0, self.commands.len).find((i) {
+            self.commands.get(i).match({
+                Ok(child) => child.name.eq(name),
+                None      => false,
+            })
+        }).match({
+            Ok(i) => self.commands.get(i),
+            None  => None,
+        })
+    }
+
+    // Validate the grammar itself before looking at argv. Ambiguous or
+    // unreachable declarations are programmer errors, but are reported with
+    // the same structured diagnostic channel so terminal applications never
+    // need to trap to explain them.
+    declaration_error* = (self: @Self) Res<Diagnostic> {
+        local = self.local_declaration_error();
+        local.match({
+            Ok(diagnostic) => Ok(diagnostic),
+            None           => {
+                found: Res<Diagnostic> = None;
+                Range(0, self.commands.len).loop((h, i) {
+                    found.match({
+                        Ok(_) => h.break(),
+                        None  => self.commands.get(i).match({
+                            None      => (),
+                            Ok(child) => child.declaration_error().match({
+                                Ok(diagnostic) => { found = Ok(
+                                    diagnostic
+                                ); h.break(); },
+                                None           => (),
+                            }),
+                        }),
+                    });
+                });
+                found
+            },
+        })
+    }
+
+    local_declaration_error = (self: @Self) Res<Diagnostic> {
+        found: Res<Diagnostic> = None;
+        (self.name.is_empty() || self.name.is_flag() || self.name.contains(' '))
+            .then(() {
+                found = self.bad_declaration(
+                    self.name,
+                    "command names must be one non-option token"
+                );
+            });
+        Range(0, self.commands.len).loop((h, i) {
+            self.commands.get(i).match({
+                None     => (),
+                Ok(left) => Range(i + 1, self.commands.len).loop((jh, j) {
+                    self.commands.get(j).match({
+                        Ok(right) => left.name.eq(right.name).then(() {
+                            found = self.bad_declaration(
+                                left.name,
+                                "duplicate subcommand name"
+                            );
+                            jh.break();
+                            h.break();
+                        }),
+                        None      => (),
+                    });
+                }),
+            });
+        });
+        prior_optional   ::= false;
+        prior_repeatable ::= false;
+        positionals      ::= 0;
+        Range(0, self.parameters.len).loop((h, i) {
+            found.match({
+                Ok(_) => h.break(),
+                None  => self.parameters.get(i).match({
+                    None          => (),
+                    Ok(parameter) => {
+                        parameter.kind.match({
+                            Switch                 => {
+                                (!valid_option_name(parameter.name)).then(() {
+                                    found = self.bad_declaration(
+                                        parameter.name,
+                                        "option names must start with `-`"
+                                    );
+                                });
+                                parameter.has_default.then(() {
+                                    found = self.bad_declaration(
+                                        parameter.name,
+                                        "switches cannot have defaults"
+                                    );
+                                });
+                            },
+                            Setting(value_type)    => {
+                                (!valid_option_name(parameter.name)).then(() {
+                                    found = self.bad_declaration(
+                                        parameter.name,
+                                        "option names must start with `-`"
+                                    );
+                                });
+                                parameter.value_name.is_empty().then(() {
+                                    found = self.bad_declaration(
+                                        parameter.name,
+                                        "value names cannot be empty"
+                                    );
+                                });
+                                (parameter.has_default
+                                    && !valid_cli_value(
+                                        value_type,
+                                        parameter.default
+                                    )
+                                ).then(() {
+                                    found = self.bad_declaration(
+                                        parameter.name,
+                                        "default does not match its value type"
+                                    );
+                                });
+                            },
+                            Positional(value_type) => {
+                                positionals = positionals + 1;
+                                (parameter.name.is_empty() || parameter.name.is_flag()).then(() {
+                                    found = self.bad_declaration(
+                                        parameter.name,
+                                        "positional names cannot start with `-`"
+                                    );
+                                });
+                                parameter.value_name.is_empty().then(() {
+                                    found = self.bad_declaration(
+                                        parameter.name,
+                                        "value names cannot be empty"
+                                    );
+                                });
+                                (prior_optional && parameter.required).then(() {
+                                    found = self.bad_declaration(
+                                        parameter.name,
+                                        "a required positional cannot follow an optional one"
+                                    );
+                                });
+                                prior_repeatable.then(() {
+                                    found = self.bad_declaration(
+                                        parameter.name,
+                                        "a positional cannot follow a repeatable one"
+                                    );
+                                });
+                                (!parameter.required).then(
+                                    () { prior_optional = true; }
+                                );
+                                parameter.repeatable.then(
+                                    () { prior_repeatable = true; }
+                                );
+                                (parameter.has_default
+                                    && !valid_cli_value(
+                                        value_type,
+                                        parameter.default
+                                    )
+                                ).then(() {
+                                    found = self.bad_declaration(
+                                        parameter.name,
+                                        "default does not match its value type"
+                                    );
+                                });
+                                (parameter.aliases.len > 0).then(() {
+                                    found = self.bad_declaration(
+                                        parameter.name,
+                                        "positionals cannot have aliases"
+                                    );
+                                });
+                            },
+                        });
+                        self.check_parameter_links(parameter).match({
+                            Ok(diagnostic) => { found = Ok(diagnostic); },
+                            None           => (),
+                        });
+                        Range(i + 1, self.parameters.len).loop((jh, j) {
+                            self.parameters.get(j).match({
+                                None      => (),
+                                Ok(other) => self.parameters_collide(parameter, other).then(() {
+                                    found = self.bad_declaration(
+                                        parameter.name,
+                                        "duplicate name or alias"
+                                    );
+                                    jh.break();
+                                }),
+                            });
+                        });
+                    },
+                }),
+            });
+        });
+        (found.match({ Ok(_) => false, None => true })
+            && self.commands.len > 0
+            && positionals > 0
+        ).then(() {
+            found = self.bad_declaration(
+                self.name,
+                "commands and root positionals are ambiguous"
+            );
+        });
+        found
+    }
+
+    check_parameter_links = (self: @Self, parameter: Parameter<T>)
+        Res<Diagnostic> {
+        found: Res<Diagnostic> = None;
+        (parameter.name.eq("--help")
+            || parameter.name.eq("-h")
+            || (!self.release.is_empty() && parameter.name.eq("--version"))
+        ).then(() {
+            found = self.bad_declaration(
+                parameter.name,
+                "name is reserved by a built-in option"
+            );
+        });
+        Range(0, parameter.aliases.len).loop((h, i) {
+            parameter.aliases.get(i).match({
+                None      => (),
+                Ok(alias) => {
+                    (!valid_option_name(alias)).then(() {
+                        found = self.bad_declaration(
+                            parameter.name,
+                            "aliases must start with `-`"
+                        );
+                        h.break();
+                    });
+                    (alias.eq(parameter.name)
+                        || alias.eq("--help")
+                        || alias.eq("-h")
+                        || (!self.release.is_empty() && alias.eq("--version"))
+                    ).then(() {
+                        found = self.bad_declaration(
+                            parameter.name,
+                            "duplicate or reserved alias"
+                        );
+                        h.break();
+                    });
+                    Range(i + 1, parameter.aliases.len).loop((jh, j) {
+                        parameter.aliases.get(j).match({
+                            Ok(other) => alias.eq(other).then(() {
+                                found = self.bad_declaration(
+                                    parameter.name,
+                                    "duplicate or reserved alias"
+                                );
+                                jh.break();
+                                h.break();
+                            }),
+                            None      => (),
+                        });
+                    });
+                },
+            });
+        });
+        Range(0, parameter.conflicts.len).loop((h, i) {
+            parameter.conflicts.get(i).match({
+                None      => (),
+                Ok(other) => (other.eq(parameter.name) || !self.has_parameter(other)).then(() {
+                    found = self.bad_declaration(
+                        parameter.name,
+                        "conflict target is missing or self-referential"
+                    );
+                    h.break();
+                }),
+            });
+        });
+        Range(0, parameter.dependencies.len).loop((h, i) {
+            parameter.dependencies.get(i).match({
+                None      => (),
+                Ok(other) => (other.eq(parameter.name) || !self.has_parameter(other)).then(() {
+                    found = self.bad_declaration(
+                        parameter.name,
+                        "dependency target is missing or self-referential"
+                    );
+                    h.break();
+                }),
+            });
+        });
+        found
+    }
+
+    parameters_collide = (
+        self: @Self,
+        left: Parameter<T>,
+        right: Parameter<T>
+    ) bool {
+        collision ::= left.name.eq(right.name)
+            || self.has_alias(left, right.name)
+            || self.has_alias(right, left.name);
+        Range(0, left.aliases.len).loop((h, i) {
+            left.aliases.get(i).match({
+                None      => (),
+                Ok(alias) => self.has_alias(right, alias).then(() {
+                    collision = true;
+                    h.break();
+                }),
+            });
+        });
+        collision
+    }
+
+    has_alias = (self: @Self, parameter: Parameter<T>, name: str) bool {
+        Range(0, parameter.aliases.len).find((i) {
+            parameter.aliases.get(i).match({
+                Ok(alias) => alias.eq(name),
+                None      => false,
+            })
+        }).match({ Ok(_) => true, None => false })
+    }
+
+    has_parameter = (self: @Self, name: str) bool {
+        self.parameter_index(name).match({ Ok(_) => true, None => false })
+    }
+
+    bad_declaration = (self: @Self, word: str, why: str) Res<Diagnostic> {
+        Ok(Diagnostic(
+            kind: DiagnosticKind.InvalidDeclaration,
+            command: self.name,
+            word: word,
+            other: why
+        ))
+    }
+
+    help_named = (self: @Self, display_name: str) Res<String, AllocError> {
+        out ::= self.alloc.String().try();
+        self.about.is_empty().match({
+            true  => (),
+            false => { out.fmt("{}\n\n", self.about).try(); },
+        });
+        out.fmt("Usage: {}", display_name).try();
+        out.add(" [OPTIONS]").try();
+        (self.commands.len > 0).then(() {
+            self.require_command.match({
+                true  => out.add(" <COMMAND>"),
+                false => out.add(" [COMMAND]"),
+            }).try();
+        });
+        Range(0, self.parameters.len).loop((h, i) {
+            self.parameters.get(i).match({
+                None          => (),
+                Ok(parameter) => parameter.kind.match({
+                    Positional(_) => {
+                        parameter.required.match({
+                            true  => out.fmt(" <{}>", parameter.value_name),
+                            false => out.fmt(" [{}]", parameter.value_name),
+                        }).try();
+                        parameter.repeatable.then(() { out.add("...").try(); });
+                    },
+                    _             => (),
+                }),
+            });
+        });
+        self.allow_trailing.then(() { out.add(" [-- <ARGS>...]").try(); });
+        out.add("\n").try();
+        self.write_positionals(out).try();
+        self.write_options(out).try();
+        self.write_commands(out).try();
+        Ok(out)
+    }
+
+    has_options = (self: @Self) bool {
+        Range(0, self.parameters.len).find((i) {
+            self.parameters.get(i).match({
+                None          => false,
+                Ok(parameter) => parameter.kind.match({
+                    Positional(_) => false,
+                    _             => true,
+                }),
+            })
+        }).match({ Ok(_) => true, None => false })
+    }
+
+    write_positionals = (self: @Self, out :: String)
+        Res<(), AllocError> {
+        any ::= false;
+        Range(0, self.parameters.len).loop((h, i) {
+            self.parameters.get(i).match({
+                None          => (),
+                Ok(parameter) => parameter.kind.match({
+                    Positional(_) => {
+                        any.match({
+                            false => { out.add(
+                                "\nArguments:\n"
+                            ).try(); any = true; },
+                            true  => (),
+                        });
+                        self.write_parameter(out, parameter).try();
+                    },
+                    _             => (),
+                }),
+            });
+        });
+        Ok(())
+    }
+
+    write_options = (self: @Self, out :: String) Res<(), AllocError> {
+        out.add("\nOptions:\n").try();
+        Range(0, self.parameters.len).loop((h, i) {
+            self.parameters.get(i).match({
+                None          => (),
+                Ok(parameter) => parameter.kind.match({
+                    Positional(_) => (),
+                    _             => self.write_parameter(out, parameter).try(),
+                }),
+            });
+        });
+        out.add("  -h, --help\tShow help\n").try();
+        (!self.release.is_empty()).then(() {
+            out.add("  --version\tShow version\n").try();
+        });
+        Ok(())
+    }
+
+    write_parameter = (self: @Self, out :: String, parameter: Parameter<T>)
+        Res<(), AllocError> {
+        out.add("  ").try();
+        Range(0, parameter.aliases.len).loop((h, i) {
+            parameter.aliases.get(i).match({
+                None      => (),
+                Ok(alias) => out.fmt("{}, ", alias).try(),
+            });
+        });
+        parameter.kind.match({
+            Positional(_) => out.fmt("<{}>", parameter.value_name),
+            Switch        => out.add(parameter.name),
+            Setting(_)    => out.fmt(
+                "{} <{}>",
+                parameter.name,
+                parameter.value_name
+            ),
+        }).try();
+        out.fmt("\t{}", parameter.help).try();
+        parameter.has_default.then(() {
+            out.fmt(" [default: {}]", parameter.default).try();
+        });
+        parameter.repeatable.then(() { out.add(" [repeatable]").try(); });
+        out.add("\n")
+    }
+
+    write_commands = (self: @Self, out :: String) Res<(), AllocError> {
+        (self.commands.len > 0).then(() {
+            out.add("\nCommands:\n").try();
+            Range(0, self.commands.len).loop((h, i) {
+                self.commands.get(i).match({
+                    None      => (),
+                    Ok(child) => out.fmt(
+                        "  {}\t{}\n",
+                        child.name,
+                        child.about
+                    ).try(),
+                });
+            });
+        });
+        Ok(())
+    }
+}
+
+command* = <T>(a: Alloc, name: str, about: str) Command<T> {
+    Command<T>(
+        name: name,
+        about: about,
+        release: "",
+        alloc: a,
+        parameters: a.Vec<Parameter<T>>(),
+        commands: a.Vec<Command<T>>()
+    )
+}
+
+Located<T> = { parameter: Parameter<T>, index: usize, inline: Res<str> }
+
+Parser<T> = {
+    argv: Vec<str>,
+    at :: usize,
+    root_name: str,
+    root_parameters: Vec<Parameter<T>>,
+    scope_parameters :: Vec<Parameter<T>>,
+    scope_commands :: Vec<Command<T>>,
+    scope_release :: str,
+    scope_requires_command :: bool,
+    scope_allows_trailing :: bool,
+    alloc: Alloc,
+    values :: Vec<Match<T>>,
+    command :: str,
+    positional :: usize = 0,
+    stopped :: bool = false,
+    selected :: bool = false,
+    error :: Res<Diagnostic> = None,
+    options_end :: Res<usize> = None,
+
+    run = (self :: @Self) Res<(), AllocError> {
+        loop(() { self.at < self.argv.len && self.no_error() }, (h) {
+            word    = arg_at(self.argv, self.at);
+            self.at = self.at + 1;
+            (!self.stopped && word.eq(OPTIONS_END)).match({
+                true  => {
+                    self.stopped     = true;
+                    self.options_end = Ok(self.at);
+                    self.scope_allows_trailing.then(() {
+                        self.at = self.argv.len;
+                    });
+                },
+                false => self.accept(word).try(),
+            });
+        });
+        self.no_error().then(() {
+            self.add_defaults(self.scope_parameters, self.command).try();
+            self.validate(self.scope_parameters, self.command).try();
+            (self.no_error() && self.scope_requires_command).then(() {
+                self.fail(DiagnosticKind.MissingRequired, "COMMAND", "");
+            });
+        });
+        Ok(())
+    }
+
+    accept = (self :: @Self, word: str) Res<(), AllocError> {
+        (!self.stopped && self.positional == 0).match({
+            true  => self.locate_command(word).match({
+                Ok(child) => {
+                    self.add_defaults(
+                        self.scope_parameters,
+                        self.command
+                    ).try();
+                    self.validate(self.scope_parameters, self.command).try();
+                    self.no_error().then(() {
+                        self.scope_parameters       = child.parameters;
+                        self.scope_commands         = child.commands;
+                        path                        = self.alloc.String(
+                            "{} {}",
+                            self.command,
+                            child.name
+                        ).try();
+                        self.command                = path.view();
+                        self.scope_release          = child.release;
+                        self.scope_requires_command = child.require_command;
+                        self.scope_allows_trailing  = child.allow_trailing;
+                        self.positional             = 0;
+                        self.selected               = true;
+                    });
+                    Ok(())
+                },
+                None      => self.consume_parameter(word),
+            }),
+            false => self.consume_parameter(word),
+        })
+    }
+
+    consume_parameter = (self :: @Self, word: str) Res<(), AllocError> {
+        ((!self.stopped && word.eq("--help"))
+            || (!self.stopped && word.eq("-h"))).match({
+            true  => { self.fail(DiagnosticKind.HelpRequested, word, ""); Ok(()) },
+            false => (!self.stopped
+                && !self.scope_release.is_empty()
+                && word.eq("--version")
+            ).match({
+                true  => { self.fail(DiagnosticKind.VersionRequested, word, ""); Ok(()) },
+                false => (!self.stopped && word.is_flag()).match({
+                    true  => self.option(word),
+                    false => self.positional_value(word),
+                }),
+            }),
+        })
+    }
+
+    option = (self :: @Self, word: str) Res<(), AllocError> {
+        self.locate_option(word).match({
+            None        => { self.fail(DiagnosticKind.UnknownOption, word, ""); Ok(()) },
+            Ok(located) => located.parameter.kind.match({
+                Switch              => located.inline.match({
+                    Ok(value) => {
+                        self.fail(
+                            DiagnosticKind.InvalidValue,
+                            located.parameter.name,
+                            value
+                        );
+                        Ok(())
+                    },
+                    None      => self.record(
+                        located.parameter,
+                        "",
+                        CliValue.On,
+                        false
+                    ),
+                }),
+                Setting(value_type) => self.setting(located, value_type),
+                Positional(_)       => Ok(()),
+            }),
+        })
+    }
+
+    setting = (self :: @Self, located: Located<T>, value_type: ValueType)
+        Res<(), AllocError> {
+        raw: Res<str> ::= located.inline;
+        raw.match({
+            Ok(_) => (),
+            None  => (self.at < self.argv.len).match({
+                true  => {
+                    candidate = arg_at(self.argv, self.at);
+                    (candidate.eq(OPTIONS_END)
+                        || !self.accepts_value(value_type, candidate)
+                    ).match({
+                        true  => (),
+                        false => {
+                            raw     = Ok(candidate);
+                            self.at = self.at + 1;
+                        },
+                    });
+                },
+                false => (),
+            }),
+        });
+        raw.match({
+            None      => {
+                self.fail(
+                    DiagnosticKind.MissingValue,
+                    located.parameter.name,
+                    ""
+                );
+                Ok(())
+            },
+            Ok(value) => parse_cli_value(value_type, value).match({
+                None       => {
+                    self.fail(
+                        DiagnosticKind.InvalidValue,
+                        located.parameter.name,
+                        value
+                    );
+                    Ok(())
+                },
+                Ok(parsed) => self.record(
+                    located.parameter,
+                    value,
+                    parsed,
+                    false
+                ),
+            }),
+        })
+    }
+
+    positional_value = (self :: @Self, word: str) Res<(), AllocError> {
+        self.positional_parameter().match({
+            None          => {
+                kind = (!self.stopped
+                    && self.scope_commands.len > 0
+                    && self.positional == 0
+                ).match({
+                    true  => DiagnosticKind.UnknownCommand,
+                    false => DiagnosticKind.UnexpectedArgument,
+                });
+                self.fail(kind, word, "");
+                Ok(())
+            },
+            Ok(parameter) => parameter.kind.match({
+                Positional(value_type) => parse_cli_value(
+                    value_type,
+                    word
+                ).match({
+                    None       => {
+                        self.fail(
+                            DiagnosticKind.InvalidValue,
+                            parameter.name,
+                            word
+                        );
+                        Ok(())
+                    },
+                    Ok(parsed) => {
+                        self.record(parameter, word, parsed, false).try();
+                        (!parameter.repeatable).then(() {
+                            self.positional = self.positional + 1;
+                        });
+                        Ok(())
+                    },
+                }),
+                _                      => Ok(()),
+            }),
+        })
+    }
+
+    positional_parameter = (self: @Self) Res<Parameter<T>> {
+        wanted ::= self.positional;
+        found: Res<Parameter<T>> = None;
+        Range(0, self.scope_parameters.len).loop((h, i) {
+            self.scope_parameters.get(i).match({
+                None          => (),
+                Ok(parameter) => parameter.kind.match({
+                    Positional(_) => (wanted == 0).match({
+                        true  => { found = Ok(parameter); h.break(); },
+                        false => { wanted = wanted - 1; },
+                    }),
+                    _             => (),
+                }),
+            });
+        });
+        found
+    }
+
+    locate_option = (self: @Self, word: str) Res<Located<T>> {
+        found: Res<Located<T>> = None;
+        Range(0, self.scope_parameters.len).loop((h, i) {
+            self.scope_parameters.get(i).match({
+                None          => (),
+                Ok(parameter) => parameter.kind.match({
+                    Positional(_) => (),
+                    _             => option_value(word, parameter.name).match({
+                        Ok(inline) => {
+                            found = Ok(Located<T>(
+                                parameter: parameter,
+                                index: i,
+                                inline: inline
+                            ));
+                            h.break();
+                        },
+                        None       => Range(0, parameter.aliases.len).loop((ah, ai) {
+                            parameter.aliases.get(ai).match({
+                                None      => (),
+                                Ok(alias) => alias_value(word, alias).match({
+                                    None       => (),
+                                    Ok(inline) => {
+                                        found = Ok(Located<T>(
+                                            parameter: parameter,
+                                            index: i,
+                                            inline: inline
+                                        ));
+                                        ah.break();
+                                        h.break();
+                                    },
+                                }),
+                            });
+                        }),
+                    }),
+                }),
+            });
+        });
+        found
+    }
+
+    record = (
+        self      :: @Self,
+        parameter : Parameter<T>,
+        raw       : str,
+        value     : CliValue,
+        defaulted : bool
+    ) Res<(), AllocError> {
+        (!parameter.repeatable && self.count_in_scope(
+            parameter.name,
+            self.command
+        ) > 0).match({
+            true  => { self.fail(DiagnosticKind.Duplicate, parameter.name, ""); Ok(()) },
+            false => self.values.add(Match<T>(
+                id: parameter.id,
+                name: parameter.name,
+                raw: raw,
+                value: value,
+                command: self.command,
+                defaulted: defaulted
+            )),
+        })
+    }
+
+    add_defaults = (
+        self :: @Self,
+        parameters: Vec<Parameter<T>>,
+        command_name: str
+    ) Res<(), AllocError> {
+        Range(0, parameters.len).loop((h, i) {
+            parameters.get(i).match({
+                None          => (),
+                Ok(parameter) => (parameter.has_default
+                    && self.count_in_scope(parameter.name, command_name) == 0
+                ).then(() {
+                    parameter.kind.match({
+                        Switch                 => (),
+                        Setting(value_type)    => {
+                            parse_cli_value(
+                                value_type,
+                                parameter.default
+                            ).match({
+                                None      => self.fail(
+                                    DiagnosticKind.InvalidValue,
+                                    parameter.name,
+                                    parameter.default
+                                ),
+                                Ok(value) => self.values.add(Match<T>(
+                                    id: parameter.id,
+                                    name: parameter.name,
+                                    raw: parameter.default,
+                                    value: value,
+                                    command: command_name,
+                                    defaulted: true
+                                )).try(),
+                            });
+                        },
+                        Positional(value_type) => {
+                            parse_cli_value(
+                                value_type,
+                                parameter.default
+                            ).match({
+                                None      => self.fail(
+                                    DiagnosticKind.InvalidValue,
+                                    parameter.name,
+                                    parameter.default
+                                ),
+                                Ok(value) => self.values.add(Match<T>(
+                                    id: parameter.id,
+                                    name: parameter.name,
+                                    raw: parameter.default,
+                                    value: value,
+                                    command: command_name,
+                                    defaulted: true
+                                )).try(),
+                            });
+                        },
+                    });
+                }),
+            });
+        });
+        Ok(())
+    }
+
+    validate = (
+        self :: @Self,
+        parameters: Vec<Parameter<T>>,
+        command_name: str
+    ) Res<(), AllocError> {
+        Range(0, parameters.len).loop((h, i) {
+            self.no_error().then(() {
+                parameters.get(i).match({
+                    None          => (),
+                    Ok(parameter) => {
+                        present = self.count_in_scope(
+                            parameter.name,
+                            command_name
+                        ) > 0;
+                        (parameter.required && !present).then(() {
+                            self.fail(
+                                DiagnosticKind.MissingRequired,
+                                parameter.name,
+                                ""
+                            );
+                        });
+                        (self.count_explicit(parameter.name, command_name) > 0
+                            && self.no_error()
+                        ).then(() {
+                            Range(0, parameter.conflicts.len).loop((ch, ci) {
+                                parameter.conflicts.get(ci).match({
+                                    None      => (),
+                                    Ok(other) => (self.count_explicit(other, command_name) > 0).then(() {
+                                        self.fail(
+                                            DiagnosticKind.Conflict,
+                                            parameter.name,
+                                            other
+                                        );
+                                        ch.break();
+                                    }),
+                                });
+                            });
+                        });
+                        (self.count_explicit(parameter.name, command_name) > 0
+                            && self.no_error()
+                        ).then(() {
+                            Range(0, parameter.dependencies.len).loop((dh, di) {
+                                parameter.dependencies.get(di).match({
+                                    None      => (),
+                                    Ok(other) => (self.count_explicit(other, command_name) == 0).then(() {
+                                        self.fail(
+                                            DiagnosticKind.RequiredBy,
+                                            other,
+                                            parameter.name
+                                        );
+                                        dh.break();
+                                    }),
+                                });
+                            });
+                        });
+                    },
+                });
+            });
+        });
+        Ok(())
+    }
+
+    count_in_scope = (self: @Self, name: str, command: str) usize {
+        hits ::= 0;
+        Range(0, self.values.len).loop((h, i) {
+            self.values.get(i).match({
+                None      => (),
+                Ok(value) => (value.name.eq(name) && value.command.eq(command))
+                    .then(() { hits = hits + 1; }),
+            });
+        });
+        hits
+    }
+
+    count_explicit = (self: @Self, name: str, command: str) usize {
+        hits ::= 0;
+        Range(0, self.values.len).loop((h, i) {
+            self.values.get(i).match({
+                None      => (),
+                Ok(value) => (value.name.eq(name)
+                    && value.command.eq(command)
+                    && !value.defaulted
+                ).then(() { hits = hits + 1; }),
+            });
+        });
+        hits
+    }
+
+    accepts_value = (self: @Self, kind: ValueType, word: str) bool {
+        (!word.is_flag()).match({
+            true  => true,
+            false => kind.match({
+                Text  => false,
+                I32   => word.parse_i32().match({ Ok(_) => true, None => false }),
+                I64   => word.parse_i64().match({ Ok(_) => true, None => false }),
+                U16   => negative_usize(word),
+                Usize => negative_usize(word),
+            }),
+        })
+    }
+
+    locate_command = (self: @Self, name: str) Res<Command<T>> {
+        Range(0, self.scope_commands.len).find((i) {
+            self.scope_commands.get(i).match({
+                Ok(child) => child.name.eq(name),
+                None      => false,
+            })
+        }).match({
+            Ok(i) => self.scope_commands.get(i),
+            None  => None,
+        })
+    }
+
+    fail = (self :: @Self, kind: DiagnosticKind, word: str, other: str) () {
+        self.no_error().then(() {
+            self.error = Ok(Diagnostic(
+                kind: kind,
+                command: self.command,
+                word: word,
+                other: other
+            ));
+        });
+    }
+
+    no_error = (self: @Self) bool {
+        self.error.match({ Ok(_) => false, None => true })
+    }
+}
+
+option_value = (word: str, name: str) Res<Res<str>> {
+    word.eq(name).match({
+        true  => Ok(None),
+        false => (word.len > name.len
+            && word.starts_with(name)
+            && word.index(name.len) == '='
+        ).match({
+            true  => Ok(Ok(word.slice(name.len + 1, word.len))),
+            false => None,
+        }),
+    })
+}
+
+alias_value = (word: str, alias: str) Res<Res<str>> {
+    option_value(word, alias).match({
+        Ok(value) => Ok(value),
+        None      => (alias.len == 2
+            && alias.index(0) == '-'
+            && word.len > alias.len
+            && word.starts_with(alias)
+        ).match({
+            true  => Ok(Ok(word.slice(alias.len, word.len))),
+            false => None,
+        }),
+    })
+}
+
+parse_cli_value = (kind: ValueType, raw: str) Res<CliValue> {
+    kind.match({
+        Text  => Ok(CliValue.TextValue(raw)),
+        I32   => raw.parse_i32().match({ Ok(v) => Ok(CliValue.I32Value(
+            v
+        )), None => None }),
+        I64   => raw.parse_i64().match({ Ok(v) => Ok(CliValue.I64Value(
+            v
+        )), None => None }),
+        U16   => raw.parse_u16().match({ Ok(v) => Ok(CliValue.U16Value(
+            v
+        )), None => None }),
+        Usize => raw.parse_usize().match({ Ok(v) => Ok(CliValue.UsizeValue(
+            v
+        )), None => None }),
+    })
+}
+
+valid_cli_value = (kind: ValueType, raw: str) bool {
+    parse_cli_value(kind, raw).match({ Ok(_) => true, None => false })
+}
+
+negative_usize = (word: str) bool {
+    word.len > 1
+        && word.index(0) == '-'
+        && word.slice(1, word.len).parse_usize().match({
+            Ok(_) => true,
+            None  => false,
+        })
+}
+
+valid_option_name = (name: str) bool {
+    short = name.len == 2 && name.index(0) == '-' && name.index(1) != '-';
+    long  = name.len > 2
+        && name.index(0) == '-'
+        && name.index(1) == '-'
+        && name.index(2) != '-'
+        && !name.contains(' ')
+        && !name.contains('=');
+    short || long
+}
