@@ -164,6 +164,54 @@ passed. Seed warnings fell to GCC 936 and Clang 966 without suppression.
 These checks do not establish the numerical ergonomics target or complete
 borrowed-view lifetime enforcement.
 
+## Module and shared-operation consolidation
+
+Standalone networking modules belong directly under `std.net`: socket, TLS,
+and SSE retain their public import paths without single-file directories.
+SSE remains an independent incremental protocol decoder; it does not belong
+inside the HTTP/1.1 client or general text utilities. Protocol identifiers use
+represented enums while combinable flags retain their bitset semantics.
+
+`std.text` owns borrowed text scans, numeric conversion, and format-hole grammar.
+`std.parse` owns Zen syntax, and `fmt` owns source layout and trivia preservation.
+Share their general text operations downward without moving compiler policy
+into the standard text library. Source-literal escape stepping and diagnostic
+positions remain compiler concerns. LSP UTF-16 conversion remains distinct from
+AST byte columns, even when a located line is reused.
+
+CLI parameter-name and alias collision rules belong to `Parameter`; commands
+search their later declarations and consume the returned collision. Refactoring
+validation must preserve diagnostic precedence as well as accepted inputs.
+
+Two larger follow-ups require explicit contracts before implementation:
+
+- Unused-code hints need a semantic use index, initially for private top-level
+  functions. Generated C is not a complete usage index: inlining, generics,
+  reflection, trait methods, and actor/drop hooks can consume declarations
+  without emitting an independent function. Executable reachability should
+  eventually root at `main`, while raw module emission retains its module roots.
+  An advisory hint must not be represented as a rejecting semantic error.
+- Most process orchestration can move from `proc.c` into Zen, but the current
+  C importer does not expose the required records, globals, macros, and typed
+  pointers, and project builds do not yet attach translated planned imports.
+  Preserve the native boundary until spawn-action layout, `errno`, `environ`,
+  polling, wait-status normalization, and interrupted-call behavior have a
+  supported representation. A header list alone cannot replace that behavior.
+
+The AST contract remains maintained documentation: stable node identities,
+trivia ownership, and source coordinates are shared consumer invariants rather
+than generated source-health evidence.
+
+Validation on September 9, 2026: `make verify J=8 TEST_J=8` passed in 245.19
+seconds with the source tree unchanged. The corpus passed 1,204 cases with zero
+failures and one existing ownership case deferred. All required gates passed,
+including the 182-unit compiler/header fixpoint and seed freshness, six
+determinism axes, 14 differential cases, warning ratchets, UBSan with a positive
+control, build-cache checks, and test-runner checks. Seed warnings decreased to
+GCC 933 and Clang 963 without suppression. Boundary controls reproduced the
+previous unsupported-radix acceptance and LSP length overflows; formatter and
+CLI declaration comparisons preserved diagnostics and first-error precedence.
+
 ## The ownership contract to build around
 
 A function can already accept an Alloc and return a String allocated through

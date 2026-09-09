@@ -130,10 +130,22 @@ the same bytes.
 Union types are stored as a flat member list. `vararg<T>` is an ordinary named
 type, while `args: ...` uses the dedicated `Variadic` written-type form.
 
+## Module origins
+
+Parsed modules and C-import modules share the same AST. `ModuleOrigin` records
+whether a module came from Zen source or has a `CBindingId`; the binding owns
+its header paths and foreign type metadata. That metadata is separate from
+written syntax. Header-owned opaque types can be used through pointers; their
+C layout must not be invented from a Zen record.
+
 ## Arena behavior
 
 Nodes are appended once and never mutated. Transformations create new nodes and
-receive new identifiers. Consequently:
+receive new identifiers. Finish building the program tree before constructing
+its semantic checker; do not append through a copied `Ast` while that checker
+or its identifier-keyed memos are in use. This is a compiler phase invariant,
+not a claim that Zen currently enforces complete deep ownership safety.
+Consequently:
 
 - an identifier always resolves to the same node;
 - semantic memos keyed by identifiers remain valid;

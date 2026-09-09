@@ -12,7 +12,7 @@ law. `DESIGN.md` remains binding.
 | What is implemented, and in what stage? | `docs/PLAN.md` and `STAGE` |
 | What shape should code take? | `docs/STYLE.md` |
 | What proves a change? | `docs/TESTING.md` and `Makefile` |
-| What does each AST node mean? | `src/AST_CONTRACT.md` |
+| What does each AST node mean? | [AST contract](AST_CONTRACT.md) |
 | What syntax do editors parse? | `grammar/grammar.js` |
 
 The tree-sitter grammar serves editors. The compiler has one independent

@@ -294,7 +294,7 @@ If this stage turns out to be expensive, the cause is stage 0.3 — a batch comp
 | precondition | state |
 |---|---|
 | sema is memoized queries | **holds** — `type_of` / `type_from_ast` memoized on AST ids |
-| every node carries a half-open span with a 1-based byte column | **holds** — `AST_CONTRACT.md`, gated by `corpus/parse/parser_spans` and `POSITIONS.md` |
+| every node carries a half-open span with a 1-based byte column | **holds** — [AST contract](AST_CONTRACT.md), gated by `corpus/parse/parser_spans` and [position fixtures](../tests/corpus/parse/POSITIONS.md) |
 | go-to-def is a query | **holds** — `defs_of` |
 | diagnostics are values carrying positions | **holds** — every phase, no exceptions |
 | **a cursor position finds its node** | **holds** — `ast_find.zen`'s `node_at` / `expr_node_at`, gated by `corpus/sema_zen/a_cursor_position_finds_its_node` |

@@ -199,6 +199,10 @@ Do not split merely because a gate reported a number. First name repeated
 state and move methods to it; the real module boundaries are usually visible
 after ownership is correct.
 
+A standalone module lives in one `.zen` file; a directory containing only a
+same-named file adds no useful boundary. Introduce the directory when the
+module gains cohesive sibling files that need a shared public surface.
+
 Folders own public surfaces. Sibling files that form one subject live under a
 folder with a root module that deliberately re-exports its API. Prefixes exist
 to prevent ambiguous filenames, not as a tax on every source file.
@@ -272,6 +276,13 @@ failure, `ensure` for a boolean precondition, and a breakable one-shot `loop`
 when several guards choose an early value. Name the loop result when inference
 needs its type. The successful path should not be buried under nested matches
 whose other arms only stop the operation.
+
+A ladder of closing matches and callbacks is a review signal. Look for empty
+arms, repeated forwarding, and searches that mutate an outer result before
+breaking. Prefer guards, returned search results, and operations on the value
+that owns the rule. Do not replace the nesting with a chain of forwarding-only
+helpers. Keep nesting that expresses necessary dependent decisions; punctuation
+counts alone cannot establish whether the control flow is wrong.
 
 Use `condition.ensure().try()` when a failed precondition means `None` in an
 optional-result function. Use `condition.ensure(Error.Invalid).try()` when it
