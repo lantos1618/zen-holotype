@@ -1,0 +1,97 @@
+Split, Lines = std.text
+
+split_source = (calls :: usize) Split {
+    calls = calls + 1;
+    "a,skip,ccc,unseen".split(',')
+}
+
+line_source = (calls :: usize) Lines {
+    calls = calls + 1;
+    "a\r\nskip\nccc\nunseen\n".lines()
+}
+
+fail = () Res<(), AllocError> { Err(AllocError.OutOfMemory) }
+
+split_failure = (seen :: usize) Res<(), AllocError> {
+    "a,fail,unseen".split(',').loop(0, (value, acc: usize) {
+        seen = seen + 1;
+        value.eq("fail").then(() { fail().try(); });
+        acc + value.len
+    });
+    seen = seen + 100;
+    Ok(())
+}
+
+line_failure = (seen :: usize) Res<(), AllocError> {
+    "a\nfail\nunseen".lines().loop(0, (h, index, value, acc: usize) {
+        seen = seen + 1;
+        value.eq("fail").then(() { fail().try(); });
+        acc + value.len
+    });
+    seen = seen + 100;
+    Ok(())
+}
+
+main = () {
+    empty_split = "".split(',').loop(7, (value, acc: usize) { acc + 1 });
+    empty_lines = "".lines().loop(7, (value, acc: usize) { acc + 1 });
+    println("empty {} {}", empty_split.value_or(0), empty_lines.value_or(0));
+    pieces = ",a,,".split(',').loop(0, (value, acc: usize) { acc + 1 });
+    lines  = "\na\r\n\n".lines().loop(0, (value, acc: usize) { acc + 1 });
+    println("edges {} {}", pieces.value_or(0), lines.value_or(0));
+
+    calls: usize ::= 0;
+    split_sum = split_source(calls).loop(10, (h, index, value, acc: usize) {
+        value.eq("skip").then(() { h.next(); });
+        println("split {} {} {}", index, value, acc);
+        value.eq("ccc").then(() { h.break(acc + value.len); });
+        acc + value.len
+    });
+    println("split sum {} calls {}", split_sum.value_or(0), calls);
+    calls    = 0;
+    line_sum = line_source(calls).loop(10, (h, value, acc: usize) {
+        value.eq("skip").then(() { h.next(); });
+        println("line {} {}", value, acc);
+        value.eq("ccc").then(() { h.break(acc + value.len); });
+        acc + value.len
+    });
+    println("line sum {} calls {}", line_sum.value_or(0), calls);
+
+    split_none = "a,b".split(',').loop(0, (h, value, acc: usize) {
+        h.break();
+        acc
+    });
+    line_none  = "a\nb".lines().loop(0, (h, index, value, acc: usize) {
+        h.break();
+        acc
+    });
+    println(
+        "none {} {}",
+        split_none.match({ None => true, Ok(_) => false }),
+        line_none.match({ None => true, Ok(_) => false })
+    );
+
+    split_cursor ::= "a,bb,".split(',');
+    split_cursor.next();
+    split_total = split_cursor.loop(0, (value, acc: usize) { acc + value.len });
+    line_cursor ::= "a\r\nbb\n".lines();
+    line_cursor.next();
+    line_total = line_cursor.loop(0, (value, acc: usize) { acc + value.len });
+    println("fresh {} {}", split_total.value_or(0), line_total.value_or(0));
+    println(
+        "cursor {} {}",
+        split_cursor.next().value_or("?"),
+        line_cursor.next().value_or("?")
+    );
+
+    seen: usize ::= 0;
+    split_failure(seen).match({
+        Ok(_)  => println("unexpected split success"),
+        Err(_) => println("split failure {}", seen),
+    });
+    seen = 0;
+    line_failure(seen).match({
+        Ok(_)  => println("unexpected line success"),
+        Err(_) => println("line failure {}", seen),
+    });
+}

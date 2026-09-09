@@ -17,6 +17,7 @@ discriminant_member_call, DiscriminantAnswer = sema.sema_discriminant
 variant_name_member_call, VariantNameAnswer = sema.sema_variant_name
 construct, instantiate, variant_call_type = sema.sema_apply
 refuse_variant_surplus, call_inst, callback_types_fit, annotated_callback = sema.sema_apply
+infer_callback_targs = sema.sema_apply
 Inst, subst, subst_list, unify_list, tparam_vars, zip, owner_of = sema.sema_inst
 is_case = sema.sema_case
 Found, Base, base_of, members_of, actor_spawn_ret, ref_of_actor = sema.sema_member
@@ -489,11 +490,23 @@ CallCheck = {
         });
         inst ::= c.alloc.Inst();
         c.zip(vars, tys, inst).try();
+        params = c.types.at(ty).match({
+            Fn(signature) => signature.params,
+            _             => c.alloc.Vec<TyId>(),
+        });
+        c.infer_callback_targs(self.call, params, off, self.ctx, inst).try();
         c.infer_member_inst(ty, self.actuals, off, inst).try();
         settled = c.subst(ty, inst).try();
         fitted ::= c.alloc.Vec<TyId>();
         c.fn_params(settled, fitted).try();
-        c.signature_matches(fitted, self.actuals, off).try().match({
+        (c.signature_matches(fitted, self.actuals, off).try()
+            && c.callback_types_fit(
+                self.call,
+                params,
+                off,
+                self.ctx,
+                inst
+            ).try()).match({
             false => self.invalid_member_instantiation(c, name),
             true  => c.inst_bounds_hold(
                 bounds,
@@ -885,7 +898,7 @@ annotated_fit = (site: CallCheck, c :: Checker, k: Cand, actuals: Vec<Actual>)
     inst = c.call_inst(site.call, k, actuals, site.ctx).try();
     c.callback_types_fit(
         site.call,
-        k,
+        k.params,
         recv_off(site.call, actuals),
         site.ctx,
         inst

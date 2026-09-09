@@ -15,7 +15,7 @@ DeclId = sema.sema_id
 TyId, TyFn = sema.sema_ty
 Def = sema.sema_def
 Ctx, Binding = sema.sema_check
-Inst, has_var = sema.sema_inst
+Inst, has_var, owner_of = sema.sema_inst
 self_ctx = sema.sema_member
 sym_local, sym_gen = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
@@ -23,7 +23,7 @@ LocalSlot, Closure = gen.gen_c.gen_c_frame
 unsupported, unresolved = gen.gen_c.gen_c_report
 has_body = gen.gen_c.gen_c_impl
 handle_depth = gen.gen_c.gen_c_handle
-inst_at, settled_inst, recv_inst, sub, sub_with = gen.gen_c.gen_c_mono
+inst_at, settled_inst, sub, sub_with = gen.gen_c.gen_c_mono
 enter_tparams, leave_tparams, enter_struct_tparams = gen.gen_c.gen_c_mono
 declarator, is_unit, write_none = gen.gen_c.gen_c_type
 expr = gen.gen_c.gen_c_expr
@@ -32,6 +32,7 @@ plain_ctx, body_ctx, self_body_ctx, ref_declarator = gen.gen_c.gen_c_decl
 write_address = gen.gen_c.gen_c_arg
 arguments, param_types, call_bindings, inline_ret = gen.gen_c.gen_c_settle
 compose, settle_params, settled = gen.gen_c.gen_c_settle
+method_inst = gen.gen_c.gen_c_mono
 
 // A bound on how deep inlining goes, and a diagnostic at it rather than
 // a walk that does not terminate. A recursive function taking a lambda
@@ -193,10 +194,12 @@ inline_member = (
     out  :: String
 )
                 Res<(), AllocError> {
-    mi   = decl.module.to_usize();
-    sctx = be.check.self_ctx(mi, rty).try();
-    inst = be.recv_inst(rty).try();
-    mark = be.enter_struct_tparams(decl).try();
+    mi    = decl.module.to_usize();
+    sctx  = be.check.self_ctx(mi, rty).try();
+    inst  = be.method_inst(id, c, rty, decl, f, ctx).try();
+    mark  = be.enter_struct_tparams(decl).try();
+    owner = owner_of(be.check, mi, f.name.text).try();
+    be.enter_tparams(f.tparams, owner).try();
     argv ::= be.alloc.Vec<ExprId>();
     be.arguments(c, Ok(a.base), argv).try();
     raws ::= be.alloc.Vec<TyId>();

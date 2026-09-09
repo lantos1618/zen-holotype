@@ -3,7 +3,7 @@
 // reading written types, and rejects open types before mangling. Inst entries
 // remain in declaration order for deterministic names.
 
-Decl, Enum, Struct, TParam, ExprId = std.ast
+Decl, Enum, Struct, TParam, ExprId, Call, Function = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
@@ -14,6 +14,7 @@ Def, decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 Inst, subst, has_var, inst_of_named, owner_of = sema.sema_inst
 tparam_vars = sema.sema_inst
+self_ctx = sema.sema_member
 CBackend = gen.gen_c.gen_c_state
 ty_of = gen.gen_c.gen_c_expr
 
@@ -137,10 +138,74 @@ recv_inst* = (be :: CBackend, rty: TyId) Res<Inst, AllocError> {
     })
 }
 
-// A method of `Vec<T>` is generic in `T` whether or not it declares
-// parameters of its own — so the receiver's instantiation is the
-// method's. One declaring parameters of its own would need the two
-// concatenated; `gen_c_member.method_fault` refuses it instead.
+// A method's instantiation is the receiver's parameters plus the parameters
+// the method declares. The latter are inferred structurally from written call
+// arguments, using the same unifier as generic free calls.
+method_inst* = (
+    be   :: CBackend,
+    id   : ExprId,
+    call : Call,
+    rty  : TyId,
+    decl : DeclId,
+    f    : Function,
+    ctx  : Ctx
+)
+              Res<Inst, AllocError> {
+    inst ::= be.recv_inst(rty).try();
+    owner = owner_of(be.check, decl.module.to_usize(), f.name.text).try();
+    // Callback annotations may settle a parameter before an untyped literal.
+    // Preserve checked choices in the caller's current instantiation; only
+    // missing or still-open bindings need inference below.
+    be.check.resolved_inst(id).match({
+        None        => (),
+        Ok(checked) => f.tparams.loop((parameter) {
+            variable = intern_var(be.check, parameter.name.text, owner).try();
+            checked.lookup(variable).match({
+                None    => (),
+                Ok(raw) => {
+                    actual = be.sub(raw).try();
+                    (!be.unsettled(actual)).then(() {
+                        inst.bind(variable, actual).try();
+                    });
+                },
+            });
+        }),
+    });
+    // Written arguments belong to the caller's scope. Resolve them before
+    // introducing the callee's equally named parameters, then let structural
+    // inference fill only variables the explicit list did not bind.
+    call.targs.loop((h, i, written) {
+        f.tparams.get(i).match({
+            None       => (),
+            Ok(tparam) => {
+                v   = intern_var(be.check, tparam.name.text, owner).try();
+                got = be.check.type_from_ast(written, ctx).try();
+                inst.bind(v, sub(be, got).try()).try();
+            },
+        });
+    });
+    mark = be.enter_struct_tparams(decl).try();
+    be.enter_tparams(f.tparams, owner).try();
+    sctx = be.check.self_ctx(decl.module.to_usize(), rty).try();
+    f.params.loop((h, i, p) {
+        (i > 0).then(() {
+            call.args.get(i - 1).match({
+                None       => (),
+                Ok(actual) => {
+                    declared = be.check.param_type(p, sctx).try();
+                    got      = be.arg_type(actual.value, ctx, declared).try();
+                    be.unify(declared, sub(be, got).try(), inst).try();
+                },
+            });
+        });
+    });
+    f.tparams.loop((h, tp) {
+        v = intern_var(be.check, tp.name.text, owner).try();
+        (!inst.bound(v)).then(() { inst.bind(v, v).try() });
+    });
+    be.leave_tparams(mark).try();
+    Ok(inst)
+}
 
 // substituting
 

@@ -1,0 +1,389 @@
+// Compare one checked input across both C paths and the other scalar renderers.
+// Each native output is compiled with warnings as errors and undefined-behavior
+// checks, then executed; matching source text alone would not prove parity.
+Build = zen.zen_build
+Generation, Layout = gen.gen
+Codegen = std.build
+Program, Func, BasicBlock, Instruction, Terminator, Const, Scalar, Binary, Op, Branch = gen.gen_ir
+nowhere = std.ast
+lower = gen.gen_lower
+verify = gen.gen_verify
+emit_c = gen.gen_c_ir
+emit_js = gen.gen_js
+emit_asm = gen.gen_asm
+
+Backend = LegacyC | IrC | Js | Asm
+
+name = (self: Backend) str {
+    self.match({ LegacyC => "legacy C", IrC => "IR C", Js => "JS", Asm => "ASM" })
+}
+
+Case = {
+    name: str,
+    source: Res<str>,
+    out: str,
+    err: str,
+    code: i32,
+
+    run = (self: @Self, env: Env) Res<bool, AllocError> {
+        a = env.mem.alloc();
+        build ::= a.Build(env, "src/program");
+        build.set_std_root("src");
+        docs ::= a.Map<str, str>();
+        self.source.when_ok(
+            (source) { docs.set("src/program/program.zen", source).try(); }
+        );
+        check = build.whole("program.zen", docs).try();
+        report ::= a.String().try();
+        good: Res<bool> = loop<bool>((h) {
+            (build.diag_count() > 0 || check.diag_count() > 0).then(() {
+                check.render_diags(report).try();
+                println("{} frontend {}", self.name, report.view());
+                h.break(false);
+            });
+            lower(a, build.tree, check, 0).match({
+                Err(_)      => { println("{} lowering failed", self.name); h.break(false); },
+                Ok(program) => {
+            valid = program.verify(a).match({ Ok(_) => true, Err(_) => false });
+            (!valid).then(
+                () { println("{} verification failed", self.name); h.break(false); }
+            );
+            all ::= true;
+            [Backend.LegacyC, Backend.IrC, Backend.Js, Backend.Asm].loop((backend) {
+                code ::= a.String().try();
+                backend.match({
+                    LegacyC => {
+                        generation = Generation(
+                            alloc: a,
+                            mem: env.mem,
+                            tree: build.tree,
+                            check: check,
+                            backend: Codegen.C,
+                            entry: 0,
+                            layout: Layout.Single,
+                            ffi: false,
+                            symbols: false
+                        );
+                        faults     = generation.emit(
+                            report,
+                            (artifact) { code.add(artifact.text).try(); Ok(0) }
+                        ).try();
+                        (faults > 0).then(
+                            () { println(
+                                "{} legacy {}",
+                                self.name,
+                                report.view()
+                            ); }
+                        );
+                        all = all && faults == 0;
+                    },
+                    IrC     => { code = emit_c(a, program).try(); },
+                    Js      => { code = emit_js(a, program).try(); },
+                    Asm     => { code = emit_asm(a, program).try(); },
+                });
+                good = self.execute(env, a, backend, code.view()).try();
+                (!good).then(
+                    () { println("{} failed: {}", self.name, backend.name()); }
+                );
+                all = all && good;
+            });
+            h.break(all);
+                },
+            });
+        });
+        Ok(good.value_or(false))
+    }
+
+    execute = (self: @Self, env: Env, a: Alloc, backend: Backend, text: str)
+              Res<bool, AllocError> {
+        extension     = backend.match({ Js => "js", Asm => "s", _ => "c" });
+        source_name   = a.String(
+            "{}-{}.{}",
+            self.name,
+            backend.name(),
+            extension
+        ).try();
+        source        = source_name.view();
+        ok: Res<bool> = loop<bool>((h) {
+            written = env.fs.write(
+                source,
+                text
+            ).match({ Ok(_) => true, Err(_) => false });
+            (!written).then(() { h.break(false); });
+            args ::= a.Vec<str>();
+            backend.match({
+                Js => { args.add("node").try(); args.add(source).try(); },
+                _  => {
+                    compiler ::= a.Vec<str>();
+                    [str, 8]("cc", source, "-O2", "-o", "candidate", "-pthread", "-lm", "-pie")
+                        .loop((word) { compiler.add(word).try(); });
+                    backend.match({
+                        IrC => [str, 6]("-std=c11", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined", "-fno-sanitize-recover=all")
+                            .loop((word) { compiler.add(word).try(); }),
+                        _   => (),
+                    });
+                    built = env.proc.run_argv(a, "", compiler).match({
+                        Ok(result) => {
+                            (result.code != 0).then(
+                                () { println(
+                                    "C compile {}",
+                                    result.err.view()
+                                ); }
+                            );
+                            result.code == 0
+                        },
+                        Err(_)     => false,
+                    });
+                    (!built).then(() { h.break(false); });
+                    args.add("./candidate").try();
+                },
+            });
+            result = env.proc.run_argv(a, "", args).match({
+                Err(_)     => false,
+                Ok(result) => {
+                    good = result.code == self.code && result.out.view().eq(
+                        self.out
+                    )
+                        && result.err.view().eq(self.err);
+                    (!good).then(
+                        () { println(
+                            "actual {} stdout {} stderr {}",
+                            result.code,
+                            result.out.view(),
+                            result.err.view()
+                        ); }
+                    );
+                    good
+                },
+            });
+            h.break(result);
+        });
+        Ok(ok.value_or(false))
+    }
+}
+
+trap = (
+    env   : Env,
+    a     : Alloc,
+    name  : str,
+    left  : str,
+    right : str,
+    op    : str,
+    fault : str
+)
+       Res<bool, AllocError> {
+    source   = a.String(
+        "main = () i32 {{ left: i32 = {}; right: i32 = {}; print(\"before\\n\"); left {} right }}",
+        left,
+        right,
+        op
+    ).try();
+    at       = source.view().rfind(op[0]).value_or(0);
+    expected = a.String("program.zen:1:{}: trap: {}\n", at + 1, fault).try();
+    Case(name: name, source: Ok(source.view()), out: "before\n", err: expected.view(), code: 134).run(env)
+}
+
+// A backedge and a physically unreachable block exercise verified IR shapes
+// the source lowerer does not yet produce. Arbitrary bytes bypass source lexing.
+cyclic_program = (a: Alloc, text: str) Res<Program, AllocError> {
+    slots ::= a.Vec<Scalar>();
+    [Scalar.I32, Scalar.I32, Scalar.Bool, Scalar.I32].loop((ty) { slots.add(ty).try(); });
+    entry ::= a.Vec<Instruction>();
+    entry.add(Instruction.Constant(Const(out: 0, value: 3))).try();
+    entry.add(Instruction.Constant(Const(out: 1, value: 1))).try();
+    condition ::= a.Vec<Instruction>();
+    condition.add(Instruction.BinaryValue(Binary(
+        out: 2,
+        left: 0,
+        right: 1,
+        op: Op.GreaterEqual,
+        span: nowhere()
+    ))).try();
+    body ::= a.Vec<Instruction>();
+    body.add(Instruction.Text(text)).try();
+    body.add(Instruction.BinaryValue(Binary(
+        out: 0,
+        left: 0,
+        right: 1,
+        op: Op.Sub,
+        span: nowhere()
+    ))).try();
+    unused ::= a.Vec<Instruction>();
+    unused.add(Instruction.Constant(Const(out: 3, value: 9))).try();
+    blocks ::= a.Vec<BasicBlock>();
+    blocks.add(BasicBlock(code: entry, exit: Terminator.Jump(2))).try();
+    blocks.add(BasicBlock(code: body, exit: Terminator.Jump(2))).try();
+    blocks.add(BasicBlock(
+        code: condition,
+        exit: Terminator.Branch(Branch(value: 2, yes: 1, no: 3))
+    )).try();
+    blocks.add(BasicBlock(
+        code: a.Vec<Instruction>(),
+        exit: Terminator.Return(0)
+    )).try();
+    blocks.add(BasicBlock(code: unused, exit: Terminator.Return(3))).try();
+    functions ::= a.Vec<Func>();
+    functions.add(Func(
+        name: "quoted\"\\name",
+        parameters: 0,
+        slots: slots,
+        blocks: blocks,
+        result: Scalar.I32
+    )).try();
+    Ok(Program(functions: functions, entry: 0))
+}
+
+direct = (env: Env, a: Alloc) Res<bool, AllocError> {
+    bytes ::= a.String("raw \"\\").try();
+    bytes.add('\0').try();
+    byte: u8 = 0xff;
+    bytes.add(byte).try();
+    bytes.add("é\n").try();
+    expected ::= a.String().try();
+    Range(0, 3).loop((_) { expected.add(bytes.view()).try(); });
+    program = cyclic_program(a, bytes.view()).try();
+    valid   = program.verify(a).match({ Ok(_) => true, Err(_) => false });
+    good ::= valid;
+    valid.then(() {
+        c        = emit_c(a, program).try();
+        repeated = emit_c(a, program).try();
+        good     = good && c.view().eq(repeated.view());
+        case     = Case(
+            name: "IR cycle and bytes",
+            source: None,
+            out: expected.view(),
+            err: "",
+            code: 0
+        );
+        [Backend.IrC, Backend.Js, Backend.Asm].loop((backend) {
+            text = backend.match({ Js => emit_js(a, program), Asm => emit_asm(a, program), _ => emit_c(a, program) }).try();
+            good = case.execute(env, a, backend, text.view()).try() && good;
+        });
+    });
+    Ok(good)
+}
+
+Refuse = {}
+Refuse.impl(Alloc, {
+    raw = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        Err(AllocError.OutOfMemory)
+    }
+    realloc = <T>(self: @Self, ptr: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        Err(AllocError.OutOfMemory)
+    }
+})
+
+boundaries = (a: Alloc) Res<bool, AllocError> {
+    program    = cyclic_program(a, "").try();
+    allocation = emit_c(
+        Refuse(),
+        program
+    ).match({ Err(OutOfMemory) => true, Ok(_) => false });
+    program.functions.get(0).when_ok((function) {
+        blocks ::= function.blocks;
+        blocks.set(
+            0,
+            BasicBlock(code: a.Vec<Instruction>(), exit: Terminator.Jump(999))
+        );
+    });
+    // emit_c has a verified-input precondition. Rejection belongs to this
+    // caller's verifier gate, not an implicit second check in the renderer.
+    invalid = program.verify(a).match({
+        Err(Invalid(fault)) => fault.reason.match({ Target => true, _ => false }),
+        _                   => false,
+    });
+    Ok(allocation && invalid)
+}
+
+main = (env: Env) Res<(), AllocError> {
+    a = env.mem.alloc();
+    expected ::= a.String(
+        "13 4 false true 8 204\n17 7 60 2 2 -12\nfalse true false false true true false\nunit:()\nquoted:\"\\"
+    ).try();
+    expected.add('\0').try();
+    expected.add("1 é\n").try();
+    println(
+        "scalar parity {}",
+        Case(name: "scalars", source: None, out: expected.view(), err: "", code: 0).run(env).try()
+    );
+    println(
+        "addition trap {}",
+        trap(
+            env,
+            a,
+            "addition",
+            "2147483647",
+            "1",
+            "+",
+            "integer overflow"
+        ).try()
+    );
+    println(
+        "subtraction trap {}",
+        trap(
+            env,
+            a,
+            "subtraction",
+            "-2147483648",
+            "1",
+            "-",
+            "integer overflow"
+        ).try()
+    );
+    println(
+        "multiplication trap {}",
+        trap(
+            env,
+            a,
+            "multiplication",
+            "2147483647",
+            "2147483647",
+            "*",
+            "integer overflow"
+        ).try()
+    );
+    println(
+        "division zero {}",
+        trap(env, a, "division zero", "1", "0", "/", "divide by zero").try()
+    );
+    println(
+        "remainder zero {}",
+        trap(env, a, "remainder zero", "1", "0", "%", "divide by zero").try()
+    );
+    println(
+        "division overflow {}",
+        trap(
+            env,
+            a,
+            "division overflow",
+            "-2147483648",
+            "-1",
+            "/",
+            "integer overflow"
+        ).try()
+    );
+    println(
+        "remainder overflow {}",
+        trap(
+            env,
+            a,
+            "remainder overflow",
+            "-2147483648",
+            "-1",
+            "%",
+            "integer overflow"
+        ).try()
+    );
+    source: str  = "main = () i32 { value: i32 = -2147483648; print(\"before\\n\"); -value }";
+    expected_neg = a.String(
+        "program.zen:1:{}: trap: integer overflow\n",
+        source.find("-value").value_or(0) + 1
+    ).try();
+    println(
+        "negation overflow {}",
+        Case(name: "negation", source: Ok(source), out: "before\n", err: expected_neg.view(), code: 134).run(env).try()
+    );
+    println("IR cycle and arbitrary bytes {}", direct(env, a).try());
+    println("allocation and verifier boundaries {}", boundaries(a).try());
+    Ok(())
+}

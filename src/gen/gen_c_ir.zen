@@ -1,0 +1,254 @@
+// C rendering of the shared scalar IR. The caller verifies the program before
+// rendering; this experimental path does not define Zen's foreign or aggregate ABI.
+Alloc, AllocError = std.mem
+String, str = std.text
+Vec = std.collections
+Range = std.core
+Span = std.ast
+Program, Func, Instruction, Terminator, Unary, Binary, Invocation, Print = gen.gen_ir
+
+emit_c* = (a: Alloc, program: Program) Res<String, AllocError> {
+    writer ::= C(
+        out: a.String().try(),
+        location: a.String().try(),
+        labels: a.Vec<bool>()
+    );
+    writer.program(program).try();
+    Ok(writer.out)
+}
+
+C = {
+    out :: String,
+    location :: String,
+    labels :: Vec<bool>,
+
+    program = (self :: @Self, program: Program) Res<(), AllocError> {
+        self.out.runtime().try();
+        program.functions.loop((h, index, function) {
+            self.signature(index, function).try();
+            self.out.add(";\n").try();
+        });
+        program.functions.loop((h, index, function) {
+            self.function(index, function).try();
+        });
+        self.out.fmt(
+            "int main(void) {{ return (int)(zg_ir_f{}() & 255); }}\n",
+            program.entry
+        )
+    }
+
+    // All three scalar types have a private i32 carrier in this renderer.
+    // Unit arguments still evaluate and occupy their ordered signature slots.
+    signature = (self :: @Self, index: usize, function: Func) Res<(), AllocError> {
+        self.out.fmt("int32_t zg_ir_f{}(", index).try();
+        (function.parameters == 0).then(() { self.out.add("void").try(); });
+        Range(0, function.parameters).loop((i) {
+            (i > 0).then(() { self.out.add(", ").try(); });
+            self.out.fmt("int32_t v{}", i).try();
+        });
+        self.out.add(')')
+    }
+
+    function = (self :: @Self, index: usize, function: Func) Res<(), AllocError> {
+        self.signature(index, function).try();
+        self.out.add(" {\n").try();
+        Range(function.parameters, function.slots.len).loop((i) {
+            self.out.fmt("  int32_t v{};\n", i).try();
+        });
+        // Discarded effect results still have IR slots. sizeof marks their
+        // declarations used without reading an uninitialized value.
+        Range(0, function.slots.len).loop((i) {
+            self.out.fmt("  (void)sizeof(v{});\n", i).try();
+        });
+        self.labels.clear();
+        function.blocks.loop((_) { self.labels.add(false).try(); });
+        self.labels.set(0, true);
+        function.blocks.loop((block) {
+            block.exit.match({
+                Return(_)      => (),
+                Jump(to)       => { self.labels.set(to, true); },
+                Branch(branch) => {
+                    self.labels.set(branch.yes, true);
+                    self.labels.set(branch.no, true);
+                },
+            });
+        });
+        self.out.add("  goto b0;\n").try();
+        function.blocks.loop((h, block_id, block) {
+            self.labels.get(block_id).value_or(false).then(() {
+                self.out.fmt("b{}:\n", block_id).try();
+            });
+            block.code.loop(
+                (instruction) { self.instruction(instruction).try(); }
+            );
+            self.terminator(block.exit).try();
+        });
+        self.out.add("}\n")
+    }
+
+    terminator = (self :: @Self, exit: Terminator) Res<(), AllocError> {
+        exit.match({
+            Return(value)  => self.out.fmt("  return v{};\n", value),
+            Jump(to)       => self.out.fmt("  goto b{};\n", to),
+            Branch(branch) => self.out.fmt(
+                "  if (v{} != 0) goto b{}; else goto b{};\n",
+                branch.value,
+                branch.yes,
+                branch.no
+            ),
+        })
+    }
+
+    instruction = (self :: @Self, instruction: Instruction) Res<(), AllocError> {
+        instruction.match({
+            Constant(value)    => self.out.fmt(
+                "  v{} = {};\n",
+                value.out,
+                value.value
+            ),
+            Copy(value)        => self.out.fmt(
+                "  v{} = v{};\n",
+                value.out,
+                value.source
+            ),
+            UnaryValue(value)  => self.unary(value),
+            BinaryValue(value) => self.binary(value),
+            Invoke(value)      => self.call(value),
+            PrintValue(value)  => self.print(value),
+            Text(text)         => {
+                self.out.add("  fwrite(").try();
+                self.out.bytes(text).try();
+                self.out.fmt(", 1, {}, stdout);\n", text.len)
+            },
+        })
+    }
+
+    position = (self :: @Self, span: Span) Res<(), AllocError> {
+        self.location.clear();
+        self.location.fmt(
+            "{}:{}:{}: ",
+            span.file,
+            span.start.line,
+            span.start.col
+        ).try();
+        self.out.bytes(self.location.view())
+    }
+
+    unary = (self :: @Self, value: Unary) Res<(), AllocError> {
+        value.op.match({
+            Not => self.out.fmt("  v{} = !v{};\n", value.out, value.input),
+            Neg => {
+                self.out.fmt(
+                    "  v{} = zg_ir_i32(-(int64_t)v{}, ",
+                    value.out,
+                    value.input
+                ).try();
+                self.position(value.span).try();
+                self.out.add(");\n")
+            },
+        })
+    }
+
+    binary = (self :: @Self, value: Binary) Res<(), AllocError> {
+        self.out.fmt("  v{} = ", value.out).try();
+        value.op.match({
+            Add          => self.out.fmt(
+                "zg_ir_i32((int64_t)v{} + v{}",
+                value.left,
+                value.right
+            ),
+            Sub          => self.out.fmt(
+                "zg_ir_i32((int64_t)v{} - v{}",
+                value.left,
+                value.right
+            ),
+            Mul          => self.out.fmt(
+                "zg_ir_i32((int64_t)v{} * v{}",
+                value.left,
+                value.right
+            ),
+            Div          => self.out.fmt(
+                "zg_ir_div(v{}, v{}",
+                value.left,
+                value.right
+            ),
+            Rem          => self.out.fmt(
+                "zg_ir_rem(v{}, v{}",
+                value.left,
+                value.right
+            ),
+            Equal        => self.out.fmt("v{} == v{}", value.left, value.right),
+            NotEqual     => self.out.fmt("v{} != v{}", value.left, value.right),
+            Less         => self.out.fmt("v{} < v{}", value.left, value.right),
+            LessEqual    => self.out.fmt("v{} <= v{}", value.left, value.right),
+            Greater      => self.out.fmt("v{} > v{}", value.left, value.right),
+            GreaterEqual => self.out.fmt("v{} >= v{}", value.left, value.right),
+        }).try();
+        checked = value.op.match({ Add => true, Sub => true, Mul => true, Div => true, Rem => true, _ => false });
+        checked.then(() {
+            self.out.add(", ").try();
+            self.position(value.span).try();
+            self.out.add(')').try();
+        });
+        self.out.add(";\n")
+    }
+
+    call = (self :: @Self, call: Invocation) Res<(), AllocError> {
+        self.out.fmt("  v{} = zg_ir_f{}(", call.out, call.function).try();
+        call.args.loop((h, index, slot) {
+            (index > 0).then(() { self.out.add(", ").try(); });
+            self.out.fmt("v{}", slot).try();
+        });
+        self.out.add(");\n")
+    }
+
+    print = (self :: @Self, value: Print) Res<(), AllocError> {
+        value.ty.match({
+            I32  => self.out.fmt("  printf(\"%\" PRId32, v{});\n", value.value),
+            Bool => self.out.fmt(
+                "  fputs(v{} != 0 ? \"true\" : \"false\", stdout);\n",
+                value.value
+            ),
+            Unit => self.out.add("  fputs(\"()\", stdout);\n"),
+        })
+    }
+}
+
+// Encode every byte: each following backslash terminates the preceding hex
+// escape, and explicit fwrite lengths preserve embedded NUL and invalid UTF-8.
+bytes = (out :: String, text: str) Res<(), AllocError> {
+    out.add('"').try();
+    text.loop((byte) {
+        out.add("\\x").try();
+        out.write_hex_fixed(byte.to_u64(), 2).try();
+    });
+    out.add('"')
+}
+
+runtime = (out :: String) Res<(), AllocError> {
+    out.add(
+        "#include <stdint.h>\n#include <inttypes.h>\n#include <stdio.h>\n#include <stdlib.h>\n"
+    ).try();
+    out.add(
+        "_Noreturn void zg_ir_trap(const char *where, const char *message) {\n"
+    ).try();
+    out.add(
+        "  fflush(stdout); fputs(where, stderr); fputs(\"trap: \", stderr); fputs(message, stderr); fputc('\\n', stderr); exit(134);\n}\n"
+    ).try();
+    out.add("int32_t zg_ir_i32(int64_t value, const char *where) {\n").try();
+    out.add(
+        "  if (value < INT32_MIN || value > INT32_MAX) zg_ir_trap(where, \"integer overflow\");\n  return (int32_t)value;\n}\n"
+    ).try();
+    out.add(
+        "void zg_ir_divisor(int32_t left, int32_t right, const char *where) {\n"
+    ).try();
+    out.add(
+        "  if (right == 0) zg_ir_trap(where, \"divide by zero\");\n  if (left == INT32_MIN && right == -1) zg_ir_trap(where, \"integer overflow\");\n}\n"
+    ).try();
+    out.add(
+        "int32_t zg_ir_div(int32_t left, int32_t right, const char *where) { zg_ir_divisor(left, right, where); return left / right; }\n"
+    ).try();
+    out.add(
+        "int32_t zg_ir_rem(int32_t left, int32_t right, const char *where) { zg_ir_divisor(left, right, where); return left % right; }\n"
+    )
+}

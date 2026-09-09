@@ -271,6 +271,36 @@ Split* = {
         self.loop((h, value) { body(value) })
     }
 
+    // Fold a fresh sequential cursor; natural completion returns Ok(acc).
+    loop* = <A>(self: @Self, init: A, body: (
+        h     : LoopHandle,
+        index : usize,
+        value : str,
+        acc   : A
+    ) A) Res<A> {
+        it  ::= Split(bytes: self.bytes, sep: self.sep);
+        acc ::= init;
+        answer: Res<A> = loop((h, index) {
+            it.next().match({
+                None      => h.break(acc),
+                Ok(value) => { acc = body(h, index, value, acc); },
+            });
+        });
+        answer
+    }
+
+    loop* = <A>(self: @Self, init: A, body: (value: str, acc: A) A) Res<A> {
+        self.loop(init, (h, index, value, acc) { body(value, acc) })
+    }
+
+    loop* = <A>(self: @Self, init: A, body: (
+        h     : LoopHandle,
+        value : str,
+        acc   : A
+    ) A) Res<A> {
+        self.loop(init, (h, index, value, acc) { body(h, value, acc) })
+    }
+
     // Sequential iteration is O(total bytes); `at(k)` rescans for random access.
     next* = (self :: @Self) Res<str> {
         self.done.match({
@@ -365,6 +395,36 @@ Lines* = {
 
     loop* = (self: @Self, body: (value: str) ()) Res<str> {
         self.loop((h, value) { body(value) })
+    }
+
+    // Fold lines without indexing or allocating an intermediate collection.
+    loop* = <A>(self: @Self, init: A, body: (
+        h     : LoopHandle,
+        index : usize,
+        value : str,
+        acc   : A
+    ) A) Res<A> {
+        it  ::= self.parts.bytes.lines();
+        acc ::= init;
+        answer: Res<A> = loop((h, index) {
+            it.next().match({
+                None      => h.break(acc),
+                Ok(value) => { acc = body(h, index, value, acc); },
+            });
+        });
+        answer
+    }
+
+    loop* = <A>(self: @Self, init: A, body: (value: str, acc: A) A) Res<A> {
+        self.loop(init, (h, index, value, acc) { body(value, acc) })
+    }
+
+    loop* = <A>(self: @Self, init: A, body: (
+        h     : LoopHandle,
+        value : str,
+        acc   : A
+    ) A) Res<A> {
+        self.loop(init, (h, index, value, acc) { body(h, value, acc) })
     }
 }
 

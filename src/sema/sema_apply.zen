@@ -39,8 +39,7 @@ construct* = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
 valid_construct = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
                   Res<TyId, AllocError> {
     c.resolve_call(id, d.id).try();
-    args ::= c.alloc.Vec<TyId>();
-    c.ctor_args(call, d, ctx, args).try();
+    args    = c.ctor_args(call, d, ctx).try();
     applied = c.types.named(d.id, d.qname, d.name, args).try();
     ty      = c.settled_ctor_type(call, d, ctx, args, applied).try();
     c.nominal_bounds_hold(ty, c.tree.expr_at(id).span).try().match({
@@ -424,15 +423,17 @@ settled_arg_ty = (c :: Checker, a: Arg, ctx: Ctx) Res<TyId, AllocError> {
     })
 }
 
-ctor_args = (c :: Checker, call: Call, d: Def, ctx: Ctx, out :: Vec<TyId>)
-            Res<(), AllocError> {
+ctor_args = (c :: Checker, call: Call, d: Def, ctx: Ctx)
+            Res<Vec<TyId>, AllocError> {
+    args ::= c.alloc.Vec<TyId>();
     (call.targs.len == 0).match({
         true  => c.tree.decl_at(d.id).match({
             None    => Ok(()),
-            Ok(dec) => c.decl_tparam_vars(dec, d.qname, out),
+            Ok(dec) => c.decl_tparam_vars(dec, d.qname, args),
         }),
-        false => c.denote_targs(call.targs, ctx, out),
-    })
+        false => c.denote_targs(call.targs, ctx, args),
+    }).try();
+    Ok(args)
 }
 
 // Written type arguments resolve in the caller's module.
@@ -459,7 +460,7 @@ instantiate* = (
         true  => k.generic.match({
             false => c.callback_types_fit(
                 call,
-                k,
+                k.params,
                 actuals.len - call.args.len,
                 ctx,
                 c.alloc.Inst()
@@ -494,7 +495,7 @@ instantiated_ret = (
             (c.signature_matches(params, actuals, 0).try()
                 && c.callback_types_fit(
                     call,
-                    k,
+                    k.params,
                     actuals.len - call.args.len,
                     ctx,
                     inst
@@ -550,7 +551,7 @@ call_inst* = (
     });
     c.infer_callback_targs(
         call,
-        k,
+        k.params,
         actuals.len - call.args.len,
         ctx,
         inst
@@ -563,20 +564,20 @@ call_inst* = (
 // Written callback types provide context for otherwise untyped literals.
 // Explicit call arguments were bound first; ordinary values must still fit
 // the resulting signature. Generic lambdas keep their own inference scope.
-infer_callback_targs = (
-    c    :: Checker,
-    call : Call,
-    k    : Cand,
-    off  : usize,
-    ctx  : Ctx,
-    inst :: Inst
+infer_callback_targs* = (
+    c      :: Checker,
+    call   : Call,
+    params : Vec<TyId>,
+    off    : usize,
+    ctx    : Ctx,
+    inst   :: Inst
 ) Res<(), AllocError> {
     call.args.loop((h, i, a) {
         c.annotated_callback(a.value).match({
             None  => (),
             Ok(l) => c.infer_callback_types(
                 l,
-                k.params.ty_at(i + off),
+                params.ty_at(i + off),
                 ctx,
                 inst
             ).try(),
@@ -634,19 +635,19 @@ infer_callback_types = (
 // against that substitution so conflicting annotations cannot be ignored.
 // Generic callbacks retain their own type-parameter checking scope.
 callback_types_fit* = (
-    c    :: Checker,
-    call : Call,
-    k    : Cand,
-    off  : usize,
-    ctx  : Ctx,
-    inst : Inst
+    c      :: Checker,
+    call   : Call,
+    params : Vec<TyId>,
+    off    : usize,
+    ctx    : Ctx,
+    inst   : Inst
 ) Res<bool, AllocError> {
     fits ::= true;
     call.args.loop((h, i, arg) {
         c.annotated_callback(arg.value).match({
             None       => (),
             Ok(lambda) => {
-                sig = c.subst(k.params.ty_at(i + off), inst).try();
+                sig = c.subst(params.ty_at(i + off), inst).try();
                 c.types.at(sig).match({
                     Fn(fn) => {
                         lambda.params.loop((p, index, param) {

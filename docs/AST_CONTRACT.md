@@ -70,7 +70,9 @@ All AST spans follow the same rules:
 - A statement span includes its semicolon; its expression span does not.
 - Leading trivia is outside the node span.
 - A module spans the complete source file.
-- File names are relative to the compilation root.
+- File names are relative to the compilation root for files within it. An
+  editor entry outside its configured source root retains its absolute path,
+  so overlays and diagnostics identify the original document.
 
 Names use `Ident { text, span }` so diagnostics and editor operations can point
 at the name itself. Dotted names use `QualifiedName` with separately located

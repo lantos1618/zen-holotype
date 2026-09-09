@@ -25,7 +25,7 @@ sym_fn, sym_member, sym_variant, qualify = gen.gen_name
 CBackend, MethodRef = gen.gen_c.gen_c_state
 unsupported, unresolved = gen.gen_c.gen_c_report
 sub, sub_with, any_open, recv_inst, inst_open = gen.gen_c.gen_c_mono
-intern_var, unify, arg_type = gen.gen_c.gen_c_mono
+method_inst = gen.gen_c.gen_c_mono
 owner_of = sema.sema_inst
 enter_tparams, enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 ctype, is_unit = gen.gen_c.gen_c_type
@@ -768,7 +768,7 @@ settle_method_call = (
     f   : Function,
     ctx : Ctx
 ) Res<MethodCallSite, AllocError> {
-    inst = be.method_inst(d, s, f, ctx).try();
+    inst = be.method_inst(d.id, d.c, s.ty, s.decl, f, ctx).try();
     sig  = s.call_signature(be, f, inst).try();
     Ok(MethodCallSite(
         dot: d,
@@ -778,49 +778,6 @@ settle_method_call = (
         sig: sig,
         ctx: ctx
     ))
-}
-
-// A method's instantiation is the receiver's parameters plus the parameters
-// the method declares. The latter are inferred structurally from written call
-// arguments, using the same unifier as generic free calls.
-method_inst = (be :: CBackend, d: Dot, s: Site, f: Function, ctx: Ctx)
-              Res<Inst, AllocError> {
-    inst ::= be.recv_inst(s.ty).try();
-    owner = owner_of(be.check, s.decl.module.to_usize(), f.name.text).try();
-    // Written arguments belong to the caller's scope. Resolve them before
-    // introducing the callee's equally named parameters, then let structural
-    // inference fill only variables the explicit list did not bind.
-    d.c.targs.loop((h, i, written) {
-        f.tparams.get(i).match({
-            None       => (),
-            Ok(tparam) => {
-                v   = intern_var(be.check, tparam.name.text, owner).try();
-                got = be.check.type_from_ast(written, ctx).try();
-                inst.bind(v, sub(be, got).try()).try();
-            },
-        });
-    });
-    mark = be.enter_struct_tparams(s.decl).try();
-    be.enter_tparams(f.tparams, owner).try();
-    sctx = be.check.self_ctx(s.decl.module.to_usize(), s.ty).try();
-    f.params.loop((h, i, p) {
-        (i > 0).then(() {
-            d.c.args.get(i - 1).match({
-                None       => (),
-                Ok(actual) => {
-                    declared = be.check.param_type(p, sctx).try();
-                    got      = be.arg_type(actual.value, ctx, declared).try();
-                    be.unify(declared, sub(be, got).try(), inst).try();
-                },
-            });
-        });
-    });
-    f.tparams.loop((h, tp) {
-        v = intern_var(be.check, tp.name.text, owner).try();
-        (!inst.bound(v)).then(() { inst.bind(v, v).try() });
-    });
-    be.leave_tparams(mark).try();
-    Ok(inst)
 }
 
 // The symbol and the queue entry are written together. Seven lowerings

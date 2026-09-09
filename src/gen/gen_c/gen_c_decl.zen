@@ -2,7 +2,7 @@
 // Bodies are lowered first so they can discover required types and helpers;
 // emitted definitions and prototypes are then sorted by mangled name.
 
-Module, Decl, Function, Param, Span = std.ast
+Decl, Function, Param, Span = std.ast
 BlockId, Struct, Enum, Member = std.ast
 AllocError = std.mem
 Vec = std.collections
@@ -103,71 +103,51 @@ emit_c_headers = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     Ok(())
 }
 
-// Every function the root module declares — the roots, for the reason
-// the header gives.
+// Seed each concrete root declaration in source order. Overload lookup uses
+// the same Def identities as call resolution; generic functions and functions
+// with body parameters are reached through their call sites instead.
 seed = (be :: CBackend, mi: usize) Res<(), AllocError> {
     be.tree.module_at(mi).match({
-        None  => Ok(()),
-        Ok(m) => be.seed_module(m, mi),
-    }).try();
-    Ok(());
-}
-
-seed_module = (be :: CBackend, m: Module, mi: usize) Res<(), AllocError> {
-    Range(0, m.decls.len).loop((h, di) {
-        be.seed_decl(m, mi, di).try();
-    });
-    Ok(());
-}
-
-seed_decl = (be :: CBackend, m: Module, mi: usize, di: usize)
-            Res<(), AllocError> {
-    m.decls.get(di).match({
-        None  => Ok(()),
-        Ok(d) => be.seed_function(m, mi, d),
-    }).try();
-    Ok(());
-}
-
-seed_function = (be :: CBackend, m: Module, mi: usize, d: Decl)
-                Res<(), AllocError> {
-    d.kind.match({
-        Function(f) => be.seed_named(m, mi, f),
-        _           => Ok(()),
+        None       => Ok(()),
+        Ok(module) => {
+            module.decls.loop((decl) {
+                be.root_function(decl).match({
+                    None         => (),
+                    Ok(function) => {
+                        be.seed_overloads(mi, function.name.text).try();
+                    },
+                });
+            });
+            Ok(())
+        },
     })
 }
 
-// Seeds concrete top-level functions using the same `Def` identity as call
-// Resolution. Generic functions are reached through concrete calls; functions
-// With body parameters are inlined and never emitted as C roots.
-seed_named = (be :: CBackend, m: Module, mi: usize, f: Function)
-             Res<(), AllocError> {
-    ((f.tparams.len > 0) || be.takes_closure(f)).match({
-        true  => Ok(()),
-        false => be.seed_defs(mi, f),
-    })
+root_function = (be: CBackend, decl: Decl) Res<Function> {
+    function = decl.kind.match({
+        Function(value) => Ok(value),
+        _               => None,
+    }).try();
+    (function.tparams.len == 0 && !be.takes_closure(function)).ensure().try();
+    Ok(function)
 }
 
-seed_defs = (be :: CBackend, mi: usize, f: Function) Res<(), AllocError> {
+seed_overloads = (be :: CBackend, mi: usize, name: str) Res<(), AllocError> {
     found ::= be.alloc.Vec<Def>();
-    be.check.world.own_defs(mi, f.name.text, found).try();
-    found.loop((h, d) { be.seed_def(d).try() });
-    Ok(());
-}
-
-seed_def = (be :: CBackend, d: Def) Res<(), AllocError> {
+    be.check.world.own_defs(mi, name, found).try();
     // A concrete overload's name also finds its generic siblings. Only
     // concrete functions can be queued without a call's instantiation.
-    decl_at(be.tree, d.id).match({
-        None  => Ok(()),
-        Ok(x) => x.kind.match({
-            Function(f) => ((f.tparams.len > 0) || be.takes_closure(f)).match({
-                true  => Ok(()),
-                false => be.seed_root(d),
-            }),
-            _           => Ok(()),
-        }),
-    })
+    found.loop((definition) {
+        function: Res<Function> = decl_at(be.tree, definition.id).match({
+            None     => None,
+            Ok(decl) => be.root_function(decl),
+        });
+        function.match({
+            None  => (),
+            Ok(_) => { be.seed_root(definition).try(); },
+        });
+    });
+    Ok(())
 }
 
 // The symbol is built the same way a call site builds it, because the

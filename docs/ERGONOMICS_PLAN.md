@@ -115,11 +115,17 @@ run took 0.06 seconds; this is an observed local result, not a timing budget.
   isolated compiler executable cannot silently replace the tested source with
   the library beside that executable.
 
-Sequential iteration is still incomplete as a shared protocol. `Lines` has
-`next` and direct `loop` methods but cannot feed generic Range-based
-`find`/`map`/`filter`/fold consumers. `Split`'s direct loops advance sequentially;
-its generic/free indexed Range paths, including folds, can still rescan and
-be quadratic. Generic callback inference
+`Split` and `Lines` now provide sequential folds through all three `loop`
+callback shapes. Each traversal starts a fresh cursor and preserves the
+receiver's cursor, early break, and lexical error propagation. Inline generic
+methods retain their own type arguments; callback annotations constrain member
+calls in the same order as free calls, without overriding explicit arguments
+or incompatible concrete values.
+
+Sequential iteration is still incomplete as a shared protocol. `Lines` cannot
+feed generic Range-based `find`/`map`/`filter` consumers. `Split`'s generic/free
+indexed Range paths can still rescan and be quadratic; the sequential guarantee
+belongs to its direct methods. Generic callback inference
 also remains distinct from complete first-class callback support. Enum-name
 parsing, enum JSON policy, complete lifetime checking, and recoverable allocation
 of a new arena remain separate work. These changes do not establish a 9/10

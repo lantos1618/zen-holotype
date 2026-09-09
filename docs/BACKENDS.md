@@ -92,6 +92,13 @@ Direct renderer callers must satisfy that precondition. All vectors, source
 spans, and text borrow caller-chosen compilation storage. Returning a Program
 or String does not extend its allocator's lifetime.
 
+`gen.gen_c_ir.emit_c(a, program)` is an experimental C renderer for this same
+scalar IR. It returns `Res<String, AllocError>` after the caller verifies the
+program. Its C11 output uses direct labels and branches, explicit arithmetic
+checks, and length-aware byte output. It is an importable API, not a CLI backend
+selection; `Codegen.C` continues to use the full-language C backend. Its private
+scalar calling convention does not specify the foreign or aggregate ABI.
+
 Generation publishes each borrowed artifact synchronously. The callback must
 consume or copy its bytes before returning. Allocation failures stay typed;
 backend diagnostics suppress publication and the driver reports publication
@@ -109,6 +116,12 @@ stages C emission; it does not produce this shared IR. The scalar backends do
 not establish full-language parity or a completed architecture migration.
 
 ## Further work and acceptance criteria
+
+The experimental scalar C renderer exercises the current contract without
+requiring whole-language IR support or changing the bootstrap path. Its corpus
+compares evaluation order, output, and arithmetic traps with existing C, JS,
+and assembly, and compiles IR C with warnings as errors and UBSan. This is a
+correctness baseline for extending the IR, not a performance result.
 
 A shared whole-language backend boundary requires migration of concrete
 semantic responsibilities, not another dispatch case:
@@ -139,3 +152,32 @@ The executable corpus covers cross-backend evaluation and output, renderer
 runtime behavior, malformed IR, and project build/run recipes. `make verify`
 remains the aggregate gate. Passing it is evidence for the implemented surface,
 not a numerical ergonomics rating.
+
+## Migration order and measurement
+
+Establish authoritative semantic call facts before migrating generic calls.
+Record the selected declaration, receiver, substitutions, argument bindings,
+and conversions only when checking succeeds. Recovery candidates and deferred
+generic obligations need distinct representations; a selected declaration ID
+alone does not prove a call is valid. Editor queries consume source-level
+semantic facts rather than execution IR.
+
+Keep instance discovery separate from building an individual function. Extend
+the IR one feature family at a time, with explicit places, aggregate values,
+captures, cleanup, and runtime operations as each becomes necessary. Remove
+the corresponding AST-based C lowering only after behavioral parity and
+bootstrap fixpoint checks pass. Do not move the existing helper chains into a
+larger shared lowerer unchanged.
+
+Record frontend, specialization/lowering, IR verification, rendering, native
+compilation, and linking separately. Benchmark cold native builds, unchanged
+builds, and a single source edit; whole-suite duration is not compiler latency.
+Use paired uninstrumented runs with identical source roots, reachable-program
+policy, toolchains, and flags. Include output checks, allocation measurements,
+and a failing regression control before imposing a budget. Different root
+policies can change how much code is emitted and must not be reported as a
+renderer speedup.
+
+Preserve the existing dependency-aware native cache. Semantic caching and
+parallel checking require explicit dependency and ownership contracts before
+sharing results or mutable compiler state.
