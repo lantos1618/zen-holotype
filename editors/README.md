@@ -248,6 +248,7 @@ Build and install:
 $ cd editors/vscode
 $ npm install
 $ npm run compile
+$ npm test
 $ npx @vscode/vsce package --allow-missing-repository -o zen.vsix
 $ code --install-extension zen.vsix --force
 ```
@@ -301,6 +302,38 @@ A server that exits is not restarted on its own; *Zen: Restart Language
 Server* (`zen.restartServer`) stops what is left and starts a fresh one
 without reloading the window — which is also the way to pick up a binary
 you just rebuilt.
+
+### Import roots for tools outside the source directory
+
+`zen.sourceRoots` supplies explicit import roots for files whose location does
+not identify their module tree. For example, this checkout's usage tool lives
+under `scripts/` but imports compiler modules from `src/`:
+
+```json
+{
+  "zen.sourceRoots": [
+    { "path": "scripts/zen_usage.zen", "root": "src" }
+  ]
+}
+```
+
+Both paths are relative to the language server's workspace folder, which is
+the first folder in a multi-folder window. A mapping matches its exact file
+or directory and descendants; the longest matching path wins. A directory
+mapping for `scripts/tools` also matches `scripts/tools/check.zen`, but does
+not match `scripts/toolset/check.zen`. Mapping paths must be unique, and
+absolute paths and `..` components are rejected. Set `root` to `.` to import
+from the workspace root. The server requires a workspace `rootUri` and
+validates the mappings during initialization.
+
+Unmapped files retain the server's usual root inference. Mappings select
+module search directories; they do not execute `build.zen`. Editing this
+setting restarts the server through the same queue as *Zen: Restart Language
+Server*, so simultaneous configuration changes cannot overlap server
+processes. Version 0.0.5 or newer of the extension forwards this setting as
+`initializationOptions.sourceRoots`. After installing an updated extension,
+activate its new version with *Developer: Reload Window*; restarting only the
+language server continues to use the extension code already loaded.
 
 Open a `.zen` file, hover over an expression. If anything goes wrong, the
 **Zen** output channel says what; set `zen.trace.server` to `verbose` to see

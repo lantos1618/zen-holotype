@@ -16,7 +16,8 @@ Item, MemberCache, complete_at, complete_shared, write_items = lsp.lsp_compl
 write_tokens = lsp.lsp_colour
 Diagnostics, Shared = lsp.lsp_diag
 write_actions = lsp.lsp_action
-relative_to = zen.zen_path
+relative_to, SourceRoot = zen.zen_path
+join_path = std.core.path
 Position = lsp.lsp_pos
 Decoded, RequestTurn, write_capabilities = lsp.lsp_reply
 RpcFault, request_of, notice_of = lsp.lsp_reply
@@ -103,14 +104,88 @@ Server* = {
         })
     }
 
+    configure_roots = (self :: @Self, request: Decoded) Res<bool, AllocError> {
+        entries ::= self.a.Vec<SourceRoot>();
+        options            = request.field(
+            request.params(),
+            "initializationOptions"
+        );
+        named: Res<JsonId> = options.match({
+            None      => None,
+            Ok(value) => request.field(value, "sourceRoots"),
+        });
+        roots              = named.value_or(JsonId(index: 0));
+        size: Res<usize>   = named.match({ None => Ok(0), Ok(value) => request.array_size(value) });
+        valid ::= size.match({ Ok(_) => true, None => false });
+        count = size.value_or(0);
+        i: usize ::= 0;
+        loop(() { valid && i < count }, (h) {
+            request.item_at(roots, i).match({
+                None     => { valid = false; h.break(); },
+                Ok(item) => {
+                    path  = request.string_at(item, "path");
+                    root  = request.string_at(item, "root");
+                    valid = valid && workspace_path(path, false)
+                        && workspace_path(
+                            root,
+                            true
+                        ) && !self.workspace.is_empty();
+                    valid.then(() {
+                        full_path = join_path(
+                            self.a,
+                            self.workspace,
+                            path
+                        ).try().view();
+                        full_root = root.eq(".").match({
+                            true  => self.workspace,
+                            false => join_path(
+                                self.a,
+                                self.workspace,
+                                root
+                            ).try().view(),
+                        });
+                        entries.loop((entry) {
+                            entry.path.eq(full_path).then(() { valid = false; });
+                        });
+                        entries.add(SourceRoot(
+                            path: full_path,
+                            root: full_root
+                        )).try();
+                    });
+                    i = i + 1;
+                    (!valid).then(() { h.break(); });
+                },
+            });
+        });
+        valid.then(() {
+            self.notes.set_roots(entries);
+            self.members.set_roots(entries);
+        });
+        Ok(valid)
+    }
+
     initialized = (self :: @Self, request: Decoded,
                    turn :: RequestTurn) Res<(), AllocError> {
         self.members.invalidate();
-        self.ready     = true;
         self.workspace = path_of(request.string_at(request.params(), "rootUri")).dup(self.a).try();
-        caps ::= turn.alloc().String().try();
-        write_capabilities(turn.alloc(), caps).try();
-        turn.result(request, caps.view())
+        loop(() { self.workspace.len > 1 && self.workspace.ends_with(
+            "/"
+        ) }, (h) {
+            self.workspace = self.workspace.slice(0, self.workspace.len - 1);
+        });
+        self.configure_roots(request).try().match({
+            false => turn.failed(
+                request,
+                RpcFault.InvalidParams,
+                "sourceRoots requires workspace-relative path/root mappings without parent traversal"
+            ),
+            true  => {
+                self.ready = true;
+                caps ::= turn.alloc().String().try();
+                write_capabilities(turn.alloc(), caps).try();
+                turn.result(request, caps.view())
+            },
+        })
     }
 
     unknown = (self :: @Self, request: Decoded,
@@ -672,4 +747,20 @@ serve* = (s :: Server, input: str, out :: String) Res<(), AllocError> {
         });
     });
     s.settled(s.a, out)
+}
+
+// A mapping is bounded to this workspace; separators cannot smuggle an
+// absolute path or parent traversal into source-root selection.
+workspace_path = (path: str, allow_current: bool) bool {
+    (allow_current && path.eq(".")).match({
+        true  => true,
+        false => {
+            valid ::= !path.is_empty() && !path.starts_with("/")
+                && !path.ends_with("/") && !path.contains("\\") && !path.contains(":");
+            path.split('/').loop((part) {
+                (part.is_empty() || part.eq(".") || part.eq("..")).then(() { valid = false; });
+            });
+            valid
+        },
+    })
 }

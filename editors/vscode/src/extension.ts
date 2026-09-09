@@ -92,7 +92,8 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidChangeConfiguration((change) => {
       if (
         change.affectsConfiguration("zen.server.path") ||
-        change.affectsConfiguration("zen.server.args")
+        change.affectsConfiguration("zen.server.args") ||
+        change.affectsConfiguration("zen.sourceRoots")
       ) {
         void restartServer("server configuration changed");
       }
@@ -138,6 +139,9 @@ async function startClient(): Promise<void> {
   const config = vscode.workspace.getConfiguration("zen");
   const configured = config.get<string>("server.path", "./zen");
   const args = config.get<string[]>("server.args", ["lsp"]);
+  // The server validates mappings against its workspace and reports invalid
+  // entries during initialization. Preserve the supplied JSON for that check.
+  const sourceRoots = config.get<unknown>("sourceRoots", []);
 
   const command = await resolveServerCommand(configured, isSet(config, "server.path"));
   output.appendLine(`zen: server command: ${command} ${args.join(" ")}`);
@@ -183,6 +187,10 @@ async function startClient(): Promise<void> {
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ language: "zen" }],
     outputChannel: output,
+    initializationOptions:
+      Array.isArray(sourceRoots) && sourceRoots.length === 0
+        ? undefined
+        : { sourceRoots },
     // Builds read imported modules from disk as well as open overlays. Tell
     // the server when one of those disk inputs changes so it can retire a
     // cached whole-program build instead of keeping stale exports/types.

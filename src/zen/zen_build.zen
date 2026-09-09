@@ -31,7 +31,7 @@ BuildArgs, Emission, Permutation = std.build
 
 slash_for, under = zen.zen_path
 unit_at, candidate, joined, relative_to = zen.zen_path
-root_for, std_root_for = zen.zen_path
+root_for, std_root_for, SourceRoot = zen.zen_path
 ENTRY, entry_of = zen.zen_path
 Unit = zen.zen_path
 
@@ -424,9 +424,14 @@ Build* = {
     // code or writing diagnostics to stdout.
     whole* = (self :: @Self, named: str, docs: Map<str, str>)
              Res<Checker, AllocError> {
+        entry = entry_of(self.env, self.alloc, self.root, named).try();
+        self.whole(entry, docs)
+    }
+
+    whole* = (self :: @Self, entry: Unit, docs: Map<str, str>)
+             Res<Checker, AllocError> {
         self.overlay  = docs;
         self.speaking = false;
-        entry         = entry_of(self.env, self.alloc, self.root, named).try();
         self.walk(entry).try();
         self.checked()
     }
@@ -587,7 +592,13 @@ check_workspace* = (
 ) Res<WorkspaceCheck, AllocError> {
     b ::= a.Build(env, root);
     b.set_std_root(std_root_for(env, a));
-    c = b.whole(entry, docs).try();
+    // Editor entries outside the import namespace retain their exact path for
+    // overlays and diagnostics; unit_at derives the matching CLI ../ identity.
+    unit = entry.starts_with("/").match({
+        true  => unit_at(a, root, entry).try(),
+        false => entry_of(env, a, root, entry).try(),
+    });
+    c    = b.whole(unit, docs).try();
     Ok(WorkspaceCheck(b: b, c: c))
 }
 
@@ -597,9 +608,15 @@ CheckedBuild* = {
     c*: Checker,
 }
 
-check_build* = (env: Env, a: Alloc, workspace: str, path: str, text: str)
-               Res<CheckedBuild, AllocError> {
-    root = root_for(env, a, workspace, path);
+check_build* = (
+    env       : Env,
+    a         : Alloc,
+    workspace : str,
+    path      : str,
+    text      : str,
+    mappings  : Res<Vec<SourceRoot>>
+) Res<CheckedBuild, AllocError> {
+    root = root_for(env, a, workspace, path, mappings);
     rel  = relative_to(root, path);
     docs ::= a.Map<str, str>();
     docs.set(path, text).try();

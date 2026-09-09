@@ -6,7 +6,7 @@ Vec, Map = std.collections
 Alloc, AllocError, Arena = std.mem
 Note = std.parse.parse_diag
 Checker = sema.sema_check
-root_for, relative_to = zen.zen_path
+root_for, relative_to, SourceRoot = zen.zen_path
 TextRange, text_range = lsp.lsp_pos
 obj, arr, Nest, written, to_json = std.json
 write_frame = lsp.lsp_frame
@@ -34,9 +34,10 @@ WorkspaceTurn = {
     uris: Vec<str>,
     docs: Map<str, str>,
     temp: Alloc,
+    roots: Res<Vec<SourceRoot>>,
 
     root = (self: @Self, path: str) str {
-        root_for(self.env, self.temp, self.workspace, path)
+        root_for(self.env, self.temp, self.workspace, path, self.roots)
     }
 
     text = (self: @Self, uri: str) str {
@@ -46,6 +47,14 @@ WorkspaceTurn = {
 
 Diagnostics* = {
     a: Alloc,
+    roots :: Res<Vec<SourceRoot>> = None,
+
+    set_roots* = (self :: @Self, roots: Vec<SourceRoot>) () {
+        self.roots = Ok(roots);
+        self.fresh = false;
+        self.built.invalidate();
+    }
+
 
     owed :: str = "",
 
@@ -100,7 +109,8 @@ Diagnostics* = {
             workspace: workspace,
             uris: uris,
             docs: docs,
-            temp: t
+            temp: t,
+            roots: self.roots
         );
         root = turn.root(path);
         self.built.ensure(
@@ -121,7 +131,8 @@ Diagnostics* = {
             workspace: workspace,
             uris: uris,
             docs: docs,
-            temp: t
+            temp: t,
+            roots: self.roots
         );
         self.clear_closed(turn, out).try();
         self.owed.is_empty().match({

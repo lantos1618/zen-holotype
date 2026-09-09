@@ -12,6 +12,10 @@ Build the tool against the compiler source and standard library:
 cc -O1 build/source_health/zen-usage.c -o build/source_health/zen-usage -pthread -lm
 ```
 
+The checkout's VS Code settings map `scripts/zen_usage.zen` to the `src`
+import root. This requires Zen extension 0.0.5 or newer; see
+[editor source-root configuration](../editors/README.md#import-roots-for-tools-outside-the-source-directory).
+
 Invoke the resulting executable as:
 
 ```

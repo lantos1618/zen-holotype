@@ -1,0 +1,242 @@
+Server, serve = lsp.lsp_serve
+write_frame, frame_at = lsp.lsp_frame
+write_text, Jsons, read = std.json
+SourceRoot, root_for, module_name = zen.zen_path
+FsError = std.env
+
+DOC: str = "Point = lib.helper\nmain = () i32 { item = Point(answer: 42); item.answer }\n"
+BAD: str = "Point = lib.helper\nmain = () i32 { missing }\n"
+
+Protocol = {
+    a: Alloc,
+    root: str,
+    uri: str,
+
+    initialize = (self: @Self, mappings: str, out :: String) Res<(), AllocError> {
+        body ::= self.a.String().try();
+        body.add(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":"
+        ).try();
+        write_text(
+            self.a.String("file://{}/", self.root).try().view(),
+            body
+        ).try();
+        body.add(",\"initializationOptions\":{\"sourceRoots\":").try();
+        body.add(mappings).try();
+        body.add("}}}").try();
+        write_frame(body.view(), out)
+    }
+
+    open = (self: @Self, uri: str, text: str, out :: String) Res<(), AllocError> {
+        body ::= self.a.String().try();
+        body.add(
+            "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":"
+        ).try();
+        write_text(uri, body).try();
+        body.add(",\"text\":").try();
+        write_text(text, body).try();
+        body.add("}}}").try();
+        write_frame(body.view(), out)
+    }
+
+    query = (self: @Self, method: str, character: usize, out :: String) Res<(), AllocError> {
+        body ::= self.a.String().try();
+        body.add("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":").try();
+        write_text(method, body).try();
+        body.add(",\"params\":{\"textDocument\":{\"uri\":").try();
+        write_text(self.uri, body).try();
+        body.add("},\"position\":{\"line\":1,\"character\":").try();
+        body.fmt("{}", character).try();
+        body.add("}}}").try();
+        write_frame(body.view(), out)
+    }
+
+    diagnostics = (self: @Self, text: str, uri: str, count: usize) Res<bool, AllocError> {
+        at: usize ::= 0;
+        found     ::= false;
+        loop(() { at < text.len }, (h) {
+            frame_at(text, at).match({
+                Err(_)    => h.break(),
+                Ok(frame) => {
+                    tree ::= self.a.Jsons();
+                    read(self.a, tree, frame.body).match({
+                        Err(_) => (),
+                        Ok(id) => {
+                            params = tree.field(id, "params").value_or(id);
+                            target = tree.text_at(params, "uri").value_or("");
+                            target.eq(uri).then(() {
+                                list  = tree.field(params, "diagnostics").value_or(id);
+                                found = tree.count(list) == count;
+                            });
+                        },
+                    });
+                    at = frame.next;
+                },
+            });
+        });
+        Ok(found)
+    }
+}
+
+main = (env: Env) Res<(), AllocError | FsError> {
+    a      = env.mem.alloc();
+    parent = Path(env.argv.get(0).value_or("")).parent().value_or(Path(""));
+    root   = a.String("{}/project", parent.text).try().view();
+    env.fs.mkdir(root).try();
+    env.fs.mkdir(a.String("{}/src", root).try().view()).try();
+    env.fs.mkdir(a.String("{}/tools", root).try().view()).try();
+    env.fs.mkdir(a.String("{}/flat", root).try().view()).try();
+    env.fs.mkdir(a.String("{}/src/lib", root).try().view()).try();
+    env.fs.mkdir(a.String("{}/flat/lib", root).try().view()).try();
+    env.fs.write(
+        a.String("{}/build.zen", root).try().view(),
+        "marker = 0\n"
+    ).try();
+    env.fs.write(
+        a.String("{}/src/lib/helper.zen", root).try().view(),
+        "Point* = { answer*: i32 }\n"
+    ).try();
+    env.fs.write(a.String("{}/tools/tool.zen", root).try().view(), BAD).try();
+    env.fs.write(
+        a.String("{}/flat/build.zen", root).try().view(),
+        "marker = 0\n"
+    ).try();
+    env.fs.write(
+        a.String("{}/flat/lib/helper.zen", root).try().view(),
+        "Point* = { answer*: i32 }\n"
+    ).try();
+    env.fs.write(a.String("{}/flat/main.zen", root).try().view(), DOC).try();
+    uri      = a.String("file://{}/tools/tool.zen", root).try().view();
+    protocol = Protocol(a: a, root: root, uri: uri);
+    server ::= a.Server(env);
+    input  ::= a.String().try();
+    protocol.initialize(
+        "[{\"path\":\"tools/tool.zen\",\"root\":\"src\"}]",
+        input
+    ).try();
+    protocol.open(uri, DOC, input).try();
+    output ::= a.String().try();
+    serve(server, input.view(), output).try();
+    println(
+        "outside entry uses unsaved overlay: {}",
+        protocol.diagnostics(output.view(), uri, 0).try()
+    );
+
+    hover ::= a.String().try();
+    protocol.query("textDocument/hover", 43, hover).try();
+    hovered ::= a.String().try();
+    serve(server, hover.view(), hovered).try();
+    println(
+        "hover resolves the mapped import: {}",
+        hovered.view().contains("Point") && !hovered.view().contains("\"result\":null")
+    );
+    definition ::= a.String().try();
+    protocol.query("textDocument/definition", 24, definition).try();
+    defined ::= a.String().try();
+    serve(server, definition.view(), defined).try();
+    target = a.String("file://{}/src/lib/helper.zen", root).try().view();
+    println(
+        "definition uses source root URI: {}",
+        defined.view().contains(target)
+    );
+
+    broken ::= a.String().try();
+    protocol.open(uri, BAD, broken).try();
+    errors ::= a.String().try();
+    serve(server, broken.view(), errors).try();
+    println(
+        "outside diagnostic URI is exact: {}",
+        protocol.diagnostics(errors.view(), uri, 1).try()
+    );
+    fixed ::= a.String().try();
+    protocol.open(uri, DOC, fixed).try();
+    cleared ::= a.String().try();
+    serve(server, fixed.view(), cleared).try();
+    println(
+        "outside diagnostics clear: {}",
+        protocol.diagnostics(cleared.view(), uri, 0).try()
+    );
+
+    partial ::= a.String().try();
+    protocol.open(
+        uri,
+        "Point = lib.helper\nmain = () i32 { item = Point(answer: 42); item. }\n",
+        partial
+    ).try();
+    ignored ::= a.String().try();
+    serve(server, partial.view(), ignored).try();
+    completion ::= a.String().try();
+    protocol.query("textDocument/completion", 47, completion).try();
+    completed ::= a.String().try();
+    serve(server, completion.view(), completed).try();
+    println(
+        "patched completion keeps mapped root: {}",
+        completed.view().contains("\"label\":\"answer\"")
+    );
+
+    flat_uri = a.String("file://{}/flat/main.zen", root).try().view();
+    local ::= a.String().try();
+    protocol.open(flat_uri, DOC, local).try();
+    locally ::= a.String().try();
+    serve(server, local.view(), locally).try();
+    println(
+        "unmapped nested project keeps local imports: {}",
+        protocol.diagnostics(locally.view(), flat_uri, 0).try()
+    );
+
+    mappings ::= a.Vec<SourceRoot>();
+    mappings.add(SourceRoot(
+        path: a.String("{}/tools", root).try().view(),
+        root: root
+    )).try();
+    src  = a.String("{}/src", root).try().view();
+    path = a.String("{}/tools/tool.zen", root).try().view();
+    mappings.add(SourceRoot(path: path, root: src)).try();
+    println(
+        "longest mapping wins: {}",
+        root_for(env, a, root, path, Ok(mappings)).eq(src)
+    );
+    other = a.String("{}/tools/tool.zenx", root).try().view();
+    println(
+        "file mapping has no prefix leak: {}",
+        root_for(env, a, root, other, Ok(mappings)).eq(root)
+    );
+    filesystem ::= a.Vec<SourceRoot>();
+    filesystem.add(SourceRoot(path: "/tools", root: "/src")).try();
+    println("filesystem root preserves path boundaries: {}",
+        root_for(env, a, "/", "/tools/tool.zen", Ok(filesystem)).eq("/src")
+            && module_name(a, "/", "/tool.zen").try().eq("tool"));
+
+    cli_name = module_name(
+        a,
+        src,
+        a.String("{}/../tools/tool.zen", src).try().view()
+    ).try();
+    println(
+        "outside entry keeps CLI module identity: {}",
+        module_name(a, src, path).try().eq(cli_name)
+    );
+
+    relocated = module_name(
+        a,
+        "/another/workspace/src",
+        "/another/workspace/tools/tool.zen"
+    ).try();
+    println(
+        "module identity survives workspace relocation: {}",
+        relocated.eq(cli_name)
+    );
+
+    ["[{\"path\":\"../tools\",\"root\":\"src\"}]", "{}", "[{}]", "[{\"path\":\"tools\",\"root\":\"/outside\"}]", "[{\"path\":\"tools\",\"root\":\"src\"},{\"path\":\"tools\",\"root\":\".\"}]"].loop((bad) {
+        refused ::= a.Server(env);
+        request ::= a.String().try();
+        protocol.initialize(bad, request).try();
+        answer ::= a.String().try();
+        serve(refused, request.view(), answer).try();
+        println(
+            "invalid mapping rejected: {}",
+            answer.view().contains("-32602")
+        );
+    });
+    Ok(())
+}

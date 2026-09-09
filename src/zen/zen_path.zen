@@ -3,12 +3,13 @@
 // A module may live at `<name>.zen` or `<name>/<name>.zen`; its qualified name
 // is the root-relative path without the extension and with dot separators.
 //
-// Paths stored in source spans are relative to the compilation root so builds
-// remain independent of the checkout location.
+// Build source spans are relative to the compilation root. Editor entries
+// outside that root retain their absolute path for overlays and URI replies.
 
 Alloc, AllocError = std.mem
 str, String = std.text
 Range, Path = std.core
+Vec = std.collections
 join_path = std.core.path
 
 QualifiedName = std.ast.ast_span
@@ -16,8 +17,17 @@ ZEN_STD_ENV = std.build
 
 // Derive a module's canonical dotted name from its root-relative path.
 module_name* = (a: Alloc, root: str, path: str) Res<str, AllocError> {
-    inner = path.slice(root.len + 1, path.len - EXT_BYTES);
-    out ::= a.String().try();
+    base ::= root;
+    out  ::= a.String().try();
+    // An editor can check a tool outside its selected import namespace. Keep
+    // the same dotted ../ identity used by an explicit CLI entry, while its
+    // Unit retains the original filesystem path for overlays and diagnostics.
+    loop(() { !path.under(base) && !base.is_empty() }, (h) {
+        base = Path(base).parent().value_or(Path("")).text;
+        out.add("...").try();
+    });
+    relative = relative_to(base, path);
+    inner    = relative.slice(0, relative.len - EXT_BYTES);
     Range(0, inner.len).loop((h, i) {
         out.add(dot_for(inner.index(i))).try();
     });
@@ -62,7 +72,7 @@ std_root_beside_program = (env: Env, a: Alloc) str {
 // Infer an editor compilation root without climbing above `floor`. Folder
 // modules (`<name>/<name>.zen`) are climbed through. A project `build.zen`
 // selects its `src` child when the open file is beneath that child.
-root_for* = (env: Env, a: Alloc, floor: str, path: str) str {
+inferred_root = (env: Env, a: Alloc, floor: str, path: str) str {
     dir ::= Path(path).parent().value_or(Path("")).text;
     loop(() { dir.len > floor.len && holds_its_own_name(env, a, dir) }, (h) {
         dir = Path(dir).parent().value_or(Path("")).text;
@@ -80,6 +90,38 @@ root_for* = (env: Env, a: Alloc, floor: str, path: str) str {
         true  => source_root(a, marked, path),
         false => settled,
     });
+}
+
+// Explicit editor mappings select an import namespace for a document without
+// changing discovery for unrelated examples, tests or nested projects.
+SourceRoot* = {
+    path*: str,
+    root*: str,
+}
+
+root_for* = (
+    env      : Env,
+    a        : Alloc,
+    floor    : str,
+    path     : str,
+    mappings : Res<Vec<SourceRoot>>
+) str {
+    chosen        ::= "";
+    length: usize ::= 0;
+    mappings.match({
+        None        => (),
+        Ok(entries) => entries.loop((entry) {
+            (path.under(floor) && (path.eq(entry.path) || path.under(entry.path))
+                && entry.path.len > length).then(() {
+                chosen = entry.root;
+                length = entry.path.len;
+            });
+        }),
+    });
+    chosen.is_empty().match({
+        true  => inferred_root(env, a, floor, path),
+        false => chosen,
+    })
 }
 
 // A project marker does not necessarily mark the module namespace root.
@@ -113,16 +155,22 @@ holds_build_zen* = (env: Env, a: Alloc, dir: str) bool {
 // Return a root-relative path, or the original path when it is outside root.
 relative_to* = (root: str, path: str) str {
     path.under(root).match({
-        true  => path.slice(root.len + 1, path.len),
+        true  => path.slice(
+            root.eq("/").match({ true => 1, false => root.len + 1 }),
+            path.len
+        ),
         false => path,
     });
 }
 
 // `path` names something strictly inside the directory `root`.
 under* = (path: str, root: str) bool {
-    path.len > root.len + 1
-        && path.slice(0, root.len).eq(root)
-        && path.index(root.len) == '/'
+    root.eq("/").match({
+        true  => path.len > 1 && path.starts_with("/"),
+        false => path.len > root.len + 1
+            && path.slice(0, root.len).eq(root)
+            && path.index(root.len) == '/',
+    })
 }
 
 EXT_BYTES : usize = 4
