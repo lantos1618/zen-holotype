@@ -17,6 +17,14 @@ SYMBOL_MAP ?=
 PY      ?= python3
 ROOT    ?= src
 
+# Development lanes isolate generated C, objects, manifests, and the compiler.
+# Canonical build/verify paths remain fixed; lane variables affect dev-* only.
+DEV_DIR ?= build/dev
+DEV_ZEN ?= $(DEV_DIR)/zen
+FILTER ?=
+TEST_J ?= $(J)
+TEST_ARGS ?=
+
 # HOW MANY C COMPILERS AT ONCE. `cc -O2` is superlinear in a translation
 # unit's size, and the backend's own output is the extreme case: the
 # 110,451-line single unit took 70.4s where the SAME code, emitted one
@@ -33,39 +41,56 @@ J       ?= $(shell nproc 2>/dev/null || echo 4)
 CACHE   ?= $(shell command -v ccache 2>/dev/null)
 ZCC      = $(CACHE) $(CC)
 
-.PHONY: all build seed test verify differential warnings lint parse cap dupcomments faults lextile determinism grammar fmt asan ubsan leak profile clean help
+.PHONY: all build dev-build dev-check dev-run bootstrap buildcheck runnercheck seed test verify differential warnings lint parse cap dupcomments faults lextile determinism fixpoint grammar fmt asan ubsan leak profile clean help
 
 # These gates share ./zen, build/, and grammar/zen.so. Keep their dependency
 # graphs serial even when an operator invokes `make -j verify`.
-.NOTPARALLEL: verify test fmt determinism differential warnings ubsan
+.NOTPARALLEL: verify test fmt determinism fixpoint differential warnings ubsan
 
 all: test
 
-## build: what a newcomer runs. needs only a C compiler.
-##
-## TWO steps and not one, because the compiler emits C and does not link:
-## `zen build <root> --emit-c-dir <dir>` is the whole interface (see
-## src/zen/zen_cli.zen). This target used to say `-o zen-new` with no
-## --emit-c, which the driver accepts, writes nothing for, and exits 0
-## on -- so `build` produced no binary and every target standing on it
-## (test, fmt, determinism) could not run at all.
-##
-## ONE FILE PER MODULE, NOT ONE PER PROGRAM. `--emit-c-dir` writes
-## build/c/<module>.c beside a build/c/zen.h; `-j` then compiles 152
-## units at once instead of one of 110,451 lines, and each unit is a
-## `-c` compile a cache can skip. THE SEED IS STILL ONE FILE: `make
-## seed` writes seed/zen.c with `--emit-c -o`, and the line below
-## compiles it as one unit, because a newcomer must be able to build
-## this compiler out of exactly one committed C file.
+## build: bootstrap from the committed C seed, rebuilding only changed inputs.
+## Content hashes cover Zen sources, native dependencies, toolchain and flags.
+## C emission and linking must succeed before ./zen is atomically replaced.
+## `make clean build` discards the incremental state for a fresh bootstrap.
 build: seed/zen.c
-	@mkdir -p build/obj
-	$(ZCC) $(CFLAGS) -c seed/zen.c -o build/obj/seed.o
-	$(ZCC) $(CFLAGS) -c src/std/proc/proc.c -o build/obj/proc.o
-	$(CC) build/obj/seed.o build/obj/proc.o -o zen
-	rm -rf build/c && mkdir -p build/c
-	./zen build $(ROOT) --emit-c-dir build/c $(if $(strip $(SYMBOL_MAP)),--symbol-map $(SYMBOL_MAP))
-	ls build/c/*.c | xargs -P $(J) -I{} $(ZCC) $(CFLAGS) -c {} -o {}.o
-	$(CC) build/c/*.o build/obj/proc.o -o zen-new && mv zen-new zen
+	$(PY) scripts/build.py --root "$(ROOT)" --cc "$(CC)" --cache "$(CACHE)" \
+	  --cflags="$(CFLAGS)" --jobs "$(J)" $(if $(strip $(SYMBOL_MAP)),--symbol-map "$(SYMBOL_MAP)")
+
+## dev-build: build an isolated compiler; choose one DEV_DIR per worker.
+dev-build: seed/zen.c
+	$(PY) scripts/build.py --root "$(ROOT)" --build-dir "$(DEV_DIR)" --output "$(DEV_ZEN)" \
+	  --cc "$(CC)" --cache "$(CACHE)" --cflags="$(CFLAGS)" --jobs "$(J)"
+
+## dev-check: build the development compiler, then run FILTER-selected tests.
+## TEST_J controls test workers; TEST_ARGS forwards runner options such as timings.
+dev-check: dev-build
+
+## dev-run: run FILTER-selected tests with an existing DEV_ZEN, without rebuilding.
+## An empty FILTER runs the corpus; make verify remains the complete required gate.
+dev-check dev-run:
+	$(PY) tests/run.py --zen "$(DEV_ZEN)" --cc "$(CC)" --cc-cache "$(CACHE)" --jobs "$(TEST_J)" \
+	  $(if $(strip $(FILTER)),--filter "$(FILTER)") $(TEST_ARGS)
+
+## buildcheck: real-C cache invalidation and atomic publication regressions.
+buildcheck:
+	CC="$(CC)" $(PY) tests/quality/build_incremental.py
+
+## runnercheck: selection/report checks and optional real-C cache regressions.
+runnercheck:
+	$(PY) tests/quality/test_runner_parallel.py
+
+## bootstrap: full seed/source bootstrap using only a C compiler and shell tools.
+## This bypasses incremental state. Publish ./zen after both stages succeed.
+bootstrap: seed/zen.c
+	@mkdir -p build/bootstrap/obj
+	$(ZCC) $(CFLAGS) -c seed/zen.c -o build/bootstrap/obj/seed.o
+	$(ZCC) $(CFLAGS) -c src/std/proc/proc.c -o build/bootstrap/obj/proc.o
+	$(CC) build/bootstrap/obj/seed.o build/bootstrap/obj/proc.o -o build/bootstrap/zen-seed
+	rm -rf build/bootstrap/c && mkdir -p build/bootstrap/c
+	build/bootstrap/zen-seed build $(ROOT) --emit-c-dir build/bootstrap/c
+	ls build/bootstrap/c/*.c | xargs -P $(J) -I{} $(ZCC) $(CFLAGS) -c {} -o {}.o
+	$(CC) build/bootstrap/c/*.o build/bootstrap/obj/proc.o -o zen-new && mv zen-new zen
 
 ## seed: regenerate AND stage, in one target. never two commands —
 ## commit-then-regenerate ships a seed one change stale, and only a
@@ -84,14 +109,20 @@ seed: build
 ## docs/GENC_REFERENCE_MAP.md pointing into bootstrap/gen_c.py.
 ##
 test: build lint parse cap dupcomments faults lextile
-	$(PY) tests/run.py
+	$(PY) tests/run.py --zen ./zen --cc "$(CC)" --cc-cache "$(CACHE)" --jobs "$(TEST_J)"
 
 ## verify: the authoritative repository-green door used by CI and releases.
 ##
 ## Keep this target as the single list of required gates. Shared prerequisites
 ## are built once per invocation, then formatting and determinism inspect the
 ## same compiler that ran the test suite.
-verify: test fmt determinism differential warnings ubsan
+verify: test fmt determinism fixpoint differential warnings ubsan buildcheck runnercheck
+
+## fixpoint: rebuilding the whole compiler preserves C and reproduces the seed.
+fixpoint: build
+	$(PY) -m unittest discover -s tests/determinism -p 'test_*.py'
+	$(PY) tests/determinism/fixpoint.py --zen ./zen --source "$(ROOT)" \
+	  --cc "$(CC)" --cflags="$(CFLAGS)" --cache "$(CACHE)" --jobs "$(J)"
 
 ## differential: classify maintained programs at the Zen, C, and process
 ## boundaries. Zen-accepted C rejection is always red; the manifest cannot

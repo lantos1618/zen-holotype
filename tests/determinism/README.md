@@ -281,3 +281,27 @@ holding `fixture/` and a copy of `src/std`, exactly as `tests/run.py` stages
 every corpus test and for the same reason. A consequence worth knowing: the
 gate compiles the whole of `std` too, which is most of the 22 kB it compares
 and most of what makes the comparison worth making.
+
+## Full compiler fixpoint
+
+`make fixpoint`, also required by `make verify`, runs `fixpoint.py` against the
+built compiler. It emits the full source tree, compiles those C units into a
+new compiler, and asks that compiler to emit the same tree. The file set, every
+C unit, and `zen.h` must be byte-identical. The rebuilt compiler must also emit
+the exact checked-in `seed/zen.c`; an empty output cannot pass.
+
+This complements the small fixture's process, path, and module-order checks.
+`test_fixpoint.py` deliberately changes C bytes, header bytes, and the file set,
+and supplies incomplete/empty emissions to verify rejection. The full command
+uses `build/fixpoint/stage`, guarded by a process lock. Every invocation removes
+any interrupted scratch output, emits into empty directories, recompiles (with
+optional ccache), links, runs both comparisons, and cleans up. Stable C paths
+allow repeated validations to reuse the C compiler's cache; no gate result or
+rebuilt executable is reused. It does not replace `./zen` or stage the seed.
+
+Direct invocations accept `--work-dir PATH` for an independent validation lane.
+Calls sharing a work directory serialize before cleanup; separate directories
+can run concurrently. Do not run `make clean` during validation. The harness
+checks stale-output removal, cleanup after failure, and process serialization.
+Compiler children inherit the lock, so killing the Python parent cannot let a
+new validation erase output that a surviving compiler is still writing.

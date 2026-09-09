@@ -25,6 +25,8 @@ Usage:
     tests/run.py --filter 'corpus/lex/*'  # a glob over the test id
     tests/run.py --filter 'example/*'     # just the worked example
     tests/run.py --jobs 8
+    tests/run.py --filter 'corpus/std/*' --shard 1/2 --timings
+    tests/run.py --timings-json build/test-timings.json
     tests/run.py --zen build/zen          # some other build of the compiler
 """
 
@@ -32,6 +34,9 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import fcntl
+import hashlib
+import json
 import os
 import re
 import shlex
@@ -227,6 +232,7 @@ class Result:
     ok: bool
     reasons: list[str] = field(default_factory=list)
     detail: str = ""
+    seconds: float = 0.0
 
 
 @dataclass
@@ -528,6 +534,34 @@ def select(tests: Iterable[Test], patterns: Sequence[str]) -> list[Test]:
     return chosen
 
 
+def shard_arg(value: str) -> tuple[int, int]:
+    """A shard is a one-based position in a positive number of workers."""
+    try:
+        index, count = map(int, value.split("/"))
+        if 1 <= index <= count:
+            return index, count
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("expected INDEX/COUNT with 1 <= INDEX <= COUNT")
+
+
+def positive_int(value: str) -> int:
+    try:
+        number = int(value)
+        if number > 0:
+            return number
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("expected a positive integer")
+
+
+def shard(tests: Sequence[Test], selection: tuple[int, int] | None) -> list[Test]:
+    if selection is None:
+        return list(tests)
+    index, count = selection
+    return sorted(tests, key=lambda test: test.tid)[index - 1::count]
+
+
 # ----------------------------------------------------------------- toolchain
 
 
@@ -540,6 +574,45 @@ class Toolchain:
     emit_argv: list[str]  # command prefix; the build arguments are appended
 
     src_root: Path | None = None  # the tree every test is compiled against
+    modules: dict[str, Path] = field(default_factory=dict, init=False)
+    imports: dict[str, frozenset[str]] = field(default_factory=dict, init=False)
+    source_state: dict[Path, tuple[int, ...]] = field(default_factory=dict, init=False)
+    c_compiler: CCompiler | None = None
+
+    def __post_init__(self) -> None:
+        # One import manifest per invocation, prepared before worker threads.
+        # Staged files remain private copies; only source-tree discovery is shared.
+        if self.src_root and self.src_root.is_dir():
+            self.source_state = self.current_source_state()
+            self.modules = {entry.name: entry for entry in self.src_root.iterdir()}
+            self.imports = {
+                name: frozenset(_modules_named_in(entry))
+                for name, entry in self.modules.items() if entry.is_dir()
+            }
+            self.check_source_state()
+
+    def current_source_state(self) -> dict[Path, tuple[int, ...]]:
+        if self.src_root is None:
+            return {}
+        try:
+            entries = list(self.src_root.iterdir())
+            paths = [self.src_root, *entries]
+            for entry in entries:
+                if entry.is_dir():
+                    paths.extend(entry.rglob("*.zen"))
+            state = {}
+            for path in paths:
+                info = path.stat()
+                state[path] = (info.st_dev, info.st_ino, info.st_size,
+                               info.st_mtime_ns, info.st_ctime_ns, info.st_mode)
+            return state
+        except OSError as exc:
+            raise HarnessError(f"cannot inspect compiler source tree: {exc}") from exc
+
+    def check_source_state(self) -> None:
+        if self.current_source_state() != self.source_state:
+            raise HarnessError("compiler sources changed during this test run; "
+                               "rerun after edits finish (the import manifest is per invocation)")
 
     def command(self, source: Path, out_c: Path, root: Path,
                 entry: str | None = None) -> list[str]:
@@ -555,7 +628,9 @@ class Toolchain:
         # renamed to `main.zen`: every must-fail position assertion names the
         # file it was written in, so renaming reddens hundreds of expectations
         # to paper over a missing flag. That gap scored the corpus 38/393.
-        argv = [*self.emit_argv, "build", str(root)]
+        # Select the staged library even when this binary has a sibling src/std
+        # or the invoking shell supplies ZEN_STD for another development lane.
+        argv = [*self.emit_argv, "build", str(root), "--std", str(root)]
         if entry:
             argv += ["--entry", entry]
         return [*argv, "--emit-c", "-o", str(out_c)]
@@ -567,7 +642,9 @@ def make_toolchain(args: argparse.Namespace) -> Toolchain:
         binary = REPO_ROOT / binary
     if not (binary.is_file() and os.access(binary, os.X_OK)):
         raise HarnessError(f"no executable zen compiler at {binary}. Build one (`make build`).")
-    return Toolchain("zen", [str(binary)], src_root=REPO_ROOT / "src")
+    return Toolchain("zen", [str(binary)], src_root=REPO_ROOT / "src",
+                     c_compiler=CCompiler(args.cc, shlex.split(args.cc_flags),
+                                          args.cc_cache, args.cc_work_dir, args.timeout))
 
 
 # ------------------------------------------------------------------- running
@@ -589,6 +666,7 @@ def run_process(
     cwd: Path | None = None,
     feed: bytes | None = None,
     env: dict[str, str] | None = None,
+    pass_fds: tuple[int, ...] = (),
 ) -> Run:
     """`feed` is the bytes on the process's stdin; None is /dev/null.
 
@@ -606,6 +684,7 @@ def run_process(
             stderr=subprocess.PIPE,
             timeout=timeout,
             env=env,
+            pass_fds=pass_fds,
         )
     except FileNotFoundError as exc:
         raise HarnessError(f"cannot execute {argv[0]!r}: {exc}") from exc
@@ -618,6 +697,55 @@ def run_process(
     if signalled:
         code = 128 + (-code)
     return Run(argv, code, proc.stdout, proc.stderr, False, signalled)
+
+
+@dataclass
+class CCompiler:
+    command: str
+    flags: list[str]
+    cache: str
+    work_dir: Path
+    timeout: float
+
+    def build(self, tid: str, source: Path, binary: Path, native: list[str]) -> Run:
+        cacheable = bool(self.cache)
+        if cacheable:
+            generated = source.read_bytes()
+            # Moving path-sensitive C would change its meaning. These uncommon
+            # programs retain the original compile path and still run normally.
+            cacheable = not (b"__FILE__" in generated or b"__BASE_FILE__" in generated
+                             or re.search(rb'(?m)^\s*#\s*include\s*"', generated))
+        if not cacheable:
+            return run_process([self.command, *self.flags, str(source), *native,
+                                "-o", str(binary)], self.timeout)
+
+        # Stable C paths allow ccache hits with debug info, while keeping the
+        # caller's working directory and relative compiler flags unchanged.
+        directory = self.work_dir.resolve() / hashlib.sha256(tid.encode()).hexdigest()
+        directory.mkdir(parents=True, exist_ok=True)
+        object_file = binary.with_suffix(".o")
+        with (directory / "compile.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            staged_c = directory / "out.c"
+            staged_object = directory / "out.o"
+            shutil.copyfile(source, staged_c)
+            # A compiler that returns zero without producing output must never
+            # reuse an object left by a previous invocation.
+            staged_object.unlink(missing_ok=True)
+            compiled = run_process([self.cache, self.command, *self.flags,
+                                    "-c", str(staged_c), "-o", str(staged_object)],
+                                   self.timeout, pass_fds=(lock.fileno(),))
+            if compiled.timed_out or compiled.code != 0:
+                return compiled
+            if not staged_object.is_file():
+                raise HarnessError("C compiler succeeded without producing an object")
+            shutil.copyfile(staged_object, object_file)
+        # Link and execute on every invocation; only C compilation is cached.
+        linked = run_process([self.command, *self.flags, str(object_file), *native,
+                              "-o", str(binary)], self.timeout)
+        linked.stdout = compiled.stdout + linked.stdout
+        linked.stderr = compiled.stderr + linked.stderr
+        return linked
 
 
 class LoopbackPeer:
@@ -896,8 +1024,8 @@ def stage(test: Test, tool: Toolchain, work: Path) -> Path:
         # line 51, which is a line only src/gen/gen.zen has. Whatever the test
         # defines wins, and the src module of that name is simply not staged.
         mine = {e.name for e in root.iterdir()}
-        available = {e.name: e for e in tool.src_root.iterdir()
-                     if e.name not in mine}
+        available = {name: entry for name, entry in tool.modules.items()
+                     if name not in mine}
         wanted = ({"std"} | _modules_named_in(root)) & set(available)
         # TRANSITIVE. `lsp` imports `sema`, so a test naming only `lsp`
         # needs `sema` staged too or it gets "module sema.sema not found". The
@@ -910,7 +1038,7 @@ def stage(test: Test, tool: Toolchain, work: Path) -> Path:
             entry = available[name]
             if not entry.is_dir():
                 continue
-            for dep in sorted(_modules_named_in(entry) & set(available)):
+            for dep in sorted(tool.imports[name] & set(available)):
                 if dep not in wanted:
                     wanted.add(dep)
                     frontier.append(dep)
@@ -1100,9 +1228,7 @@ def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace
         if loopback is not None:
             loopback.close()
         raise
-    cc = run_process([args.cc, *shlex.split(args.cc_flags), str(out_c), *native,
-                      "-o", str(binary)],
-                     args.timeout)
+    cc = tool.c_compiler.build(test.tid, out_c, binary, native)
     if cc.timed_out or cc.code != 0:
         if loopback is not None:
             loopback.close()
@@ -1278,6 +1404,7 @@ def stage_verdict(result: Result, current: int) -> tuple[Result, bool]:
             result.test, False,
             [f"deferred to stage {stage_at}, but it passes at stage {current}: "
              f"delete {name} -- the stage arrived"],
+            seconds=result.seconds,
         ), False
     return result, True
 
@@ -1455,11 +1582,21 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--cc-flags",
                    default=os.environ.get("CFLAGS", "-std=c11 -O0 -g -Werror=return-type"),
                    help="flags passed to the C compiler")
+    p.add_argument("--cc-cache", default="", metavar="COMMAND",
+                   help="optional ccache executable; caches C objects, never test verdicts")
+    p.add_argument("--cc-work-dir", type=Path, default=REPO_ROOT / "build/test-native",
+                   help="locked stable C paths used with --cc-cache")
     p.add_argument("--tests", default=str(TESTS_DIR), help="the tests/ directory")
     p.add_argument("--filter", action="append", default=[], metavar="GLOB",
                    help="select tests whose id matches (repeatable)")
     p.add_argument("--list", action="store_true", help="print selected test ids and exit")
-    p.add_argument("--jobs", "-j", type=int, default=os.cpu_count() or 1)
+    p.add_argument("--jobs", "-j", type=positive_int, default=os.cpu_count() or 1)
+    p.add_argument("--shard", type=shard_arg, metavar="INDEX/COUNT",
+                   help="run a disjoint one-based shard of the sorted filtered tests")
+    p.add_argument("--timings", nargs="?", type=positive_int, const=10, metavar="N",
+                   help="report the N slowest tests (default: 10)")
+    p.add_argument("--timings-json", type=Path, metavar="PATH",
+                   help="write all test durations and verdicts as JSON")
     p.add_argument("--stage", type=int, default=_current_stage(),
                    help="PLAN.md stage to grade against; a test whose .stage is "
                         "ahead of it is deferred rather than failed")
@@ -1512,7 +1649,14 @@ def main(argv: Sequence[str]) -> int:
         )
         return 2
 
-    selected = select(found.tests, args.filter)
+    matched = select(found.tests, args.filter)
+    selected = shard(matched, args.shard)
+
+    if matched and not selected:
+        index, count = args.shard
+        print(f"run.py: shard {index}/{count} selected no tests from "
+              f"{len(matched)} matching test(s)", file=sys.stderr)
+        return 2
 
     if args.list:
         for test in selected:
@@ -1539,6 +1683,8 @@ def main(argv: Sequence[str]) -> int:
         if any(t.kind in (CORPUS, EXAMPLE) for t in selected) \
                 and shutil.which(args.cc) is None:
             raise HarnessError(f"no C compiler on PATH: {args.cc!r} (pass --cc)")
+        if args.cc_cache and shutil.which(args.cc_cache) is None:
+            raise HarnessError(f"no C compiler cache on PATH: {args.cc_cache!r}")
     except HarnessError as exc:
         print(f"run.py: {exc}", file=sys.stderr)
         return 2
@@ -1547,23 +1693,27 @@ def main(argv: Sequence[str]) -> int:
     results: list[Result] = []
     deferred: list[Result] = []
     harness_errors: list[str] = []
+    started = time.perf_counter()
 
     def task(test: Test) -> Result:
+        test_started = time.perf_counter()
         try:
-            return run_one(test, tool, workroot, args)
+            result = run_one(test, tool, workroot, args)
         except HarnessError as exc:
             harness_errors.append(f"{test.tid}: {exc}")
-            return Result(test, False, [f"harness error: {exc}"])
+            result = Result(test, False, [f"harness error: {exc}"])
         except Exception as exc:  # a runner that tracebacks reports nothing
             harness_errors.append(f"{test.tid}: {type(exc).__name__}: {exc}")
-            return Result(test, False, [f"harness error: {type(exc).__name__}: {exc}"])
+            result = Result(test, False, [f"harness error: {type(exc).__name__}: {exc}"])
+        result.seconds = time.perf_counter() - test_started
+        return result
 
     try:
         print(
             f"run.py: {len(selected)} test(s) via {tool.name} "
             f"[{shlex.join(tool.emit_argv)}], {args.jobs} job(s)"
         )
-        with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
             for raw in pool.map(task, selected):
                 result, is_deferred = stage_verdict(raw, args.stage)
                 results.append(result)
@@ -1587,6 +1737,11 @@ def main(argv: Sequence[str]) -> int:
             print(f"run.py: work directory kept at {workroot}")
         else:
             shutil.rmtree(workroot, ignore_errors=True)
+
+    try:
+        tool.check_source_state()
+    except HarnessError as exc:
+        harness_errors.append(str(exc))
 
     failures = [r for r in results if not r.ok and r not in deferred]
     if failures:
@@ -1616,6 +1771,36 @@ def main(argv: Sequence[str]) -> int:
     print(f"\nrun.py: {passed} passed, {len(failures)} failed, "
           f"{len(deferred)} deferred, "
           f"{len(found.uncollected)} uncollected, {len(found.tests) - len(selected)} deselected")
+
+    elapsed = time.perf_counter() - started
+    deferred_ids = {result.test.tid for result in deferred}
+    if args.timings:
+        print(f"\nslowest tests (wall seconds per test; {elapsed:.3f}s batch):")
+        for result in sorted(results, key=lambda r: (-r.seconds, r.test.tid))[:args.timings]:
+            print(f"    {result.seconds:8.3f}s  {result.test.tid}")
+    if args.timings_json:
+        report = {
+            "version": 1,
+            "elapsed_seconds": elapsed,
+            "jobs": args.jobs,
+            "cc_cache": args.cc_cache or None,
+            "filter": args.filter,
+            "harness_errors": list(harness_errors),
+            "uncollected": found.uncollected,
+            "shard": ({"index": args.shard[0], "count": args.shard[1]}
+                      if args.shard else None),
+            "tests": [
+                {"id": result.test.tid, "seconds": result.seconds,
+                 "status": ("deferred" if result.test.tid in deferred_ids
+                            else "passed" if result.ok else "failed")}
+                for result in results
+            ],
+        }
+        try:
+            args.timings_json.parent.mkdir(parents=True, exist_ok=True)
+            args.timings_json.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        except OSError as exc:
+            harness_errors.append(f"cannot write timing report {args.timings_json}: {exc}")
 
     if harness_errors:
         for line in harness_errors:
