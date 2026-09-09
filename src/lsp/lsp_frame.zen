@@ -51,7 +51,7 @@ frame_at* = (bytes: str, at: usize) Res<Envelope, FrameFault> {
     blank = bytes.blank_at(at).try();
     len   = bytes.length_in(at, blank).try();
     body  = blank + BLANK.len;
-    (body + len <= bytes.len).match({
+    (len <= bytes.len - body).match({
         false => Err(FrameFault.Short(body)),
         true  => Ok(Envelope(
             body: bytes.slice(body, body + len),
@@ -67,14 +67,15 @@ short_by* = (bytes: str, at: usize) usize {
         Err(_)    => 0,
         Ok(blank) => bytes.length_in(at, blank).match({
             Err(_) => 0,
-            Ok(n)  => bytes.missing(blank + BLANK.len + n),
+            Ok(n)  => bytes.missing(blank + BLANK.len, n),
         }),
     })
 }
 
-missing = (bytes: str, end: usize) usize {
-    (end > bytes.len).match({
-        true  => end - bytes.len,
+missing = (bytes: str, body: usize, len: usize) usize {
+    available = bytes.len - body;
+    (len > available).match({
+        true  => len - available,
         false => 0,
     })
 }

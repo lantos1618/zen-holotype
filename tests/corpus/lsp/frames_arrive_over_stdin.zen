@@ -22,7 +22,7 @@ str, String, str_at = std.text
 Vec = std.collections
 Alloc, AllocError = std.mem
 Range = std.core
-frame_at, short_by = lsp
+frame_at, short_by = lsp.lsp_frame
 
 // How far a pass got, and how many messages it has answered in total.
 //
@@ -79,6 +79,19 @@ main = (env: Env) Res<i32, AllocError> {
         p.at
     );
     println("{} read(s), widest ask {}", r.calls, r.widest);
+    // A representable length may still overflow when added to its header.
+    huge ::= a.String("Content-Length: {}\r\n\r\n", usize.MAX).try();
+    println("largest length missing {}", short_by(huge.view(), 0) == usize.MAX);
+    println("largest length short {}", frame_at(huge.view(), 0).match({
+        Err(Short(at)) => at == huge.len(),
+        _              => false,
+    }));
+    huge.add("x").try();
+    println(
+        "largest length partial {}",
+        short_by(huge.view(), 0) == usize.MAX - 1
+    );
+    println("complete missing {}", short_by("Content-Length: 1\r\n\r\nxy", 0));
     Ok(0);
 }
 

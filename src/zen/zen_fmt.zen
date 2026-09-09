@@ -1,11 +1,11 @@
 // `zen fmt`: read, format, compare or write explicitly named files.
 
 Alloc, AllocError = std.mem
-str, String = std.text
+str = std.text
 FsError, fs_message = std.env
 
-scan, Source, Lexed = std.lex.lex
-Render, render = fmt.fmt
+scan, Source = std.lex
+render = fmt
 
 FmtJob = zen.zen_cli
 
@@ -35,105 +35,60 @@ Fmt = {
         Ok(());
     }
 
-    route = (self :: @Self, path: str) Res<Outcome, AllocError> {
+    route = (self: @Self, path: str) Res<Outcome, AllocError> {
         self.env.fs.is_dir(path).match({
-            true  => self.folder(path),
-            false => self.bytes_of(path),
+            true  => {
+                println(
+                    "{}: is a directory — zen fmt takes files (see `make fmt`)",
+                    path
+                );
+                Ok(Outcome.Failed)
+            },
+            false => self.env.fs.read(self.alloc, path).match({
+                Err(e)   => self.fs_fault(path, e),
+                Ok(text) => self.format_text(path, text.view()),
+            }),
         })
     }
 
-    folder = (self :: @Self, path: str) Res<Outcome, AllocError> {
-        println(
-            "{}: is a directory — zen fmt takes files (see `make fmt`)",
-            path
-        );
-        Ok(Outcome.Failed);
-    }
-
-    bytes_of = (self :: @Self, path: str) Res<Outcome, AllocError> {
-        self.env.fs.read(self.alloc, path).match({
-            Err(e)   => self.fs_fault(path, e),
-            Ok(text) => self.scan_it(path, text),
-        })
-    }
-
-    fs_fault = (self :: @Self, path: str, e: FsError) Res<Outcome, AllocError> {
+    fs_fault = (self: @Self, path: str, e: FsError) Res<Outcome, AllocError> {
         println("{}: {}", path, fs_message(e));
-        Ok(Outcome.Failed);
+        Ok(Outcome.Failed)
     }
 
-    // Lexical faults invalidate the spans the formatter would print from.
-    scan_it = (self :: @Self, path: str, text: String) Res<Outcome, AllocError> {
-        lexed = scan(self.alloc, Source(file: path, text: text.view())).try();
-        lexed.is_clean().match({
-            false => self.lex_diags(lexed),
-            true  => self.print_it(path, text, lexed),
-        })
-    }
-
-    lex_diags = (self :: @Self, lexed: Lexed) Res<Outcome, AllocError> {
-        lexed.diags.loop((h, d) { d.say(); });
-        Ok(Outcome.Failed);
-    }
-
-    print_it = (self :: @Self, path: str, text: String, lexed: Lexed)
-               Res<Outcome, AllocError> {
-        out = render(self.alloc, lexed).try();
-        (out.diags.len > 0).match({
-            true  => self.syntax_diags(out),
-            false => self.settled(path, text, out),
-        })
-    }
-
-    syntax_diags = (self :: @Self, out: Render) Res<Outcome, AllocError> {
-        out.diags.loop((h, d) { d.say(); });
-        Ok(Outcome.Failed);
-    }
-
-    // Never write output that changed the token stream.
-    settled = (self :: @Self, path: str, text: String, out: Render)
-              Res<Outcome, AllocError> {
-        out.faithful.match({
-            false => self.unfaithful(path),
-            true  => self.same_or_not(path, text, out),
-        })
-    }
-
-    unfaithful = (self :: @Self, path: str) Res<Outcome, AllocError> {
-        println(
-            "{}: zen fmt would have changed this file's tokens — left alone",
-            path
-        );
-        println("  that is a bug in src/fmt/, not in the file");
-        Ok(Outcome.Failed);
-    }
-
-    same_or_not = (self :: @Self, path: str, text: String, out: Render)
-                  Res<Outcome, AllocError> {
-        text.view().eq(out.text.view()).match({
-            true  => Ok(Outcome.Same),
-            false => self.change(path, out),
-        })
-    }
-
-    change = (self :: @Self, path: str, out: Render) Res<Outcome, AllocError> {
-        self.check.match({
-            true  => self.name_it(path),
-            false => self.write_it(path, out),
-        })
-    }
-
-    // Check mode names every file that differs.
-    name_it = (self :: @Self, path: str) Res<Outcome, AllocError> {
-        println("{}", path);
-        Ok(Outcome.Differs);
-    }
-
-    write_it = (self :: @Self, path: str, out: Render) Res<Outcome, AllocError> {
-        self.env.fs.write(path, out.text.view()).match({
-            Ok(_)  => Ok(Outcome.Wrote),
-            Err(e) => self.fs_fault(path, e),
-        })
+    format_text = (self: @Self, path: str, text: str) Res<Outcome, AllocError> {
+        outcome: Res<Outcome> = loop<Outcome>((h) {
+            lexed = scan(self.alloc, Source(file: path, text: text)).try();
+            // Lexical faults invalidate the spans the formatter would print from.
+            (!lexed.is_clean()).then(() {
+                lexed.diags.loop((d) { d.say(); });
+                h.break(Outcome.Failed);
+            });
+            out = render(self.alloc, lexed).try();
+            (out.diags.len > 0).then(() {
+                out.diags.loop((d) { d.say(); });
+                h.break(Outcome.Failed);
+            });
+            // Never write output that changed the token stream.
+            (!out.faithful).then(() {
+                println(
+                    "{}: zen fmt would have changed this file's tokens — left alone",
+                    path
+                );
+                println("  that is a bug in src/fmt/, not in the file");
+                h.break(Outcome.Failed);
+            });
+            text.eq(out.text.view()).then(() { h.break(Outcome.Same); });
+            self.check.then(() {
+                println("{}", path);
+                h.break(Outcome.Differs);
+            });
+            self.env.fs.write(path, out.text.view()).match({
+                Ok(_)  => h.break(Outcome.Wrote),
+                Err(e) => h.break(self.fs_fault(path, e).try()),
+            });
+        });
+        Ok(outcome.value_or(Outcome.Failed))
     }
 
     // Successful runs stay quiet; the exit code reflects the tally.

@@ -7,7 +7,7 @@ Call, Arg, Span, Pos = std.ast
 AllocError = std.mem
 str, String = std.text
 Range = std.core
-is_ident_start, is_ident_cont = std.core
+FmtAt, fmt_at, ends_run, arguments_taken = std.text.text_fmt
 TyId, is_float = sema.sema_ty
 Ctx = sema.sema_check
 GenFault = gen.gen_diag
@@ -180,7 +180,7 @@ write_format = (
     used  ::= 1;
     i     ::= 1;
     loop(i < end, (h) {
-        at = fmt_at(raw, i, end);
+        at = source_fmt_at(raw, i, end);
         at.ends_run().then(() {
             write_piece(be, raw, start, at.keep, stream).try();
             write_what(be, c, id, at, used, stream, ctx).try();
@@ -259,91 +259,18 @@ write_named = (
     })
 }
 
-// Classification shared with sink formatting. `keep` ends the preceding
-// chunk and `next` resumes the scan.
-
-FmtWhat* = Byte           // an ordinary byte: the literal run goes on
-         | Hole           // `{}`, filled by the next argument
-         | Pair           // `{{` or `}}`: the run keeps ONE of the two
-         | Named(str)     // `{name}`, filled by that name's binding
-         | NoName         // a `{` that meant a hole and closed on nothing
-
-FmtAt* = {
-    what*: FmtWhat,
-    keep*: usize,     // one past the last byte the run before this keeps
-    next*: usize,     // where the walk resumes
-}
-
-// Only `Byte` continues the current literal chunk.
-ends_run* = (at: FmtAt) bool {
-    at.what.match({ Byte => false, _ => true })
-}
-
-// Named holes carry their own value; only positional holes consume arguments.
-arguments_taken* = (what: FmtWhat) usize {
-    what.match({ Hole => 1, _ => 0 })
-}
-
-fmt_at* = (raw: str, i: usize, end: usize) FmtAt {
-    is_hole(raw, i, end).match({
-        true  => FmtAt(what: FmtWhat.Hole, keep: i, next: i + 2),
-        false => at_no_hole(raw, i, end),
-    })
-}
-
-// Doubled braces are literal escapes.
-at_no_hole = (raw: str, i: usize, end: usize) FmtAt {
-    is_doubled_brace(raw, i, end).match({
-        true  => FmtAt(what: FmtWhat.Pair, keep: i + 1, next: i + 2),
-        false => at_no_pair(raw, i, end),
-    })
-}
-
-// A named hole accepts an identifier, not an arbitrary expression.
-at_no_pair = (raw: str, i: usize, end: usize) FmtAt {
-    opens_name(raw, i, end).match({
-        false => FmtAt(what: FmtWhat.Byte, keep: i, next: i + step_of(raw, i)),
-        true  => at_ident(raw, i, end, ident_end(raw, i + 1, end)),
-    })
-}
-
-at_ident = (raw: str, i: usize, end: usize, j: usize) FmtAt {
-    ((j < end) && raw.index(j) == '}').match({
-        true  => FmtAt(
-            what: FmtWhat.Named(raw.slice(i + 1, j)),
-            keep: i,
-            next: j + 1
-        ),
-        false => FmtAt(what: FmtWhat.NoName, keep: i, next: i + 1),
+// Keep source literal escapes intact while using the shared format grammar.
+source_fmt_at* = (raw: str, i: usize, end: usize) FmtAt {
+    at = raw.fmt_at(i, end);
+    at.what.match({
+        Byte => FmtAt(what: at.what, keep: at.keep, next: i + step_of(raw, i)),
+        _    => at,
     })
 }
 
 // Index after the literal body, before the closing quote.
 body_end* = (raw: str) usize {
     (raw.len > 1).match({ true => raw.len - 1, false => 1 })
-}
-
-is_hole = (raw: str, i: usize, end: usize) bool {
-    (i + 1 < end) && raw.index(i) == '{' && raw.index(i + 1) == '}'
-}
-
-is_doubled_brace = (raw: str, i: usize, end: usize) bool {
-    (i + 1 < end) && raw.index(i) == raw.index(i + 1)
-        && (raw.index(i) == '{' || raw.index(i) == '}')
-}
-
-opens_name = (raw: str, i: usize, end: usize) bool {
-    (i + 1 < end) && raw.index(i) == '{'
-        && raw.index(i + 1).is_ident_start()
-}
-
-// Use the language's identifier predicates for named holes.
-ident_end = (raw: str, from: usize, end: usize) usize {
-    j ::= from;
-    loop(() { (j < end) && raw.index(j).is_ident_cont() }, (h) {
-        j = j + 1;
-    });
-    j
 }
 
 // Stable diagnostics shared by console and sink formatting.

@@ -109,6 +109,23 @@ Parameter*<T> = {
     repeatable :: bool = false,
     default :: str = "",
     has_default :: bool = false,
+
+    collides_with = (self: @Self, other: @Self) bool {
+        self.name.eq(other.name)
+            || self.has_alias(other.name)
+            || other.has_alias(self.name)
+            || self.aliases.find((alias) { other.has_alias(alias) }).match({
+                Ok(_) => true,
+                None  => false,
+            })
+    }
+
+    has_alias = (self: @Self, name: str) bool {
+        self.aliases.find((alias) { alias.eq(name) }).match({
+            Ok(_) => true,
+            None  => false,
+        })
+    }
 }
 
 Match*<T> = {
@@ -646,21 +663,14 @@ Command*<T> = {
                                 });
                             },
                         });
-                        self.check_parameter_links(parameter).match({
-                            Ok(diagnostic) => { found = Ok(diagnostic); },
-                            None           => (),
+                        self.check_parameter_links(parameter).when_ok((diagnostic) {
+                            found = Ok(diagnostic);
                         });
-                        Range(i + 1, self.parameters.len).loop((jh, j) {
-                            self.parameters.get(j).match({
-                                None      => (),
-                                Ok(other) => self.parameters_collide(parameter, other).then(() {
-                                    found = self.bad_declaration(
-                                        parameter.name,
-                                        "duplicate name or alias"
-                                    );
-                                    jh.break();
-                                }),
-                            });
+                        self.colliding_parameter(parameter, i + 1).when_ok((other) {
+                            found = self.bad_declaration(
+                                parameter.name,
+                                "duplicate name or alias"
+                            );
                         });
                     },
                 }),
@@ -755,33 +765,18 @@ Command*<T> = {
         found
     }
 
-    parameters_collide = (
+    colliding_parameter = (
         self: @Self,
-        left: Parameter<T>,
-        right: Parameter<T>
-    ) bool {
-        collision ::= left.name.eq(right.name)
-            || self.has_alias(left, right.name)
-            || self.has_alias(right, left.name);
-        Range(0, left.aliases.len).loop((h, i) {
-            left.aliases.get(i).match({
-                None      => (),
-                Ok(alias) => self.has_alias(right, alias).then(() {
-                    collision = true;
-                    h.break();
-                }),
-            });
-        });
-        collision
-    }
-
-    has_alias = (self: @Self, parameter: Parameter<T>, name: str) bool {
-        Range(0, parameter.aliases.len).find((i) {
-            parameter.aliases.get(i).match({
-                Ok(alias) => alias.eq(name),
+        parameter: Parameter<T>,
+        from: usize
+    ) Res<Parameter<T>> {
+        at = Range(from, self.parameters.len).find((i) {
+            self.parameters.get(i).match({
+                Ok(other) => parameter.collides_with(other),
                 None      => false,
             })
-        }).match({ Ok(_) => true, None => false })
+        }).try();
+        self.parameters.get(at)
     }
 
     has_parameter = (self: @Self, name: str) bool {

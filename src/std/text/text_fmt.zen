@@ -26,82 +26,113 @@ FmtStep* = {
     next*: usize,      // start of the next step; f.len when spent
 }
 
-opens_hole = (f: str, i: usize) bool {
-    f[i] == '{' && (i + 1) < f.len && f[i + 1] == '}'
+FmtWhat* = Byte           // an ordinary byte: the literal run goes on
+         | Hole           // `{}`, filled by the next argument
+         | Pair           // `{{` or `}}`: the run keeps ONE of the two
+         | Named(str)     // `{name}`, filled by that name's binding
+         | NoName         // a `{` that meant a hole and closed on nothing
+
+FmtAt* = {
+    what*: FmtWhat,
+    keep*: usize,     // one past the last byte the run before this keeps
+    next*: usize,     // where the walk resumes
 }
 
-opens_pair = (f: str, i: usize) bool {
-    (f[i] == '{' || f[i] == '}') && (i + 1) < f.len && f[i + 1] == f[i]
+// Only `Byte` continues the current literal chunk.
+ends_run* = (at: FmtAt) bool {
+    at.what.match({ Byte => false, _ => true })
 }
 
-opens_name = (f: str, i: usize) bool {
-    f[i] == '{' && (i + 1) < f.len && f[i + 1].is_ident_start()
+// Named holes carry their own value; only positional holes consume arguments.
+arguments_taken* = (what: FmtWhat) usize {
+    what.match({ Hole => 1, _ => 0 })
 }
 
-break_at = (f: str, from: usize) Res<usize> {
-    Range(from, f.len).find((i) {
-        f.opens_hole(i) || f.opens_pair(i) || f.opens_name(i)
+// Classify one byte position in [i, end), with end bounded by raw.len.
+// Source-language escapes belong to the caller; ordinary bytes advance by one.
+fmt_at* = (raw: str, i: usize, end: usize) FmtAt {
+    is_hole(raw, i, end).match({
+        true  => FmtAt(what: FmtWhat.Hole, keep: i, next: i + 2),
+        false => at_no_hole(raw, i, end),
     })
 }
 
-ident_end = (f: str, from: usize) usize {
-    Range(from, f.len).find((i) { f[i].is_ident_cont() == false }).match({
-        Ok(j) => j,
-        None  => f.len,
+// Doubled braces are literal escapes.
+at_no_hole = (raw: str, i: usize, end: usize) FmtAt {
+    is_doubled_brace(raw, i, end).match({
+        true  => FmtAt(what: FmtWhat.Pair, keep: i + 1, next: i + 2),
+        false => at_no_pair(raw, i, end),
     })
+}
+
+// A named hole accepts an identifier, not an arbitrary expression.
+at_no_pair = (raw: str, i: usize, end: usize) FmtAt {
+    opens_name(raw, i, end).match({
+        false => FmtAt(what: FmtWhat.Byte, keep: i, next: i + 1),
+        true  => at_ident(raw, i, end, ident_end(raw, i + 1, end)),
+    })
+}
+
+at_ident = (raw: str, i: usize, end: usize, j: usize) FmtAt {
+    ((j < end) && raw.index(j) == '}').match({
+        true  => FmtAt(
+            what: FmtWhat.Named(raw.slice(i + 1, j)),
+            keep: i,
+            next: j + 1
+        ),
+        false => FmtAt(what: FmtWhat.NoName, keep: i, next: i + 1),
+    })
+}
+
+is_hole = (raw: str, i: usize, end: usize) bool {
+    (i + 1 < end) && raw.index(i) == '{' && raw.index(i + 1) == '}'
+}
+
+is_doubled_brace = (raw: str, i: usize, end: usize) bool {
+    (i + 1 < end) && raw.index(i) == raw.index(i + 1)
+        && (raw.index(i) == '{' || raw.index(i) == '}')
+}
+
+opens_name = (raw: str, i: usize, end: usize) bool {
+    (i + 1 < end) && raw.index(i) == '{'
+        && raw.index(i + 1).is_ident_start()
+}
+
+// Use the language's identifier predicates for named holes.
+ident_end = (raw: str, from: usize, end: usize) usize {
+    j ::= from;
+    loop(() { (j < end) && raw.index(j).is_ident_cont() }, (h) {
+        j = j + 1;
+    });
+    j
+}
+
+break_at = (f: str, from: usize) Res<FmtAt> {
+    i ::= from;
+    found: Res<FmtAt> = loop<FmtAt>(() { i < f.len }, (h) {
+        at = f.fmt_at(i, f.len);
+        at.ends_run().then(() { h.break(at) });
+        i = i + 1;
+    });
+    found
 }
 
 // Call repeatedly with `step.next` until `next == f.len`.
 fmt_next* = (f: str, from: usize) FmtStep {
     f.break_at(from).match({
-        None  => f.rest_step(from),
-        Ok(i) => f.step_at(from, i),
-    });
+        None   => f.rest_step(from),
+        Ok(at) => f.step_at(from, at),
+    })
 }
 
-step_at = (f: str, from: usize, i: usize) FmtStep {
-    f.opens_hole(i).match({
-        true  => FmtStep(
-            literal: f.slice(from, i),
-            hole: true,
-            name: "",
-            bad: false,
-            next: i + 2
-        ),
-        false => f.step_not_hole(from, i),
-    });
-}
-
-step_not_hole = (f: str, from: usize, i: usize) FmtStep {
-    f.opens_pair(i).match({
-        true  => FmtStep(
-            literal: f.slice(from, i + 1),
-            hole: false,
-            name: "",
-            bad: false,
-            next: i + 2
-        ),
-        false => f.step_named(from, i, f.ident_end(i + 1)),
-    });
-}
-
-step_named = (f: str, from: usize, i: usize, j: usize) FmtStep {
-    ((j < f.len) && f[j] == '}').match({
-        true  => FmtStep(
-            literal: f.slice(from, i),
-            hole: true,
-            name: f.slice(i + 1, j),
-            bad: false,
-            next: j + 1
-        ),
-        false => FmtStep(
-            literal: f.slice(from, i),
-            hole: false,
-            name: "",
-            bad: true,
-            next: i + 1
-        ),
-    });
+step_at = (f: str, from: usize, at: FmtAt) FmtStep {
+    FmtStep(
+        literal: f.slice(from, at.keep),
+        hole: at.what.match({ Hole => true, Named(_) => true, _ => false }),
+        name: at.what.match({ Named(name) => name, _ => "" }),
+        bad: at.what.match({ NoName => true, _ => false }),
+        next: at.next,
+    )
 }
 
 rest_step = (f: str, from: usize) FmtStep {

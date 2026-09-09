@@ -4,7 +4,7 @@ Alloc = std.mem
 str, String = std.text
 Res = std.core
 Vec = std.collections
-H2Error, h2_error, FrameType, FLAG_PADDED, FLAG_PRIORITY, MAX_RECV = std.net.http2.http2_types
+H2Error, h2_error, FrameType, FrameFlag, SettingId, mask, MAX_RECV = std.net.http2.http2_types
 Stream, read, write = std.net.tls
 
 FRAME_HEADER_LEN: usize = 9
@@ -19,21 +19,21 @@ Frame* = {
     sid*:     usize,
     payload*: Vec<u8>,
 
-    has_flag* = (self: @Self, flag: u8) bool {
-        (self.flags / flag) % 2 == 1;
+    has_flag* = (self: @Self, flag: FrameFlag) bool {
+        (self.flags / flag.mask()) % 2 == 1;
     }
 
     // Locate application bytes after optional DATA/HEADERS prefixes.
     content_range* = (self: @Self) Res<H2Range, H2Error> {
         from: usize ::= 0;
         pad: usize  ::= 0;
-        self.has_flag(FLAG_PADDED).then(() {
+        self.has_flag(FrameFlag.Padded).then(() {
             p    = self.payload.get(0).ok_or(H2Error.DecodeFailed).try();
             pad  = p.to_usize();
             from = 1;
         });
         self.ftype.match({
-            Headers => self.has_flag(FLAG_PRIORITY).then(() {
+            Headers => self.has_flag(FrameFlag.Priority).then(() {
                 from = from + 5;
             }),
             _       => None,
@@ -117,9 +117,18 @@ write_frame* = (
     });
 }
 
-settings_add* = (blk :: String, id: usize, val: usize) Res<(), H2Error> {
-    blk.add_be(id, 2).try();
+settings_add* = (blk :: String, id: SettingId, val: usize) Res<(), H2Error> {
+    blk.add_be(id.discriminant().to_usize(), 2).try();
     blk.add_be(val, 4)
+}
+
+setting_at* = (payload: Vec<u8>, at: usize) Res<SettingId, H2Error> {
+    (at < payload.len && payload.len - at >= 2).ensure(
+        H2Error.DecodeFailed
+    ).try();
+    high = payload.get(at).ok_or(H2Error.DecodeFailed).try().to_u16();
+    low  = payload.get(at + 1).ok_or(H2Error.DecodeFailed).try().to_u16();
+    Ok(SettingId.from_discriminant(high * 256 + low))
 }
 
 u32_add* = (blk :: String, val: usize) Res<(), H2Error> {

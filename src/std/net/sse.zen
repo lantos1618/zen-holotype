@@ -3,7 +3,8 @@
 // complete event data or retry controls.
 
 Alloc, AllocError = std.mem
-str, String = std.text
+str, String, SplitPair = std.text
+BOM_FIRST, BOM_SECOND, BOM_THIRD = std.text.text_utf8
 Vec = std.collections
 Range = std.core
 
@@ -29,7 +30,7 @@ SseDecoder* = {
         event_a: Alloc,
         events :: Vec<SseEvent>
     ) Res<(), AllocError> {
-        bytes.loop((h, i, byte) {
+        bytes.loop((byte) {
             self.feed_byte(byte, event_a, events).try();
         });
         Ok(())
@@ -85,9 +86,9 @@ SseDecoder* = {
         first ::= self.first_line;
         self.first_line = false;
         (first && raw.len >= 3
-            && raw.index(0) == 239
-            && raw.index(1) == 187
-            && raw.index(2) == 191).match({
+            && raw.index(0) == BOM_FIRST
+            && raw.index(1) == BOM_SECOND
+            && raw.index(2) == BOM_THIRD).match({
             true  => raw.slice(3, raw.len),
             false => raw,
         });
@@ -103,7 +104,7 @@ SseDecoder* = {
             true  => self.dispatch(event_a, events),
             false => (line.index(0) == ':').match({
                 true  => Ok(()),
-                false => self.field(line, event_a, events),
+                false => self.field(line, events),
             }),
         })
     }
@@ -111,23 +112,21 @@ SseDecoder* = {
     field = (
         self   :: @Self,
         line   : str,
-        event_a: Alloc,
         events :: Vec<SseEvent>
     ) Res<(), AllocError> {
-        colon     = line.find(':');
-        name      = colon.match({
-            Ok(at) => line.slice(0, at),
-            None   => line,
+        parts     = line.split_once(':').match({
+            Ok(pair) => pair,
+            None     => SplitPair(
+                before: line,
+                after: line.slice(line.len, line.len),
+            ),
         });
-        raw_value = colon.match({
-            Ok(at) => line.slice(at + 1, line.len),
-            None   => line.slice(line.len, line.len),
-        });
+        raw_value = parts.after;
         value     = (raw_value.len > 0 && raw_value.index(0) == ' ').match({
             true  => raw_value.slice(1, raw_value.len),
             false => raw_value,
         });
-        name.match({
+        parts.before.match({
             "data"  => {
                 self.data.add(value).try();
                 self.data.add('\n')

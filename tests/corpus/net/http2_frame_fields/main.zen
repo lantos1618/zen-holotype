@@ -1,0 +1,61 @@
+FrameType, FrameFlag, SettingId, H2Error, mask = std.net.http2.http2_types
+Frame, settings_add, setting_at = std.net.http2.http2_frame
+
+Error = AllocError | H2Error
+
+main = (env: Env) Res<(), Error> {
+    a        ::= env.mem.alloc();
+    settings ::= a.String().try();
+    settings.settings_add(SettingId.HeaderTableSize, 0).try();
+    settings.settings_add(SettingId.InitialWindowSize, 16777216).try();
+    settings.settings_add(SettingId.from_discriminant(0xffff), 258).try();
+    settings.view().loop((byte) { println("{}", byte); });
+    fields ::= a.Vec<u8>();
+    settings.view().loop((byte) { fields.add(byte).try(); });
+    fields.setting_at(6).try().match({
+        InitialWindowSize => println("window setting decoded"),
+        _                 => println("wrong setting"),
+    });
+    fields.setting_at(12).try().match({
+        Unknown(code) => println("unknown setting {}", code),
+        _             => println("lost unknown setting"),
+    });
+    [fields.len - 1, usize.MAX].loop((at) {
+        fields.setting_at(at).match({
+            Err(DecodeFailed) => println("short setting refused"),
+            _                 => println("wrong setting bounds"),
+        });
+    });
+
+    // Padding, priority and an unknown flag can coexist on a HEADERS frame.
+    payload ::= a.Vec<u8>();
+    [2, 0, 0, 0, 0, 0, 'x', 'y', 0, 0].loop((byte: u8) {
+        payload.add(byte).try();
+    });
+    frame = Frame(
+        ftype: FrameType.Headers,
+        flags: 0xad,
+        sid: 1,
+        payload: payload
+    );
+    range = frame.content_range().try();
+    println("content {} {}", range.from, range.len);
+    println(
+        "flags {} {} {}",
+        frame.has_flag(FrameFlag.EndStream),
+        frame.has_flag(FrameFlag.EndHeaders),
+        frame.has_flag(FrameFlag.Priority)
+    );
+    println("ack bit {}", FrameFlag.Ack.mask() == FrameFlag.EndStream.mask());
+    empty = Frame(
+        ftype: FrameType.Headers,
+        flags: 0x8,
+        sid: 1,
+        payload: a.Vec<u8>()
+    );
+    empty.content_range().match({
+        Err(DecodeFailed) => println("missing padding refused"),
+        _                 => println("wrong padding result"),
+    });
+    Ok(())
+}

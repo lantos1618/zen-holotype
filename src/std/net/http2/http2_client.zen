@@ -8,8 +8,8 @@ Vec = std.collections
 parse_url = std.net.url
 Stream, dial, write, close = std.net.tls
 Actor, ActorError, Receive, Ref = std.actor
-H2Error, h2_error, H2StreamError, H2Response, H2Head, H2Chunk, h2_chunk, FrameType, FLAG_END_STREAM, FLAG_ACK, FLAG_END_HEADERS, SET_HEADER_TABLE, SET_INITIAL_WINDOW, MAX_SEND, WINDOW, DEFAULT_WINDOW, MAX_WINDOW, PREFACE = std.net.http2.http2_types
-Frame, read_frame, write_frame, settings_add, u32_add, u31_of, be_of = std.net.http2.http2_frame
+H2Error, h2_error, H2StreamError, H2Response, H2Head, H2Chunk, h2_chunk, FrameType, FrameFlag, SettingId, mask, MAX_SEND, WINDOW, DEFAULT_WINDOW, MAX_WINDOW, PREFACE = std.net.http2.http2_types
+Frame, read_frame, write_frame, settings_add, setting_at, u32_add, u31_of, be_of = std.net.http2.http2_frame
 hpack_response_headers, hpack_trailer_headers, block_add_header, block_add_user_header = std.net.http2.http2_hpack
 
 H2ReadState = {
@@ -70,8 +70,8 @@ H2Client* = {
         // No dynamic HPACK table; receive credit is replenished only after
         // the response consumer accepts DATA.
         settings ::= a.String().try(H2Error.SendFailed);
-        settings.settings_add(SET_HEADER_TABLE, 0).try();
-        settings.settings_add(SET_INITIAL_WINDOW, WINDOW).try();
+        settings.settings_add(SettingId.HeaderTableSize, 0).try();
+        settings.settings_add(SettingId.InitialWindowSize, WINDOW).try();
         stream.write_frame(a, FrameType.Settings, 0, 0, settings.view()).try();
 
         // Match the advertised receive window on stream 0.
@@ -123,7 +123,7 @@ H2Client* = {
         self.stream.write_frame(
             a,
             FrameType.Headers,
-            hflags.match({ true => FLAG_END_HEADERS + FLAG_END_STREAM, false => FLAG_END_HEADERS }),
+            hflags.match({ true => FrameFlag.EndHeaders.mask() + FrameFlag.EndStream.mask(), false => FrameFlag.EndHeaders.mask() }),
             sid,
             blk.view()
         ).try();
@@ -152,7 +152,7 @@ H2Client* = {
             self.stream.write_frame(
                 a,
                 FrameType.Data,
-                last.match({ true => FLAG_END_STREAM, false => 0 }),
+                last.match({ true => FrameFlag.EndStream.mask(), false => 0 }),
                 sid,
                 body.slice(off, off + n)
             ).try();
@@ -318,7 +318,7 @@ H2Client* = {
         state :: H2ReadState
     ) Res<H2Head, H2Error> {
         // CONTINUATION is not supported: a header block ends in its frame.
-        f.has_flag(FLAG_END_HEADERS)
+        f.has_flag(FrameFlag.EndHeaders)
             .ensure(H2Error.ProtocolFailed).try();
         range = f.content_range().try();
 
@@ -337,17 +337,17 @@ H2Client* = {
 
         headers.match({
             Informational(_) => {
-                (!f.has_flag(FLAG_END_STREAM))
+                (!f.has_flag(FrameFlag.EndStream))
                     .ensure(H2Error.ProtocolFailed).try();
             },
             Response(status) => {
                 state.status    = status;
                 state.got_final = true;
             },
-            Trailers         => f.has_flag(FLAG_END_STREAM)
+            Trailers         => f.has_flag(FrameFlag.EndStream)
                 .ensure(H2Error.ProtocolFailed).try(),
         });
-        f.has_flag(FLAG_END_STREAM).then(() { state.done = true; });
+        f.has_flag(FrameFlag.EndStream).then(() { state.done = true; });
         Ok(headers);
     }
 
@@ -362,7 +362,7 @@ H2Client* = {
             f.payload.ptr().offset(range.from),
             range.len
         )).try();
-        ended = f.has_flag(FLAG_END_STREAM);
+        ended = f.has_flag(FrameFlag.EndStream);
         ended.then(() { state.done = true; });
         Ok(H2Event.Data(H2Data(
             bytes: bytes,
@@ -477,7 +477,7 @@ H2Client* = {
     control = (self :: @Self, a: Alloc, f: Frame) Res<bool, H2Error> {
         f.ftype.match({
             Settings     => {
-                f.has_flag(FLAG_ACK).match({
+                f.has_flag(FrameFlag.Ack).match({
                     true  => (),  // ACK of ours
                     false => {
                         self.got_peer_settings = true;
@@ -485,7 +485,7 @@ H2Client* = {
                         self.stream.write_frame(
                             a,
                             FrameType.Settings,
-                            FLAG_ACK,
+                            FrameFlag.Ack.mask(),
                             0,
                             ""
                         ).try();
@@ -494,11 +494,11 @@ H2Client* = {
                 Ok(true)
             },
             Ping         => {
-                (!f.has_flag(FLAG_ACK)).match({
+                (!f.has_flag(FrameFlag.Ack)).match({
                     true  => self.stream.write_frame(
                         a,
                         FrameType.Ping,
-                        FLAG_ACK,
+                        FrameFlag.Ack.mask(),
                         0,
                         str_at(f.payload.ptr(), f.payload.len)
                     ).try(),
@@ -534,9 +534,10 @@ H2Client* = {
         (f.payload.len % 6 == 0).ensure(H2Error.ProtocolFailed).try();
         Range(0, f.payload.len / 6).loop((h, i) {
             base = i * 6;
-            id   = f.payload.be_of(base, 2).try();
+            id   = f.payload.setting_at(base).try();
             val  = f.payload.be_of(base + 2, 4).try();
-            (id == SET_INITIAL_WINDOW).then(() {
+            id.match({
+                InitialWindowSize => {
                 (val <= MAX_WINDOW).ensure(H2Error.ProtocolFailed).try();
                 (val >= self.init_win).match({
                     true  => self.add_stream_credit(val - self.init_win).try(),
@@ -553,6 +554,8 @@ H2Client* = {
                     },
                 });
                 self.init_win = val;
+                },
+                _                 => (),
             });
         });
         Ok(());

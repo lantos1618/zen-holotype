@@ -6,11 +6,13 @@ Res = std.core
 Drop = std.core
 Vec = std.collections
 
-AF_UNSPEC: i32 = 0
-AF_INET6: i32 = 10
-SOCK_STREAM: i32 = 1
+// Known Linux ABI codes; foreign records and calls retain their integer layout.
+AddressFamily = | Unspecified = 0 | Ipv6 = 10 | Unknown(i32)
+SocketKind = | Stream = 1 | Unknown(i32)
+InternetProtocol = | Tcp = 6 | Unknown(i32)
+
+// These values are combinable flags or a buffer capacity, not discriminants.
 SOCK_CLOEXEC: i32 = 524288
-IPPROTO_TCP: i32 = 6
 MSG_NOSIGNAL: i32 = 16384
 NI_MAXHOST: u32 = 1025
 NI_NUMERICHOST: i32 = 1
@@ -116,9 +118,9 @@ hints = (a: Alloc, fault: SocketFault) Res<Vec<AddrInfo>, SocketFault> {
     out ::= a.Vec<AddrInfo>();
     out.add(AddrInfo(
         flags: 0,
-        family: AF_UNSPEC,
-        socktype: SOCK_STREAM,
-        protocol: IPPROTO_TCP,
+        family: AddressFamily.Unspecified.discriminant(),
+        socktype: SocketKind.Stream.discriminant(),
+        protocol: InternetProtocol.Tcp.discriminant(),
         address_len: 0,
         address: null_ptr<u8>(),
         canonical_name: null_ptr<u8>(),
@@ -182,7 +184,10 @@ resolve_addr* = (a: Alloc, host: str) Res<ResolvedAddr, SocketFault> {
             });
             ip ::= a.String().try(SocketFault.ReadFault);
             ip.add(str_at(bytes.ptr(), n)).try(SocketFault.ReadFault);
-            Ok(ResolvedAddr(ip: ip, is_v6: info.family == AF_INET6))
+            Ok(ResolvedAddr(
+                ip: ip,
+                is_v6: info.family == AddressFamily.Ipv6.discriminant()
+            ))
         },
     })
 }
