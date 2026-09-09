@@ -10,12 +10,12 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HEALTH = ROOT / "docs" / "SOURCE_HEALTH.md"
-INVENTORY = ROOT / "docs" / "ZEN_SIGNATURES.md"
+HEALTH = ROOT / "build" / "source_health" / "SOURCE_HEALTH.md"
+INVENTORY = ROOT / "build" / "source_health" / "ZEN_SIGNATURES.md"
 STYLE = ROOT / "docs" / "STYLE.md"
 AUDIT = ROOT / "docs" / "SOURCE_OWNERSHIP_AUDIT.md"
 PROMPT = ROOT / "docs" / "SOURCE_HEALTH_JUDGE.md"
-SNAPSHOTS = ROOT / "docs" / "source_health"
+SNAPSHOTS = ROOT / "build" / "source_health"
 PACKS = ROOT / "build" / "source_health"
 MODEL = "gemini-3.7-flash"
 

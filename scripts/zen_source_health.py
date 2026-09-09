@@ -26,8 +26,8 @@ from zen_signature_inventory import (
 )
 
 
-DEFAULT_SNAPSHOTS = ROOT / "docs" / "source_health"
-DEFAULT_REPORT = ROOT / "docs" / "SOURCE_HEALTH.md"
+DEFAULT_SNAPSHOTS = ROOT / "build" / "source_health"
+DEFAULT_REPORT = DEFAULT_SNAPSHOTS / "SOURCE_HEALTH.md"
 HISTORY_MARKERS = re.compile(
     r"\b(PLAN\.md|issue|measured|previous(?:ly)?|temporary|eventual|"
     r"benchmark|reported|stage [0-9]|used to)\b",
@@ -329,11 +329,10 @@ def report_of(snapshots: list[dict]) -> str:
             "",
             "## External review",
             "",
-            "Each implementation round stores a separate Gemini Flash review next",
-            "to its JSON snapshot. The model receives the current signatures, this",
-            "metric report, the previous external ranking, and the style constraints.",
-            "It is asked to rank bounded implementation lanes and to reject metric",
-            "gaming, parameter bags, dependency reversals, and behavior regressions.",
+            "Historical rounds include separate Gemini Flash reviews beside their",
+            "snapshots. A JSON snapshot alone records measurements, not external",
+            "review or a quality grade. See each round's disposition or the current",
+            "REFACTOR_REVIEW.md for implementation decisions and validation.",
             "",
         ]
     )

@@ -11,7 +11,7 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SNAPSHOTS = ROOT / "docs" / "source_health"
+SNAPSHOTS = ROOT / "build" / "source_health"
 PACKS = ROOT / "build" / "source_health"
 
 
@@ -37,16 +37,33 @@ def previous_revision(label: str) -> str | None:
     snapshots = sorted(SNAPSHOTS.glob("round-*.json"))
     current = SNAPSHOTS / f"{label}.json"
     earlier = [path for path in snapshots if path < current]
-    if not earlier:
-        return None
-    return json.loads(earlier[-1].read_text())["revision"]
+    # Local snapshots do not retain an independently diffable working tree.
+    # Compare against the latest recorded Git base instead.
+    for path in reversed(earlier):
+        revision = json.loads(path.read_text())["revision"]
+        if revision != "working-tree":
+            return revision.removesuffix("+working-tree")
+    return None
 
 
 def changed_sources(before: str | None, after: str) -> set[str]:
-    if before is None:
+    if after == "working-tree" or after.endswith("+working-tree"):
+        base = after.removesuffix("+working-tree") if after != "working-tree" else "HEAD"
+        if after != "working-tree":
+            subprocess.run(
+                ["git", "rev-parse", "--verify", "--end-of-options", f"{base}^{{commit}}"],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+        revisions = [before or base]
+    elif before is None:
         return set()
+    else:
+        revisions = [f"{before}..{after}"]
     result = subprocess.run(
-        ["git", "diff", "--name-only", f"{before}..{after}", "--", "src"],
+        ["git", "diff", "--name-only", *revisions, "--", "src"],
         cwd=ROOT,
         text=True,
         capture_output=True,

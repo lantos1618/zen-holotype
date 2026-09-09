@@ -123,7 +123,8 @@ Three things about this tree that are decisions, not layout:
 - **`bootstrap/` and `src/` never shared code.** The bootstrapper was deleted after self-hosting; its remaining Python parser was later deleted with the script cleanup.
 - **Two generated files.** `grammar/src/parser.c` is gated by `tree-sitter
   test`. `seed/zen.c` has an atomic regeneration target, corpus coverage, and a
-  determinism gate, but its full freshness fixpoint is still owed. If a third
+  determinism gate, and `make fixpoint` verifies successive full compiler
+  emissions and seed freshness. If a third
   generated file appears, ask what proves it fresh.
 
 File naming and the 500/800-line review prompts are in `STYLE.md`. The short version, visible above: a folder's root file is its public surface and is nothing but starred re-exports; siblings repeat the folder as a prefix (`std/parse/parse_expr.zen`), so every filename is unique tree-wide and every editor tab says something.
@@ -234,6 +235,9 @@ display-through-`Sink`, and arena cleanup behavior.
 `make build` compiles `seed/zen.c`, emits one C file per module, compiles those
 units in parallel, and replaces `./zen` only after the link succeeds. `make
 determinism` checks that repeated and permuted emission is byte-identical.
+Unchanged inputs reuse verified build artifacts; `make bootstrap` retains the
+fresh C-only path. `make fixpoint` rebuilds the compiler, compares every emitted
+C unit and header, then verifies its monolithic output against `seed/zen.c`.
 
 `make seed` regenerates and stages `seed/zen.c` in one target. Regenerate after
 source changes, never before them; a stale seed can still build a compiler and
@@ -330,7 +334,7 @@ regenerate `seed/zen.c`; otherwise the next clean build cannot compile `src/`.
 | gate | fails when |
 |---|---|
 | corpus | any program's stdout or exit code changes |
-| fixpoint | **owed**: `stage2.c != stage3.c` (there is no Make target yet) |
+| `make fixpoint` | successive full compiler emissions differ, or the seed is stale |
 | `zen fmt --check` | any file is unformatted |
 | `must-fail/` | anything that should be rejected compiles |
 

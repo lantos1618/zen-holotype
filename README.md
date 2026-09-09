@@ -64,12 +64,16 @@ owned chunk directly to its decoder without copying it through a `String`.
 ## Building
 
 ```sh
-make build      # needs only a C compiler: the seed is checked-in C
-make test       # the corpus and must-fail suites
-make determinism # repeated builds emit byte-identical C
+make build       # incremental build; C compiler and Python 3
+make bootstrap   # fresh bootstrap; needs only a C compiler
+make test        # the corpus and must-fail suites
+make verify      # all required gates, including the full compiler fixpoint
 ```
 
-`make help` lists the rest.
+`make help` lists the rest. [Build iteration](docs/BUILD_ITERATION.md) explains
+cache invalidation and the clean bootstrap path. [Parallel work](docs/PARALLEL_WORK.md)
+covers isolated compiler lanes and test shards; [test iteration](docs/TEST_ITERATION.md)
+covers timing reports and faster staging.
 
 ## The documents
 
@@ -101,8 +105,8 @@ tests/       corpus, must-fail cases, and Zen gate programs
 
 Stage 4. The standard library, self-hosted compiler, formatter, ownership checker,
 project build runner, and language server are in the tree. `make determinism`
-guards stable code generation; a full stage-2/stage-3 fixpoint gate is still
-owed. The corpus defines the LSP
+guards stable code generation; `make fixpoint` compares successive full
+compiler emissions and verifies that the checked-in seed is fresh. The corpus defines the LSP
 requests currently supported. Stage 4 is the grade the tree is measured against,
 not a claim that stages 1–4 are complete. `docs/PLAN.md` is the map, and every
 stage in it ends at a command that exits non-zero when the stage is wrong.

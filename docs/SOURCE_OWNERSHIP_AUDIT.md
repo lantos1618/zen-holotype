@@ -4,11 +4,15 @@ This audit asks one question of every Zen source declaration:
 
 > Is this behavior owned by the value, phase, or domain where it is written?
 
-The exhaustive evidence is [ZEN_SIGNATURES.md](ZEN_SIGNATURES.md). It contains
-the body-free declaration surface of all 227 files below `src`: 7,202
-top-level declarations, including private declarations, imports, constants,
-types, functions, and `impl`s. It is generated with Zen's tree-sitter grammar
-by `scripts/zen_signature_inventory.py`; it is not a regular-expression scan.
+The original evidence is the historical [ZEN_SIGNATURES.md](ZEN_SIGNATURES.md).
+That audit covered the body-free declaration surface of all 227 files below
+`src`: 7,202 top-level declarations, including private declarations, imports, constants,
+types, functions, and `impl`s. `scripts/zen_signature_inventory.py` uses Zen's
+tree-sitter grammar to generate the current local inventory at
+`build/source_health/ZEN_SIGNATURES.md`; it is not a regular-expression scan.
+Generated inventories, metrics, round snapshots, external reviews, and context
+packs belong in ignored `build/source_health/` and must not be committed.
+The tracked artifacts in `docs/` remain historical evidence for this audit.
 
 This document is the judgement applied to that inventory. It is deliberately
 not a proposal to merge files until their count looks smaller. Repeated state,

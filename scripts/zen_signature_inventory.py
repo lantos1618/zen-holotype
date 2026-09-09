@@ -21,7 +21,7 @@ from tree_sitter import Language, Node, Parser
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE = ROOT / "src"
 DEFAULT_GRAMMAR = ROOT / "grammar" / "zen.so"
-DEFAULT_OUTPUT = ROOT / "docs" / "ZEN_SIGNATURES.md"
+DEFAULT_OUTPUT = ROOT / "build" / "source_health" / "ZEN_SIGNATURES.md"
 
 CATEGORY_ORDER = (
     "Types",
@@ -170,7 +170,7 @@ def generate(source_root: Path, grammar: Path) -> tuple[str, Counter[str]]:
         "constants are included so aliases and public surfaces are not mistaken for",
         "free functions during a later ownership review.",
         "The corresponding decisions are in",
-        "[`SOURCE_OWNERSHIP_AUDIT.md`](SOURCE_OWNERSHIP_AUDIT.md).",
+        "`docs/SOURCE_OWNERSHIP_AUDIT.md` in the repository.",
         "",
         "## Coverage",
         "",

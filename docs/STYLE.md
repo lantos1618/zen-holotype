@@ -7,6 +7,56 @@ The formatter owns layout. The grammar owns syntax. This guide owns the
 judgement the compiler cannot make: where behavior belongs, what deserves a
 type or module, and which comments help the next reader.
 
+## Ergonomic API contract
+
+Use the task summarizer in `ERGONOMICS_PLAN.md` as a design reference. A proposed
+API remains proposed until the compiler and library support it; examples used
+to justify a refactor must compile against that support. This contract applies
+to new and changed code, including the compiler itself.
+
+- Choose the allocation owner at the operation boundary. Pass its Alloc inward
+  or use a receiver that already owns the appropriate allocation context.
+- Return a meaningful completed value when that is the operation's result.
+  Keep append methods for composing one destination; do not allocate a new
+  String for every fragment merely to remove an output parameter.
+- Use str for borrowed text and String for building text. Returning either
+  does not extend its arena's lifetime. Current String and Vec descriptors do
+  not individually release their buffers; the allocator owner controls that.
+- Leave required fields without defaults and supply them at construction.
+  Use a default only when it is a meaningful domain value. An empty string is
+  not a substitute for establishing whether required state exists. Model
+  absence explicitly in new APIs; preserve existing sentinel semantics during
+  a deliberate migration.
+- Keep one name for one operation. Traversal uses loop overloads: value only,
+  handle plus value, or handle plus index plus value. Do not introduce each or
+  each_indexed aliases merely to omit callback parameters. Parameter roles
+  follow the overload's contract, not the spelling of callback variable names.
+- Put a guard or error propagation at the edge of the operation. Preserve the
+  original error unless the domain intentionally translates it. Additional
+  helpers should own a useful operation, not merely hide .try() from callers.
+
+Missing compiler or library support is a tracked implementation gap, not a
+reason to spread another local convention. Use supported code until the shared
+API exists. Group a migration into a reviewable batch, with focused behavior
+checks followed by one stable-source integration run.
+
+### What enforces the contract
+
+| Requirement | Enforcement |
+| --- | --- |
+| Required initialization, type correctness, supported ownership transfers | Compiler diagnostics and must-fail/corpus tests |
+| Full allocator and borrowed-view lifetime safety | Compiler work tracked in the ergonomics plan; current taint checks are incomplete |
+| Loop callback roles, errors, and receiver evaluation count | Executable library/dispatch regression tests |
+| Traversal complexity and allocation budgets | Counting or allocation probes with a demonstrated failing control |
+| Formatting and generated output consistency | Existing formatter, determinism, fixpoint, and warning gates |
+| Meaningful results, cohesive owners, justified file boundaries | Diff review against the questions below |
+
+Keep `make verify` as the aggregate correctness gate. A new automatic check
+must identify a concrete violation and prove it can fail. Do not enforce taste
+with arbitrary function-length, match-depth, file-count, or numerical style
+score thresholds. Source-health counts identify review candidates; they do not
+approve an architecture.
+
 ## The ownership question
 
 Before adding a function, ask:
@@ -74,8 +124,11 @@ conversion between peer domains, or a helper with no natural state owner.
 Do not invent a one-method record merely to avoid a free function.
 
 Calling style follows ownership. If the first parameter is the natural
-receiver, call the function on it. A source file full of `write(backend, ...)`
-usually contains methods someone has not moved to their owner yet.
+receiver, call the function on it. Use `backend.write(...)` when backend is the
+receiver. An operation owned by one consumer may remain a private UFCS function
+in that consumer module;
+shared intrinsic behavior belongs on the type. Dot-call ergonomics do not
+require moving every declaration into the type definition.
 
 An `impl` stays with its target type. Traits sit below the types satisfying
 them; putting an impl with the trait reverses that dependency.
@@ -171,7 +224,9 @@ map* = <T, U>(items: Vec<T>, alloc: Alloc, body: (item: T) U)
        Res<Vec<U>, AllocError>
 ```
 
-- No `Alloc` parameter means no allocation.
+- Allocation uses an explicit Alloc, an allocator-backed receiver, or the
+  storage policy of a documented runtime capability. Borrowed text operations
+  without such storage authority do not allocate.
 - `self :: @Self` means the method writes the receiver's own bytes.
 - `self: @Self` may still act through capabilities or referenced state.
 - Every parameter has a name and type, including parameters in function types.
@@ -217,6 +272,16 @@ failure, `ensure` for a boolean precondition, and a breakable one-shot `loop`
 when several guards choose an early value. Name the loop result when inference
 needs its type. The successful path should not be buried under nested matches
 whose other arms only stop the operation.
+
+Use `condition.ensure().try()` when a failed precondition means `None` in an
+optional-result function. Use `condition.ensure(Error.Invalid).try()` when it
+means a typed failure. Both preserve the distinction between absence and an
+error; do not convert a typed failure to absence merely to shorten a guard.
+
+Choose only the callback arguments the operation needs. A fold may use
+`values.loop(init, (value, acc) { ... })`, add a handle for early control, or add
+both handle and index. An annotation such as `acc: usize` supplies context for
+a literal seed; it does not authorize converting an incompatible typed value.
 
 ### Actors and streams
 
@@ -335,7 +400,13 @@ For every new or moved function, ask:
 10. Would a proposed file split remove coupling or merely relocate it?
 11. Does each comment help a new maintainer understand the current contract?
 12. Is a recovery value prevented from becoming an authoritative result?
-13. Which executable gate proves this change, and has that gate gone red under
+13. Does a self-contained result return as a value, while shared output stays
+    an append operation with a justified allocation lifetime?
+14. Are field defaults real initial values, and are missing values represented
+    deliberately?
+15. Does the call use the existing operation and suitable overload rather than
+    another spelling of it?
+16. Which executable gate proves this change, and has that gate gone red under
     a deliberate mutation?
 
 Do this while writing the function. A later cleanup has less context and more
