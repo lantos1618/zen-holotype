@@ -72,7 +72,7 @@ and a bounded-mailbox runtime have landed, but deep `iso` sendability remains
 law rather than implemented behaviour. What is checked refuses; what is not
 still compiles.
 
-**Not needed, and traps if attempted early:** an optimizer (C is the backend), a second backend, a package manager, incremental codegen.
+**Bootstrap scope:** C remains the full-language bootstrap backend. Optional scalar JavaScript and assembly generators now have an explicit support boundary; see [Code generation](BACKENDS.md). Whole-language shared lowering, an LLVM renderer, and optimization passes remain separate work.
 
 **Compilation is whole-program.** One merged module graph; `gen_c` emits each generic instantiation exactly once. Separate compilation would have to decide which object file owns `Vec<Circle>` when `Vec` and `Circle` come from different modules, and every language that tries pays for that forever. The cost is that build time scales with the tree, which is exactly what `b.budget` exists to watch.
 

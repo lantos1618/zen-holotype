@@ -6,7 +6,7 @@ str, String = std.text
 Path, Range, join_path = std.core
 Map, Vec = std.collections
 
-BuildArgs, ProjectArgs, Emission, Target, Os, Arch, Abi, Dep = std.build
+BuildArgs, ProjectArgs, Emission, Target, Os, Arch, Abi, Dep, Codegen = std.build
 Build = zen.zen_build
 run_once = zen.zen_run
 entry_of, holds_build_zen = zen.zen_path
@@ -33,11 +33,21 @@ project_present = (env: Env, a: Alloc, job: ProjectArgs, execute: bool)
     (build.faults > 0 || checked.diag_count() > 0).match({
         true  => Ok(1),
         false => plan(a, build.tree, checked, host_target()).match({
-            Err(_)      => {
+            Err(OutOfMemory)              => Err(AllocError.OutOfMemory),
+            Err(Refused(Unsupported(at))) => {
+                println(
+                    "zen: {}:{}:{}: unsupported build expression",
+                    at.file,
+                    at.start.line,
+                    at.start.col
+                );
+                Ok(1)
+            },
+            Err(Refused(_))               => {
                 println("zen: build.zen uses an unsupported build expression");
                 Ok(1)
             },
-            Ok(planned) => Project(env: env, a: a, job: job, planned: planned).execute(execute),
+            Ok(planned)                   => Project(env: env, a: a, job: job, planned: planned).execute(execute),
         }),
     })
 }
@@ -89,7 +99,7 @@ Project = {
 
     build_selected = (self: @Self, selected: Res<ExeNode>)
                      Res<i32, AllocError> {
-        code ::= 0;
+        code: i32 ::= 0;
         self.planned.exes.loop((h, exe) {
             wanted = selected.match({
                 None       => true,
@@ -115,20 +125,49 @@ Project = {
             None       => Ok(1),
             Ok(target) => self.build_exe(target).try().match({
                 None           => Ok(1),
-                Ok(executable) => self.run_program(executable.view()),
+                Ok(executable) => self.run_program(
+                    executable.view(),
+                    target.spec.backend
+                ),
             }),
         })
     }
 
-    // Backend selection also chooses the build recipe. A future generator
-    // must supply its own artifact/link path instead of inheriting C's.
     build_exe = (self: @Self, exe: ExeNode) Res<Res<String>, AllocError> {
-        exe.spec.backend.match({ C => self.build_c_exe(exe) })
+        exe.spec.backend.match({
+            C   => self.build_native(exe, "c"),
+            Js  => self.build_script(exe),
+            Asm => self.planned.target.clang_triple().match({
+                Ok(triple) => triple.eq("x86_64-linux-gnu"),
+                None       => false,
+            }).match({
+                true  => self.build_native(exe, "s"),
+                false => {
+                    println("zen: asm projects require Linux x86_64 GNU");
+                    Ok(None)
+                },
+            }),
+        })
     }
 
-    build_c_exe = (self: @Self, exe: ExeNode) Res<Res<String>, AllocError> {
+    build_script = (self: @Self, exe: ExeNode) Res<Res<String>, AllocError> {
+        output              = self.output_path(exe).try();
+        result: Res<String> = loop<String>((done) {
+            (exe.spec.deps.len > 0).then(() {
+                println("zen: js projects do not support native dependencies");
+                done.break();
+            });
+            (!self.ensure_parent(output.view()).try()).then(() { done.break(); });
+            (!self.compile_exe(exe, output.view()).try()).then(() { done.break(); });
+            done.break(output);
+        });
+        Ok(result)
+    }
+
+    build_native = (self: @Self, exe: ExeNode, extension: str)
+                   Res<Res<String>, AllocError> {
         output    = self.output_path(exe).try();
-        generated = self.a.String("{}.c", output.view()).try();
+        generated = self.a.String("{}.{}", output.view(), extension).try();
         self.ensure_parent(generated.view()).try().match({
             false => Ok(None),
             true  => self.compile_exe(exe, generated.view()).try().match({
@@ -180,7 +219,10 @@ Project = {
             "debug" => "-O0",
             _       => "-O2",
         })).try();
-        argv.add("-std=c99").try();
+        exe.spec.backend.match({
+            C => argv.add("-std=c99").try(),
+            _ => (),
+        });
         exe.spec.optimize.eq("size").then(() {
             argv.add("-ffunction-sections").try();
             argv.add("-fdata-sections").try();
@@ -308,8 +350,10 @@ Project = {
         })
     }
 
-    run_program = (self: @Self, program: str) Res<i32, AllocError> {
+    run_program = (self: @Self, program: str, backend: Codegen)
+                  Res<i32, AllocError> {
         argv ::= self.a.Vec<str>();
+        backend.match({ Js => argv.add("node").try(), _ => () });
         argv.add(program).try();
         Range(self.job.args_at, self.job.argv.len).loop((h, i) {
             self.job.argv.get(i).match({
@@ -318,7 +362,16 @@ Project = {
             });
         });
         self.env.proc.run_argv_inherit(self.a, "", argv).match({
-            Err(_)   => { println("zen: could not run `{}`", program); Ok(1) },
+            Err(_)   => {
+                backend.match({
+                    Js => println(
+                        "zen: could not start Node.js for `{}`",
+                        program
+                    ),
+                    _  => println("zen: could not run `{}`", program),
+                });
+                Ok(1)
+            },
             Ok(code) => Ok(code),
         })
     }
@@ -327,11 +380,12 @@ Project = {
         exe.spec.out.match({
             Ok(path) => self.project_path(path.text),
             None     => self.a.String(
-                "{}/build/{}-{}/{}",
+                "{}/build/{}-{}/{}{}",
                 self.job.root,
                 self.planned.target.os.stable_name(),
                 self.planned.target.arch.stable_name(),
-                exe.name
+                exe.name,
+                exe.spec.backend.match({ Js => ".js", _ => "" })
             ),
         })
     }

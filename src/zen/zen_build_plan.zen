@@ -9,7 +9,7 @@ Path = std.core
 Ast, ExprId, Expr, Call, Access, Record, Block, Function, Span, Try = std.ast
 nowhere = std.ast
 Stmt, Bind, Member, Field, Module = std.ast
-Checker = sema.sema
+Checker, Ctx, type_of = sema.sema
 CImport, Lib, Extern, Exe, Dep, Target, Codegen = std.build
 
 PlanFault* = MissingBuild(str)
@@ -76,7 +76,7 @@ Local = {
 Executor = {
     alloc: Alloc,
     tree: Ast,
-    check: Checker,
+    check :: Checker,
     builder: str,
     locals :: Vec<Local>,
     plan :: BuildPlan,
@@ -134,21 +134,46 @@ Executor = {
         })
     }
 
-    // Only the checked std.build.Codegen declaration admits a backend
-    // constant. A different enum's C case must not acquire build meaning.
-    backend_value = (self: @Self, id: ExprId, access: Access, at: Span)
+    // Required builder members do not retain a memo for every record field.
+    // Resolve an unmemoized global enum expression in its owning module;
+    // runtime locals cannot be reconstructed outside their lexical scope.
+    backend_value = (self :: @Self, id: ExprId, access: Access, at: Span)
                     Res<Value, PlanError> {
-        known = self.check.expr_memo.get(id).match({
-            None   => false,
-            Ok(ty) => self.check.types.at(ty).match({
-                Named(named) => named.name.eq("Codegen")
-                    && self.check.world.module_name(named.decl).eq("std.build.build"),
-                _            => false,
-            }),
+        ty    = self.check.expr_memo.get(id).match({
+            Ok(ty) => ty,
+            None   => {
+                self.global_base(access.base).ensure(unsupported(at)).try();
+                module  = Range(0, self.tree.module_count()).find((index) {
+                    self.tree.module_at(index).match({
+                        Ok(module) => module.span.file.eq(
+                            at.file
+                        ), None => false,
+                    })
+                }).ok_or(unsupported(at)).try();
+                unknown = self.check.types.unknown().try(PlanError.OutOfMemory);
+                self.check.type_of(
+                    id,
+                    Ctx(module, unknown)
+                ).try(PlanError.OutOfMemory)
+            },
         });
-        (known && access.name.text.eq("C")).match({
-            true  => Ok(Value.BackendValue(Codegen.C)),
-            false => Err(unsupported(at)),
+        known = self.check.types.at(ty).match({
+            Named(named) => named.name.eq("Codegen")
+                && self.check.world.module_name(named.decl).eq("std.build.build"),
+            _            => false,
+        });
+        known.ensure(unsupported(at)).try();
+        backend = access.name.text.match({
+            "C" => Ok(Codegen.C), "Js" => Ok(Codegen.Js), "Asm" => Ok(Codegen.Asm), _ => None,
+        }).ok_or(unsupported(at)).try();
+        Ok(Value.BackendValue(backend))
+    }
+
+    global_base = (self: @Self, id: ExprId) bool {
+        self.tree.expr_at(id).kind.match({
+            Name(name)     => !self.has_local(name.text) && !name.text.eq(self.builder),
+            Access(access) => self.global_base(access.base),
+            _              => false,
         })
     }
 

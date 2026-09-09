@@ -1,0 +1,272 @@
+// JavaScript rendering of the shared scalar IR. Generated names come from
+// function and value IDs; source identifiers never become JavaScript syntax.
+
+Alloc, AllocError = std.mem
+str, String = std.text
+Range = std.core
+Span = std.ast
+Program, Func, Instruction, Terminator, Unary, Binary, Invocation, Print = gen.gen_ir
+
+// The caller verifies slot types, initialization, calls, and block targets
+// before rendering. Malformed IR is a compiler fault, not executable input.
+emit_js* = (a: Alloc, program: Program) Res<String, AllocError> {
+    writer ::= JavaScript(out: a.String().try(), location: a.String().try());
+    writer.program(program).try();
+    Ok(writer.out)
+}
+
+JavaScript = {
+    out :: String,
+    location :: String,
+
+    program = (self :: @Self, program: Program) Res<(), AllocError> {
+        self.out.runtime().try();
+        program.functions.loop((h, index, function) {
+            self.function(index, function).try();
+        });
+        self.out.add("try {\n").try();
+        self.out.fmt(
+            "  process.exitCode = zg_f{}() & 255;\n",
+            program.entry
+        ).try();
+        self.out.add("} catch (error) {\n").try();
+        self.out.add("  if (!(error instanceof ZenTrap)) throw error;\n").try();
+        self.out.add(
+            "  process.stderr.write(Buffer.from(error.where, \"hex\"));\n"
+        ).try();
+        self.out.add(
+            "  process.stderr.write(\"trap: \" + error.message + \"\\n\");\n"
+        ).try();
+        self.out.add("  process.exitCode = 134;\n}\n")
+    }
+
+    function = (self :: @Self, index: usize, function: Func)
+               Res<(), AllocError> {
+        self.out.fmt("function zg_f{}(", index).try();
+        Range(0, function.parameters).loop((i) {
+            (i > 0).then(() { self.out.add(", ").try(); });
+            self.out.fmt("v{}", i).try();
+        });
+        self.out.add(") {\n").try();
+        Range(function.parameters, function.slots.len).loop((i) {
+            self.out.fmt("  let v{};\n", i).try();
+        });
+        // Every block explicitly returns or chooses its successor. Slots live
+        // in the function scope and retain their values across back-edges.
+        self.out.add("  let pc = 0;\n  for (;;) {\n    switch (pc) {\n").try();
+        function.blocks.loop((h, index, block) {
+            self.out.fmt("    case {}:\n", index).try();
+            block.code.loop(
+                (instruction) { self.instruction(instruction).try(); }
+            );
+            self.terminator(block.exit).try();
+        });
+        self.out.add(
+            "    default: throw new Error(\"invalid Zen IR block\");\n    }\n  }\n}\n"
+        )
+    }
+
+    terminator = (self :: @Self, exit: Terminator) Res<(), AllocError> {
+        exit.match({
+            Return(value)  => self.out.fmt("      return v{};\n", value),
+            Jump(block)    => self.out.fmt("      pc = {}; continue;\n", block),
+            Branch(branch) => self.out.fmt(
+                "      pc = v{} !== 0 ? {} : {}; continue;\n",
+                branch.value,
+                branch.yes,
+                branch.no
+            ),
+        })
+    }
+
+    instruction = (self :: @Self, instruction: Instruction)
+                  Res<(), AllocError> {
+        instruction.match({
+            Constant(value)    => self.out.fmt(
+                "      v{} = {};\n",
+                value.out,
+                value.value
+            ),
+            Copy(value)        => self.out.fmt(
+                "      v{} = v{};\n",
+                value.out,
+                value.source
+            ),
+            UnaryValue(value)  => self.unary(value),
+            BinaryValue(value) => self.binary(value),
+            Invoke(value)      => self.call(value),
+            PrintValue(value)  => self.print(value),
+            Text(value)        => {
+                self.out.add("      process.stdout.write(").try();
+                self.out.byte_string(value).try();
+                self.out.add(");\n")
+            },
+        })
+    }
+
+    // Keep location formatting in one reusable buffer. The generated hex
+    // literal is decoded only on the failing path, not on every arithmetic op.
+    position = (self :: @Self, span: Span) Res<(), AllocError> {
+        self.location.clear();
+        self.location.fmt(
+            "{}:{}:{}: ",
+            span.file,
+            span.start.line,
+            span.start.col
+        ).try();
+        self.out.hex_literal(self.location.view())
+    }
+
+    unary = (self :: @Self, value: Unary) Res<(), AllocError> {
+        value.op.match({
+            Neg => {
+                self.out.fmt(
+                    "      v{} = zg_i32(-v{}, ",
+                    value.out,
+                    value.input
+                ).try();
+                self.position(value.span).try();
+                self.out.add(");\n")
+            },
+            Not => self.out.fmt(
+                "      v{} = v{} === 0 ? 1 : 0;\n",
+                value.out,
+                value.input
+            ),
+        })
+    }
+
+    binary = (self :: @Self, value: Binary) Res<(), AllocError> {
+        self.out.fmt("      v{} = ", value.out).try();
+        value.op.match({
+            Add          => self.out.fmt(
+                "zg_i32(v{} + v{}",
+                value.left,
+                value.right
+            ),
+            Sub          => self.out.fmt(
+                "zg_i32(v{} - v{}",
+                value.left,
+                value.right
+            ),
+            Mul          => self.out.fmt(
+                "zg_i32(v{} * v{}",
+                value.left,
+                value.right
+            ),
+            Div          => self.out.fmt(
+                "zg_div(v{}, v{}",
+                value.left,
+                value.right
+            ),
+            Rem          => self.out.fmt(
+                "zg_rem(v{}, v{}",
+                value.left,
+                value.right
+            ),
+            Equal        => self.out.fmt(
+                "v{} === v{} ? 1 : 0",
+                value.left,
+                value.right
+            ),
+            NotEqual     => self.out.fmt(
+                "v{} !== v{} ? 1 : 0",
+                value.left,
+                value.right
+            ),
+            Less         => self.out.fmt(
+                "v{} < v{} ? 1 : 0",
+                value.left,
+                value.right
+            ),
+            LessEqual    => self.out.fmt(
+                "v{} <= v{} ? 1 : 0",
+                value.left,
+                value.right
+            ),
+            Greater      => self.out.fmt(
+                "v{} > v{} ? 1 : 0",
+                value.left,
+                value.right
+            ),
+            GreaterEqual => self.out.fmt(
+                "v{} >= v{} ? 1 : 0",
+                value.left,
+                value.right
+            ),
+        }).try();
+        checked = value.op.match({ Add => true, Sub => true, Mul => true, Div => true, Rem => true, _ => false });
+        checked.then(() {
+            self.out.add(", ").try();
+            self.position(value.span).try();
+            self.out.add(')').try();
+        });
+        self.out.add(";\n")
+    }
+
+    call = (self :: @Self, value: Invocation) Res<(), AllocError> {
+        self.out.fmt("      v{} = zg_f{}(", value.out, value.function).try();
+        value.args.loop((h, i, slot) {
+            (i > 0).then(() { self.out.add(", ").try(); });
+            self.out.fmt("v{}", slot).try();
+        });
+        self.out.add(");\n")
+    }
+
+    print = (self :: @Self, value: Print) Res<(), AllocError> {
+        value.ty.match({
+            I32  => self.out.fmt(
+                "      process.stdout.write(String(v{}));\n",
+                value.value
+            ),
+            Bool => self.out.fmt(
+                "      process.stdout.write(v{} === 0 ? \"false\" : \"true\");\n",
+                value.value
+            ),
+            Unit => self.out.add("      process.stdout.write(\"()\");\n"),
+        })
+    }
+}
+
+// Node drains queued writes before exiting. Throwing a distinct trap aborts
+// execution without process.exit truncating already-produced output.
+// Every i32 is exactly representable as a Number. An in-range product is exact
+// too; rounding of larger products cannot bring them inside the i32 bounds.
+runtime = (out :: String) Res<(), AllocError> {
+    out.add("\"use strict\";\n").try();
+    out.add("class ZenTrap extends Error {}\n").try();
+    out.add(
+        "function zg_trap(where, message) { const error = new ZenTrap(message); error.where = where; throw error; }\n"
+    ).try();
+    out.add("function zg_i32(value, where) {\n").try();
+    out.add(
+        "  if (!Number.isInteger(value) || value < -2147483648 || value > 2147483647) zg_trap(where, \"integer overflow\");\n"
+    ).try();
+    out.add("  return value;\n}\n").try();
+    out.add("function zg_div(left, right, where) {\n").try();
+    out.add("  if (right === 0) zg_trap(where, \"divide by zero\");\n").try();
+    out.add(
+        "  if (left === -2147483648 && right === -1) zg_trap(where, \"integer overflow\");\n"
+    ).try();
+    out.add("  return Math.trunc(left / right);\n}\n").try();
+    out.add("function zg_rem(left, right, where) {\n").try();
+    out.add("  if (right === 0) zg_trap(where, \"divide by zero\");\n").try();
+    out.add(
+        "  if (left === -2147483648 && right === -1) zg_trap(where, \"integer overflow\");\n"
+    ).try();
+    out.add("  return left % right;\n}\n")
+}
+
+// Hex spelling preserves arbitrary byte strings, including invalid UTF-8 and
+// embedded NULs, without placing source text in JavaScript syntax.
+byte_string = (out :: String, text: str) Res<(), AllocError> {
+    out.add("Buffer.from(").try();
+    out.hex_literal(text).try();
+    out.add(", \"hex\")")
+}
+
+hex_literal = (out :: String, text: str) Res<(), AllocError> {
+    out.add('"').try();
+    text.loop((byte) { out.write_hex_fixed(byte.to_u64(), 2).try(); });
+    out.add('"')
+}

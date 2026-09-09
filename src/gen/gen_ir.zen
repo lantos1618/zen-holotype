@@ -1,0 +1,60 @@
+// Scalar executable IR shared by the JavaScript and assembly renderers.
+// The caller owns every vector and text buffer. Renderers consume a verified
+// program synchronously; retaining a view does not extend that allocation.
+Vec = std.collections
+str = std.text
+Span = std.ast
+
+Scalar* = I32 | Bool | Unit
+Op* = Add
+    | Sub
+    | Mul
+    | Div
+    | Rem
+    | Equal
+    | NotEqual
+    | Less
+    | LessEqual
+    | Greater
+    | GreaterEqual
+UnaryOp* = Neg | Not
+
+Const* = { out*: usize, value*: i32 }
+Move* = { out*: usize, source*: usize }
+Unary* = { out*: usize, input*: usize, op*: UnaryOp, span*: Span }
+Binary* = { out*: usize, left*: usize, right*: usize, op*: Op, span*: Span }
+Invocation* = { out*: usize, function*: usize, args*: Vec<usize> }
+Print* = { value*: usize, ty*: Scalar }
+Branch* = { value*: usize, yes*: usize, no*: usize }
+
+Instruction* = Constant(Const)
+    | Copy(Move)
+    | UnaryValue(Unary)
+    | BinaryValue(Binary)
+    | Invoke(Invocation)
+    | PrintValue(Print)
+    | Text(str)
+
+Terminator* = Return(usize) | Jump(usize) | Branch(Branch)
+
+// Every block has exactly one terminator; its targets index Func.blocks.
+BasicBlock* = {
+    code*: Vec<Instruction>,
+    exit*: Terminator,
+}
+
+Func* = {
+    name*: str,
+    parameters*: usize,
+    // The first `parameters` slots describe the ordered argument types.
+    slots*: Vec<Scalar>,
+    // Execution starts at block zero. Slots are mutable within one invocation.
+    blocks*: Vec<BasicBlock>,
+    result*: Scalar,
+}
+
+Program* = {
+    functions*: Vec<Func>,
+    // The entry function takes no arguments.
+    entry*: usize,
+}

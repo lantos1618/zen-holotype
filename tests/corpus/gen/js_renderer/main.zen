@@ -1,0 +1,132 @@
+// A trap preserves earlier output, arbitrary text bytes, and the operation's
+// source location. A large payload exercises Node's pending stdout writes.
+
+Program, Func, Instruction, Const, Unary, UnaryOp, Binary, Op, Scalar = gen.gen_ir
+BasicBlock, Terminator = gen.gen_ir
+emit_js = gen.gen_js
+Span, Pos = std.ast
+
+location = () Span {
+    Span(
+        file: "arithmetic\"\\é.zen",
+        start: Pos(line: 7, col: 9),
+        end: Pos(line: 7, col: 10),
+    )
+}
+
+run = (env: Env, a: Alloc, code: Vec<Instruction>, before: str, fault: str)
+      Res<bool, AllocError> {
+    slots ::= a.Vec<Scalar>();
+    Range(0, 3).loop((i) { slots.add(Scalar.I32).try(); });
+    blocks ::= a.Vec<BasicBlock>();
+    blocks.add(BasicBlock(code: code, exit: Terminator.Return(0))).try();
+    functions ::= a.Vec<Func>();
+    functions.add(Func(
+        name: "main",
+        parameters: 0,
+        slots: slots,
+        blocks: blocks,
+        result: Scalar.I32,
+    )).try();
+    program = Program(functions: functions, entry: 0);
+    first   = emit_js(a, program).try();
+    second  = emit_js(a, program).try();
+    stable  = first.view().eq(second.view());
+    env.fs.write("generated.js", first.view()).match({
+        Err(_) => Ok(false),
+        Ok(_)  => {
+            args ::= a.Vec<str>();
+            args.add("node").try();
+            args.add("generated.js").try();
+            expected = a.String(
+                "{}:7:9: trap: {}\n",
+                location().file,
+                fault
+            ).try();
+            env.proc.run_argv(a, "", args).match({
+                Err(_)     => Ok(false),
+                Ok(result) => Ok(stable && result.code == 134
+                    && result.out.view().eq(before)
+                    && result.err.view().eq(expected.view())),
+            })
+        },
+    })
+}
+
+check = (
+    env       : Env,
+    a         : Alloc,
+    before    : str,
+    operation : Instruction,
+    left      : i32,
+    right     : i32,
+    fault     : str,
+) Res<bool, AllocError> {
+    code ::= a.Vec<Instruction>();
+    code.add(Instruction.Constant(Const(out: 0, value: left))).try();
+    code.add(Instruction.Constant(Const(out: 1, value: right))).try();
+    code.add(Instruction.Text(before)).try();
+    code.add(operation).try();
+    code.add(Instruction.Text("execution continued after the trap\n")).try();
+    code.add(Instruction.Constant(Const(out: 0, value: 0))).try();
+    run(env, a, code, before, fault)
+}
+
+main = (env: Env) Res<(), AllocError> {
+    a = env.mem.alloc();
+    before ::= a.String().try();
+    Range(0, 300000).loop((i) { before.add('x').try(); });
+    before.add("\n\"\\\0").try();
+    invalid: u8 = 0xff;
+    before.add(invalid).try();
+    before.add('\n').try();
+
+    overflow = check(
+        env,
+        a,
+        before.view(),
+        Instruction.BinaryValue(Binary(
+            out: 2,
+            left: 0,
+            right: 1,
+            op: Op.Mul,
+            span: location()
+        )),
+        i32.MAX,
+        i32.MAX,
+        "integer overflow"
+    ).try();
+    division = check(
+        env,
+        a,
+        "before division\n",
+        Instruction.BinaryValue(Binary(
+            out: 2,
+            left: 0,
+            right: 1,
+            op: Op.Div,
+            span: location()
+        )),
+        1,
+        0,
+        "divide by zero"
+    ).try();
+    unary    = check(
+        env,
+        a,
+        "before negation\n",
+        Instruction.UnaryValue(Unary(
+            out: 2,
+            input: 0,
+            op: UnaryOp.Neg,
+            span: location()
+        )),
+        i32.MIN,
+        0,
+        "integer overflow"
+    ).try();
+    println("overflow, bytes, and pending stdout: {}", overflow);
+    println("division and location: {}", division);
+    println("negation and location: {}", unary);
+    Ok(())
+}

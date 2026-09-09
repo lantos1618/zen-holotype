@@ -70,6 +70,14 @@ make test        # the corpus and must-fail suites
 make verify      # all required gates, including the full compiler fixpoint
 ```
 
+Local `make test` and `make verify` require Node.js 20 or newer for the
+JavaScript backend execution tests. Verification also uses Node for the grammar
+and editor checks; CI installs Node 20 explicitly. A missing Node executable is
+reported as a test failure; JavaScript execution is not silently skipped.
+
+[Code generation](docs/BACKENDS.md) describes the C, JavaScript, and assembly
+backends and the runnable `example/backends` project.
+
 `make help` lists the rest. [Build iteration](docs/BUILD_ITERATION.md) explains
 cache invalidation and the clean bootstrap path. [Parallel work](docs/PARALLEL_WORK.md)
 covers isolated compiler lanes and test shards; [test iteration](docs/TEST_ITERATION.md)

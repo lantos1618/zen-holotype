@@ -44,9 +44,20 @@ alias_target_type = (c :: Checker, t: TypeId, id: DeclId) Res<usize> {
 }
 
 module_for_target = (c :: Checker, n: Named, id: DeclId) Res<usize> {
-    c.world.defines(id.module.to_usize(), n.name.text).match({
-        true  => None,
-        false => c.target_module(n),
+    table = c.world.table_at(id.module.to_usize()).try();
+    table.defs.find((d) { d.name.eq(n.name.text) }).match({
+        // The alias itself does not shadow its module target. A different
+        // declaration with that name still has ordinary local precedence.
+        Ok(_) => table.defs.find((d) {
+            d.name.eq(n.name.text) && d.id.eq(id) == false
+        }).match({
+            Ok(_) => None,
+            None  => c.target_module(n),
+        }),
+        None  => c.world.defines(id.module.to_usize(), n.name.text).match({
+            true  => None,
+            false => c.target_module(n),
+        }),
     })
 }
 

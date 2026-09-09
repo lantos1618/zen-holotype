@@ -12,9 +12,16 @@ Checker = sema.sema
 Codegen = std.build
 String, str = std.text
 Range = std.core
+lower = gen.gen_lower
+Program = gen.gen_ir
+emit_js = gen.gen_js
+emit_asm = gen.gen_asm
+verify, message = gen.gen_verify
 
 Layout* = Single | Modules
 ArtifactKind* = Source | Symbols
+
+ScalarBackend = Js | Asm
 
 // Names and bytes borrow the renderer's current buffer. Consumers must write
 // or copy them during the callback; retaining this record extends no lifetime.
@@ -41,7 +48,17 @@ Generation* = {
              publish: (artifact: Artifact) Res<usize, AllocError>)
             Res<usize, AllocError> {
         self.backend.match({
-            C => {
+            Js  => self.scalar(
+                ScalarBackend.Js,
+                report,
+                (artifact) { publish(artifact) }
+            ),
+            Asm => self.scalar(
+                ScalarBackend.Asm,
+                report,
+                (artifact) { publish(artifact) }
+            ),
+            C   => {
                 be ::= self.alloc.CBackend(self.tree, self.check).try();
                 self.ffi.then(() { be.enable_ffi(); });
                 output ::= COutput(generation: self, be: be);
@@ -59,6 +76,78 @@ Generation* = {
                     true  => output.symbols((artifact) { publish(artifact) }),
                     false => Ok(faults),
                 })
+            },
+        })
+    }
+
+    scalar = (self: @Self, backend: ScalarBackend, report :: String,
+              publish: (artifact: Artifact) Res<usize, AllocError>)
+             Res<usize, AllocError> {
+        single = self.layout.match({ Single => true, Modules => false });
+        (single && self.symbols == false).match({
+            false => {
+                report.add(
+                    "error: JS and assembly backends require single-file output without a symbol map\n"
+                ).try();
+                Ok(1)
+            },
+            true  => lower(
+                self.alloc,
+                self.tree,
+                self.check,
+                self.entry
+            ).match({
+                Err(error)  => error.match({
+                    OutOfMemory        => Err(AllocError.OutOfMemory),
+                    Unsupported(fault) => {
+                        report.fmt(
+                            "{}:{}:{}: error: unsupported by this backend: {}\n",
+                            fault.span.file,
+                            fault.span.start.line,
+                            fault.span.start.col,
+                            fault.what
+                        ).try();
+                        Ok(1)
+                    },
+                }),
+                Ok(program) => self.render_scalar(
+                    backend,
+                    program,
+                    report,
+                    (artifact) { publish(artifact) }
+                ),
+            }),
+        })
+    }
+
+    render_scalar = (self: @Self, backend: ScalarBackend, program: Program,
+                     report :: String,
+                     publish: (artifact: Artifact) Res<usize, AllocError>)
+                    Res<usize, AllocError> {
+        program.verify(self.alloc).match({
+            Err(error) => error.match({
+                OutOfMemory    => Err(AllocError.OutOfMemory),
+                Invalid(fault) => {
+                    report.fmt(
+                        "compiler error: invalid IR at function {}, block {}: {}\n",
+                        fault.function,
+                        fault.block,
+                        fault.reason.message()
+                    ).try();
+                    Ok(1)
+                },
+            }),
+            Ok(_)      => {
+                    out  = backend.match({
+                        Js  => emit_js(self.alloc, program),
+                        Asm => emit_asm(self.alloc, program),
+                    }).try();
+                    name = backend.match({ Js => "zen.js", Asm => "zen.s" });
+                    publish(Artifact(
+                        kind: ArtifactKind.Source,
+                        name: name,
+                        text: out.view()
+                    ))
             },
         })
     }

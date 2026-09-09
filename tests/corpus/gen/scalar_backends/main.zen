@@ -1,0 +1,147 @@
+Build = zen.zen_build
+Generation, Layout = gen.gen
+Codegen = std.build
+
+// All three backends consume the same checked source. The output comparison
+// catches reordered mutable reads, short-circuit effects, recursion, shadowed
+// print sugar, and literal bytes; unsupported programs must never publish.
+run = (
+    env     : Env,
+    a       : Alloc,
+    backend : Codegen,
+    source  : str,
+    output  : str,
+    code    : i32
+)
+      Res<bool, AllocError> {
+    build ::= a.Build(env, "src/program");
+    build.set_std_root("src");
+    check = build.whole(source, a.Map<str, str>()).try();
+    report ::= a.String().try();
+    (check.diag_count() > 0).then(() {
+        check.render_diags(report).try();
+        println("frontend {}", report.view());
+    });
+    source_path = backend.match({ C => "candidate.c", Js => "candidate.js", Asm => "candidate.s" });
+    generation  = Generation(
+        alloc: a,
+        mem: env.mem,
+        tree: build.tree,
+        check: check,
+        backend: backend,
+        entry: 0,
+        layout: Layout.Single,
+        ffi: false,
+        symbols: false
+    );
+    called ::= 0;
+    faults = generation.emit(report, (artifact) {
+        called = called + 1;
+        Ok(
+            env.fs.write(
+                source_path,
+                artifact.text
+            ).match({ Ok(_) => 0, Err(_) => 1 })
+        )
+    }).try();
+    (faults > 0).then(() { println("generation {}", report.view()); });
+    good: Res<bool> = loop<bool>((h) {
+        (build.diag_count() > 0 || check.diag_count() > 0 || faults > 0 || called != 1)
+            .then(() { h.break(false); });
+        args ::= a.Vec<str>();
+        backend.match({
+            Js => { args.add("node").try(); args.add(source_path).try(); },
+            _  => {
+                compiler ::= a.Vec<str>();
+                [str, 7]("cc", source_path, "-o", "candidate", "-pthread", "-lm", "-pie")
+                    .loop((word) { compiler.add(word).try(); });
+                built = env.proc.run_argv(a, "", compiler).match({
+                    Ok(result) => result.code == 0, Err(_) => false,
+                });
+                (!built).then(() { h.break(false); });
+                args.add("./candidate").try();
+            },
+        });
+        result = env.proc.run_argv(a, "", args).match({
+            Err(_)     => false,
+            Ok(result) => result.code == code && result.out.view().eq(output)
+                && result.err.view().is_empty(),
+        });
+        h.break(result);
+    });
+    Ok(good.value_or(false))
+}
+
+refused = (env: Env, a: Alloc, backend: Codegen, source: str, layout: Layout)
+          Res<bool, AllocError> {
+    build ::= a.Build(env, "src/program");
+    build.set_std_root("src");
+    check = build.whole(source, a.Map<str, str>()).try();
+    report ::= a.String().try();
+    (check.diag_count() > 0).then(() {
+        check.render_diags(report).try();
+        println("frontend {}", report.view());
+    });
+    generation = Generation(
+        alloc: a,
+        mem: env.mem,
+        tree: build.tree,
+        check: check,
+        backend: backend,
+        entry: 0,
+        layout: layout,
+        ffi: false,
+        symbols: false
+    );
+    called ::= false;
+    faults = generation.emit(report, (artifact) { called = true; Ok(0) }).try();
+    Ok(build.diag_count() == 0 && check.diag_count() == 0 && faults > 0
+        && !called && !report.view().is_empty())
+}
+
+main = (env: Env) Res<(), AllocError> {
+    [Codegen, 3](Codegen.C, Codegen.Js, Codegen.Asm).loop((backend) {
+        a = env.mem.alloc();
+        println(
+            "{} evaluation {}",
+            backend.stable_name(),
+            run(
+                env,
+                a,
+                backend,
+                "program.zen",
+                "2 23 4 8 false true 8\n{literal} 4\0\n",
+                7
+            ).try()
+        );
+        println(
+            "{} shadow {}",
+            backend.stable_name(),
+            run(env, a, backend, "shadow.zen", "", 42).try()
+        );
+    });
+    [Codegen, 2](Codegen.Js, Codegen.Asm).loop((backend) {
+        a = env.mem.alloc();
+        println(
+            "{} wide refused {}",
+            backend.stable_name(),
+            refused(env, a, backend, "wide.zen", Layout.Single).try()
+        );
+        println(
+            "{} literal width refused {}",
+            backend.stable_name(),
+            refused(env, a, backend, "literal_width.zen", Layout.Single).try()
+        );
+        println(
+            "{} bool entry refused {}",
+            backend.stable_name(),
+            refused(env, a, backend, "bool_entry.zen", Layout.Single).try()
+        );
+        println(
+            "{} split refused {}",
+            backend.stable_name(),
+            refused(env, a, backend, "program.zen", Layout.Modules).try()
+        );
+    });
+    Ok(())
+}

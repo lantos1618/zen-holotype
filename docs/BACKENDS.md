@@ -1,88 +1,141 @@
-# Code generation backends
+# Code generation
 
-Zen currently implements the C backend. `std.build.Codegen` selects the
-source generator; `std.build.Emission` describes delivery:
+C is the default, full-language backend and the compiler's bootstrap path.
+JavaScript and GNU x86-64 assembly support scalar executables. Their support
+boundary is deliberately checked: unsupported reachable code produces a source
+diagnostic before the output callback runs. Selecting another backend never
+falls back to C.
 
-```zen
-Codegen = | C
-Emission = Check | Stdout | File(str) | Directory(str)
-```
+## Running the same source
 
-`BuildArgs.backend` and `Exe.backend` default to `Codegen.C`. Existing
-`--emit-c` and `--emit-c-dir` flags retain their output behavior. Explicit
-source-generator selection is also supported:
+After `make build`, enter the example project:
 
 ```sh
-zen build src --backend c --entry main.zen -o main.c
-mkdir -p build/c
-zen build src --backend c --entry main.zen --emit-c-dir build/c
+cd example/backends
+../../zen run c
+../../zen run js
+../../zen run asm
 ```
 
-With no output path, `--backend c` selects source output on stdout. This is
-part of the raw source compilation interface; executable names in project
-commands remain a separate selection. Unknown or unavailable names, including
-`js` and `asm`, produce an explicit error before compilation or output writes.
-There is no fallback to C and no dynamic plugin loader.
+Each prints `fib(10) = 55`. JavaScript runs on Node.js. Assembly projects require
+Linux, x86-64, the GNU ABI, and a C toolchain for assembly and linking. The
+assembly renderer writes `.s` directly; it does not ask a C compiler to generate
+assembly from C.
 
-Build files may select the implemented generator per executable:
+`Codegen.C`, `Codegen.Js`, and `Codegen.Asm` select the recipe in `build.zen`.
+JavaScript defaults to `build/{os}-{arch}/{name}.js`; an explicit output path is
+used exactly. C and assembly produce native executables. Arguments after the
+project target are passed to the selected runtime, although the scalar subset
+does not yet expose `Env.args` to the program.
 
-```zen
-Builder, BuildError, Codegen = std.build
+From the repository root, select a backend explicitly for raw source emission:
 
-build = (builder :: Builder) Res<(), BuildError> {
-    builder.exe("app", {
-        src: Path("src/main.zen"),
-        deps: [],
-        backend: Codegen.C,
-    }).try();
-    Ok(())
-}
+```sh
+./zen build example/backends --entry main.zen --std src --backend js -o build/fib.js
+./zen build example/backends --entry main.zen --std src --backend asm -o build/fib.s
 ```
 
-Project recipe dispatch also matches the selected backend explicitly. A future
-generator must supply its build/link recipe rather than inheriting `.c` output
-and `cc` invocation.
+`--backend` selects source output; omitting `-o` writes it to stdout. Existing
+`--emit-c` invocations remain compatible. Split-module output and symbol maps
+currently belong to C. Raw assembly output has a fixed Linux x86-64 GNU target; it is not a
+host-independent assembly format.
 
-The build interpreter accepts the checked Codegen constant and local bindings
-of it. An explicit expression outside the interpreter's supported subset is
-refused; it does not become the default backend.
+## Implemented scalar surface
 
-## Generator and driver boundary
+Both new backends share these language rules:
 
-`gen.Generation` receives the checked program, caller allocator, scratch-memory
-capability, entry module, generator choice, output layout and runtime options.
-It owns backend construction and lowering. `zen.zen_write.Publisher` owns stdout and
-filesystem destinations.
+- `i32`, `bool`, and unit parameters, local values, and function results.
+- A zero-argument `main` returning `i32` or unit; an unused standard `Env`
+  parameter is also accepted. An integer result becomes the process exit code.
+- Monomorphic functions, recursion, positional calls, local assignments, and
+  nested boolean matches with explicit `true` and `false` arms.
+- Checked arithmetic, comparisons, unary negation and boolean negation, and
+  short-circuit `&&` and `||`. Source evaluation order is preserved. Dynamic
+  integer arithmetic requires operands with a settled `i32` type. Unsettled
+  literal arithmetic is accepted only when sema can fold it to a fitting
+  constant; this avoids silently changing the current C path's wider literal
+  arithmetic. The underlying defaulting discrepancy remains compiler work.
+- `print` and `println` of scalar values and literal byte strings, positional
+  and local named format holes, doubled braces, and Zen string escapes.
+- Operator-position arithmetic diagnostics and exit status 134, matching Zen's
+  failure model. Output preceding a trap is flushed before exit.
 
-Generation publishes `gen.Artifact` values through a synchronous callback.
-An artifact contains a kind, name and borrowed bytes. The callback must consume
-or copy those bytes before returning; retaining the record extends no lifetime.
-Allocation failures remain typed. Backend diagnostics suppress publication;
-publication failures are counted and reported by the driver.
+Actors, allocator capabilities, dynamic strings, collections, structural
+results, closures, generic instantiation, foreign calls, named/default call
+arguments, wrapping arithmetic, and other numeric widths are not lowered by
+these backends yet. Unused generic functions need not be lowered, but the
+frontend still checks the entire imported source graph. JavaScript project
+recipes refuse native link dependencies.
 
-The C adapter preserves single-file output and the split layout: lower once,
-render the shared header, render used modules in stable order using a fresh
-scratch arena per module, then render a requested symbol map only if all source
-writes succeeded. Direct CBackend entry points remain available to compiler
-internals and backend-specific tools.
+## Phase boundaries
 
-A future backend belongs in its own generator module with an explicit dispatch
-case and artifact rendering implementation. It must implement real behavior
-before selection is advertised. C-only details such as declarators, the shared
-header and the C runtime floor remain in the C adapter.
+The new paths are:
 
-## Platform targets and remaining work
+```text
+AST + checked semantic facts
+  → gen_lower
+  → gen_ir.Program
+  → gen_verify
+  → gen_js or gen_asm
+  → synchronous artifact publication
+```
 
-`std.build.Target` means OS, architecture and ABI. A project command's target
-name means a selected executable. Neither is a synonym for a backend.
+The scalar IR contains typed slots, function signatures, explicit basic blocks
+and terminators, and operator source spans. It uses mutable slots rather than
+SSA. The verifier checks references, types, calls, constant representations,
+branch targets, return types, and definite assignment across reachable control
+flow. Structural validation also covers unreachable blocks. Validation failure
+is a compiler diagnostic, not a partially emitted program.
 
-The current project driver still selects a Linux/x86_64/GNU host and invokes
-`cc`; backend selection does not implement cross compilation. JavaScript and
-native machine-code generation are not implemented.
+Renderers consume verified IR without consulting the AST or semantic checker.
+Direct renderer callers must satisfy that precondition. All vectors, source
+spans, and text borrow caller-chosen compilation storage. Returning a Program
+or String does not extend its allocator's lifetime.
 
-A future native backend can share a typed lowered IR, but needs target-specific
-instruction selection, layout, register allocation, calling conventions and
-object/link handling. Current monomorphization, callback expansion and cleanup
-lowering are intertwined with C emission. Extracting reusable lowering requires
-behavioral comparisons against C. A generic assembly vocabulary alone does not
-supply these semantics or a complete actor/allocator runtime.
+Generation publishes each borrowed artifact synchronously. The callback must
+consume or copy its bytes before returning. Allocation failures stay typed;
+backend diagnostics suppress publication and the driver reports publication
+failures. The C split layout lowers once, emits its shared header, and renders
+used modules in stable order with a fresh scratch arena for each. A requested
+symbol map follows only when all source publications succeeded.
+
+Registration is static: a generator has a Codegen case, Generation dispatch,
+and an explicit project recipe. Importing a generator module exposes its API;
+it does not register a plugin. No dynamic plugin loader is implemented.
+
+The C backend still has its existing AST-based lowering, specialization,
+closure handling, cleanup, and runtime machinery. Its `lower_program` operation
+stages C emission; it does not produce this shared IR. The scalar backends do
+not establish full-language parity or a completed architecture migration.
+
+## Further work and acceptance criteria
+
+A shared whole-language backend boundary requires migration of concrete
+semantic responsibilities, not another dispatch case:
+
+1. Carry settled call targets, type substitutions, captures, and cleanup exits
+   into a shared representation. Renderers must not repeat name resolution or
+   type inference.
+2. Define allocation, ownership transfer, actor mailboxes, and foreign ABI
+   operations with explicit runtime contracts. Prove behavior against the
+   existing C path one feature family at a time.
+3. Migrate C to that representation while retaining the current bootstrap
+   path until fixpoint and corpus parity hold. Remove each duplicated lowering
+   only after its replacement covers the existing behavior.
+4. Measure frontend, lowering, validation, rendering, and native-tool time
+   separately before adding optimization passes. This change does not claim a
+   compilation-speed improvement.
+5. Add an LLVM renderer when that shared contract can serve it. Textual `.ll`
+   is a viable first interface. Typed blocks and explicit runtime operations
+   transfer; LLVM still needs the correct target layout, ABI, debug locations,
+   and explicit checks for Zen's trapping arithmetic.
+
+`gen_llvm` is not implemented. A future LLVM path may initially lower mutable
+slots to stack allocations and let promotion passes construct SSA. LLVM is an
+optional native backend, not a requirement for bootstrapping or running the C
+path.
+
+The executable corpus covers cross-backend evaluation and output, renderer
+runtime behavior, malformed IR, and project build/run recipes. `make verify`
+remains the aggregate gate. Passing it is evidence for the implemented surface,
+not a numerical ergonomics rating.

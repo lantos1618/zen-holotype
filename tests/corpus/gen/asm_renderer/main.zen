@@ -1,0 +1,269 @@
+// Exercise the renderer directly so ABI and trap behavior cannot be hidden by
+// the source lowerer. Each executable is linked as PIE in the test's workspace.
+Alloc, AllocError = std.mem
+FsError = std.env
+ProcError, ProcOutput = std.proc
+Span, Pos = std.ast
+Program, Func, Instruction, BasicBlock, Terminator, Const, Binary, Op, Invocation, Print, Scalar, Branch = gen.gen_ir
+emit_asm = gen.gen_asm
+
+BuildFault = | Compile
+
+binary = (out: usize, left: usize, op: Op, right: usize) Instruction {
+    Instruction.BinaryValue(Binary(
+        out: out,
+        left: left,
+        right: right,
+        op: op,
+        span: Span(
+            file: "a\"b\\c.zen",
+            start: Pos(line: 7, col: 11),
+            end: Pos(line: 7, col: 12)
+        )
+    ))
+}
+
+weighted = (a: Alloc, parameters: usize) Res<Func, AllocError> {
+    result  = parameters;
+    place   = parameters + 1;
+    product = parameters + 2;
+    code ::= a.Vec<Instruction>();
+    code.add(Instruction.Constant(Const(out: result, value: 0))).try();
+    factor: i32 ::= 1;
+    Range(0, parameters - 1).loop((i) {
+        code.add(Instruction.Constant(Const(out: place, value: factor))).try();
+        code.add(binary(product, i, Op.Mul, place)).try();
+        code.add(binary(result, result, Op.Add, product)).try();
+        factor = factor * 10;
+    });
+    // Block 2 computes the final digit before block 1 returns it. Physical
+    // fallthrough would omit that digit. Stack-argument callees also print it
+    // so the printf ABI probe checks their incoming stack alignment.
+    tail ::= a.Vec<Instruction>();
+    tail.add(Instruction.Constant(Const(out: place, value: factor))).try();
+    tail.add(binary(product, parameters - 1, Op.Mul, place)).try();
+    tail.add(binary(result, result, Op.Add, product)).try();
+    (parameters > 6).then(() {
+        tail.add(Instruction.PrintValue(Print(
+            value: result,
+            ty: Scalar.I32
+        ))).try();
+    });
+    blocks ::= a.Vec<BasicBlock>();
+    blocks.add(BasicBlock(code: code, exit: Terminator.Jump(2))).try();
+    blocks.add(BasicBlock(
+        code: a.Vec<Instruction>(),
+        exit: Terminator.Return(result)
+    )).try();
+    blocks.add(BasicBlock(code: tail, exit: Terminator.Jump(1))).try();
+    Ok(Func(
+        name: "weighted",
+        parameters: parameters,
+        slots: i32_slots(a, parameters + 3).try(),
+        blocks: blocks,
+        result: Scalar.I32
+    ))
+}
+
+factorial = (a: Alloc) Res<Func, AllocError> {
+    entry ::= a.Vec<Instruction>();
+    entry.add(Instruction.Constant(Const(out: 7, value: 1))).try();
+    entry.add(binary(8, 0, Op.LessEqual, 7)).try();
+    recursive ::= a.Vec<Instruction>();
+    recursive.add(binary(9, 0, Op.Sub, 7)).try();
+    args ::= a.Vec<usize>();
+    args.add(9).try();
+    Range(1, 7).loop((i) { args.add(i).try(); });
+    recursive.add(Instruction.Invoke(Invocation(
+        out: 10,
+        function: 2,
+        args: args
+    ))).try();
+    recursive.add(binary(11, 0, Op.Mul, 10)).try();
+    base ::= a.Vec<Instruction>();
+    base.add(Instruction.PrintValue(Print(value: 6, ty: Scalar.I32))).try();
+    base.add(Instruction.Text("=")).try();
+    blocks ::= a.Vec<BasicBlock>();
+    blocks.add(BasicBlock(
+        code: entry,
+        exit: Terminator.Branch(Branch(value: 8, yes: 1, no: 2))
+    )).try();
+    blocks.add(BasicBlock(code: base, exit: Terminator.Return(6))).try();
+    blocks.add(BasicBlock(code: recursive, exit: Terminator.Return(11))).try();
+    slots ::= a.Vec<Scalar>();
+    [Scalar.I32, Scalar.I32, Scalar.I32, Scalar.I32, Scalar.I32, Scalar.I32, Scalar.I32, Scalar.I32, Scalar.Bool, Scalar.I32, Scalar.I32, Scalar.I32].loop((ty) {
+        slots.add(ty).try();
+    });
+    Ok(Func(
+        name: "factorial",
+        parameters: 7,
+        slots: slots,
+        blocks: blocks,
+        result: Scalar.I32
+    ))
+}
+
+calls = (a: Alloc) Res<Program, AllocError> {
+    code ::= a.Vec<Instruction>();
+    args ::= a.Vec<usize>();
+    Range(0, 6).loop((i) {
+        value = i.match({ 0 => 1, 1 => 2, 2 => 3, 3 => 4, 4 => 5, _ => 6 });
+        code.add(Instruction.Constant(Const(out: i, value: value))).try();
+        args.add(i).try();
+    });
+    code.add(Instruction.Invoke(Invocation(
+        out: 6,
+        function: 1,
+        args: args
+    ))).try();
+    code.add(Instruction.PrintValue(Print(value: 6, ty: Scalar.I32))).try();
+    code.add(Instruction.Text(" ")).try();
+    single ::= a.Vec<usize>();
+    single.add(4).try();
+    code.add(Instruction.Constant(Const(out: 7, value: 1))).try();
+    Range(1, 7).loop((_) { single.add(7).try(); });
+    code.add(Instruction.Invoke(Invocation(
+        out: 6,
+        function: 2,
+        args: single
+    ))).try();
+    code.add(Instruction.PrintValue(Print(value: 6, ty: Scalar.I32))).try();
+    code.add(Instruction.Text("\nraw \"\\\0😀\n")).try();
+    code.add(Instruction.Constant(Const(out: 7, value: 0))).try();
+    blocks ::= a.Vec<BasicBlock>();
+    blocks.add(BasicBlock(code: code, exit: Terminator.Return(7))).try();
+    functions ::= a.Vec<Func>();
+    functions.add(Func(
+        name: "main",
+        parameters: 0,
+        slots: i32_slots(a, 8).try(),
+        blocks: blocks,
+        result: Scalar.I32
+    )).try();
+    functions.add(weighted(a, 6).try()).try();
+    functions.add(factorial(a).try()).try();
+    Ok(Program(functions: functions, entry: 0))
+}
+
+stack_calls = (a: Alloc, parameters: usize) Res<Program, AllocError> {
+    code ::= a.Vec<Instruction>();
+    args ::= a.Vec<usize>();
+    Range(0, parameters).loop((i) {
+        value = i.match({ 0 => 1, 1 => 2, 2 => 3, 3 => 4, 4 => 5, 5 => 6, 6 => 7, _ => 8 });
+        code.add(Instruction.Constant(Const(out: i, value: value))).try();
+        args.add(i).try();
+    });
+    code.add(Instruction.Invoke(Invocation(
+        out: parameters,
+        function: 1,
+        args: args
+    ))).try();
+    code.add(Instruction.Text("=")).try();
+    code.add(Instruction.PrintValue(Print(
+        value: parameters,
+        ty: Scalar.I32
+    ))).try();
+    code.add(Instruction.Text("\n")).try();
+    code.add(Instruction.Constant(Const(out: parameters + 1, value: 0))).try();
+    blocks ::= a.Vec<BasicBlock>();
+    blocks.add(BasicBlock(
+        code: code,
+        exit: Terminator.Return(parameters + 1)
+    )).try();
+    functions ::= a.Vec<Func>();
+    functions.add(Func(
+        name: "main",
+        parameters: 0,
+        slots: i32_slots(a, parameters + 2).try(),
+        blocks: blocks,
+        result: Scalar.I32
+    )).try();
+    functions.add(weighted(a, parameters).try()).try();
+    Ok(Program(functions: functions, entry: 0))
+}
+
+trapping = (a: Alloc, left: i32, op: Op, right: i32) Res<Program, AllocError> {
+    code ::= a.Vec<Instruction>();
+    code.add(Instruction.Constant(Const(out: 0, value: left))).try();
+    code.add(Instruction.Constant(Const(out: 1, value: right))).try();
+    code.add(Instruction.Text("before\n")).try();
+    code.add(binary(2, 0, op, 1)).try();
+    blocks ::= a.Vec<BasicBlock>();
+    blocks.add(BasicBlock(code: code, exit: Terminator.Return(2))).try();
+    functions ::= a.Vec<Func>();
+    functions.add(Func(
+        name: "main",
+        parameters: 0,
+        slots: i32_slots(a, 3).try(),
+        blocks: blocks,
+        result: Scalar.I32
+    )).try();
+    Ok(Program(functions: functions, entry: 0))
+}
+
+i32_slots = (a: Alloc, count: usize) Res<Vec<Scalar>, AllocError> {
+    slots ::= a.Vec<Scalar>();
+    Range(0, count).loop((_) { slots.add(Scalar.I32).try(); });
+    Ok(slots)
+}
+
+run = (env: Env, a: Alloc, name: str, program: Program)
+      Res<ProcOutput, AllocError | FsError | ProcError | BuildFault> {
+    source = a.String("{}.s", name).try();
+    assembly ::= emit_asm(a, program).try();
+    // The wrapper observes the real ABI at a libc call without changing its
+    // arguments. Even an integer-only printf must receive an aligned stack.
+    assembly.add(
+        ".text\n.globl __wrap_printf\n__wrap_printf:\n    movq %rsp, %r11\n    andl $15, %r11d\n    cmpl $8, %r11d\n    jne .Lbad_alignment\n    jmp __real_printf@PLT\n.Lbad_alignment:\n    movl $97, %edi\n    andq $-16, %rsp\n    call exit@PLT\n    ud2\n"
+    ).try();
+    env.fs.write(source.view(), assembly.view()).try();
+    compile ::= a.Vec<str>();
+    ["cc", "-pie", "-Wl,--wrap=printf", source.view(), "-o", name].loop((arg) { compile.add(arg).try(); });
+    compiled = env.proc.run_argv(a, ".", compile).try();
+    (compiled.code == 0).ensure(BuildFault.Compile).try();
+    execute ::= a.Vec<str>();
+    path = a.String("./{}", name).try();
+    execute.add(path.view()).try();
+    env.proc.run_argv(a, ".", execute)
+}
+
+check_trap = (output: ProcOutput, reason: str) bool {
+    output.code == 134 && output.out.view().eq("before\n")
+        && output.err.view().eq(reason)
+}
+
+main = (env: Env) Res<i32, AllocError | FsError | ProcError | BuildFault> {
+    a      = env.mem.alloc();
+    normal = run(env, a, "calls", calls(a).try()).try();
+    println("calls and exact bytes {}", normal.code == 0
+        && normal.out.view().eq(
+            "654321 1=120\nraw \"\\\0😀\n"
+        ) && normal.err.is_empty());
+    seven = run(env, a, "seven", stack_calls(a, 7).try()).try();
+    println("seven arguments {}", seven.code == 0
+        && seven.out.view().eq("7654321=7654321\n") && seven.err.is_empty());
+    eight = run(env, a, "eight", stack_calls(a, 8).try()).try();
+    println("eight arguments {}", eight.code == 0
+        && eight.out.view().eq("87654321=87654321\n") && eight.err.is_empty());
+    added = run(env, a, "add", trapping(a, i32.MAX, Op.Add, 1).try()).try();
+    println(
+        "addition overflow {}",
+        check_trap(added, "a\"b\\c.zen:7:11: trap: integer overflow\n")
+    );
+    divided = run(
+        env,
+        a,
+        "divide",
+        trapping(a, i32.MIN, Op.Div, -1).try()
+    ).try();
+    println(
+        "division overflow {}",
+        check_trap(divided, "a\"b\\c.zen:7:11: trap: integer overflow\n")
+    );
+    zero = run(env, a, "zero", trapping(a, 7, Op.Div, 0).try()).try();
+    println(
+        "divide by zero {}",
+        check_trap(zero, "a\"b\\c.zen:7:11: trap: divide by zero\n")
+    );
+    Ok(0)
+}

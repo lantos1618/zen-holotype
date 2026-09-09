@@ -1,0 +1,280 @@
+Program, Func, Scalar, BasicBlock, Terminator, Branch = gen.gen_ir
+Instruction, Const, Move, Unary, UnaryOp, Binary, Op, Invocation, Print = gen.gen_ir
+verify, message = gen.gen_verify
+nowhere = std.ast
+
+Refuse = {}
+Refuse.impl(Alloc, {
+    raw = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        Err(AllocError.OutOfMemory)
+    }
+    realloc = <T>(self: @Self, ptr: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        Err(AllocError.OutOfMemory)
+    }
+})
+
+show = (name: str, program: Program, alloc: Alloc) () {
+    verify(program, alloc).match({
+        Ok(_)               => println("{} ok", name),
+        Err(OutOfMemory)    => println("{} allocation failure", name),
+        Err(Invalid(fault)) => println(
+            "{} {}:{} {}",
+            name,
+            fault.function,
+            fault.block,
+            fault.reason.message()
+        ),
+    });
+}
+
+Example = {
+    alloc: Alloc,
+    slots :: Vec<Scalar>,
+    code :: Vec<Instruction>,
+    exit :: Terminator,
+    result :: Scalar = Scalar.I32,
+    parameters :: usize = 0,
+
+    program = (self: @Self) Res<Program, AllocError> {
+        blocks ::= self.alloc.Vec<BasicBlock>();
+        blocks.add(BasicBlock(code: self.code, exit: self.exit)).try();
+        functions ::= self.alloc.Vec<Func>();
+        functions.add(Func(
+            name: "main",
+            parameters: self.parameters,
+            slots: self.slots,
+            blocks: blocks,
+            result: self.result
+        )).try();
+        Ok(Program(functions: functions, entry: 0))
+    }
+}
+
+example = (a: Alloc) Res<Example, AllocError> {
+    slots ::= a.Vec<Scalar>();
+    [Scalar.I32, Scalar.I32, Scalar.Bool, Scalar.Unit].loop((ty) { slots.add(ty).try(); });
+    code ::= a.Vec<Instruction>();
+    [i32, 4](1, 2, 1, 0).loop((h, index, number) {
+        code.add(Instruction.Constant(Const(out: index, value: number))).try();
+    });
+    Ok(Example(alloc: a, slots: slots, code: code, exit: Terminator.Return(0)))
+}
+
+structure = (a: Alloc) Res<(), AllocError> {
+    show("missing entry", Program(functions: a.Vec<Func>(), entry: 0), a);
+    e ::= example(a).try();
+    show("valid scalars", e.program().try(), a);
+    show("allocation", e.program().try(), Refuse());
+    e.parameters = 1;
+    show("entry arguments", e.program().try(), a);
+    e.parameters = 0;
+    e.exit       = Terminator.Return(9);
+    show("missing slot", e.program().try(), a);
+    e.exit = Terminator.Return(2);
+    show("return type", e.program().try(), a);
+    e.exit = Terminator.Jump(1);
+    show("missing target", e.program().try(), a);
+    e.exit = Terminator.Branch(Branch(value: 0, yes: 0, no: 0));
+    show("branch type", e.program().try(), a);
+    e.exit = Terminator.Return(0);
+    e.code.add(Instruction.Constant(Const(out: 2, value: 2))).try();
+    show("boolean constant", e.program().try(), a);
+    e.code.take(e.code.len - 1);
+    e.code.add(Instruction.Constant(Const(out: 3, value: 1))).try();
+    show("unit constant", e.program().try(), a);
+    e.code.take(e.code.len - 1);
+    e.code.add(Instruction.Copy(Move(out: 0, source: 2))).try();
+    show("copy type", e.program().try(), a);
+    e.code.take(e.code.len - 1);
+    e.code.add(Instruction.UnaryValue(Unary(
+        out: 2,
+        input: 0,
+        op: UnaryOp.Not,
+        span: nowhere()
+    ))).try();
+    show("unary type", e.program().try(), a);
+    e.code.take(e.code.len - 1);
+    e.code.add(Instruction.BinaryValue(Binary(
+        out: 2,
+        left: 2,
+        right: 2,
+        op: Op.Less,
+        span: nowhere()
+    ))).try();
+    show("ordered type", e.program().try(), a);
+    e.code.take(e.code.len - 1);
+    e.code.add(Instruction.BinaryValue(Binary(
+        out: 2,
+        left: 3,
+        right: 3,
+        op: Op.Equal,
+        span: nowhere()
+    ))).try();
+    show("unit equality", e.program().try(), a);
+    e.code.take(e.code.len - 1);
+    e.code.add(Instruction.PrintValue(Print(value: 0, ty: Scalar.Bool))).try();
+    show("print type", e.program().try(), a);
+    e.code.take(e.code.len - 1);
+    e.code.clear();
+    show("uninitialized return", e.program().try(), a);
+    Ok(())
+}
+
+calls = (a: Alloc) Res<(), AllocError> {
+    e    ::= example(a).try();
+    args ::= a.Vec<usize>();
+    args.add(1).try();
+    e.code.add(Instruction.Invoke(Invocation(
+        out: 0,
+        function: 1,
+        args: args
+    ))).try();
+    program = e.program().try();
+    show("missing callee", program, a);
+    slots ::= a.Vec<Scalar>();
+    slots.add(Scalar.I32).try();
+    blocks ::= a.Vec<BasicBlock>();
+    blocks.add(BasicBlock(
+        code: a.Vec<Instruction>(),
+        exit: Terminator.Return(0)
+    )).try();
+    functions ::= program.functions;
+    functions.add(Func(
+        name: "identity",
+        parameters: 1,
+        slots: slots,
+        blocks: blocks,
+        result: Scalar.I32
+    )).try();
+    p = Program(functions: functions, entry: 0);
+    show("initialized parameter", p, a);
+    args.set(0, 2);
+    show("call type", p, a);
+    args.set(0, 1);
+    e.code.set(
+        e.code.len - 1,
+        Instruction.Invoke(Invocation(
+            out: 0,
+            function: 1,
+            args: a.Vec<usize>()
+        ))
+    );
+    show("call count", p, a);
+    e.code.set(
+        e.code.len - 1,
+        Instruction.Invoke(Invocation(out: 0, function: 1, args: args))
+    );
+    functions.set(
+        1,
+        Func(
+            name: "bad",
+            parameters: 2,
+            slots: slots,
+            blocks: blocks,
+            result: Scalar.I32
+        )
+    );
+    // Remove the call so the invalid callee's signature is the first fault.
+    e.code.set(e.code.len - 1, Instruction.Text(""));
+    show("parameter slots", p, a);
+    functions.set(
+        1,
+        Func(
+            name: "bad",
+            parameters: 0,
+            slots: slots,
+            blocks: a.Vec<BasicBlock>(),
+            result: Scalar.I32
+        )
+    );
+    show("missing block", p, a);
+    Ok(())
+}
+
+constant_block = (a: Alloc, initialize: bool, exit: Terminator)
+                 Res<BasicBlock, AllocError> {
+    code ::= a.Vec<Instruction>();
+    initialize.then(
+        () { code.add(Instruction.Constant(Const(out: 1, value: 7))).try(); }
+    );
+    Ok(BasicBlock(code: code, exit: exit))
+}
+
+flow_program = (a: Alloc, blocks: Vec<BasicBlock>) Res<Program, AllocError> {
+    slots ::= a.Vec<Scalar>();
+    slots.add(Scalar.Bool).try();
+    slots.add(Scalar.I32).try();
+    functions ::= a.Vec<Func>();
+    functions.add(Func(
+        name: "main",
+        parameters: 0,
+        slots: slots,
+        blocks: blocks,
+        result: Scalar.I32
+    )).try();
+    Ok(Program(functions: functions, entry: 0))
+}
+
+diamond = (a: Alloc, initialize: bool) Res<Program, AllocError> {
+    code ::= a.Vec<Instruction>();
+    code.add(Instruction.Constant(Const(out: 0, value: 1))).try();
+    blocks ::= a.Vec<BasicBlock>();
+    blocks.add(BasicBlock(
+        code: code,
+        exit: Terminator.Branch(Branch(value: 0, yes: 1, no: 2))
+    )).try();
+    blocks.add(constant_block(a, initialize, Terminator.Jump(3)).try()).try();
+    blocks.add(constant_block(a, true, Terminator.Jump(3)).try()).try();
+    blocks.add(constant_block(a, false, Terminator.Return(1)).try()).try();
+    flow_program(a, blocks)
+}
+
+cycle = (a: Alloc, initialize: bool) Res<Program, AllocError> {
+    start = constant_block(a, initialize, Terminator.Jump(1)).try();
+    code ::= start.code;
+    code.add(Instruction.Constant(Const(out: 0, value: 0))).try();
+    body ::= a.Vec<Instruction>();
+    body.add(Instruction.Copy(Move(out: 1, source: 1))).try();
+    blocks ::= a.Vec<BasicBlock>();
+    blocks.add(BasicBlock(code: code, exit: start.exit)).try();
+    blocks.add(BasicBlock(
+        code: body,
+        exit: Terminator.Branch(Branch(value: 0, yes: 1, no: 2))
+    )).try();
+    blocks.add(constant_block(a, false, Terminator.Return(1)).try()).try();
+    flow_program(a, blocks)
+}
+
+unreachable = (a: Alloc) Res<(), AllocError> {
+    e = example(a).try();
+    code ::= a.Vec<Instruction>();
+    code.add(Instruction.PrintValue(Print(value: 1, ty: Scalar.I32))).try();
+    blocks ::= a.Vec<BasicBlock>();
+    blocks.add(BasicBlock(code: e.code, exit: e.exit)).try();
+    blocks.add(BasicBlock(code: code, exit: Terminator.Return(1))).try();
+    functions ::= a.Vec<Func>();
+    functions.add(Func(
+        name: "main",
+        parameters: 0,
+        slots: e.slots,
+        blocks: blocks,
+        result: Scalar.I32
+    )).try();
+    program = Program(functions: functions, entry: 0);
+    show("unreachable read", program, a);
+    code.set(0, Instruction.PrintValue(Print(value: 1, ty: Scalar.Bool)));
+    show("unreachable type", program, a);
+    Ok(())
+}
+
+main = (env: Env) Res<(), AllocError> {
+    a = env.mem.alloc();
+    structure(a).try();
+    calls(a).try();
+    unreachable(a).try();
+    show("both predecessors", diamond(a, true).try(), a);
+    show("missing predecessor", diamond(a, false).try(), a);
+    show("initialized loop", cycle(a, true).try(), a);
+    show("circular initialization", cycle(a, false).try(), a);
+    Ok(())
+}

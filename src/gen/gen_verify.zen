@@ -1,0 +1,342 @@
+// Validate the scalar IR before rendering. Structural checks cover every
+// block. Definite assignment intersects the outgoing facts of reachable
+// predecessors until stable, so a backedge cannot invent an initial value.
+Alloc = std.mem
+Vec = std.collections
+Range = std.core
+str = std.text
+Program, Func, Scalar, Instruction, Terminator = gen.gen_ir
+
+IrReason* = EntryFunction
+    | EntryParameters
+    | ParameterSlots
+    | MissingBlock
+    | Slot
+    | Type
+    | Constant
+    | Callee
+    | Arguments
+    | Target
+    | Uninitialized
+
+message* = (reason: IrReason) str {
+    reason.match({
+        EntryFunction   => "entry function is missing",
+        EntryParameters => "entry function takes arguments",
+        ParameterSlots  => "parameter count exceeds the slot signature",
+        MissingBlock    => "function has no entry block",
+        Slot            => "instruction refers to a missing slot",
+        Type            => "instruction types do not agree",
+        Constant        => "constant does not fit its scalar type",
+        Callee          => "call refers to a missing function",
+        Arguments       => "call argument count does not match its signature",
+        Target          => "terminator refers to a missing block",
+        Uninitialized   => "slot is read before initialization on a reachable path",
+    })
+}
+
+IrFault* = { function*: usize, block*: usize, reason*: IrReason }
+VerifyError* = OutOfMemory | Invalid(IrFault)
+
+same = (left: Scalar, right: Scalar) bool {
+    left.match({
+        I32  => right.match({ I32 => true, _ => false }),
+        Bool => right.match({ Bool => true, _ => false }),
+        Unit => right.match({ Unit => true, _ => false }),
+    })
+}
+
+Check = {
+    program: Program,
+    function: Func,
+    index: usize,
+    block :: usize = 0,
+
+    fault = (self: @Self, reason: IrReason) VerifyError {
+        VerifyError.Invalid(IrFault(
+            function: self.index,
+            block: self.block,
+            reason: reason
+        ))
+    }
+
+    slot = (self: @Self, index: usize) Res<Scalar, VerifyError> {
+        self.function.slots.get(index).ok_or(self.fault(IrReason.Slot))
+    }
+
+    expect = (self: @Self, index: usize, ty: Scalar) Res<(), VerifyError> {
+        self.slot(index).try().same(ty).ensure(self.fault(IrReason.Type)).try();
+        Ok(())
+    }
+
+    target = (self: @Self, index: usize) Res<(), VerifyError> {
+        (index < self.function.blocks.len).ensure(self.fault(
+            IrReason.Target
+        )).try();
+        Ok(())
+    }
+
+    instruction = (self: @Self, instruction: Instruction) Res<(), VerifyError> {
+        instruction.match({
+            Constant(value)    => {
+                ty    = self.slot(value.out).try();
+                valid = ty.match({ I32 => true, Bool => value.value == 0 || value.value == 1,
+                    Unit => value.value == 0 });
+                valid.ensure(self.fault(IrReason.Constant)).try();
+                Ok(())
+            },
+            Copy(value)        => self.expect(
+                value.out,
+                self.slot(value.source).try()
+            ),
+            UnaryValue(value)  => {
+                ty = value.op.match({ Neg => Scalar.I32, Not => Scalar.Bool });
+                self.expect(value.input, ty).try();
+                self.expect(value.out, ty)
+            },
+            BinaryValue(value) => {
+                input = self.slot(value.left).try();
+                self.expect(value.right, input).try();
+                result = value.op.match({
+                    Equal => Scalar.Bool, NotEqual => Scalar.Bool,
+                    _ => {
+                        input.same(Scalar.I32).ensure(self.fault(IrReason.Type)).try();
+                        value.op.match({
+                            Add => Scalar.I32, Sub => Scalar.I32, Mul => Scalar.I32,
+                            Div => Scalar.I32, Rem => Scalar.I32, _ => Scalar.Bool,
+                        })
+                    },
+                });
+                self.expect(value.out, result)
+            },
+            Invoke(call)       => {
+                callee = self.program.functions.get(call.function)
+                    .ok_or(self.fault(IrReason.Callee)).try();
+                (callee.parameters == call.args.len).ensure(self.fault(
+                    IrReason.Arguments
+                )).try();
+                call.args.loop((h, index, slot) {
+                    ty = callee.slots.get(index).ok_or(self.fault(IrReason.ParameterSlots)).try();
+                    self.expect(slot, ty).try();
+                });
+                self.expect(call.out, callee.result)
+            },
+            PrintValue(value)  => self.expect(value.value, value.ty),
+            Text(_)            => Ok(()),
+        })
+    }
+
+    exit = (self: @Self, exit: Terminator) Res<(), VerifyError> {
+        exit.match({
+            Return(slot)   => self.expect(slot, self.function.result),
+            Jump(target)   => self.target(target),
+            Branch(branch) => {
+                self.expect(branch.value, Scalar.Bool).try();
+                self.target(branch.yes).try();
+                self.target(branch.no)
+            },
+        })
+    }
+
+    structure = (self :: @Self) Res<(), VerifyError> {
+        (self.function.parameters <= self.function.slots.len)
+            .ensure(self.fault(IrReason.ParameterSlots)).try();
+        (self.function.blocks.len > 0).ensure(self.fault(
+            IrReason.MissingBlock
+        )).try();
+        self.function.blocks.loop((h, index, block) {
+            self.block = index;
+            block.code.loop(
+                (instruction) { self.instruction(instruction).try(); }
+            );
+            self.exit(block.exit).try();
+        });
+        Ok(())
+    }
+
+    initialized = (self: @Self, flags: Vec<bool>, slot: usize) Res<(), VerifyError> {
+        flags.get(slot).value_or(false).ensure(self.fault(IrReason.Uninitialized)).try();
+        Ok(())
+    }
+
+    reads = (self: @Self, flags: Vec<bool>, instruction: Instruction) Res<(), VerifyError> {
+        instruction.match({
+            Constant(_)        => Ok(()),
+            Copy(value)        => self.initialized(flags, value.source),
+            UnaryValue(value)  => self.initialized(flags, value.input),
+            BinaryValue(value) => {
+                self.initialized(flags, value.left).try();
+                self.initialized(flags, value.right)
+            },
+            Invoke(call)       => {
+                call.args.loop((slot) { self.initialized(flags, slot).try(); });
+                Ok(())
+            },
+            PrintValue(value)  => self.initialized(flags, value.value),
+            Text(_)            => Ok(()),
+        })
+    }
+
+    exit_reads = (self: @Self, flags: Vec<bool>, exit: Terminator) Res<(), VerifyError> {
+        exit.match({
+            Return(slot)   => self.initialized(flags, slot),
+            Branch(branch) => self.initialized(flags, branch.value),
+            Jump(_)        => Ok(()),
+        })
+    }
+}
+
+flags = (alloc: Alloc, count: usize, value: bool) Res<Vec<bool>, VerifyError> {
+    result ::= alloc.Vec<bool>();
+    Range(0, count).loop((_) { result.add(value).try(VerifyError.OutOfMemory); });
+    Ok(result)
+}
+
+// Structural validation has established the bounds of every slot and edge.
+write = (flags :: Vec<bool>, instruction: Instruction) () {
+    instruction.match({
+        Constant(value)    => { flags.set(value.out, true); },
+        Copy(value)        => { flags.set(value.out, true); },
+        UnaryValue(value)  => { flags.set(value.out, true); },
+        BinaryValue(value) => { flags.set(value.out, true); },
+        Invoke(value)      => { flags.set(value.out, true); },
+        _                  => (),
+    });
+}
+
+Flow = {
+    alloc: Alloc,
+    check :: Check,
+    reachable :: Vec<bool>,
+    predecessors :: Vec<Vec<usize>>,
+    outgoing :: Vec<Vec<bool>>,
+    scratch :: Vec<bool>,
+
+    connect = (self :: @Self, from: usize, to: usize) Res<(), VerifyError> {
+        pred ::= self.predecessors.get(to).ok_or(self.check.fault(IrReason.Target)).try();
+        pred.add(from).try(VerifyError.OutOfMemory);
+        self.predecessors.set(to, pred);
+        Ok(())
+    }
+
+    graph = (self :: @Self) Res<(), VerifyError> {
+        self.check.function.blocks.loop((_) {
+            self.predecessors.add(
+                self.alloc.Vec<usize>()
+            ).try(VerifyError.OutOfMemory);
+            self.outgoing.add(
+                flags(self.alloc, self.check.function.slots.len, true).try()
+            )
+                .try(VerifyError.OutOfMemory);
+        });
+        self.check.function.blocks.loop((h, index, block) {
+            block.exit.match({
+                Jump(to)       => self.connect(index, to),
+                Branch(branch) => {
+                    self.connect(index, branch.yes).try();
+                    self.connect(index, branch.no)
+                },
+                Return(_)      => Ok(()),
+            }).try();
+        });
+        self.reachable.set(0, true);
+        work ::= self.alloc.Vec<usize>();
+        work.add(0).try(VerifyError.OutOfMemory);
+        at: usize ::= 0;
+        loop(() { at < work.len }, (h) {
+            index = work.get(at).ok_or(self.check.fault(IrReason.Target)).try();
+            block = self.check.function.blocks.get(index).ok_or(self.check.fault(IrReason.Target)).try();
+            block.exit.match({
+                Jump(to)       => self.visit(to, work),
+                Branch(branch) => { self.visit(branch.yes, work).try(); self.visit(branch.no, work) },
+                Return(_)      => Ok(()),
+            }).try();
+            at = at + 1;
+        });
+        Ok(())
+    }
+
+    visit = (self :: @Self, block: usize, work :: Vec<usize>) Res<(), VerifyError> {
+        (!self.reachable.get(block).value_or(false)).then(() {
+            self.reachable.set(block, true);
+            work.add(block).try(VerifyError.OutOfMemory);
+        });
+        Ok(())
+    }
+
+    incoming = (self: @Self, block: usize, incoming :: Vec<bool>) Res<(), VerifyError> {
+        Range(0, incoming.len).loop((slot) { incoming.set(slot, true); });
+        (block == 0).then(() {
+            Range(self.check.function.parameters, incoming.len).loop((slot) { incoming.set(slot, false); });
+        });
+        predecessors = self.predecessors.get(block).ok_or(self.check.fault(IrReason.Target)).try();
+        predecessors.loop((predecessor) {
+            self.reachable.get(predecessor).value_or(false).then(() {
+                previous = self.outgoing.get(predecessor).ok_or(self.check.fault(IrReason.Target)).try();
+                Range(0, incoming.len).loop((slot) {
+                    (!previous.get(slot).value_or(false)).then(() { incoming.set(slot, false); });
+                });
+            });
+        });
+        Ok(())
+    }
+
+    solve = (self :: @Self) Res<(), VerifyError> {
+        changed ::= true;
+        loop(() { changed }, (h) {
+            changed = false;
+            self.check.function.blocks.loop((bh, index, block) {
+                self.reachable.get(index).value_or(false).then(() {
+                    next ::= self.scratch;
+                    self.incoming(index, next).try();
+                    block.code.loop((instruction) { next.write(instruction); });
+                    old ::= self.outgoing.get(index).ok_or(self.check.fault(IrReason.Target)).try();
+                    Range(0, next.len).loop((slot) {
+                        (old.get(slot).value_or(false) != next.get(slot).value_or(false))
+                            .then(() { changed = true; });
+                        old.set(slot, next.get(slot).value_or(false));
+                    });
+                });
+            });
+        });
+        self.check.function.blocks.loop((h, index, block) {
+            self.reachable.get(index).value_or(false).then(() {
+                self.check.block = index;
+                state ::= self.scratch;
+                self.incoming(index, state).try();
+                block.code.loop((instruction) {
+                    self.check.reads(state, instruction).try();
+                    state.write(instruction);
+                });
+                self.check.exit_reads(state, block.exit).try();
+            });
+        });
+        Ok(())
+    }
+}
+
+verify* = (program: Program, alloc: Alloc) Res<(), VerifyError> {
+    entry = program.functions.get(program.entry).ok_or(VerifyError.Invalid(IrFault(function: program.entry, block: 0, reason: IrReason.EntryFunction))).try();
+    (entry.parameters == 0).ensure(VerifyError.Invalid(IrFault(
+        function: program.entry,
+        block: 0,
+        reason: IrReason.EntryParameters
+    ))).try();
+    program.functions.loop((h, index, function) {
+        check ::= Check(program: program, function: function, index: index);
+        check.structure().try();
+    });
+    program.functions.loop((h, index, function) {
+        flow ::= Flow(
+            alloc: alloc,
+            check: Check(program: program, function: function, index: index),
+            reachable: flags(alloc, function.blocks.len, false).try(),
+            predecessors: alloc.Vec<Vec<usize>>(),
+            outgoing: alloc.Vec<Vec<bool>>(),
+            scratch: flags(alloc, function.slots.len, false).try()
+        );
+        flow.graph().try();
+        flow.solve().try();
+    });
+    Ok(())
+}

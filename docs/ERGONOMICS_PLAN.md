@@ -146,8 +146,9 @@ feature/cache interactions:
   duplicate reply-module helper without changing their allocator choices.
 - Code generator selection is separate from output delivery and platform
   targets. The working C adapter owns lowering/rendering and publishes borrowed
-  artifacts synchronously. JS and native backends remain unavailable; the
-  interface does not imply complete shared IR or cross-compilation support.
+  artifacts synchronously. The later scalar backend batch is described in
+  [Code generation](BACKENDS.md); neither boundary implies whole-language
+  shared lowering or general cross-compilation support.
 - Incremental build validation records include-search candidates as well as
   resolved dependencies. Header shadowing invalidates object reuse. Every native
   compilation uses ccache preprocessor mode to avoid stale direct-mode history;
@@ -482,3 +483,20 @@ The independent earlier review put the synchronous task at Zen 7/10, Go 8/10,
 and Nim 8.5/10, with an approximate half-point uncertainty. Those are subjective
 example-level assessments. Completing this plan is grounds for another review,
 not an automatic entitlement to a 9/10 label.
+
+## Scalar backend foundation
+
+JavaScript and GNU x86-64 assembly now have concrete renderers behind the
+backend selection boundary. Their shared lowerer preserves evaluated local
+values in distinct slots and uses sema-selected declarations. Typed basic
+blocks carry explicit terminators; verification checks types, references,
+signatures, and definite assignment before artifact publication. Arithmetic
+traps retain operator source locations. Hexadecimal byte encoding reuses the
+standard String writer.
+
+This is a bounded scalar implementation. C still owns the full-language
+lowering and runtime path; actors, allocator capabilities, generics, and
+closures have not migrated. [Code generation](BACKENDS.md) records the
+implemented surface, runnable example, and acceptance criteria for extending
+the shared boundary. No numerical ergonomics or compilation-speed target is
+claimed by this change.

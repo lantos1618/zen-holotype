@@ -1,0 +1,726 @@
+// Lower checked scalar executables once for the JS and assembly renderers.
+// Unsupported reachable language constructs fail before any artifact is
+// published. Declaration identity and overload choices come from sema.
+Alloc, AllocError = std.mem
+Vec, Map = std.collections
+String, str = std.text
+fmt_at = std.text.text_fmt
+Ast, ExprId, BlockId, TypeId, Span, Function, Literal, Bind = std.ast
+BinOp, UnOp, Match, Call, nowhere = std.ast
+Checker, DeclId, Def, TyId, decl_at, const_int = sema.sema
+Scalar, Op, UnaryOp, Const, Move, Unary, Binary, Invocation, Print, Branch = gen.gen_ir
+Instruction, Func, Program, BasicBlock, Terminator = gen.gen_ir
+
+// Range checked before this native numeric conversion.
+to_i32 = (value: u64) i32
+to_i32 = (value: i64) i32
+
+Fault* = { span*: Span, what*: str }
+LowerError* = OutOfMemory | Unsupported(Fault)
+
+unsupported = (span: Span, what: str) LowerError {
+    LowerError.Unsupported(Fault(span: span, what: what))
+}
+
+Value = { slot: usize, ty: Scalar }
+Local = { name: str, value: Value }
+
+Lowering = {
+    alloc: Alloc,
+    tree: Ast,
+    check: Checker,
+    module :: usize,
+    known :: Map<DeclId, usize>,
+    pending :: Vec<DeclId>,
+    locals :: Vec<Local>,
+    code :: Vec<Instruction>,
+    slots :: Vec<Scalar>,
+    blocks :: Vec<Res<BasicBlock>>,
+    current :: Res<usize> = None,
+
+    enqueue = (self :: @Self, id: DeclId) Res<usize, LowerError> {
+        self.known.get(id).match({
+            Ok(index) => Ok(index),
+            None      => {
+                index = self.pending.len;
+                self.pending.add(id).try(LowerError.OutOfMemory);
+                self.known.set(id, index).try(LowerError.OutOfMemory);
+                Ok(index)
+            },
+        })
+    }
+
+    add = (self :: @Self, instruction: Instruction) Res<(), LowerError> {
+        self.code.add(instruction).try(LowerError.OutOfMemory);
+        Ok(())
+    }
+
+    slot = (self :: @Self, ty: Scalar) Res<Value, LowerError> {
+        value = Value(slot: self.slots.len, ty: ty);
+        self.slots.add(ty).try(LowerError.OutOfMemory);
+        Ok(value)
+    }
+
+    label = (self :: @Self) Res<usize, LowerError> {
+        id = self.blocks.len;
+        self.blocks.add(None).try(LowerError.OutOfMemory);
+        Ok(id)
+    }
+
+    start = (self :: @Self, id: usize) () {
+        self.current = Ok(id);
+        self.code    = self.alloc.Vec<Instruction>();
+    }
+
+    finish = (self :: @Self, exit: Terminator) Res<(), LowerError> {
+        id = self.current.ok_or(unsupported(
+            nowhere(),
+            "an already terminated block"
+        )).try();
+        self.blocks.set(id, Ok(BasicBlock(code: self.code, exit: exit)))
+            .ok_or(unsupported(nowhere(), "an unreserved block")).try();
+        self.current = None;
+        Ok(())
+    }
+
+    constant = (self :: @Self, number: i32, ty: Scalar) Res<Value, LowerError> {
+        value = self.slot(ty).try();
+        self.add(Instruction.Constant(Const(
+            out: value.slot,
+            value: number
+        ))).try();
+        Ok(value)
+    }
+
+    lookup = (self: @Self, name: str) Res<Value> {
+        i ::= self.locals.len;
+        found: Res<Value> = loop<Value>(() { i > 0 }, (h) {
+            i     = i - 1;
+            local = self.locals.get(i).try();
+            local.name.eq(name).then(() { h.break(local.value); });
+        });
+        found
+    }
+
+    scalar = (self: @Self, id: TyId, span: Span) Res<Scalar, LowerError> {
+        name = self.check.types.at(id).match({ Prim(p) => p.name, _ => "" });
+        name.match({
+            "i32"  => Ok(Scalar.I32),
+            "int"  => Ok(Scalar.I32),
+            "bool" => Ok(Scalar.Bool),
+            "()"   => Ok(Scalar.Unit),
+            _      => Err(unsupported(
+                span,
+                "this backend supports only i32, bool and unit values"
+            )),
+        })
+    }
+
+    written_type = (self: @Self, id: TypeId) Res<Scalar, LowerError> {
+        span = self.tree.type_at(id).span;
+        ty   = self.check.type_memo.get(id)
+            .ok_or(unsupported(
+                span,
+                "a type without a checked representation"
+            )).try();
+        self.scalar(ty, span)
+    }
+
+    expr_type = (self: @Self, id: ExprId) Res<Scalar, LowerError> {
+        span = self.tree.expr_at(id).span;
+        ty   = self.check.expr_memo.get(id)
+            .ok_or(unsupported(
+                span,
+                "an expression without a checked type"
+            )).try();
+        self.scalar(ty, span)
+    }
+
+    is_env = (self: @Self, id: TypeId) bool {
+        self.check.type_memo.get(id).match({
+            None   => false,
+            Ok(ty) => self.check.types.at(ty).match({
+                Named(n) => n.name.eq("Env")
+                    && self.check.world.module_name(n.decl).eq("std.env.env"),
+                _        => false,
+            }),
+        })
+    }
+
+    function = (self :: @Self, id: DeclId, entry: bool) Res<Func, LowerError> {
+        decl = decl_at(self.tree, id)
+            .ok_or(unsupported(
+                nowhere(),
+                "a missing function declaration"
+            )).try();
+        f    = decl.kind.match({ Function(f) => Ok(f), _ => None })
+            .ok_or(unsupported(
+                decl.span,
+                "a call to a non-function declaration"
+            )).try();
+        (f.tparams.len == 0).ensure(unsupported(
+            decl.span,
+            "generic functions"
+        )).try();
+        body   = f.body.ok_or(unsupported(
+            decl.span,
+            "external function calls"
+        )).try();
+        ret    = f.ret.ok_or(unsupported(
+            decl.span,
+            "an inferred function result"
+        )).try();
+        result = self.written_type(ret).try();
+        (entry == false || result.match({ Bool => false, _ => true }))
+            .ensure(unsupported(
+                decl.span,
+                "main results other than i32 or unit"
+            )).try();
+        self.module = id.module.to_usize();
+        self.locals = self.alloc.Vec<Local>();
+        self.code   = self.alloc.Vec<Instruction>();
+        self.slots  = self.alloc.Vec<Scalar>();
+        self.blocks = self.alloc.Vec<Res<BasicBlock>>();
+        first       = self.label().try();
+        self.start(first);
+        skip_env = entry && f.params.len == 1 && f.params.get(0).match({
+            Ok(p) => p.type.match({ Ok(t) => self.is_env(t), None => false }),
+            None  => false,
+        });
+        (entry == false || f.params.len == 0 || skip_env)
+            .ensure(unsupported(
+                decl.span,
+                "main parameters other than an unused Env"
+            )).try();
+        (skip_env == false).then(() {
+            f.params.loop((p) {
+                (p.mutable == false).ensure(unsupported(
+                    p.span,
+                    "mutable function parameters"
+                )).try();
+                t     = p.type.ok_or(unsupported(
+                    p.span,
+                    "an inferred parameter type"
+                )).try();
+                ty    = self.written_type(t).try();
+                value = self.slot(ty).try();
+                self.locals.add(Local(
+                    name: p.name.text,
+                    value: value
+                )).try(LowerError.OutOfMemory);
+            });
+        });
+        parameters = self.slots.len;
+        value      = self.block(body).try();
+        self.finish(Terminator.Return(value.slot)).try();
+        blocks ::= self.alloc.Vec<BasicBlock>();
+        self.blocks.loop((pending) {
+            block = pending.ok_or(unsupported(
+                decl.span,
+                "an unterminated block"
+            )).try();
+            blocks.add(block).try(LowerError.OutOfMemory);
+        });
+        Ok(Func(
+            name: f.name.text,
+            parameters: parameters,
+            slots: self.slots,
+            blocks: blocks,
+            result: result
+        ))
+    }
+
+    block = (self :: @Self, id: BlockId) Res<Value, LowerError> {
+        block = self.tree.block_at(id);
+        mark  = self.locals.len;
+        last ::= self.constant(0, Scalar.Unit).try();
+        block.stmts.loop((s) {
+            last = s.kind.match({
+                Expr(e)  => self.expr(e.expr),
+                Bind(b)  => { self.bind(b).try(); self.constant(0, Scalar.Unit) },
+                Block(b) => self.block(b),
+                Decl(_)  => Err(unsupported(s.span, "nested declarations")),
+            }).try();
+        });
+        value = block.value.match({ Ok(e) => self.expr(e), None => Ok(last) }).try();
+        loop(
+            () { self.locals.len > mark },
+            (h) { self.locals.take(self.locals.len - 1); }
+        );
+        Ok(value)
+    }
+
+    bind = (self :: @Self, b: Bind) Res<(), LowerError> {
+        target = self.tree.expr_at(b.target);
+        name   = target.kind.match({ Name(n) => Ok(n.text), _ => None })
+            .ok_or(unsupported(
+                target.span,
+                "non-local assignment targets"
+            )).try();
+        value  = self.expr(b.value).try();
+        b.type.match({ Ok(t) => { self.written_type(t).try(); }, None => () });
+        written = b.type.match({ Ok(_) => true, None => false });
+        old     = (b.mutable == false && written == false).match({
+            true => self.lookup(name), false => None,
+        });
+        old.match({
+            Ok(local) => self.add(Instruction.Copy(Move(
+                out: local.slot,
+                source: value.slot
+            ))),
+            None      => {
+                local = self.slot(value.ty).try();
+                self.add(Instruction.Copy(Move(
+                    out: local.slot,
+                    source: value.slot
+                ))).try();
+                self.locals.add(Local(
+                    name: name,
+                    value: local
+                )).try(LowerError.OutOfMemory);
+                Ok(())
+            },
+        })
+    }
+
+    expr = (self :: @Self, id: ExprId) Res<Value, LowerError> {
+        self.expr_type(id).try();
+        self.unsettled_arithmetic(id).match({
+            true  => self.fold_integer(id),
+            false => self.lower_expr(id),
+        })
+    }
+
+    // Literal arithmetic has not acquired a concrete machine width in sema.
+    // The current C path uses i64 for it. Fold only proven fitting constants;
+    // dynamic operations need an explicit i32 context before this scalar path.
+    unsettled_arithmetic = (self: @Self, id: ExprId) bool {
+        integer = self.check.expr_memo.get(id).match({
+            Ok(ty) => self.check.types.at(ty).match({ Prim(p) => p.name.eq("int"), _ => false }),
+            None   => false,
+        });
+        integer && self.tree.expr_at(id).kind.match({
+            Unary(u)  => u.op.match({ Neg => true, _ => false }),
+            Binary(b) => b.op.match({ Add => true, Sub => true, Mul => true,
+                Div => true, Rem => true, _ => false }),
+            _         => false,
+        })
+    }
+
+    fold_integer = (self :: @Self, id: ExprId) Res<Value, LowerError> {
+        span  = self.tree.expr_at(id).span;
+        fault = unsupported(
+            span,
+            "integer arithmetic without a settled i32 type; annotate its operands"
+        );
+        value = self.check.const_int(id).ok_or(fault).try();
+        (value >= -2147483648 && value <= 2147483647).ensure(fault).try();
+        self.constant(value.to_i32(), Scalar.I32)
+    }
+
+    lower_expr = (self :: @Self, id: ExprId) Res<Value, LowerError> {
+        e = self.tree.expr_at(id);
+        e.kind.match({
+            Name(n)    => {
+                local = self.lookup(n.text)
+                    .ok_or(unsupported(
+                        e.span,
+                        "a non-local value or a used Env parameter"
+                    )).try();
+                value = self.slot(local.ty).try();
+                self.add(Instruction.Copy(Move(
+                    out: value.slot,
+                    source: local.slot
+                ))).try();
+                Ok(value)
+            },
+            Literal(l) => self.literal(l, self.expr_type(id).try(), e.span),
+            Unit       => self.constant(0, Scalar.Unit),
+            Paren(p)   => self.expr(p.inner),
+            Block(b)   => self.block(b),
+            Unary(u)   => self.unary(u.op, u.operand, u.op_span),
+            Binary(b)  => self.binary(b.op, b.lhs, b.rhs, b.op_span),
+            Match(m)   => self.branch(m, e.span),
+            Call(c)    => self.call(id, c, e.span),
+            _          => Err(unsupported(
+                e.span,
+                "this expression in a scalar executable"
+            )),
+        })
+    }
+
+    literal = (self :: @Self, lit: Literal, ty: Scalar, span: Span)
+              Res<Value, LowerError> {
+        lit.kind.match({
+            Int  => {
+                value = lit.integer.ok_or(unsupported(
+                    span,
+                    "an unparsed integer literal"
+                )).try();
+                (value <= 2147483647).ensure(unsupported(
+                    span,
+                    "an integer outside i32"
+                )).try();
+                self.constant(value.to_i32(), ty)
+            },
+            Bool => self.constant(
+                lit.text.eq("true").match({ true => 1, false => 0 }),
+                ty
+            ),
+            _    => Err(unsupported(span, "a non-scalar literal")),
+        })
+    }
+
+    unary = (self :: @Self, op: UnOp, operand: ExprId, span: Span)
+            Res<Value, LowerError> {
+        // The minimum signed literal has no positive i32 intermediate.
+        minimum            = op.match({
+            Neg => self.tree.expr_at(operand).kind.match({
+                Literal(l) => l.integer.match({ Ok(v) => v == 2147483648, None => false }),
+                _          => false,
+            }),
+            _   => false,
+        });
+        result: Res<Value> = loop<Value>((h) {
+            minimum.then(
+                () { h.break(self.constant(-2147483648, Scalar.I32).try()); }
+            );
+            value     = self.expr(operand).try();
+            operation = op.match({ Neg => Ok(UnaryOp.Neg), Not => Ok(UnaryOp.Not), _ => None })
+                .ok_or(unsupported(span, "address-of")).try();
+            out       = self.slot(value.ty).try();
+            self.add(Instruction.UnaryValue(Unary(
+                out: out.slot,
+                input: value.slot,
+                op: operation,
+                span: span
+            ))).try();
+            h.break(out);
+        });
+        result.ok_or(unsupported(span, "an incomplete unary expression"))
+    }
+
+    binary = (self :: @Self, op: BinOp, lhs: ExprId, rhs: ExprId, span: Span)
+             Res<Value, LowerError> {
+        logical = op.match({ And => true, Or => true, _ => false });
+        logical.match({
+            true  => self.logical(op, lhs, rhs),
+            false => {
+                operation = op.match({
+                    Add => Ok(Op.Add), Sub => Ok(Op.Sub), Mul => Ok(Op.Mul),
+                    Div => Ok(Op.Div), Rem => Ok(Op.Rem), Equal => Ok(Op.Equal),
+                    NotEqual => Ok(Op.NotEqual), Less => Ok(Op.Less),
+                    LessEq => Ok(Op.LessEqual), Greater => Ok(Op.Greater),
+                    GreaterEq => Ok(Op.GreaterEqual), _ => None,
+                }).ok_or(unsupported(span, "wrapping arithmetic")).try();
+                left      = self.expr(lhs).try();
+                right     = self.expr(rhs).try();
+                ty        = op.match({ Add => Scalar.I32, Sub => Scalar.I32, Mul => Scalar.I32,
+                    Div => Scalar.I32, Rem => Scalar.I32, _ => Scalar.Bool });
+                out       = self.slot(ty).try();
+                self.add(Instruction.BinaryValue(Binary(
+                    out: out.slot,
+                    left: left.slot,
+                    right: right.slot,
+                    op: operation,
+                    span: span
+                ))).try();
+                Ok(out)
+            },
+        })
+    }
+
+    logical = (self :: @Self, op: BinOp, lhs: ExprId, rhs: ExprId)
+              Res<Value, LowerError> {
+        left = self.expr(lhs).try();
+        out  = self.slot(Scalar.Bool).try();
+        self.add(Instruction.Copy(Move(
+            out: out.slot,
+            source: left.slot
+        ))).try();
+        next   = self.label().try();
+        done   = self.label().try();
+        branch = op.match({
+            And => Branch(value: left.slot, yes: next, no: done),
+            _   => Branch(value: left.slot, yes: done, no: next),
+        });
+        self.finish(Terminator.Branch(branch)).try();
+        self.start(next);
+        right = self.expr(rhs).try();
+        self.add(Instruction.Copy(Move(
+            out: out.slot,
+            source: right.slot
+        ))).try();
+        self.finish(Terminator.Jump(done)).try();
+        self.start(done);
+        Ok(out)
+    }
+
+    branch = (self :: @Self, m: Match, span: Span) Res<Value, LowerError> {
+        ty = self.expr_type(m.scrutinee).try();
+        ty.match({ Bool => true, _ => false })
+            .ensure(unsupported(
+                span,
+                "matches over values other than bool"
+            )).try();
+        (m.arms.len == 2).ensure(unsupported(
+            span,
+            "bool matches without two explicit arms"
+        )).try();
+        yes: Res<ExprId> ::= None;
+        no: Res<ExprId>  ::= None;
+        m.arms.loop((arm) {
+            p    = self.tree.pattern_at(arm.pattern);
+            text = p.kind.match({ Literal(l) => l.text, _ => "" });
+            text.match({
+                "true"  => { yes = Ok(arm.body); },
+                "false" => { no = Ok(arm.body); },
+                _       => { Err(unsupported(
+                    p.span,
+                    "bool patterns other than true and false"
+                )).try(); },
+            });
+        });
+        yes_body   = yes.ok_or(unsupported(
+            span,
+            "a bool match without a true arm"
+        )).try();
+        no_body    = no.ok_or(unsupported(
+            span,
+            "a bool match without a false arm"
+        )).try();
+        value      = self.expr(m.scrutinee).try();
+        then_block = self.label().try();
+        otherwise  = self.label().try();
+        done       = self.label().try();
+        self.finish(Terminator.Branch(Branch(
+            value: value.slot,
+            yes: then_block,
+            no: otherwise
+        ))).try();
+        self.start(then_block);
+        yes_value = self.expr(yes_body).try();
+        out       = self.slot(yes_value.ty).try();
+        self.add(Instruction.Copy(Move(
+            out: out.slot,
+            source: yes_value.slot
+        ))).try();
+        self.finish(Terminator.Jump(done)).try();
+        self.start(otherwise);
+        no_value = self.expr(no_body).try();
+        self.add(Instruction.Copy(Move(
+            out: out.slot,
+            source: no_value.slot
+        ))).try();
+        self.finish(Terminator.Jump(done)).try();
+        self.start(done);
+        Ok(out)
+    }
+
+    call = (self :: @Self, id: ExprId, call: Call, span: Span)
+           Res<Value, LowerError> {
+        name     = self.tree.expr_at(
+            call.callee
+        ).kind.match({ Name(n) => n.text, _ => "" });
+        selected = self.check.resolved_call(
+            id
+        ).match({ Ok(_) => true, None => false });
+        sugar ::= name.is_in(["print", "println"]) && selected == false;
+        sugar.then(() {
+            defs ::= self.alloc.Vec<Def>();
+            self.check.world.defs_of(
+                self.module,
+                name,
+                defs
+            ).try(LowerError.OutOfMemory);
+            sugar = defs.len == 0 && self.lookup(
+                name
+            ).match({ None => true, Ok(_) => false });
+        });
+        sugar.match({
+            true  => self.print(call, name.eq("println"), span),
+            false => self.invoke(id, call, span),
+        })
+    }
+
+    invoke = (self :: @Self, id: ExprId, call: Call, span: Span)
+             Res<Value, LowerError> {
+        did  = self.check.resolved_call(id)
+            .ok_or(unsupported(
+                span,
+                "a call without a concrete function selection"
+            )).try();
+        decl = decl_at(self.tree, did).ok_or(unsupported(span, "a missing callee")).try();
+        f    = decl.kind.match({ Function(f) => Ok(f), _ => None })
+            .ok_or(unsupported(span, "a non-function callee")).try();
+        (f.tparams.len == 0 && call.targs.len == 0)
+            .ensure(unsupported(span, "generic function calls")).try();
+        (f.params.len == call.args.len)
+            .ensure(unsupported(
+                span,
+                "implicit receiver or default arguments"
+            )).try();
+        args ::= self.alloc.Vec<usize>();
+        call.args.loop((arg) {
+            arg.name.match({ None => true, Ok(_) => false })
+                .ensure(unsupported(arg.span, "named arguments")).try();
+            value = self.expr(arg.value).try();
+            args.add(value.slot).try(LowerError.OutOfMemory);
+        });
+        function = self.enqueue(did).try();
+        out      = self.slot(self.expr_type(id).try()).try();
+        self.add(Instruction.Invoke(Invocation(
+            out: out.slot,
+            function: function,
+            args: args
+        ))).try();
+        Ok(out)
+    }
+
+    print = (self :: @Self, call: Call, newline: bool, span: Span)
+            Res<Value, LowerError> {
+        raw: Res<str> = call.args.get(0).match({
+            None    => None,
+            Ok(arg) => self.tree.expr_at(arg.value).kind.match({
+                Literal(l) => l.kind.match({ Str => Ok(l.text), _ => None }),
+                _          => None,
+            }),
+        });
+        raw.match({
+            Ok(text) => self.format(call, text, span),
+            None     => {
+                call.args.loop((arg) { self.print_value(arg.value).try(); });
+                Ok(())
+            },
+        }).try();
+        newline.then(() { self.add(Instruction.Text("\n")).try(); });
+        self.constant(0, Scalar.Unit)
+    }
+
+    print_value = (self :: @Self, id: ExprId) Res<(), LowerError> {
+        e             = self.tree.expr_at(id);
+        raw: Res<str> = e.kind.match({
+            Literal(l) => l.kind.match({ Str => Ok(l.text), _ => None }),
+            _          => None,
+        });
+        raw.match({
+            Ok(text) => self.text(text.slice(1, text.len - 1), e.span),
+            None     => {
+                value = self.expr(id).try();
+                self.add(Instruction.PrintValue(Print(
+                    value: value.slot,
+                    ty: value.ty
+                )))
+            },
+        })
+    }
+
+    format = (self :: @Self, call: Call, raw: str, span: Span)
+             Res<(), LowerError> {
+        end = raw.len - 1;
+        start: usize ::= 1;
+        i: usize     ::= 1;
+        used: usize  ::= 1;
+        loop(() { i < end }, (h) {
+            at = raw.fmt_at(i, end);
+            at.what.match({
+                Byte        => { i = i + (raw[i] == '\\').match({ true => 2, false => 1 }); },
+                Pair        => {
+                    self.text(raw.slice(start, at.keep), span).try();
+                    i     = at.next;
+                    start = i;
+                },
+                Hole        => {
+                    self.text(raw.slice(start, i), span).try();
+                    arg = call.args.get(used).ok_or(unsupported(span, "a format hole without an argument")).try();
+                    self.print_value(arg.value).try();
+                    used  = used + 1;
+                    i     = at.next;
+                    start = i;
+                },
+                Named(name) => {
+                    self.text(raw.slice(start, i), span).try();
+                    value = self.lookup(name).ok_or(unsupported(span, "a named hole without a scalar local")).try();
+                    self.add(Instruction.PrintValue(Print(
+                        value: value.slot,
+                        ty: value.ty
+                    ))).try();
+                    i     = at.next;
+                    start = i;
+                },
+                NoName      => { Err(unsupported(
+                    span,
+                    "an invalid format hole"
+                )).try(); },
+            });
+        });
+        self.text(raw.slice(start, end), span).try();
+        (used == call.args.len).ensure(unsupported(
+            span,
+            "an argument without a format hole"
+        )).try();
+        Ok(())
+    }
+
+    text = (self :: @Self, raw: str, span: Span) Res<(), LowerError> {
+        out      ::= self.alloc.String().try(LowerError.OutOfMemory);
+        i: usize ::= 0;
+        loop(() { i < raw.len }, (h) {
+            byte ::= raw[i];
+            (byte == '\\').then(() {
+                i = i + 1;
+                (i < raw.len).ensure(unsupported(
+                    span,
+                    "an incomplete string escape"
+                )).try();
+                byte = raw[i].match({
+                    'n' => '\n', 'r' => '\r', 't' => '\t', 'v' => '\v',
+                    'f' => '\f', '0' => '\0', _ => raw[i],
+                });
+            });
+            out.add(byte).try(LowerError.OutOfMemory);
+            i = i + 1;
+        });
+        self.add(Instruction.Text(out.view()))
+    }
+}
+
+lower* = (alloc: Alloc, tree: Ast, check: Checker, entry: usize)
+         Res<Program, LowerError> {
+    module = tree.module_at(entry).ok_or(unsupported(nowhere(), "a missing entry module")).try();
+    mains ::= alloc.Vec<DeclId>();
+    table = check.world.table_at(entry).ok_or(unsupported(module.span, "a missing module table")).try();
+    table.defs.loop((def) {
+        is_main = def.name.eq(
+            "main"
+        ) && def.kind.match({ FunctionDef => true, _ => false });
+        is_main.then(() { mains.add(def.id).try(LowerError.OutOfMemory); });
+    });
+    (mains.len == 1).ensure(unsupported(
+        module.span,
+        "an executable without exactly one main function"
+    )).try();
+    main = mains.get(0).ok_or(unsupported(module.span, "a missing main function")).try();
+    state ::= Lowering(
+        alloc: alloc,
+        tree: tree,
+        check: check,
+        module: entry,
+        known: alloc.Map<DeclId, usize>(),
+        pending: alloc.Vec<DeclId>(),
+        locals: alloc.Vec<Local>(),
+        code: alloc.Vec<Instruction>(),
+        slots: alloc.Vec<Scalar>(),
+        blocks: alloc.Vec<Res<BasicBlock>>()
+    );
+    entry_index = state.enqueue(main).try();
+    functions ::= alloc.Vec<Func>();
+    i: usize  ::= 0;
+    loop(() { i < state.pending.len }, (h) {
+        id = state.pending.get(i).ok_or(unsupported(module.span, "a missing reachable function")).try();
+        f  = state.function(id, i == entry_index).try();
+        functions.add(f).try(LowerError.OutOfMemory);
+        i = i + 1;
+    });
+    Ok(Program(functions: functions, entry: entry_index))
+}

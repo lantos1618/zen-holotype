@@ -1,0 +1,49 @@
+Source, scan = std.lex
+Parser = std.parse.parser
+module = std.parse.parse_decl
+Checker = sema.sema_check
+Emit = gen.gen_emit
+CBackend, emit_program = gen.gen_c
+FsError = std.env
+
+// Ask the C compiler whether the generated receiver bindings are unused, then
+// execute the program. Other runtime helpers have separate warning coverage.
+// The constant start must need no receiver copy; end and at still use their
+// receiver, and constructing the range must happen exactly once.
+main = (env: Env) Res<(), AllocError | FsError> {
+    a      = env.mem.alloc();
+    source = env.fs.read(a, "src/program/program.zen").try();
+    lexed  = scan(a, Source(file: "program.zen", text: source.view())).try();
+    parser ::= a.Parser(lexed);
+    parsed = parser.module("main").try();
+    parser.tree.add_module(parsed).try();
+    check   ::= a.Checker(parser.tree).try();
+    backend ::= a.CBackend(parser.tree, check).try();
+    out     ::= a.Emit().try();
+    backend.emit_program(0, out).try();
+    faults ::= a.String().try();
+    backend.render_diags(faults).try();
+    env.fs.write("range.c", out.view()).try();
+    argv ::= a.Vec<str>();
+    [str, 6]("cc", "-Wunused-variable", "range.c", "-o", "range", "-lm")
+        .loop((arg) { argv.add(arg).try(); });
+    compiled = env.proc.run_argv(a, "", argv).match({
+        Ok(result) => result.code == 0 && faults.is_empty()
+            && result.err.view().contains("zu_l4self") == false,
+        Err(_)     => false,
+    });
+    println("no unused bound receiver: {}", compiled);
+    ran ::= false;
+    compiled.then(() {
+        args ::= a.Vec<str>();
+        args.add("./range").try();
+        ran = env.proc.run_argv(a, "", args).match({
+            Ok(result) => result.code == 0
+                && result.out.view().eq("receiver\n2\n3\n")
+                && result.err.view().is_empty(),
+            Err(_)     => false,
+        });
+    });
+    println("receiver effects and runtime bounds: {}", ran);
+    Ok(())
+}

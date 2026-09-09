@@ -1,0 +1,52 @@
+// Hashes that differ only above bit 31 must be rejected before Eq runs,
+// including when their low bits place every key in the same probe cluster.
+Key = {
+    hash_value: u64,
+    comparisons: Ptr<usize>,
+}
+
+Key.impl(Hash, {
+    hash = (self: @Self, hasher :: Hasher) u64 { self.hash_value }
+})
+
+Key.impl(Eq, {
+    eq = (self: @Self, other: @Self) bool {
+        self.comparisons.write(0, self.comparisons.read(0) + 1);
+        self.hash_value == other.hash_value
+    }
+})
+
+key = (id: usize, comparisons: Ptr<usize>) Key {
+    Key(hash_value: id.to_u64() *% 4294967296 +% 7, comparisons: comparisons)
+}
+
+probe = (alloc: Alloc, count: usize) Res<(), AllocError> {
+    comparisons = alloc.create<usize>().try();
+    comparisons.write(0, 0);
+    map ::= alloc.Map<Key, usize>();
+    Range(0, count).loop((id) { map.set(key(id, comparisons), id).try(); });
+
+    comparisons.write(0, 0);
+    value = map.get(key(count - 1, comparisons)).value_or(count);
+    println("{} hit {} comparisons {}", count, value, comparisons.read(0));
+
+    comparisons.write(0, 0);
+    missing = map.get(key(
+        count,
+        comparisons
+    )).match({ None => true, Ok(_) => false });
+    println(
+        "{} missing {} comparisons {}",
+        count,
+        missing,
+        comparisons.read(0)
+    );
+    Ok(())
+}
+
+main = (env: Env) Res<(), AllocError> {
+    alloc = env.mem.alloc();
+    probe(alloc, 4).try();
+    probe(alloc, 12).try();
+    Ok(())
+}

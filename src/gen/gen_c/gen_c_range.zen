@@ -283,13 +283,25 @@ supplied_bound* = (
     mark  = be.enter_struct_tparams(ri.decl).try();
     cmark = be.check.mark();
     lmark = be.mark();
-    be.bind_self(ri, rty, rng).try();
+    // The range has already been evaluated into rng. Literal bounds need
+    // its type context, but no runtime receiver copy to evaluate their value.
+    (be.literal_bound(value) == false).then(() {
+        be.bind_self(ri, rty, rng).try();
+    });
     be.deliver(value, ictx, usize_ty, Dest.Into(target)).try();
     be.release(lmark).try();
     be.check.release(cmark).try();
     be.leave_tparams(mark).try();
     be.enter_inst(held);
     Ok(());
+}
+
+literal_bound = (be: CBackend, value: ExprId) bool {
+    be.tree.expr_at(value).kind.match({
+        Literal(_) => true,
+        Paren(p)   => be.literal_bound(p.inner),
+        _          => false,
+    })
 }
 
 // A body in the impl's module with `@Self` bound. `self_body_ctx` says
