@@ -1,0 +1,122 @@
+Source, scan = std.lex
+Parser = std.parse.parser
+module = std.parse.parse_decl
+Checker = sema.sema_check
+check_all = sema.sema_decl
+analyse, RootPolicy, UsageReport, UsageError, review = sema.sema_usage
+FsError = std.env
+Build = zen.zen_build
+read, Jsons = std.json
+
+marked = (
+    report    : UsageReport,
+    index     : u32,
+    reachable : bool,
+    uncertain : bool
+) bool {
+    report.declarations.find((row) {
+        row.id.module == 0 && row.id.decl == index
+            && row.reachable == reachable && row.uncertain == uncertain
+    }).match({ Ok(_) => true, None => false })
+}
+
+main = (env: Env) Res<(), AllocError | FsError | UsageError> {
+    a      = env.mem.alloc();
+    source = env.fs.read(a, "src/program/program.zen").try();
+    lexed  = scan(
+        a,
+        Source(file: "quoted\"program.zen", text: source.view())
+    ).try();
+    parser ::= a.Parser(lexed);
+    parsed = parser.module("main").try();
+    parser.tree.add_module(parsed).try();
+    checker ::= a.Checker(parser.tree).try();
+    checker.check_all().try();
+    report = analyse(a, parser.tree, checker, 0, RootPolicy.Main).try();
+    println("selected overload only: {}", marked(report, 0, true, false)
+        && marked(report, 1, false, false));
+    println(
+        "unreferenced is only a candidate: {}",
+        marked(report, 2, false, false)
+    );
+    println("nested targets retained: {}", marked(report, 3, false, true));
+    println(
+        "callback dispatch is uncertain: {}",
+        marked(report, 4, true, true)
+    );
+    println("generic body conservative: {}", marked(report, 6, false, true));
+    nested = report.calls.find((call) { call.nested && call.propagates == false
+        && call.target.match({ Ok(to) => to.decl == 3, None => false }) });
+    println(
+        "nested edge is not a direct root path: {}",
+        nested.match({ Ok(_) => true, None => false })
+    );
+    text  = report.json(a, "/snapshot/root", "/snapshot/std").try();
+    again = report.json(a, "/snapshot/root", "/snapshot/std").try();
+    json ::= a.Jsons();
+    decoded = read(
+        a,
+        json,
+        text.view()
+    ).match({ Ok(_) => true, Err(_) => false });
+    println(
+        "escaped JSON is deterministic: {}",
+        decoded && text.view().eq(again.view())
+    );
+    exports = analyse(
+        a,
+        parser.tree,
+        checker,
+        0,
+        RootPolicy.LoadedExports
+    ).match({
+        Ok(report) => marked(report, 5, true, false) && marked(report, 0, false, false),
+        Err(_)     => false,
+    });
+    println("export policy is explicit: {}", exports);
+    public_retained = report.declarations.get(5).match({
+        None    => false,
+        Ok(row) => row.exported && row.root == false
+            && row.status().eq("conservative"),
+    });
+    println("uncalled exports retained: {}", public_retained);
+    captured ::= a.Build(env, "src/program");
+    captured.set_std_root("src");
+    captured.capture_sources();
+    overlay ::= a.Map<str, str>();
+    overlay_source = "main = () i32 { 12345 }\n";
+    overlay.set("src/program/program.zen", overlay_source).try();
+    snapshot        = captured.whole("program.zen", overlay).try();
+    snapshot_report = analyse(
+        a,
+        captured.tree,
+        snapshot,
+        0,
+        RootPolicy.Main
+    ).try();
+    env.fs.write("src/program/program.zen", "main = () i32 { 98765 }\n").try();
+    exact = captured.sources.match({
+        None        => false,
+        Ok(sources) => {
+            pack = snapshot_report.review(a, sources, 1).try();
+            pack.view().contains("12345") && pack.view().contains("98765") == false
+                && pack.view().contains("choose") == false
+        },
+    });
+    println("review retains checked overlay bytes: {}", exact);
+    bad = scan(
+        a,
+        Source(file: "bad.zen", text: "main = () i32 { missing }\n")
+    ).try();
+    failed ::= a.Parser(bad);
+    bad_module = failed.module("main").try();
+    failed.tree.add_module(bad_module).try();
+    bad_check ::= a.Checker(failed.tree).try();
+    bad_check.check_all().try();
+    refused = analyse(a, failed.tree, bad_check, 0, RootPolicy.Main).match({
+        Err(InvalidInput) => true,
+        _                 => false,
+    });
+    println("invalid checking cannot publish facts: {}", refused);
+    Ok(())
+}

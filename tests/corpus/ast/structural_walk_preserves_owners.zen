@@ -1,0 +1,101 @@
+scan, Source = std.lex
+Parser, module = std.parse
+Ast, WalkNode, WalkEvent, WalkVisitor, DeclVisit, DeclSite, DeclParent = std.ast
+AllocError = std.mem
+
+SOURCE: str = "Box<T: Bound<[i32, bound_count()]>> = {\n    value :: [i32, count()] = default_value()\n    method = (self: @Self) i32 { member_body() }\n}\nAlias = Holder<[i32, alias_count()]>\nChoice = One([i32, payload_count()]) | Two = 4\nBox.impl(Bound<[i32, impl_count()]>, { value = impl_default() })\nouter = (input: [i32, parameter_count()]) [i32, return_count()] {\n    nested = () i32 { nested_body() }\n    invoke(() i32 { callback_body() });\n    consume_record({ value = record_value(), method = () i32 { record_body() } });\n    local: [i32, local_count()] = local_value();\n    items = [i32, fixed_count()](1, 2);\n    reflected = @meta(meta_value());\n    (input[0] + -1).match({ 0 => matched(), _ => fallback().try((e) { recovered() }) })\n}\n"
+
+Trace = {
+    tree: Ast,
+    depth :: usize = 0,
+    entered :: usize = 0,
+    left :: usize = 0,
+}
+Trace.impl(WalkVisitor, {
+    visit = (self :: @Self, event: WalkEvent) Res<(), AllocError> {
+        event.match({
+            Enter(node) => {
+                self.depth   = self.depth + 1;
+                self.entered = self.entered + 1;
+                node.match({
+                    Declaration(d) => d.site.parent.match({
+                        Module(i) => println(
+                            "declaration module {} index {} depth {}",
+                            i,
+                            d.site.index,
+                            self.depth
+                        ),
+                        Block(_)  => println(
+                            "declaration block index {} depth {}",
+                            d.site.index,
+                            self.depth
+                        ),
+                    }),
+                    Member(member) => println(
+                        "member {} index {} depth {}",
+                        member.value.name().text,
+                        member.site.index,
+                        self.depth
+                    ),
+                    Expr(id)       => self.tree.expr_at(id).kind.match({
+                        Name(n)   => println(
+                            "name {} depth {}",
+                            n.text,
+                            self.depth
+                        ),
+                        Lambda(_) => println("lambda depth {}", self.depth),
+                        _         => (),
+                    }),
+                    _              => (),
+                });
+            },
+            Leave(_)    => {
+                self.depth = self.depth - 1;
+                self.left  = self.left + 1;
+            },
+        });
+        Ok(())
+    }
+})
+
+Refuse = { calls :: usize = 0 }
+Refuse.impl(WalkVisitor, {
+    visit = (self :: @Self, event: WalkEvent) Res<(), AllocError> {
+        self.calls = self.calls + 1;
+        (self.calls < 6).ensure(AllocError.OutOfMemory).try();
+        Ok(())
+    }
+})
+
+main = (env: Env) Res<i32, AllocError> {
+    a     = env.mem.alloc();
+    lexed = scan(a, Source(file: "walk.zen", text: SOURCE)).try();
+    p ::= a.Parser(lexed);
+    m = p.module("walk").try();
+    println("lex {} parse {}", lexed.diags.len, p.diags.len);
+    p.diags.loop((d) { d.say(); });
+    trace ::= Trace(tree: p.tree);
+    m.decls.loop((h, index, declaration) {
+        root = WalkNode.Declaration(DeclVisit(
+            site: DeclSite(parent: DeclParent.Module(0), index: index),
+            value: declaration
+        ));
+        p.tree.walk(root, trace).try();
+        (index == 0).then(() {
+            refuse ::= Refuse();
+            result = p.tree.walk(root, refuse);
+            println(
+                "stopped {} visits {}",
+                result.match({ Ok(_) => false, Err(_) => true }),
+                refuse.calls
+            );
+        });
+    });
+    println(
+        "balanced {} nodes {} leaves {}",
+        trace.depth,
+        trace.entered,
+        trace.left
+    );
+    Ok(0)
+}

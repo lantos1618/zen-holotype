@@ -5,6 +5,7 @@ Alloc, AllocError = std.mem
 Vec, Map = std.collections
 String, str = std.text
 fmt_at = std.text.text_fmt
+decode_literal = std.lex
 Ast, ExprId, BlockId, TypeId, Span, Function, Literal, Bind = std.ast
 BinOp, UnOp, Match, Call, nowhere = std.ast
 Checker, DeclId, Def, TyId, decl_at, const_int = sema.sema
@@ -663,25 +664,20 @@ Lowering = {
     }
 
     text = (self :: @Self, raw: str, span: Span) Res<(), LowerError> {
-        out      ::= self.alloc.String().try(LowerError.OutOfMemory);
-        i: usize ::= 0;
-        loop(() { i < raw.len }, (h) {
-            byte ::= raw[i];
-            (byte == '\\').then(() {
-                i = i + 1;
-                (i < raw.len).ensure(unsupported(
+        text = raw.decode_literal(self.alloc).try((error) {
+            error.match({
+                OutOfMemory         => LowerError.OutOfMemory,
+                IncompleteEscape(_) => unsupported(
                     span,
                     "an incomplete string escape"
-                )).try();
-                byte = raw[i].match({
-                    'n' => '\n', 'r' => '\r', 't' => '\t', 'v' => '\v',
-                    'f' => '\f', '0' => '\0', _ => raw[i],
-                });
-            });
-            out.add(byte).try(LowerError.OutOfMemory);
-            i = i + 1;
+                ),
+                UnknownEscape(_)    => unsupported(
+                    span,
+                    "an unknown string escape"
+                ),
+            })
         });
-        self.add(Instruction.Text(out.view()))
+        self.add(Instruction.Text(text))
     }
 }
 

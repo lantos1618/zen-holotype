@@ -1,0 +1,38 @@
+decode_literal = std.lex
+
+Refuse = {}
+Refuse.impl(Alloc, {
+    raw = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        Err(AllocError.OutOfMemory)
+    }
+    realloc = <T>(self: @Self, ptr: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        Err(AllocError.OutOfMemory)
+    }
+})
+
+main = (env: Env) Res<(), AllocError> {
+    a = env.mem.alloc();
+    println("plain no allocation {}", "plain\0é".decode_literal(
+        Refuse()
+    ).match({
+        Ok(text) => text.eq("plain\0é"), Err(_) => false,
+    }));
+    println("all escapes {}", "\\n\\t\\r\\v\\f\\0\\\\\\'\\\"".decode_literal(
+        a
+    ).match({
+        Ok(text) => text.eq("\n\t\r\v\f\0\\'\""), Err(_) => false,
+    }));
+    println("unknown offset {}", "ab\\q".decode_literal(a).match({
+        Err(UnknownEscape(at)) => at == 2, _ => false,
+    }));
+    println("incomplete offset {}", "ab\\".decode_literal(a).match({
+        Err(IncompleteEscape(at)) => at == 2, _ => false,
+    }));
+    println("json escape refused {}", "\\b".decode_literal(a).match({
+        Err(UnknownEscape(_)) => true, _ => false,
+    }));
+    println("allocation error {}", "\\n".decode_literal(Refuse()).match({
+        Err(OutOfMemory) => true, _ => false,
+    }));
+    Ok(())
+}

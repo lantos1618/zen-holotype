@@ -1,0 +1,697 @@
+// Checked declaration/call evidence for source review. This is an intentionally
+// incomplete graph: no absent edge grants permission to remove source.
+Alloc, AllocError = std.mem
+Vec, Map = std.collections
+String, str = std.text
+Ast, Decl, ExprId, Span, BlockId = std.ast
+WalkNode, WalkEvent, WalkVisitor, DeclVisit, DeclSite, DeclParent, walk = std.ast
+Checker = sema.sema_check
+DeclId = sema.sema_id
+obj, arr, Nest, write_text = std.json
+
+RootPolicy* = Main | LoadedExports
+UsageError* = OutOfMemory | InvalidInput | InvalidRoots
+CallKind* = Direct | Constructor | Intrinsic | Unresolved
+
+Declaration* = {
+    id*: DeclId,
+    name*: str,
+    module*: str,
+    kind*: str,
+    exported*: bool,
+    generic*: bool,
+    span*: Span,
+    root* :: bool = false,
+    reachable* :: bool = false,
+    uncertain* :: bool = false,
+
+    status* = (self: @Self) str {
+        self.root.match({
+            true  => "root",
+            false => self.reachable.match({
+                true  => "known_reachable",
+                false => (self.uncertain || self.exported || self.kind.eq(
+                    "function"
+                ) == false)
+                    .match({ true => "conservative", false => "review_candidate" }),
+            }),
+        })
+    }
+
+    write = (self: @Self, out :: String) Res<(), AllocError> {
+        row ::= obj(out).try();
+        row.key("id", out).try();
+        self.id.write_id(out).try();
+        row.text("name", self.name, out).try();
+        row.text("module", self.module, out).try();
+        row.text("kind", self.kind, out).try();
+        row.flag("exported", self.exported, out).try();
+        row.flag("generic", self.generic, out).try();
+        row.key("span", out).try();
+        self.span.write_span(out).try();
+        row.flag("root", self.root, out).try();
+        row.text("status", self.status(), out).try();
+        row.flag("uncertain", self.uncertain, out).try();
+        row.close(out)
+    }
+}
+
+CallFact* = {
+    owner*: DeclId,
+    site*: ExprId,
+    span*: Span,
+    nested*: bool,
+    kind*: CallKind,
+    target*: Res<DeclId>,
+    detail*: str,
+    propagates*: bool,
+
+    write = (self: @Self, out :: String) Res<(), AllocError> {
+        row ::= obj(out).try();
+        row.key("owner", out).try();
+        self.owner.write_id(out).try();
+        row.number("site", self.site.index.to_usize(), out).try();
+        row.key("span", out).try();
+        self.span.write_span(out).try();
+        row.text(
+            "context",
+            self.nested.match({ true => "nested", false => "body" }),
+            out
+        ).try();
+        row.text("kind", self.kind.label(), out).try();
+        row.key("target", out).try();
+        self.target.match({ Ok(id) => id.write_id(out), None => out.add("null") }).try();
+        row.text("detail", self.detail, out).try();
+        row.flag("propagates", self.propagates, out).try();
+        row.close(out)
+    }
+}
+
+UsageReport* = {
+    policy*: RootPolicy,
+    entry*: usize,
+    declarations* :: Vec<Declaration>,
+    calls* :: Vec<CallFact>,
+
+    json* = (self: @Self, a: Alloc, source_root: str, std_root: str)
+            Res<String, AllocError> {
+        out  ::= a.String().try();
+        root ::= obj(out).try();
+        root.text("schema", "zen-usage-v1", out).try();
+        root.text("root_policy", self.policy.label(), out).try();
+        root.number("entry_module", self.entry, out).try();
+        root.text("source_root", source_root, out).try();
+        root.text("std_root", std_root, out).try();
+        root.text(
+            "roots_relative_to",
+            "invocation_working_directory",
+            out
+        ).try();
+        root.text("source_identity", "unstamped", out).try();
+        root.text("scope", "loaded_modules", out).try();
+        root.flag("complete", false, out).try();
+        root.flag("deletion_safe", false, out).try();
+        root.key("limitations", out).try();
+        list ::= arr(out).try();
+        [str, 7](
+            "Known reachability follows selected direct declaration calls, not execution frequency.",
+            "A review candidate lacks a known root path; it is not proven unused or safe to delete.",
+            "Member dispatch, function values, actors and implicit cleanup do not have complete call identities.",
+            "Calls in nested bodies, initializers and generic bodies are recorded without runtime propagation.",
+            "Type and field usage, exports outside loaded modules and reflection require conservative retention.",
+            "IDs belong to this parse; source spans use one-based byte columns and half-open ends.",
+            "Source bytes are unstamped; consumers must record hashes and check report freshness."
+        ).loop((text) {
+            list.next(out).try();
+            write_text(text, out).try();
+        });
+        list.close(out).try();
+        root.key("declarations", out).try();
+        declarations ::= arr(out).try();
+        self.declarations.loop((row) {
+            declarations.next(out).try();
+            row.write(out).try();
+        });
+        declarations.close(out).try();
+        root.key("calls", out).try();
+        calls ::= arr(out).try();
+        self.calls.loop((row) { calls.next(out).try(); row.write(out).try(); });
+        calls.close(out).try();
+        root.close(out).try();
+        out.add('\n').try();
+        Ok(out)
+    }
+}
+
+label = (policy: RootPolicy) str {
+    policy.match({ Main => "main", LoadedExports => "loaded_exports" })
+}
+
+label = (kind: CallKind) str {
+    kind.match({ Direct => "direct", Constructor => "constructor",
+        Intrinsic => "intrinsic", Unresolved => "unresolved" })
+}
+
+number = (row :: Nest, name: str, value: usize, out :: String)
+         Res<(), AllocError> {
+    row.key(name, out).try();
+    out.write_usize(value)
+}
+
+flag = (row :: Nest, name: str, value: bool, out :: String)
+       Res<(), AllocError> {
+    row.key(name, out).try();
+    out.add(value.match({ true => "true", false => "false" }))
+}
+
+write_id = (id: DeclId, out :: String) Res<(), AllocError> {
+    row ::= obj(out).try();
+    row.number("module", id.module.to_usize(), out).try();
+    row.number("decl", id.decl.to_usize(), out).try();
+    row.close(out)
+}
+
+write_span = (span: Span, out :: String) Res<(), AllocError> {
+    row ::= obj(out).try();
+    row.text("file", span.file, out).try();
+    row.number("line", span.start.line, out).try();
+    row.number("column", span.start.col, out).try();
+    row.number("end_line", span.end.line, out).try();
+    row.number("end_column", span.end.col, out).try();
+    row.close(out)
+}
+
+Collector = {
+    alloc: Alloc,
+    tree: Ast,
+    check: Checker,
+    report :: UsageReport,
+    indices :: Map<DeclId, usize>,
+    outgoing :: Map<DeclId, Vec<usize>>,
+    callees :: Map<ExprId, bool>,
+    owner :: DeclId,
+    active_body :: Res<BlockId> = None,
+    declarations :: usize = 0,
+    members :: usize = 0,
+    lambdas :: usize = 0,
+    types :: usize = 0,
+    bodies :: usize = 0,
+
+    index = (self :: @Self) Res<(), AllocError> {
+        mi: u32 ::= 0;
+        loop(() { mi.to_usize() < self.tree.module_count() }, (h) {
+            self.tree.module_at(mi.to_usize()).match({
+                None       => (),
+                Ok(module) => {
+                    di: u32 ::= 0;
+                    module.decls.loop((decl) {
+                        id = DeclId(module: mi, decl: di);
+                        describe(id, decl, module.name).match({
+                            None     => (),
+                            Ok(info) => {
+                                row ::= info;
+                                row.root      = self.report.policy.match({
+                                    Main          => id.module.to_usize() == self.report.entry
+                                        && row.kind.eq("function") && row.name.eq("main"),
+                                    LoadedExports => row.exported,
+                                });
+                                row.reachable = row.root;
+                                self.indices.set(
+                                    id,
+                                    self.report.declarations.len
+                                ).try();
+                                self.report.declarations.add(row).try();
+                            },
+                        });
+                        di = di + 1;
+                    });
+                },
+            });
+            mi = mi + 1;
+        });
+        self.tree.exprs_each((id, expr) {
+            expr.kind.match({
+                Call(call) => { self.mark_callee(call.callee).try(); },
+                _          => (),
+            });
+        });
+        Ok(())
+    }
+
+    mark_callee = (self :: @Self, id: ExprId) Res<(), AllocError> {
+        self.callees.set(id, true).try();
+        self.tree.expr_at(id).kind.match({
+            Paren(p) => self.mark_callee(p.inner),
+            _        => Ok(()),
+        })
+    }
+
+    collect = (self :: @Self) Res<(), UsageError> {
+        self.report.declarations.loop((row) {
+            self.owner       = row.id;
+            module           = self.tree.module_at(row.id.module.to_usize()).ok_or(UsageError.InvalidInput).try();
+            decl             = module.decls.get(row.id.decl.to_usize()).ok_or(UsageError.InvalidInput).try();
+            self.active_body = decl.kind.match({ Function(f) => f.body, _ => None });
+            site             = DeclSite(
+                parent: DeclParent.Module(row.id.module.to_usize()),
+                index: row.id.decl.to_usize()
+            );
+            self.tree.walk(
+                WalkNode.Declaration(DeclVisit(site: site, value: decl)),
+                self
+            ).try(UsageError.OutOfMemory);
+        });
+        Ok(())
+    }
+
+    visit_event = (self :: @Self, event: WalkEvent) Res<(), AllocError> {
+        event.match({
+            Enter(node) => self.enter(node),
+            Leave(node) => { self.leave(node); Ok(()) },
+        })
+    }
+
+    enter = (self :: @Self, node: WalkNode) Res<(), AllocError> {
+        node.match({
+            Declaration(_) => { self.declarations = self.declarations + 1; },
+            Member(_)      => { self.members = self.members + 1; },
+            Type(_)        => { self.types = self.types + 1; },
+            Block(id)      => self.active_body.match({
+                Ok(body) => body.eq(id).then(() { self.bodies = self.bodies + 1; }),
+                None     => (),
+            }),
+            Expr(id)       => self.tree.expr_at(id).kind.match({
+                Lambda(_) => { self.lambdas = self.lambdas + 1; },
+                Call(_)   => { self.call(id).try(); },
+                Name(_)   => { self.function_value(id).try(); },
+                Access(_) => { self.function_value(id).try(); },
+                _         => (),
+            }),
+            _              => (),
+        });
+        Ok(())
+    }
+
+    leave = (self :: @Self, node: WalkNode) () {
+        node.match({
+            Declaration(_) => { self.declarations = self.declarations - 1; },
+            Member(_)      => { self.members = self.members - 1; },
+            Type(_)        => { self.types = self.types - 1; },
+            Block(id)      => self.active_body.match({
+                Ok(body) => body.eq(id).then(() { self.bodies = self.bodies - 1; }),
+                None     => (),
+            }),
+            Expr(id)       => self.tree.expr_at(id).kind.match({
+                Lambda(_) => { self.lambdas = self.lambdas - 1; },
+                _         => (),
+            }),
+            _              => (),
+        });
+    }
+
+    direct_context = (self: @Self) bool {
+        self.declarations == 1 && self.members == 0 && self.lambdas == 0
+            && self.types == 0 && self.bodies > 0
+            && self.indices.get(self.owner).match({
+                None  => false,
+                Ok(i) => self.report.declarations.get(i).match({
+                    None => false, Ok(row) => row.generic == false,
+                }),
+            })
+    }
+
+    call = (self :: @Self, id: ExprId) Res<(), AllocError> {
+        self.check.resolved_call(id).match({
+            Ok(target) => {
+                function = self.indices.get(target).match({
+                    None  => false,
+                    Ok(i) => self.report.declarations.get(i).match({
+                        None => false, Ok(row) => row.kind.eq("function"),
+                    }),
+                });
+                kind     = function.match({ true => CallKind.Direct, false => CallKind.Constructor });
+                self.add(id, kind, Ok(target), "selected by semantic checking")
+            },
+            None       => {
+                intrinsic = self.check.discriminant_call_of(
+                    id
+                ).match({ Ok(_) => true, None => false })
+                    || self.check.variant_name_call_of(
+                        id
+                    ).match({ Ok(_) => true, None => false })
+                    || self.check.meta_walk_of(
+                        id
+                    ).match({ Ok(_) => true, None => false })
+                    || self.check.meta_proj(id);
+                intrinsic.match({
+                    true  => self.add(
+                        id,
+                        CallKind.Intrinsic,
+                        None,
+                        "compiler-recorded intrinsic"
+                    ),
+                    false => self.add(
+                        id,
+                        CallKind.Unresolved,
+                        None,
+                        "no concrete callee identity recorded; may be a member, callback, actor or intrinsic"
+                    ),
+                })
+            },
+        })
+    }
+
+    function_value = (self :: @Self, id: ExprId) Res<(), AllocError> {
+        callee   = self.callees.get(id).value_or(false);
+        function = self.check.expr_memo.get(id).match({
+            None   => false,
+            Ok(ty) => self.check.types.at(
+                ty
+            ).match({ Fn(_) => true, _ => false }),
+        });
+        (function && callee == false).then(() {
+            self.add(
+                id,
+                CallKind.Unresolved,
+                None,
+                "function-valued expression; declaration identity and eventual invocation are not recorded"
+            ).try();
+        });
+        Ok(())
+    }
+
+    uncertain = (self :: @Self, id: DeclId) () {
+        self.indices.get(id).match({
+            None  => (),
+            Ok(i) => self.report.declarations.get(i).match({
+                None     => (),
+                Ok(info) => {
+                    row ::= info;
+                    row.uncertain = true;
+                    self.report.declarations.set(i, row);
+                },
+            }),
+        });
+    }
+
+    add = (self :: @Self, id: ExprId, kind: CallKind, target: Res<DeclId>, detail: str)
+          Res<(), AllocError> {
+        nested     = self.direct_context() == false;
+        direct     = kind.match({ Direct => true, _ => false });
+        propagates = direct && nested == false;
+        index      = self.report.calls.len;
+        self.report.calls.add(CallFact(
+            owner: self.owner,
+            site: id,
+            span: self.tree.expr_at(id).span,
+            nested: nested,
+            kind: kind,
+            target: target,
+            detail: detail,
+            propagates: propagates
+        )).try();
+        (nested || kind.match({ Unresolved => true, _ => false })).then(() {
+            self.uncertain(self.owner);
+            target.match({ Ok(to) => self.uncertain(to), None => () });
+        });
+        propagates.then(() {
+            edges ::= self.outgoing.get(self.owner).value_or(self.alloc.Vec<usize>());
+            edges.add(index).try();
+            self.outgoing.set(self.owner, edges).try();
+        });
+        Ok(())
+    }
+
+    reach = (self :: @Self) Res<(), UsageError> {
+        pending ::= self.alloc.Vec<DeclId>();
+        self.report.declarations.loop((row) {
+            row.root.then(
+                () { pending.add(row.id).try(UsageError.OutOfMemory); }
+            );
+        });
+        i: usize ::= 0;
+        loop(() { i < pending.len }, (h) {
+            owner = pending.get(i).ok_or(UsageError.InvalidInput).try();
+            self.outgoing.get(owner).match({
+                None      => (),
+                Ok(edges) => edges.loop((edge) {
+                    call  = self.report.calls.get(edge).ok_or(UsageError.InvalidInput).try();
+                    to    = call.target.ok_or(UsageError.InvalidInput).try();
+                    index = self.indices.get(to).ok_or(UsageError.InvalidInput).try();
+                    info  = self.report.declarations.get(index).ok_or(UsageError.InvalidInput).try();
+                    (info.reachable == false).then(() {
+                        row ::= info;
+                        row.reachable = true;
+                        self.report.declarations.set(index, row);
+                        pending.add(to).try(UsageError.OutOfMemory);
+                    });
+                }),
+            });
+            i = i + 1;
+        });
+        Ok(())
+    }
+}
+
+// Imports have no declaration body to analyse; their exported declarations
+// retain their original module/decl identity in the loaded module inventory.
+describe = (id: DeclId, decl: Decl, module: str) Res<Declaration> {
+    name     = decl.kind.match({ Function(f) => Ok(f.name.text), Struct(s) => Ok(s.name.text),
+        Enum(e) => Ok(e.name.text), Alias(a) => Ok(a.name.text), Const(c) => Ok(c.name.text),
+        Impl(i) => Ok(i.target.text), Import(_) => None }).try();
+    kind     = decl.kind.match({ Function(_) => "function", Struct(_) => "struct",
+        Enum(_) => "enum", Alias(_) => "alias", Const(_) => "constant", Impl(_) => "impl", _ => "import" });
+    exported = decl.kind.match({ Function(f) => f.exported, Struct(s) => s.exported,
+        Enum(e) => e.exported, Alias(a) => a.exported, Const(c) => c.exported, _ => false });
+    generic  = decl.kind.match({ Function(f) => f.tparams.len > 0, Struct(s) => s.tparams.len > 0,
+        Enum(e) => e.tparams.len > 0, Alias(a) => a.tparams.len > 0, _ => false });
+    Ok(Declaration(
+        id: id,
+        name: name,
+        module: module,
+        kind: kind,
+        exported: exported,
+        generic: generic,
+        span: decl.span,
+        uncertain: generic
+    ))
+}
+
+analyse* = (
+    alloc  : Alloc,
+    tree   : Ast,
+    check  : Checker,
+    entry  : usize,
+    policy : RootPolicy
+)
+           Res<UsageReport, UsageError> {
+    (check.diag_count() == 0 && entry < tree.module_count())
+        .ensure(UsageError.InvalidInput).try();
+    collector ::= Collector(
+        alloc: alloc,
+        tree: tree,
+        check: check,
+        report: UsageReport(
+            policy: policy,
+            entry: entry,
+            declarations: alloc.Vec<Declaration>(),
+            calls: alloc.Vec<CallFact>()
+        ),
+        indices: alloc.Map<DeclId, usize>(),
+        outgoing: alloc.Map<DeclId, Vec<usize>>(),
+        callees: alloc.Map<ExprId, bool>(),
+        owner: DeclId(module: 0, decl: 0)
+    );
+    collector.index().try(UsageError.OutOfMemory);
+    roots: usize ::= 0;
+    collector.report.declarations.loop(
+        (row) { row.root.then(() { roots = roots + 1; }); }
+    );
+    policy.match({ Main => roots == 1, LoadedExports => roots > 0 })
+        .ensure(UsageError.InvalidRoots).try();
+    collector.collect().try();
+    collector.reach().try();
+    Ok(collector.report)
+}
+
+Collector.impl(WalkVisitor, {
+    visit = (self :: @Self, event: WalkEvent) Res<(), AllocError> {
+        self.visit_event(event)
+    }
+})
+// A bounded pack of source bodies and checked call evidence. Sources must be
+// the views captured by the same Build, never files reread after checking.
+review* = (report: UsageReport, a: Alloc, sources: Map<str, str>, limit: usize)
+          Res<String, AllocError> {
+    pack ::= ReviewPack(
+        report: report,
+        sources: sources,
+        out: a.String().try(),
+        incoming: a.Map<DeclId, Vec<CallFact>>(),
+        outgoing: a.Map<DeclId, Vec<CallFact>>(),
+        names: a.Map<DeclId, Declaration>(),
+        alloc: a
+    );
+    pack.index().try();
+    pack.out.add("# Checked AST review pack\n\n").try();
+    pack.out.fmt(
+        "Root policy: {}; entry module: {}.\n\n",
+        report.policy.label(),
+        report.entry
+    ).try();
+    [str, 8](
+        "Bodies below are borrowed from the exact input captured during checking.\n",
+        "This is a partial graph: a missing caller does not prove non-use.\n",
+        "Review candidates are not deletion recommendations. Function values,\n",
+        "member dispatch, actors, reflection, and implicit cleanup remain uncertain.\n",
+        "Nested and generic body calls are recorded without runtime propagation.\n",
+        "IDs identify declarations in this parse only.\n\n",
+        "Review concrete behavior and ownership before editing. Validate proposed\n",
+        "changes with relevant regressions and measured performance where applicable.\n"
+    ).loop((text) { pack.out.add(text).try(); });
+    written: usize ::= 0;
+    report.declarations.loop((h, row) {
+        (written >= limit).then(() { h.break(); });
+        row.kind.eq("function").then(() {
+            pack.declaration(row).try();
+            written = written + 1;
+        });
+    });
+    pack.out.fmt(
+        "\nIncluded {} function declarations; selection limit {}.\n",
+        written,
+        limit
+    ).try();
+    Ok(pack.out)
+}
+
+ReviewPack = {
+    report: UsageReport,
+    sources: Map<str, str>,
+    out :: String,
+    incoming :: Map<DeclId, Vec<CallFact>>,
+    outgoing :: Map<DeclId, Vec<CallFact>>,
+    names :: Map<DeclId, Declaration>,
+    alloc: Alloc,
+
+    index = (self :: @Self) Res<(), AllocError> {
+        self.report.declarations.loop(
+            (row) { self.names.set(row.id, row).try(); }
+        );
+        self.report.calls.loop((call) {
+            from ::= self.outgoing.get(call.owner).value_or(self.alloc.Vec<CallFact>());
+            from.add(call).try();
+            self.outgoing.set(call.owner, from).try();
+            call.target.match({
+                None   => (),
+                Ok(id) => {
+                    to ::= self.incoming.get(id).value_or(self.alloc.Vec<CallFact>());
+                    to.add(call).try();
+                    self.incoming.set(id, to).try();
+                },
+            });
+        });
+        Ok(())
+    }
+
+    name = (self :: @Self, id: DeclId) Res<(), AllocError> {
+        self.out.fmt("{}:{}", id.module.to_usize(), id.decl.to_usize()).try();
+        self.names.get(id).match({
+            None    => Ok(()),
+            Ok(row) => self.out.fmt(" {}.{}", row.module, row.name),
+        })
+    }
+
+    declaration = (self :: @Self, row: Declaration) Res<(), AllocError> {
+        self.out.add("\n## ").try();
+        self.name(row.id).try();
+        self.out.fmt(
+            "\n\nClassification: {}; uncertain: {}; exported: {}; generic: {}.\n",
+            row.status(),
+            row.uncertain,
+            row.exported,
+            row.generic
+        ).try();
+        self.out.fmt(
+            "Source: {}:{}:{}.\n",
+            row.span.file,
+            row.span.start.line,
+            row.span.start.col
+        ).try();
+        self.out.add("\nRecorded callers:\n\n").try();
+        self.incoming.get(row.id).match({
+            None      => self.out.add(
+                "- None recorded; other forms of use may be unresolved.\n"
+            ),
+            Ok(calls) => {
+                calls.loop((h, i, call) {
+                    (i >= 32).then(() { h.break(); });
+                    self.out.add("- ").try();
+                    self.name(call.owner).try();
+                    self.call_site(call).try();
+                });
+                self.omitted(calls.len)
+            },
+        }).try();
+        self.out.add("\nRecorded calls:\n\n").try();
+        self.outgoing.get(row.id).match({
+            None      => self.out.add("- None recorded.\n"),
+            Ok(calls) => {
+                calls.loop((h, i, call) {
+                    (i >= 32).then(() { h.break(); });
+                    self.out.add("- ").try();
+                    call.target.match({
+                        Ok(id) => self.name(id),
+                        None   => self.out.add("unresolved"),
+                    }).try();
+                    self.call_site(call).try();
+                });
+                self.omitted(calls.len)
+            },
+        }).try();
+        body: Res<str> = self.sources.get(row.span.file).match({
+            None     => None,
+            Ok(text) => row.span.text_in(text),
+        });
+        body.match({
+            None     => self.out.add(
+                "\nSource body unavailable: captured source or span is invalid.\n"
+            ),
+            Ok(text) => self.body(text),
+        })
+    }
+
+    call_site = (self :: @Self, call: CallFact) Res<(), AllocError> {
+        self.out.fmt(
+            " at {}:{}:{}: {}, {}; propagates={}; {}.\n",
+            call.span.file,
+            call.span.start.line,
+            call.span.start.col,
+            call.kind.label(),
+            call.nested.match({ true => "nested", false => "body" }),
+            call.propagates,
+            call.detail
+        )
+    }
+
+    omitted = (self :: @Self, count: usize) Res<(), AllocError> {
+        (count > 32).then(() {
+            self.out.fmt(
+                "- {} additional sites in the JSON report.\n",
+                count - 32
+            ).try();
+        });
+        Ok(())
+    }
+
+    body = (self :: @Self, text: str) Res<(), AllocError> {
+        // Indentation keeps arbitrary source backticks inside the code block.
+        self.out.add('\n').try();
+        text.split('\n').loop((line) {
+            self.out.add("    ").try();
+            self.out.add(line).try();
+            self.out.add('\n').try();
+        });
+        Ok(())
+    }
+}

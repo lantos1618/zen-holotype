@@ -8,6 +8,7 @@
 ExprId, Decl, Function, Param, Call = std.ast
 Literal, TypeId = std.ast
 AllocError = std.mem
+literal_byte_len = std.lex
 Vec = std.collections
 str, String = std.text
 Range = std.core
@@ -23,12 +24,12 @@ CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
 ctype = gen.gen_c.gen_c_type
 is_c_integer, is_signed = gen.gen_c.gen_c_type
-expr, ty_of, named_hole = gen.gen_c.gen_c_expr
+expr, ty_of, named_hole, write_c_literal = gen.gen_c.gen_c_expr
 declare_temp, is_variant, payload_type = gen.gen_c.gen_c_flow
 write_assign_err = gen.gen_c.gen_c_flow
 signature_of = gen.gen_c.gen_c_call
 recv_arg, arg_value, by_ref = gen.gen_c.gen_c_arg
-body_end, decoded_bytes, cast_of = gen.gen_c.gen_c_print
+body_end, cast_of = gen.gen_c.gen_c_print
 FmtAt, ends_run, arguments_taken = std.text.text_fmt
 source_fmt_at = gen.gen_c.gen_c_print
 report_in_format, NOT_A_HOLE = gen.gen_c.gen_c_print
@@ -542,10 +543,9 @@ SinkWalk = {
 
     write_literal = (self: @Self, be :: CBackend, piece: str)
                     Res<(), AllocError> {
-        text ::= be.alloc.String(
-            "(zg_str){{ (unsigned char *)\"{piece}\", {}u }}",
-            decoded_bytes(piece)
-        ).try();
+        text ::= be.alloc.String("(zg_str){{ (unsigned char *)").try();
+        text.write_c_literal(piece).try();
+        text.fmt(", {}u }}", piece.literal_byte_len()).try();
         call ::= be.alloc.String().try();
         self.p.sink_write(be, text.view(), call).try().match({
             false => self.p.unsupported(be, self.p.id, "a sink with no write"),

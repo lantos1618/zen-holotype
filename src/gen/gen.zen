@@ -4,14 +4,13 @@
 
 Emit*, order* = gen.gen_emit
 CBackend*, emit_program*, render_symbol_map* = gen.gen_c
-lower_program*, emit_header*, emit_unit*, unit_used* = gen.gen_c
+lower_program*, emit_header*, emit_unit*, group_bodies*, ModuleBodies* = gen.gen_c
 
 Alloc, AllocError, Mem = std.mem
 Ast = std.ast
 Checker = sema.sema
 Codegen = std.build
 String, str = std.text
-Range = std.core
 lower = gen.gen_lower
 Program = gen.gen_ir
 emit_js = gen.gen_js
@@ -189,20 +188,20 @@ COutput = {
         (faults == 0).match({
             false => Ok(faults),
             true  => {
-                seq = order(self.generation.alloc, self.be.fn_names).try();
+                groups = self.be.group_bodies().try();
                 failed ::= publish(Artifact(
                     kind: ArtifactKind.Source,
                     name: "zen.h",
                     text: header.view()
                 )).try();
-                Range(0, self.generation.tree.module_count()).loop((h, unit) {
-                    ((unit == self.generation.entry) || self.be.unit_used(unit)).then(() {
+                groups.loop((h, group) {
+                    unit = group.unit;
+                    ((unit == self.generation.entry) || (group.functions.len > 0)).then(() {
                         scratch ::= self.generation.mem.alloc();
                         out     ::= scratch.Emit().try();
                         self.be.emit_unit(
                             self.generation.entry,
-                            unit,
-                            seq,
+                            group,
                             out
                         ).try();
                         module_name = self.generation.tree.module_at(

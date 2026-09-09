@@ -6,9 +6,52 @@
 Lexer = std.lex.lex_state
 Pos, TokenKind = std.lex.lex_token
 LexFault = std.lex.lex_diag
-is_escape = std.lex.lex_byte
-AllocError = std.mem
+is_escape, escape_value = std.lex.lex_byte
+Alloc, AllocError = std.mem
 str = std.text
+
+LiteralError* = OutOfMemory | IncompleteEscape(usize) | UnknownEscape(usize)
+
+// Byte length of an unquoted, lexer-validated literal body or format fragment.
+// Each Zen escape denotes one byte; counting needs no decoded allocation.
+literal_byte_len* = (raw: str) usize {
+    count: usize ::= 0;
+    at: usize    ::= 0;
+    loop(() { at < raw.len }, (h) {
+        count = count + 1;
+        at    = at + (raw[at] == '\\').match({ true => 2, false => 1 });
+    });
+    count
+}
+
+// Decode an unquoted Zen literal body or format fragment. Plain bytes borrow
+// raw; escaped bytes borrow storage allocated through a. JSON uses a different
+// vocabulary and must keep its own decoder. Error offsets name the backslash.
+decode_literal* = (raw: str, a: Alloc) Res<str, LiteralError> {
+    raw.find('\\').match({
+        None      => Ok(raw),
+        Ok(first) => {
+            out ::= a.String().try(LiteralError.OutOfMemory);
+            out.add(raw.slice(0, first)).try(LiteralError.OutOfMemory);
+            at: usize ::= first;
+            loop(() { at < raw.len }, (h) {
+                byte ::= raw[at];
+                (byte == '\\').then(() {
+                    slash = at;
+                    at    = at + 1;
+                    (at < raw.len).ensure(LiteralError.IncompleteEscape(
+                        slash
+                    )).try();
+                    byte = raw[at].escape_value()
+                        .ok_or(LiteralError.UnknownEscape(slash)).try();
+                });
+                out.add(byte).try(LiteralError.OutOfMemory);
+                at = at + 1;
+            });
+            Ok(out.view())
+        },
+    })
+}
 
 // String line/end faults are anchored at the opening quote.
 string* = (lx :: Lexer) Res<(), AllocError> {

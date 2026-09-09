@@ -86,6 +86,27 @@ Build* = {
     // Open editor buffers keyed by path; command-line builds leave this empty.
     overlay* :: Map<str, str>,
 
+    // Opt-in borrowed source views for tools that need the exact parsed bytes.
+    // The compilation allocator still owns disk buffers; overlays keep their
+    // caller's lifetime. Ordinary builds do not allocate this index.
+    sources* :: Res<Map<str, str>> = None,
+
+    capture_sources* = (self :: @Self) () {
+        self.sources = Ok(self.alloc.Map<str, str>());
+    }
+
+    keep_source = (self :: @Self, file: str, text: str) Res<(), AllocError> {
+        self.sources.match({
+            None      => Ok(()),
+            Ok(saved) => {
+                texts ::= saved;
+                texts.set(file, text).try();
+                self.sources = Ok(texts);
+                Ok(())
+            },
+        })
+    }
+
     // Language-server builds collect diagnostics without writing to stdout.
     speaking* :: bool = true,
 
@@ -204,6 +225,7 @@ Build* = {
     // Files with lexical faults are reported without invoking the parser.
     lex_it = (self :: @Self, u: Unit, text: str, seen :: Vec<Unit>)
              Res<(), AllocError> {
+        self.keep_source(u.rel, text).try();
         // Tokens live only through this parse; a per-module arena returns them.
         scratch ::= self.env.mem.alloc();
         lexed = scan(scratch, Source(file: u.rel, text: text)).try();

@@ -21,6 +21,8 @@ the language, implementation stages, source style, and verification rules.
 - `TEST_ITERATION.md` explains test timing reports and shared import discovery.
 - `REFACTOR_REVIEW.md` records the current structural review and measured changes.
 - `TEST_REVIEW.md` maps consolidated smoke tests to their retained coverage.
+- [USAGE_REPORT.md](USAGE_REPORT.md) describes the Zen tool for checked call
+  evidence and source review packs captured from the same compilation input.
 
 ## Generated review artifacts
 

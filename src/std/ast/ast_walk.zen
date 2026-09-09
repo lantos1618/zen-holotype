@@ -1,0 +1,275 @@
+// Structural traversal follows every child edge, including expressions in
+// types and defaults. Shared arena nodes are visited once per edge, preserving
+// their enclosing owner. No temporary collections are allocated.
+Ast = std.ast.ast_arena
+ExprId, TypeId, PatternId, BlockId = std.ast.ast_id
+Decl, Member, Stmt, Function, TParam, Param = std.ast.ast_node
+AllocError = std.mem
+
+DeclParent* = Module(usize) | Block(BlockId)
+DeclSite* = { parent*: DeclParent, index*: usize }
+MemberParent* = Declaration(DeclSite) | Record(ExprId)
+MemberSite* = { parent*: MemberParent, index*: usize }
+DeclVisit* = { site*: DeclSite, value*: Decl }
+MemberVisit* = { site*: MemberSite, value*: Member }
+StmtVisit* = { block*: BlockId, index*: usize, value*: Stmt }
+
+// Non-arena nodes carry their value and exact structural position. A lambda
+// is an Expr whose kind is Lambda; its event encloses its signature and body.
+WalkNode* = Declaration(DeclVisit)
+    | Member(MemberVisit)
+    | Statement(StmtVisit)
+    | Expr(ExprId)
+    | Type(TypeId)
+    | Pattern(PatternId)
+    | Block(BlockId)
+WalkEvent* = Enter(WalkNode) | Leave(WalkNode)
+
+// A synchronous visitor borrows its mutable state for the traversal.
+WalkVisitor* = {
+    visit* = (self :: @Self, event: WalkEvent) Res<(), AllocError>
+}
+
+// The root must belong to this immutable Ast snapshot. Successful traversal
+// emits balanced Enter/Leave events in child order. Visitor failure stops
+// immediately; pending Leave events are not delivered after an error.
+walk* = (
+    tree    : Ast,
+    root    : WalkNode,
+    visitor :: WalkVisitor
+) Res<(), AllocError> {
+    walker ::= Walker(tree: tree, visitor: visitor);
+    walker.node(root)
+}
+
+Walker = { tree: Ast, visitor :: WalkVisitor }
+
+node = (walker :: Walker, root: WalkNode) Res<(), AllocError> {
+    walker.visitor.visit(WalkEvent.Enter(root)).try();
+    root.match({
+        Declaration(d) => walker.declaration(d).try(),
+        Member(m)      => walker.member(m).try(),
+        Statement(s)   => walker.statement(s).try(),
+        Expr(id)       => walker.expression(id).try(),
+        Type(id)       => walker.type(id).try(),
+        Pattern(id)    => walker.tree.pattern_at(id).kind.match({
+            Name(_)        => (),
+            Destructure(d) => walker.node(WalkNode.Pattern(d.binder)).try(),
+            Wild           => (),
+            Literal(_)     => (),
+        }),
+        Block(id)      => {
+            block = walker.tree.block_at(id);
+            block.stmts.loop((h, index, statement) {
+                walker.node(WalkNode.Statement(StmtVisit(
+                    block: id,
+                    index: index,
+                    value: statement
+                ))).try();
+            });
+            block.value.when_ok((value) {
+                walker.node(WalkNode.Expr(value)).try();
+            });
+        },
+    });
+    walker.visitor.visit(WalkEvent.Leave(root))
+}
+
+signature = (
+    walker  :: Walker,
+    tparams : Vec<TParam>,
+    params  : Vec<Param>,
+    ret     : Res<TypeId>
+) Res<(), AllocError> {
+    tparams.loop((p) {
+        p.bounds.loop((bound) { walker.node(WalkNode.Type(bound)).try(); });
+    });
+    params.loop((p) {
+        p.type.when_ok((ty) { walker.node(WalkNode.Type(ty)).try(); });
+    });
+    ret.when_ok((ty) { walker.node(WalkNode.Type(ty)).try(); });
+    Ok(())
+}
+
+function = (walker :: Walker, f: Function) Res<(), AllocError> {
+    walker.signature(f.tparams, f.params, f.ret).try();
+    f.body.when_ok((body) { walker.node(WalkNode.Block(body)).try(); });
+    Ok(())
+}
+
+declaration = (walker :: Walker, d: DeclVisit) Res<(), AllocError> {
+    d.value.kind.match({
+        Struct(s)   => {
+            s.tparams.loop((p) {
+                p.bounds.loop((ty) { walker.node(WalkNode.Type(ty)).try(); });
+            });
+            s.members.loop((h, index, member) {
+                walker.node(WalkNode.Member(MemberVisit(
+                    site: MemberSite(
+                        parent: MemberParent.Declaration(d.site),
+                        index: index
+                    ),
+                    value: member
+                ))).try();
+            });
+        },
+        Enum(e)     => {
+            e.tparams.loop((p) {
+                p.bounds.loop((ty) { walker.node(WalkNode.Type(ty)).try(); });
+            });
+            e.variants.loop((v) {
+                v.payload.when_ok(
+                    (ty) { walker.node(WalkNode.Type(ty)).try(); }
+                );
+                v.discriminant.when_ok(
+                    (value) { walker.node(WalkNode.Expr(value)).try(); }
+                );
+            });
+        },
+        Alias(a)    => {
+            a.tparams.loop((p) {
+                p.bounds.loop((ty) { walker.node(WalkNode.Type(ty)).try(); });
+            });
+            walker.node(WalkNode.Type(a.target)).try();
+        },
+        Function(f) => walker.function(f).try(),
+        Impl(i)     => {
+            walker.node(WalkNode.Type(i.bound)).try();
+            i.members.loop((h, index, member) {
+                walker.node(WalkNode.Member(MemberVisit(
+                    site: MemberSite(
+                        parent: MemberParent.Declaration(d.site),
+                        index: index
+                    ),
+                    value: member
+                ))).try();
+            });
+        },
+        Import(_)   => (),
+        Const(c)    => {
+            c.type.when_ok((ty) { walker.node(WalkNode.Type(ty)).try(); });
+            walker.node(WalkNode.Expr(c.value)).try();
+        },
+    });
+    Ok(())
+}
+
+member = (walker :: Walker, m: MemberVisit) Res<(), AllocError> {
+    m.value.kind.match({
+        Field(f)    => {
+            f.type.when_ok((ty) { walker.node(WalkNode.Type(ty)).try(); });
+            f.value.when_ok(
+                (value) { walker.node(WalkNode.Expr(value)).try(); }
+            );
+        },
+        Const(c)    => {
+            c.type.when_ok((ty) { walker.node(WalkNode.Type(ty)).try(); });
+            walker.node(WalkNode.Expr(c.value)).try();
+        },
+        Function(f) => walker.function(f).try(),
+    });
+    Ok(())
+}
+
+statement = (walker :: Walker, s: StmtVisit) Res<(), AllocError> {
+    s.value.kind.match({
+        Bind(b)   => {
+            walker.node(WalkNode.Expr(b.target)).try();
+            b.type.when_ok((ty) { walker.node(WalkNode.Type(ty)).try(); });
+            walker.node(WalkNode.Expr(b.value)).try();
+        },
+        Expr(e)   => walker.node(WalkNode.Expr(e.expr)).try(),
+        Decl(d)   => walker.node(WalkNode.Declaration(DeclVisit(
+            site: DeclSite(parent: DeclParent.Block(s.block), index: s.index),
+            value: d
+        ))).try(),
+        Block(id) => walker.node(WalkNode.Block(id)).try(),
+    });
+    Ok(())
+}
+
+expression = (walker :: Walker, id: ExprId) Res<(), AllocError> {
+    walker.tree.expr_at(id).kind.match({
+        Name(_)       => (),
+        Literal(_)    => (),
+        Unit          => (),
+        SelfType      => (),
+        Scope         => (),
+        Meta(m)       => {
+            m.value.when_ok(
+                (value) { walker.node(WalkNode.Expr(value)).try(); }
+            );
+            m.type.when_ok((ty) { walker.node(WalkNode.Type(ty)).try(); });
+        },
+        Paren(p)      => walker.node(WalkNode.Expr(p.inner)).try(),
+        Array(a)      => { a.elems.loop(
+            (value) { walker.node(WalkNode.Expr(value)).try(); }
+        ); },
+        FixedArray(a) => {
+            walker.node(WalkNode.Type(a.type)).try();
+            a.elems.loop((value) { walker.node(WalkNode.Expr(value)).try(); });
+        },
+        Lambda(l)     => {
+            walker.signature(l.tparams, l.params, l.ret).try();
+            walker.node(WalkNode.Block(l.body)).try();
+        },
+        Call(c)       => {
+            walker.node(WalkNode.Expr(c.callee)).try();
+            c.targs.loop((ty) { walker.node(WalkNode.Type(ty)).try(); });
+            c.args.loop((a) { walker.node(WalkNode.Expr(a.value)).try(); });
+        },
+        Match(m)      => {
+            walker.node(WalkNode.Expr(m.scrutinee)).try();
+            m.arms.loop((a) {
+                walker.node(WalkNode.Pattern(a.pattern)).try();
+                walker.node(WalkNode.Expr(a.body)).try();
+            });
+        },
+        Try(t)        => {
+            walker.node(WalkNode.Expr(t.operand)).try();
+            t.error.when_ok(
+                (value) { walker.node(WalkNode.Expr(value)).try(); }
+            );
+        },
+        Record(r)     => { r.entries.loop((h, index, member) {
+            walker.node(WalkNode.Member(MemberVisit(
+                site: MemberSite(parent: MemberParent.Record(id), index: index),
+                value: member
+            ))).try();
+        }); },
+        Access(a)     => walker.node(WalkNode.Expr(a.base)).try(),
+        Index(i)      => {
+            walker.node(WalkNode.Expr(i.base)).try();
+            walker.node(WalkNode.Expr(i.index)).try();
+        },
+        Unary(u)      => walker.node(WalkNode.Expr(u.operand)).try(),
+        Binary(b)     => {
+            walker.node(WalkNode.Expr(b.lhs)).try();
+            walker.node(WalkNode.Expr(b.rhs)).try();
+        },
+        Consume(c)    => walker.node(WalkNode.Expr(c.operand)).try(),
+        Block(body)   => walker.node(WalkNode.Block(body)).try(),
+    });
+    Ok(())
+}
+
+type = (walker :: Walker, id: TypeId) Res<(), AllocError> {
+    walker.tree.type_at(id).kind.match({
+        Named(n) => { n.args.loop(
+            (ty) { walker.node(WalkNode.Type(ty)).try(); }
+        ); },
+        Union(u) => { u.members.loop(
+            (ty) { walker.node(WalkNode.Type(ty)).try(); }
+        ); },
+        Fn(f)    => walker.signature(f.tparams, f.params, Ok(f.ret)).try(),
+        Array(a) => {
+            walker.node(WalkNode.Type(a.elem)).try();
+            walker.node(WalkNode.Expr(a.count)).try();
+        },
+        Unit     => (),
+        SelfType => (),
+        Infer    => (),
+        Variadic => (),
+    });
+    Ok(())
+}

@@ -99,6 +99,27 @@ refused = (env: Env, a: Alloc, backend: Codegen, source: str, layout: Layout)
         && !called && !report.view().is_empty())
 }
 
+// Construct expected NUL bytes independently of source literal spelling.
+literal_output = (a: Alloc) Res<String, AllocError> {
+    out ::= a.String().try();
+    out.add("\\01|").try();
+    [str, 5]("1|", "0|", "00|", "7|", "8|end\n").loop((tail) {
+        out.add('\0').try();
+        out.add(tail).try();
+    });
+    Ok(out)
+}
+
+c_literal_output = (a: Alloc) Res<String, AllocError> {
+    out ::= a.String().try();
+    out.add(
+        "str 10 0 49 0 48 0 48 48 92 48 49\nmatch true\nsink 6 0 49 55 92 48 49\nconsole:"
+    ).try();
+    out.add('\0').try();
+    out.add("1\n").try();
+    Ok(out)
+}
+
 main = (env: Env) Res<(), AllocError> {
     [Codegen, 3](Codegen.C, Codegen.Js, Codegen.Asm).loop((backend) {
         a = env.mem.alloc();
@@ -114,12 +135,24 @@ main = (env: Env) Res<(), AllocError> {
                 7
             ).try()
         );
+        expected = literal_output(a).try();
+        println(
+            "{} literal bytes {}",
+            backend.stable_name(),
+            run(env, a, backend, "literal_bytes.zen", expected.view(), 0).try()
+        );
         println(
             "{} shadow {}",
             backend.stable_name(),
             run(env, a, backend, "shadow.zen", "", 42).try()
         );
     });
+    a        = env.mem.alloc();
+    expected = c_literal_output(a).try();
+    println(
+        "c literal paths {}",
+        run(env, a, Codegen.C, "literal_c.zen", expected.view(), 0).try()
+    );
     [Codegen, 2](Codegen.Js, Codegen.Asm).loop((backend) {
         a = env.mem.alloc();
         println(

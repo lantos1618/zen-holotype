@@ -13,6 +13,7 @@ Literal, Binary, Unary, Match = std.ast
 Access, Call = std.ast
 TypeId = std.ast
 AllocError = std.mem
+literal_byte_len = std.lex
 Vec = std.collections
 str, String = std.text
 Range = std.core
@@ -38,7 +39,7 @@ lower_call, res_value, is_res_ctor = gen.gen_c.gen_c_call
 call_callee = sema.sema_call
 needs_hoist, hoist_expr = gen.gen_c.gen_c_hoist
 needs_widen, widen_expr, needs_set, set_expr = gen.gen_c.gen_c_widen
-is_print, body_end = gen.gen_c.gen_c_print
+is_print = gen.gen_c.gen_c_print
 call_ret_type = gen.gen_c.gen_c_infer
 lower_unary, lower_binary, binary_type = gen.gen_c.gen_c_op
 lower_index, index_type = gen.gen_c.gen_c_index
@@ -805,11 +806,8 @@ lower_paren = (
     Ok(());
 }
 
-// A literal is its raw source slice, and that is deliberate: Zen's
-// escape set is `\n \t \r \0 \\ \' \"` and every one of those is a C
-// escape with the same meaning, so the bytes travel unchanged. A `str`
-// is not a `char *` though — it is a pointer and a length — so a
-// string literal is built as one.
+// Scalar literals retain their checked source spelling. Strings also carry
+// a byte length and use C spelling that preserves Zen's escape boundaries.
 lower_literal = (l: Literal, out :: String) Res<(), AllocError> {
     l.kind.match({
         Str   => lower_str_literal(l, out),
@@ -845,24 +843,37 @@ over_i64 = (literal: Literal) bool {
 }
 
 lower_str_literal = (l: Literal, out :: String) Res<(), AllocError> {
-    out.fmt("(zg_str){ (unsigned char *){}, ", l.text).try();
-    out.write_usize(decoded_len(l.text)).try();
+    out.add("(zg_str){ (unsigned char *)").try();
+    out.write_c_literal(l.text.slice(1, l.text.len - 1)).try();
+    out.add(", ").try();
+    out.write_usize(l.text.slice(1, l.text.len - 1).literal_byte_len()).try();
     out.add("u }").try();
     Ok(());
 }
 
-// The byte length a string literal denotes: its raw slice without the
-// quotes, with each escape counting once.
-// `esc` is "the previous byte opened an escape", so the byte that
-// closes one is not counted and the backslash that opened it is.
-decoded_len* = (raw: str) usize {
-    n   ::= 0;
-    esc ::= false;
-    Range(1, body_end(raw)).loop((h, i) {
-        (esc == false).then(() { n = n + 1; });
-        esc = (esc == false) && (raw.index(i) == '\\');
+// Append one C string from a lexer-validated, unquoted Zen literal body.
+// Zen's \0 consumes one source digit; C octal escapes can consume three.
+// Escaped backslashes stay paired so \\01 remains three ordinary bytes.
+write_c_literal* = (out :: String, raw: str) Res<(), AllocError> {
+    out.add('"').try();
+    start: usize ::= 0;
+    at: usize    ::= 0;
+    loop(() { at < raw.len }, (h) {
+        (raw[at] == '\\').match({
+            true  => {
+                (at + 2 < raw.len && raw[at + 1] == '0'
+                    && raw[at + 2] >= '0' && raw[at + 2] <= '7').then(() {
+                    out.add(raw.slice(start, at + 2)).try();
+                    out.add("00").try();
+                    start = at + 2;
+                });
+                at = at + 2;
+            },
+            false => { at = at + 1; },
+        });
     });
-    n
+    out.add(raw.slice(start, raw.len)).try();
+    out.add('"')
 }
 
 // Reads sema's folded `@meta(T).name` and `@meta(T).fields().len` values.
@@ -931,8 +942,7 @@ chain_count = (be :: CBackend, call_id: ExprId, out :: String)
 // no escaping can be needed for: Zen's escapes are introduced by `\`
 // and a literal is closed by `"`, and neither byte can appear in an
 // identifier the lexer accepted. So the quotes are added around the
-// text and the length is `text.len` — no `decoded_len`, there is
-// nothing to decode.
+// text and the length is `text.len`; there is nothing to decode.
 lower_meta_name* = (text: str, out :: String) Res<(), AllocError> {
     out.fmt("(zg_str){ (unsigned char *)\"{}\", ", text).try();
     out.write_usize(text.len).try();

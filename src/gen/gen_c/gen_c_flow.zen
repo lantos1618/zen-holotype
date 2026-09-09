@@ -7,6 +7,7 @@ Expr, Match, Arm, Pattern, PatternId = std.ast
 Literal, Decl, Enum, Variant = std.ast
 Destructure, QualifiedName = std.ast
 AllocError = std.mem
+literal_byte_len = std.lex
 Vec = std.collections
 str, String = std.text
 Range = std.core
@@ -25,7 +26,7 @@ declarator, is_unit, variant_type, decl_ctx = gen.gen_c.gen_c_type
 decl_inst = gen.gen_c.gen_c_type
 write_qname = gen.gen_c.gen_c_layout
 Dest, deliver = gen.gen_c.gen_c_stmt
-res_type_of, decoded_len = gen.gen_c.gen_c_expr
+res_type_of, write_c_literal = gen.gen_c.gen_c_expr
 is_str = gen.gen_c.gen_c_read
 write_position = gen.gen_c.gen_c_op
 
@@ -444,7 +445,7 @@ equality = (scrut: str, text: str, out :: String) Res<(), AllocError> {
 
 write_str_cond = (l: Literal, scrut: str, out :: String)
                  Res<(), AllocError> {
-    n = decoded_len(l.text);
+    n = l.text.slice(1, l.text.len - 1).literal_byte_len();
     out.fmt("({scrut}.len == ").try();
     out.write_usize(n).try();
     out.add("u").try();
@@ -461,7 +462,9 @@ write_str_cond = (l: Literal, scrut: str, out :: String)
 // handed even for zero bytes.
 str_bytes_cond = (l: Literal, scrut: str, n: usize, out :: String)
                  Res<(), AllocError> {
-    out.fmt(" && memcmp({scrut}.data, {}, ", l.text).try();
+    out.fmt(" && memcmp({scrut}.data, ").try();
+    out.write_c_literal(l.text.slice(1, l.text.len - 1)).try();
+    out.add(", ").try();
     out.write_usize(n).try();
     out.add("u) == 0").try();
     Ok(());

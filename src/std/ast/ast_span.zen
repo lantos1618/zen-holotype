@@ -15,6 +15,23 @@ Pos* = {
     at_or_after* = (self: @Self, other: @Self) bool {
         !self.before(other)
     }
+
+    // Byte offset in the original source. Invalid positions are refused,
+    // including columns beyond the line and lines beyond the final newline.
+    offset_in* = (self: @Self, text: str) Res<usize> {
+        (self.line > 0 && self.col > 0).ensure().try();
+        at: usize   ::= 0;
+        line: usize ::= 1;
+        loop(() { line < self.line }, (h) {
+            end = text.newline_in(at, text.len);
+            (end < text.len).ensure().try();
+            at   = end + 1;
+            line = line + 1;
+        });
+        end = text.newline_in(at, text.len);
+        (self.col - 1 <= end - at).ensure().try();
+        Ok(at + self.col - 1)
+    }
 }
 
 Pos.impl(Display, {
@@ -28,6 +45,14 @@ Span* = {
     file*: str,
     start*: Pos,
     end*: Pos,
+
+    // Borrow the half-open source span, using the parser's byte columns.
+    text_in* = (self: @Self, text: str) Res<str> {
+        from = self.start.offset_in(text).try();
+        to   = self.end.offset_in(text).try();
+        (from <= to).ensure().try();
+        Ok(text.slice(from, to))
+    }
 
     // Whether `p` in `file` lies in this span.
     covers* = (self: @Self, file: str, p: Pos) bool {

@@ -923,39 +923,55 @@ emit_header* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     Ok(());
 }
 
-// One unit: every function whose body was lowered while module `u` was
-// the one being lowered, and `main` when `u` is the root.
+// Completed module selection: body indices retain the global mangled-name
+// order. Empty modules remain represented so the entry can still emit main.
+ModuleBodies* = {
+    unit*: usize,
+    functions*: Vec<usize>,
+}
+
+group_bodies* = (be: CBackend) Res<Vec<ModuleBodies>, AllocError> {
+    groups ::= be.alloc.Vec<ModuleBodies>();
+    Range(0, be.tree.module_count()).loop((h, unit) {
+        groups.add(ModuleBodies(
+            unit: unit,
+            functions: be.alloc.Vec<usize>()
+        )).try();
+    });
+    seq = order(be.alloc, be.fn_names).try();
+    seq.loop((h, index) {
+        unit = be.unit_of(index);
+        groups.get(unit).match({
+            None      => (),
+            Ok(group) => {
+                functions ::= group.functions;
+                functions.add(index).try();
+                groups.set(
+                    unit,
+                    ModuleBodies(unit: unit, functions: functions)
+                );
+            },
+        });
+    });
+    Ok(groups)
+}
+
+// Each body is visited once across all units, after the single grouping pass.
 emit_unit* = (
-    be   :: CBackend,
-    root : usize,
-    u    : usize,
-    seq  : Vec<usize>,
-    out  :: Emit
+    be    :: CBackend,
+    root  : usize,
+    group : ModuleBodies,
+    out   :: Emit
 )
              Res<(), AllocError> {
     out.say("#include \"zen.h\"").try();
     out.line().try();
-    seq.loop((h, i) {
-        // `.match` and not `.then`: a loop binding read inside a nested
-        // closure does not resolve, and `i` is one.
-        (be.unit_of(i) == u).match({
-            false => Ok(()),
-            true  => be.write_body_at(out, i),
-        }).try();
+    group.functions.loop((h, index) {
+        be.write_body_at(out, index).try();
     });
-    (u == root).match({
+    (group.unit == root).match({
         false => Ok(()),
         true  => be.emit_main(root, out),
     }).try();
     Ok(());
-}
-
-// Whether module `u` owns any body at all. A module every one of whose
-// functions is generic, inlined, or unreached contributes no file —
-// and an empty `.c` would still cost a compiler process.
-unit_used* = (be: CBackend, u: usize) bool {
-    Range(0, be.fn_units.len).find((i) { be.unit_of(i) == u }).match({
-        Ok(_) => true,
-        None  => false,
-    })
 }
