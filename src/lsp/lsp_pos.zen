@@ -1,21 +1,19 @@
 // Converts between Zen's 1-based byte columns and LSP's 0-based UTF-16
 // positions. Out-of-range positions clamp to valid line boundaries.
 
-str, String = std.text
+str = std.text
 Range = std.core
-Alloc, AllocError = std.mem
 Pos, Span = std.ast.ast_span
 codepoint_at, UTF8_MIN_4 = std.text.text_utf8
-to_json = std.json
 
-WirePos* = {
+Position* = {
     line*: usize,
     character*: usize,
 }
 
-WireRange* = {
-    start*: WirePos,
-    end*: WirePos,
+TextRange* = {
+    start*: Position,
+    end*: Position,
 }
 
 LineRun* = {
@@ -24,21 +22,48 @@ LineRun* = {
 
     // Byte offset of 1-based `col`, clamped to the run.
     target_of = (self: @Self, col: usize) usize {
-        at = (col == 0).match({ true => self.start, false => self.start + col - 1 });
-        (at > self.end).match({ true => self.end, false => at })
+        offset = zero_based(col);
+        self.start + (offset > self.end - self.start).match({
+            true  => self.end - self.start,
+            false => offset,
+        })
     }
+    byte_column = (self: @Self, text: str, character: usize) usize {
+        at    ::= self.start;
+        units ::= 0;
+        loop(() { at < self.end && units < character }, (h) {
+            step = utf16_step_at(text, at);
+            ((units + step.units) > character).then(() { h.break(); });
+            at    = at + step.bytes;
+            units = units + step.units;
+        });
+        at - self.start + 1
+    }
+
+    utf16_column = (self: @Self, text: str, col: usize) usize {
+        target = self.target_of(col);
+        at    ::= self.start;
+        units ::= 0;
+        loop(() { at < target }, (h) {
+            step = utf16_step_at(text, at);
+            ((at + step.bytes) > target).then(() { h.break(); });
+            at    = at + step.bytes;
+            units = units + step.units;
+        });
+        units
+    }
+
 }
 
 run_of* = (text: str, line: usize) LineRun {
     at   ::= 0;
     seen ::= 0;
-    done ::= line == 0;
-    (!done).then(() {
+    (line > 0).then(() {
         Range(0, text.len).loop((h, i) {
-            (!done && text.index(i) == '\n').then(() {
+            (text.index(i) == '\n').then(() {
                 seen = seen + 1;
                 at   = i + 1;
-                (seen == line).then(() { done = true; h.break(); });
+                (seen == line).then(() { h.break(); });
             });
         });
     });
@@ -48,89 +73,57 @@ run_of* = (text: str, line: usize) LineRun {
     })
 }
 
-// Offset of the first newline in `[from, stop)`, or `stop`.
-newline_in* = (text: str, from: usize, stop: usize) usize {
-    text.slice(from, stop).find('\n').match({
-        Ok(i) => from + i,
-        None  => stop,
-    })
-}
-
 zero_based* = (line: usize) usize {
     (line == 0).match({ true => 0, false => line - 1 })
 }
 
-Step* = {
+Utf16Step* = {
     units*: usize,
     bytes*: usize,
 }
 
-step_at* = (text: str, at: usize) Step {
+utf16_step_at* = (text: str, at: usize) Utf16Step {
     text.codepoint_at(at).match({
-        Err(_) => Step(units: 1, bytes: 1),
+        Err(_) => Utf16Step(units: 1, bytes: 1),
         Ok(c)  => (c.value < UTF8_MIN_4).match({
-            true  => Step(units: 1, bytes: c.len),
-            false => Step(units: 2, bytes: c.len),
+            true  => Utf16Step(units: 1, bytes: c.len),
+            false => Utf16Step(units: 2, bytes: c.len),
         }),
     })
 }
 
-to_pos* = (text: str, line: usize, character: usize) Pos {
+source_position* = (text: str, line: usize, character: usize) Pos {
     run = run_of(text, line);
-    at    ::= run.start;
-    units ::= 0;
-    done  ::= false;
-    loop(() { !done && at < run.end && units < character }, (h) {
-        step = step_at(text, at);
-        ((units + step.units) > character).match({
-            true  => { done = true; },
-            false => { at = at + step.bytes; units = units + step.units; },
-        });
-    });
-    Pos(line: line + 1, col: at - run.start + 1);
+    Pos(line: line + 1, col: run.byte_column(text, character))
 }
 
-to_wire* = (text: str, p: Pos) WirePos {
-    line   = zero_based(p.line);
-    run    = run_of(text, line);
-    target = run.target_of(p.col);
-    at    ::= run.start;
-    units ::= 0;
-    done  ::= false;
-    loop(() { !done && at < target }, (h) {
-        step = step_at(text, at);
-        ((at + step.bytes) > target).match({
-            true  => { done = true; },
-            false => { at = at + step.bytes; units = units + step.units; },
-        });
-    });
-    WirePos(line: line, character: units);
+lsp_position* = (text: str, p: Pos) Position {
+    line = zero_based(p.line);
+    run  = run_of(text, line);
+    Position(line: line, character: run.utf16_column(text, p.col))
 }
 
-wire_range* = (text: str, span: Span) WireRange {
-    WireRange(start: to_wire(text, span.start), end: to_wire(text, span.end))
-}
-
-whole_range* = (text: str) WireRange {
-    WireRange(
-        start: WirePos(line: 0, character: 0),
-        end: WirePos(line: text.count("\n") + 1, character: 0)
+text_range* = (text: str, span: Span) TextRange {
+    TextRange(
+        start: lsp_position(text, span.start),
+        end: lsp_position(text, span.end)
     )
 }
 
-units_of* = (text: str, from: usize, upto: usize) usize {
+whole_range* = (text: str) TextRange {
+    TextRange(
+        start: Position(line: 0, character: 0),
+        end: Position(line: text.count("\n") + 1, character: 0)
+    )
+}
+
+utf16_units* = (text: str, from: usize, upto: usize) usize {
     at    ::= from;
     units ::= 0;
     loop(at < upto, (h) {
-        step  = step_at(text, at);
+        step  = utf16_step_at(text, at);
         at    = at + step.bytes;
         units = units + step.units;
     });
     units;
-}
-
-write_range* = (a: Alloc, text: str, span: Span, out :: String)
-              Res<(), AllocError> {
-    encoded ::= wire_range(text, span).to_json(a).try();
-    out.add(encoded.view())
 }

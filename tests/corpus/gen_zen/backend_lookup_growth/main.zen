@@ -1,0 +1,53 @@
+// Lookup keys remain valid after owners and hash indexes grow. A reused
+// caller buffer must not rename a remembered function, and duplicate types
+// retain their first insertion index.
+Ast = std.ast
+AllocError = std.mem
+String = std.text
+Checker = sema.sema_check
+CBackend = gen.gen_c
+TyId = sema.sema_ty
+Range = std.core
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    tree  = alloc.Ast();
+    check = alloc.Checker(tree).try();
+    be      ::= alloc.CBackend(tree, check).try();
+    scratch ::= alloc.String().try();
+    first   ::= true;
+    Range(0, 96).loop((h, i) {
+        scratch.clear();
+        scratch.fmt("function_{}", i).try();
+        first = first && be.need_thunk(scratch.view()).try();
+        name ::= alloc.String().try();
+        name.fmt("type_{}", i).try();
+        be.queue_type(name, TyId(index: 0)).try();
+    });
+    kept ::= true;
+    Range(0, 96).loop((h, i) {
+        scratch.clear();
+        scratch.fmt("function_{}", i).try();
+        kept = kept && !be.need_thunk(scratch.view()).try();
+        scratch.clear();
+        scratch.fmt("type_{}", i).try();
+        kept = kept && be.type_index(scratch.view()).match({
+            Ok(index) => index == i,
+            None      => false,
+        });
+    });
+    duplicate ::= alloc.String().try();
+    duplicate.add("type_0").try();
+    be.queue_type(duplicate, TyId(index: 0)).try();
+    println("new functions: {}", first);
+    println("growth preserves keys: {}", kept);
+    println("duplicate keeps first index: {}", be.type_index("type_0").match({
+        Ok(index) => index == 0,
+        None      => false,
+    }));
+    println("missing type: {}", be.type_index("missing").match({
+        Ok(_) => false,
+        None  => true,
+    }));
+    Ok(0);
+}

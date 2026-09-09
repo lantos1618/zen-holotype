@@ -289,6 +289,9 @@ InlineExpansion = {
                     be.enter_inst(self.inst);
                     be.enter_frame(lmark);
                     be.enter_call();
+                    held_return = be.return_to;
+                    target      = be.open_inline_return(result.view()).try();
+                    be.enter_return(Ok(target));
                     lowered = block(
                         be,
                         blk,
@@ -296,12 +299,14 @@ InlineExpansion = {
                         self.ret,
                         dest_of(keeps, result.view())
                     );
+                    be.enter_return(held_return);
                     be.leave_call();
                     be.enter_frame(floor);
                     be.enter_inst(held);
                     be.release(lmark).try();
                     be.check.release(cmark).try();
                     lowered.try();
+                    be.finish_inline_return(target).try();
                     be.write_result(keeps, result.view(), out).try();
                     h.break();
                 },
@@ -358,7 +363,8 @@ InlineSite = {
                         check_home: self.check_home,
                         floor: be.floor,
                         inst: captured,
-                        ctx: self.ctx
+                        ctx: self.ctx,
+                        return_to: be.return_to,
                     )
                 )
             },
@@ -509,6 +515,8 @@ run_lambda = (
     // captured assignment remains a store rather than a shadow declaration.
     floor = be.floor;
     be.enter_frame(ready.floor);
+    held_return = be.return_to;
+    be.enter_return(ready.return_to);
     be.enter_call();
     lowered = block(
         be,
@@ -517,6 +525,7 @@ run_lambda = (
         ret,
         dest_of(keeps, result.view())
     );
+    be.enter_return(held_return);
     be.leave_call();
     be.enter_frame(floor);
     be.release(lmark).try();
@@ -546,6 +555,7 @@ instantiate_closure = (be :: CBackend, cl: Closure, inst: Inst)
         floor: cl.floor,
         inst: inst,
         ctx: cl.ctx,
+        return_to: cl.return_to,
     ))
 }
 

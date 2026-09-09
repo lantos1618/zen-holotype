@@ -1,22 +1,21 @@
 // Owns the workspace check used to publish diagnostics. A settle publishes
 // changed results and empty lists for files whose previous errors disappeared.
 
-str, String = std.text
+str, String, dup = std.text
 Vec, Map = std.collections
 Alloc, AllocError, Arena = std.mem
 Note = std.parse.parse_diag
 Checker = sema.sema_check
 root_for, relative_to = zen.zen_path
-WireRange, wire_range, write_range = lsp.lsp_pos
+TextRange, text_range = lsp.lsp_pos
 obj, arr, Nest, written, to_json = std.json
 write_frame = lsp.lsp_frame
 path_of, doc_text = lsp.lsp_uri
-own_str = lsp.lsp_reply
 Built, Spot* = lsp.lsp_built
 Classed = lsp.lsp_colour
 
 Diagnostic = {
-    range: WireRange,
+    range: TextRange,
     severity: usize,
     source: str,
     message: str,
@@ -192,7 +191,7 @@ Diagnostics* = {
     remember_showing = (self :: @Self, now: Vec<str>) Res<(), AllocError> {
         self.showing = self.a.Vec<str>();
         now.loop((h, u) {
-            kept = own_str(self.a, u).try();
+            kept = u.dup(self.a).try();
             self.showing.add(kept).try();
         });
         Ok(());
@@ -219,14 +218,14 @@ Diagnostics* = {
         self.said.pairs((h, key, value) {
             (!key.eq(uri)).then(() {
                 fresh.set(
-                    own_str(fresh_arena, key).try(),
-                    own_str(fresh_arena, value).try()
+                    key.dup(fresh_arena).try(),
+                    value.dup(fresh_arena).try()
                 ).try();
             });
         });
         fresh.set(
-            own_str(fresh_arena, uri).try(),
-            own_str(fresh_arena, body.view()).try()
+            uri.dup(fresh_arena).try(),
+            body.view().dup(fresh_arena).try()
         ).try();
         write_frame(body.view(), out).try();
         self.said_arena.drop();
@@ -335,7 +334,7 @@ write_spot = (s: Spot, a: Alloc, text: str, out :: String)
 
 write_plain_spot = (s: Spot, a: Alloc, text: str, out :: String)
                    Res<(), AllocError> {
-    encoded ::= Diagnostic(range: wire_range(text, s.span), severity: ERROR, source: "zen", message: s.message).to_json(a).try();
+    encoded ::= Diagnostic(range: text_range(text, s.span), severity: ERROR, source: "zen", message: s.message).to_json(a).try();
     out.add(encoded.view())
 }
 
@@ -345,7 +344,8 @@ write_noted_spot = (s: Spot, a: Alloc, n: Note, text: str, out :: String)
                    Res<(), AllocError> {
     spot ::= obj(out).try();
     spot.key("range", out).try();
-    write_range(a, text, s.span, out).try();
+    range ::= text_range(text, s.span).to_json(a).try();
+    out.add(range.view()).try();
     spot.key("severity", out).try();
     out.write_usize(ERROR).try();
     spot.text("source", "zen", out).try();
@@ -371,7 +371,8 @@ write_related = (
     at ::= obj(out).try();
     at.text("uri", uri, out).try();
     at.key("range", out).try();
-    write_range(a, text, n.span, out).try();
+    range ::= text_range(text, n.span).to_json(a).try();
+    out.add(range.view()).try();
     at.close(out).try();
     note.text("message", n.message, out).try();
     note.close(out).try();

@@ -156,9 +156,17 @@ seed_defs = (be :: CBackend, mi: usize, f: Function) Res<(), AllocError> {
 }
 
 seed_def = (be :: CBackend, d: Def) Res<(), AllocError> {
-    is_function(d).match({
-        false => Ok(()),
-        true  => be.seed_root(d),
+    // A concrete overload's name also finds its generic siblings. Only
+    // concrete functions can be queued without a call's instantiation.
+    decl_at(be.tree, d.id).match({
+        None  => Ok(()),
+        Ok(x) => x.kind.match({
+            Function(f) => ((f.tparams.len > 0) || be.takes_closure(f)).match({
+                true  => Ok(()),
+                false => be.seed_root(d),
+            }),
+            _           => Ok(()),
+        }),
     })
 }
 
@@ -172,10 +180,6 @@ seed_root = (be :: CBackend, d: Def) Res<(), AllocError> {
     sym ::= be.alloc.String().try();
     sym_fn(sym, be.check.types, be.check.world, d.qname, sig, inst).try();
     be.need_function(d, inst, sym.view())
-}
-
-is_function = (d: Def) bool {
-    d.kind.match({ FunctionDef => true, _ => false })
 }
 
 // Interleaves free-function and member queues until both reach a fixpoint.

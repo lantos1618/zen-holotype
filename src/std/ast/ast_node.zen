@@ -323,6 +323,15 @@ Struct* = {
     tparams*: Vec<TParam>,
     members*: Vec<Member>,
     body_span*: Span,
+
+    has_field* = (self: @Self, name: str) bool {
+        self.members.find((m) {
+            m.kind.match({
+                Field(f) => f.name.text.eq(name),
+                _        => false,
+            })
+        }).match({ Ok(_) => true, None => false })
+    }
 }
 
 // leading_bar preserves one-variant enum syntax for formatting.
@@ -371,6 +380,28 @@ Impl* = {
     bound*: TypeId,
     members*: Vec<Member>,
     body_span*: Span,
+
+    // Only explicitly supplied values count; required fields have no value.
+    field_value* = (self: @Self, name: str) Res<ExprId> {
+        member = self.members.find((m) {
+            m.named(name) && m.kind.match({
+                Field(f) => f.value.match({ Ok(_) => true, None => false }),
+                _        => false,
+            })
+        }).try();
+        member.kind.match({ Field(f) => f.value, _ => None })
+    }
+
+    // Required members and optional hooks without bodies are not definitions.
+    bodied_fn* = (self: @Self, name: str) Res<Function> {
+        member = self.members.find((m) {
+            m.named(name) && m.kind.match({
+                Function(f) => f.body.match({ Ok(_) => true, None => false }),
+                _           => false,
+            })
+        }).try();
+        member.kind.match({ Function(f) => Ok(f), _ => None })
+    }
 }
 
 // Starred import bindings are re-exported.

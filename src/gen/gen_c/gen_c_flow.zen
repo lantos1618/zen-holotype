@@ -16,7 +16,7 @@ Ctx = sema.sema_check
 Inst = sema.sema_inst
 member_of = sema.sema_union
 sym_local, sym_member, sym_variant = gen.gen_name
-sym_union_member = gen.gen_name
+sym_union_member, sym_union_variant = gen.gen_name
 RES_PATH = gen.gen_name
 GenFault = gen.gen_diag
 CBackend = gen.gen_c.gen_c_state
@@ -93,20 +93,11 @@ PatternSite = {
 
     leaf_cond = (self: @Self, be :: CBackend, pid: PatternId,
                  out :: String) Res<(), AllocError> {
-        pat     = be.tree.pattern_at(pid);
-        narrows = pat.kind.match({
-            Name(p) => be.is_variant(self.ty, p.name.last_segment()),
-            _       => false,
+        be.narrows(pid, self.ty).then(() {
+            out.add(" && ").try();
+            self.cond(be, pid, out).try();
         });
-        narrows.match({
-            false => Ok(()),
-            true  => self.leaf_tag_cond(be, pat, out),
-        })
-    }
-
-    leaf_tag_cond = (self: @Self, be :: CBackend, pat: Pattern,
-                     out :: String) Res<(), AllocError> {
-        self.leaf_case_cond(be, leaf_of(pat), out)
+        Ok(())
     }
 
     payload_cond = (self: @Self, be :: CBackend, d: Destructure,
@@ -196,11 +187,28 @@ PatternSite = {
 
     tag_name = (self: @Self, be :: CBackend, name: str, out :: String)
                Res<(), AllocError> {
+        out.fmt("({}.zg_tag == ", self.place).try();
+        be.check.types.at(self.ty).match({
+            Union(_) => member_of(be.check, self.ty, name).match({
+                Ok(member) => sym_union_variant(
+                    out,
+                    be.types(),
+                    be.world(),
+                    self.ty,
+                    member
+                ),
+                None       => self.nominal_tag(be, name, out),
+            }),
+            _        => self.nominal_tag(be, name, out),
+        }).try();
+        out.add(")")
+    }
+
+    nominal_tag = (self: @Self, be :: CBackend, name: str, out :: String)
+                  Res<(), AllocError> {
         qname ::= be.alloc.String().try();
         be.enum_path(self.ty, qname).try();
-        out.fmt("({}.zg_tag == ", self.place).try();
-        out.sym_variant(qname.view(), name).try();
-        out.add(")")
+        out.sym_variant(qname.view(), name)
     }
 
     bind = (self: @Self, be :: CBackend, pid: PatternId)
@@ -215,7 +223,8 @@ PatternSite = {
     bind_name = (self: @Self, be :: CBackend, q: QualifiedName)
                 Res<(), AllocError> {
         name = q.last_segment();
-        be.is_variant(self.ty, name).match({
+        (be.is_variant(self.ty, name) || member_of(be.check, self.ty, name)
+            .match({ Ok(_) => true, None => false })).match({
             true  => Ok(()),
             false => be.bind_local(name, self.ty, self.place),
         })
@@ -359,14 +368,6 @@ write_unreachable = (be :: CBackend, node: Expr, m: Match)
 }
 
 // patterns
-
-// Only a narrowing Name reaches here, so its last segment is the case.
-leaf_of = (pat: Pattern) str {
-    pat.kind.match({
-        Name(p) => p.name.last_segment(),
-        _       => "",
-    })
-}
 
 // A variant with no payload cannot have a literal one, and reaching
 // `.zg_data` for it would be a union member nothing declared. The arm

@@ -14,7 +14,7 @@ Checker = sema.sema_check
 Emit = gen.gen_emit
 CBackend, emit_program = gen.gen_c
 
-// Four of the six shapes, and each one written so a wrong lowering
+// Four traversal shapes, each written so a wrong lowering
 // shows in the C: a non-zero-based range, a condition whose variable
 // the body stores through, a `break` that carries a value, and a
 // `next` that skips the rest of a pass.
@@ -42,20 +42,19 @@ main = (env: Env) Res<i32, AllocError> {
 
     println("nothing was refused: {}", faults.is_empty());
 
-    // four loops, so four `while`/`for` heads and four break labels.
+    // Four loops produce four `while`/`for` heads.
     // A shape that fell through to the general call path would emit a
     // call to a symbol nothing defines instead.
     println(
         "loop heads: {}",
         c.view().count("while (") + c.view().count("for (;;) {")
     );
-    // four label definitions, plus the two jumps to one: `h.break(v)`
-    // and the `while_` guard, which leaves through the same door.
+    // Only h.break(v) and the condition guard need completion labels.
+    // Each contributes its jump and definition; natural ends need neither.
     println("break label mentions: {}", c.view().count("zg_brk"));
 
-    // `h.break(v)` and `h.next()` are gotos and not C's break and
-    // continue: an inlined body sits inside the `if` chain a `.match`
-    // produced, where a C `break` leaves the chain and not the loop.
+    // Handle control targets its own loop even through an inlined match
+    // or nested loop, so these explicit exits use their generated labels.
     println("continue label used: {}", c.view().count("goto zg_cnt") == 1);
     println("no C break statement: {}", c.view().count(" break;") == 0);
 

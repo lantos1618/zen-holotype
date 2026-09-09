@@ -1,0 +1,106 @@
+// Byte-valued summaries make lone CR data visible without embedding CR in
+// expected output. Empty input differs deliberately from split('\n').
+Lines = std.text
+
+show = (name: str, input: str) {
+    count: usize ::= 0;
+    input.lines().loop((h, index, line) {
+        first = line.get(0).match({ Ok(b) => b.to_usize(), None => 0 });
+        last  = line.get(
+            line.len -% 1
+        ).match({ Ok(b) => b.to_usize(), None => 0 });
+        println("{} {} len {} edges {} {}", name, index, line.len, first, last);
+        count = count + 1;
+    });
+    println("{} count {}", name, count);
+}
+
+source = (calls :: usize) Lines {
+    calls = calls + 1;
+    "first\r\nskip\nlast\nunseen".lines()
+}
+
+fail = () Res<(), AllocError> { Err(AllocError.OutOfMemory) }
+
+try_lines = (seen :: usize) Res<(), AllocError> {
+    "first\nfail\nunseen".lines().loop((line) {
+        seen = seen + 1;
+        line.eq("fail").then(() { fail().try(); });
+    });
+    seen = seen + 100;
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    show("empty", "");
+    show("plain", "plain");
+    show("lf", "\n");
+    show("crlf", "\r\n");
+    show("adjacent", "a\n\nb\n");
+    show("mixed", "a\r\nb\nc\r\n");
+    show("lone", "a\rb\r");
+    show("double", "\r\r\n");
+    show("tail", "a\nb");
+    show("trailing-cr", "a\n\r");
+
+    calls: usize ::= 0;
+    stopped = source(calls).loop((h, index, line) {
+        line.eq("skip").then(() { h.next(); });
+        println("walk {} {}", index, line);
+        line.eq("last").then(() { h.break(line); });
+    });
+    stopped.match({
+        Ok(line) => println("stopped {} calls {}", line, calls),
+        None     => println("missing stop"),
+    });
+    calls = 0;
+    count: usize ::= 0;
+    source(calls).loop((line) { count = count + 1; });
+    println("value source {} count {}", calls, count);
+    "first\nunseen".lines().loop((h, line) {
+        println("break {}", line);
+        h.break();
+    });
+
+    cursor ::= "a\nb\n".lines();
+    cursor.next();
+    natural = cursor.loop((line) { println("fresh {}", line); });
+    println("natural none {}", natural.match({ None => true, Ok(_) => false }));
+    cursor.next().match({
+        Ok(line) => println("cursor {}", line),
+        None     => println("cursor exhausted"),
+    });
+    println("end {}", cursor.next().match({ None => true, Ok(_) => false }));
+    println(
+        "end again {}",
+        cursor.next().match({ None => true, Ok(_) => false })
+    );
+
+    seen: usize ::= 0;
+    try_lines(seen).match({
+        Ok(_)  => println("unexpected success"),
+        Err(_) => println("try {}", seen),
+    });
+
+    alloc ::= env.mem.alloc();
+    owned = alloc.String("one\r\ntwo").try();
+    bytes = owned.view();
+    bytes.lines().loop((h, index, line) {
+        offset: usize = (index == 0).match({ true => 0, false => 5 });
+        println(
+            "borrowed {} {}",
+            index,
+            line.ptr().same(bytes.ptr().offset(offset))
+        );
+    });
+    text ::= alloc.String().try();
+    Range(0, 16384).loop((i) { text.add("x\r\n").try(); });
+    count = 0;
+    width: usize ::= 0;
+    text.view().lines().loop((line) {
+        count = count + 1;
+        width = width + line.len;
+    });
+    println("large {} {}", count, width);
+    Ok(0);
+}

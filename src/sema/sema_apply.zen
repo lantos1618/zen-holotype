@@ -1,4 +1,4 @@
-Expr, ExprId, Call, Arg, Span = std.ast
+Expr, ExprId, Call, Arg, Span, Lambda = std.ast
 Decl, Enum, Struct, TypeId, Impl = std.ast
 AllocError = std.mem
 Vec = std.collections
@@ -14,6 +14,7 @@ Cand, TBound, Actual, ty_at, signature_matches = sema.sema_cand
 tparam_bounds = sema.sema_cand
 impl_bound_type, LocalImpl, local_impls = sema.sema_supply
 type_of = sema.sema_type
+spelled_lambda = sema.sema_call
 type_from_ast = sema.sema_denote
 check_literal = sema.sema_trap
 array_range_shape, check_inst_bounds, inst_bounds_hold = sema.sema_bound
@@ -307,35 +308,46 @@ settle_variant_at* = (
     want : TyId,
     ctx  : Ctx
 ) Res<TyId, AllocError> {
-    (c.same_head(got, want) == false).match({
-        true  => Ok(got),
-        false => c.tree.expr_at(id).kind.match({
-            Call(call) => (call.targs.len > 0).match({
-                true  => Ok(got),
-                false => c.tree.expr_at(call.callee).kind.match({
-                    Access(a) => {
-                        cases ::= c.alloc.Vec<Case>();
-                        c.cases_of(want, cases).try();
-                        cases.find_case(a.name.text).match({
-                            None  => Ok(got),
-                            Ok(_) => {
-                                settled = c.variant_call_type(
-                                    call,
-                                    want,
-                                    a.name.text,
-                                    ctx
-                                ).try();
-                                c.expr_memo.set(id, settled).try();
-                                Ok(settled)
-                            },
-                        })
-                    },
-                    _         => Ok(got),
-                }),
-            }),
-            _          => Ok(got),
-        }),
+    VariantCall(c, id, got, want).match({
+        None     => Ok(got),
+        Ok(site) => site.settle(c, ctx),
     })
+}
+
+// An inferred call to a declared variant of the expected enum application.
+// Selection is allocation-free; missing syntax is ordinary absence.
+VariantCall = {
+    id: ExprId,
+    call: Call,
+    name: str,
+    want: TyId,
+
+    settle = (self: @Self, c :: Checker, ctx: Ctx) Res<TyId, AllocError> {
+        settled = c.variant_call_type(
+            self.call,
+            self.want,
+            self.name,
+            ctx
+        ).try();
+        c.expr_memo.set(self.id, settled).try();
+        Ok(settled)
+    }
+}
+
+VariantCall = (c: Checker, id: ExprId, got: TyId, want: TyId) Res<VariantCall> {
+    c.same_head(got, want).ensure().try();
+    call = c.tree.expr_at(id).kind.match({ Call(value) => Ok(value), _ => None }).try();
+    (call.targs.len == 0).ensure().try();
+    access      = c.tree.expr_at(call.callee).kind.match({ Access(value) => Ok(value), _ => None }).try();
+    named       = c.types.at(want).match({ Named(value) => Ok(value), _ => None }).try();
+    decl        = c.tree.decl_at(named.decl).try();
+    enumeration = decl.kind.match({ Enum(value) => Ok(
+        value
+    ), _ => None }).try();
+    enumeration.variants.find(
+        (variant) { variant.name.text.eq(access.name.text) }
+    ).try();
+    Ok(VariantCall(id: id, call: call, name: access.name.text, want: want))
 }
 
 // Re-apply the declaration at its own variables so every explicit or
@@ -445,7 +457,16 @@ instantiate* = (
     c.type_arg_arity_fits(call, k).match({
         false => c.invalid_instantiation(id, k.name),
         true  => k.generic.match({
-            false => Ok(Ok(k.ret)),
+            false => c.callback_types_fit(
+                call,
+                k,
+                actuals.len - call.args.len,
+                ctx,
+                c.alloc.Inst()
+            ).try().match({
+                true  => Ok(Ok(k.ret)),
+                false => c.invalid_instantiation(id, k.name),
+            }),
             true  => c.instantiated_ret(id, call, k, actuals, ctx),
         }),
     })
@@ -470,7 +491,14 @@ instantiated_ret = (
         true  => {
             params ::= c.alloc.Vec<TyId>();
             c.subst_list(k.params, inst, params).try();
-            c.signature_matches(params, actuals, 0).try().match({
+            (c.signature_matches(params, actuals, 0).try()
+                && c.callback_types_fit(
+                    call,
+                    k,
+                    actuals.len - call.args.len,
+                    ctx,
+                    inst
+                ).try()).match({
                 false => c.invalid_instantiation(id, k.name),
                 true  => {
                     c.resolve_inst(id, inst).try();
@@ -507,7 +535,7 @@ note_call_edge = (c :: Checker, id: ExprId, k: Cand, inst: Inst)
     ))
 }
 
-call_inst = (
+call_inst* = (
     c       :: Checker,
     call    : Call,
     k       : Cand,
@@ -520,9 +548,141 @@ call_inst = (
         c.denote_targs(call.targs, ctx, tys).try();
         c.zip(k.tvars, tys, inst).try();
     });
+    c.infer_callback_targs(
+        call,
+        k,
+        actuals.len - call.args.len,
+        ctx,
+        inst
+    ).try();
     c.infer_targs(k, actuals, inst).try();
     c.infer_from_bounds(k, inst).try();
     Ok(inst);
+}
+
+// Written callback types provide context for otherwise untyped literals.
+// Explicit call arguments were bound first; ordinary values must still fit
+// the resulting signature. Generic lambdas keep their own inference scope.
+infer_callback_targs = (
+    c    :: Checker,
+    call : Call,
+    k    : Cand,
+    off  : usize,
+    ctx  : Ctx,
+    inst :: Inst
+) Res<(), AllocError> {
+    call.args.loop((h, i, a) {
+        c.annotated_callback(a.value).match({
+            None  => (),
+            Ok(l) => c.infer_callback_types(
+                l,
+                k.params.ty_at(i + off),
+                ctx,
+                inst
+            ).try(),
+        });
+    });
+    Ok(());
+}
+
+// Unannotated callbacks contribute arity only. Generic callbacks establish
+// their own type-parameter scope when their selected body is checked.
+annotated_callback* = (c :: Checker, id: ExprId) Res<Lambda> {
+    lambda = c.spelled_lambda(id).try();
+    (lambda.tparams.len == 0).ensure().try();
+    (lambda.ret.match({ Ok(_) => true, None => false })
+        || lambda.params.find((param) {
+            param.type.match({ Ok(_) => true, None => false })
+        }).match({ Ok(_) => true, None => false })).ensure().try();
+    Ok(lambda)
+}
+
+infer_callback_types = (
+    c    :: Checker,
+    l    : Lambda,
+    sig  : TyId,
+    ctx  : Ctx,
+    inst :: Inst
+) Res<(), AllocError> {
+    c.types.at(sig).match({
+        Fn(f) => {
+            l.params.loop((h, i, p) {
+                p.type.match({
+                    None   => (),
+                    Ok(ty) => c.unify(
+                        f.params.ty_at(i),
+                        c.type_from_ast(ty, ctx).try(),
+                        inst
+                    ).try(),
+                });
+            });
+            l.ret.match({
+                None   => (),
+                Ok(ty) => c.unify(
+                    f.ret,
+                    c.type_from_ast(ty, ctx).try(),
+                    inst
+                ).try(),
+            });
+        },
+        _     => (),
+    });
+    Ok(());
+}
+
+// Inference binds each variable once. Verify all written callback types
+// against that substitution so conflicting annotations cannot be ignored.
+// Generic callbacks retain their own type-parameter checking scope.
+callback_types_fit* = (
+    c    :: Checker,
+    call : Call,
+    k    : Cand,
+    off  : usize,
+    ctx  : Ctx,
+    inst : Inst
+) Res<bool, AllocError> {
+    fits ::= true;
+    call.args.loop((h, i, arg) {
+        c.annotated_callback(arg.value).match({
+            None       => (),
+            Ok(lambda) => {
+                sig = c.subst(k.params.ty_at(i + off), inst).try();
+                c.types.at(sig).match({
+                    Fn(fn) => {
+                        lambda.params.loop((p, index, param) {
+                            fits = fits && c.callback_annotation_fits(
+                                param.type,
+                                fn.params.ty_at(index),
+                                ctx
+                            ).try();
+                        });
+                        fits = fits && c.callback_annotation_fits(
+                            lambda.ret,
+                            fn.ret,
+                            ctx
+                        ).try();
+                    },
+                    _      => (),
+                });
+            },
+        });
+    });
+    Ok(fits)
+}
+
+callback_annotation_fits = (
+    c        :: Checker,
+    written  : Res<TypeId>,
+    expected : TyId,
+    ctx      : Ctx
+) Res<bool, AllocError> {
+    written.match({
+        None     => Ok(true),
+        Ok(type) => {
+            actual = c.type_from_ast(type, ctx).try();
+            Ok(c.assignable(actual, expected) && c.assignable(expected, actual))
+        },
+    })
 }
 
 infer_targs = (c :: Checker, k: Cand, actuals: Vec<Actual>, inst :: Inst)
@@ -600,8 +760,44 @@ infer_impl_bound = (c :: Checker, bound: TyId, g: TyId, inst :: Inst)
     c.types.at(g).match({
         Named(n) => c.infer_named_impl(bound, n, inst),
         Array(a) => c.infer_array_bound(bound, a.elem, inst),
+        Var(v)   => c.infer_var_bound(bound, v.name, g, inst),
         _        => Ok(()),
     })
+}
+
+// Forward a generic receiver's declared bound with its outer type variables
+// intact. A later instantiation supplies their concrete types. Conflicting
+// bounds with the same head do not provide a unique inference answer.
+infer_var_bound = (
+    c      :: Checker,
+    bound  : TyId,
+    name   : str,
+    actual : TyId,
+    inst   :: Inst
+) Res<(), AllocError> {
+    bounds ::= c.alloc.Vec<TyId>();
+    c.unshadowed_tvar(name, actual).then(() {
+        c.bounds_of(name, bounds).try();
+    });
+    source: Res<TyId> = None;
+    ambiguous ::= false;
+    bounds.loop((h, b) {
+        c.same_head(bound, b).then(() {
+            source.match({
+                None      => { source = Ok(b); },
+                Ok(prior) => (prior.eq(b) == false).then(() {
+                    ambiguous = true;
+                }),
+            });
+        });
+    });
+    (ambiguous == false).then(() {
+        source.match({
+            None  => (),
+            Ok(b) => c.unify(bound, b, inst).try(),
+        });
+    });
+    Ok(());
 }
 
 infer_array_bound = (c :: Checker, bound: TyId, elem: TyId, inst :: Inst)

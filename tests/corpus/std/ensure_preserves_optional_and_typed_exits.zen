@@ -1,0 +1,50 @@
+// Guards evaluate once and propagate absence or a typed failure through
+// non-escaping callbacks, including the enclosing frame's cleanup.
+Failure = | NotPositive
+
+positive = (value: i32, checks :: usize) bool {
+    checks = checks + 1;
+    value > 0
+}
+
+double = (value: i32, checks :: usize) Res<i32> {
+    positive(value, checks).ensure().try();
+    Ok(value * 2)
+}
+
+required = (value: i32) Res<i32, Failure> {
+    (value > 0).ensure(Failure.NotPositive).try();
+    Ok(value)
+}
+
+walk = (visits :: usize) Res<()> {
+    @scope.defer(() { println("guard cleanup"); });
+    Range(0, 4).loop((value) {
+        (value < 2).ensure().try();
+        visits = visits + 1;
+    });
+    println("unexpected continuation");
+    Ok(())
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    checks: usize ::= 0;
+    good = double(3, checks);
+    bad  = double(0, checks);
+    println(
+        "values {} {} checks {}",
+        good.value_or(-1),
+        bad.value_or(-1),
+        checks
+    );
+    required(4).match({ Ok(value) => println("required {}", value), Err(_) => println("unexpected failure") });
+    required(0).match({ Ok(_) => println("unexpected success"), Err(error) => println("error {}", error.variant_name()) });
+    visits: usize ::= 0;
+    result = walk(visits);
+    println(
+        "stopped {} visits {}",
+        result.match({ None => true, Ok(_) => false }),
+        visits
+    );
+    Ok(0)
+}

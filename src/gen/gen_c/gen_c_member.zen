@@ -211,8 +211,7 @@ write_case_value = (
     ctx : Ctx,
     out :: String
 ) Res<(), AllocError> {
-    qname ::= be.alloc.String().try();
-    be.type_qname(ty, qname).try();
+    qname = be.type_qname(ty).try();
     cty ::= be.alloc.String().try();
     be.ctype(ty, cty).try();
     out.fmt("({}){ .zg_tag = ", cty.view()).try();
@@ -426,9 +425,8 @@ keep_if_fits = (
     actuals : Vec<Actual>,
     kept    :: Vec<Member>
 ) Res<(), AllocError> {
-    inst ::= be.recv_inst(s.ty).try();
-    sig  ::= be.alloc.Vec<TyId>();
-    be.method_sig(s.ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
+    inst = be.recv_inst(s.ty).try();
+    sig  = s.signature(be, f, inst).try();
     be.check.recv_sig_fits(sig, actuals).try()
         .then(() { kept.add(m).try() });
     Ok(())
@@ -472,6 +470,49 @@ Site* = {
     decl*: DeclId,
     qname*: str,
     generic*: bool,
+
+    // Resolve the receiver's member signature without introducing member
+    // type parameters; overload selection and equality use this.
+    signature = (self: @Self, be :: CBackend, f: Function, inst: Inst)
+                Res<Vec<TyId>, AllocError> {
+        sig ::= be.alloc.Vec<TyId>();
+        be.method_sig(
+            self.ty,
+            self.decl,
+            f,
+            self.decl.module.to_usize(),
+            inst,
+            sig
+        ).try();
+        Ok(sig)
+    }
+
+    // A generic call resolves written parameter types with the member's
+    // type parameters in scope and the exact owner bound by its Inst.
+    call_signature = (self: @Self, be :: CBackend, f: Function, inst: Inst)
+                     Res<Vec<TyId>, AllocError> {
+        f.tparams.len.eq(0).match({
+            true  => self.signature(be, f, inst),
+            false => {
+                sig ::= be.alloc.Vec<TyId>();
+                owner = owner_of(
+                    be.check,
+                    self.decl.module.to_usize(),
+                    f.name.text
+                ).try();
+                be.generic_method_sig(
+                    self.ty,
+                    self.decl,
+                    f,
+                    self.decl.module.to_usize(),
+                    owner,
+                    inst,
+                    sig
+                ).try();
+                Ok(sig)
+            },
+        })
+    }
 }
 
 site_of* = (be :: CBackend, rty: TyId) Res<Res<Site>, AllocError> {
@@ -512,11 +553,13 @@ prim_site = (be :: CBackend, rty: TyId, name: str) Res<Res<Site>, AllocError> {
 }
 
 // The qualified name of a type, for a variant symbol.
-type_qname = (be :: CBackend, ty: TyId, out :: String) Res<(), AllocError> {
+type_qname = (be :: CBackend, ty: TyId) Res<String, AllocError> {
+    out ::= be.alloc.String().try();
     be.check.types.at(ty).match({
         Named(n) => qualify(out, be.check.world.module_name(n.decl), n.name),
         _        => Ok(()),
-    })
+    }).try();
+    Ok(out)
 }
 
 // The member of `s` called `name`, when its declaration has one.
@@ -726,8 +769,7 @@ settle_method_call = (
     ctx : Ctx
 ) Res<MethodCallSite, AllocError> {
     inst = be.method_inst(d, s, f, ctx).try();
-    sig ::= be.alloc.Vec<TyId>();
-    be.method_call_sig(s, f, inst, sig).try();
+    sig  = s.call_signature(be, f, inst).try();
     Ok(MethodCallSite(
         dot: d,
         site: s,
@@ -736,45 +778,6 @@ settle_method_call = (
         sig: sig,
         ctx: ctx
     ))
-}
-
-// A generic member's written parameter types are meaningful only while its
-// own type parameters are in scope. Keep the non-generic path unchanged: it
-// is also used for overloaded primitive doors, whose signatures sema has
-// already resolved without a member-owned type-variable frame.
-method_call_sig = (
-    be   :: CBackend,
-    s    : Site,
-    f    : Function,
-    inst : Inst,
-    sig  :: Vec<TyId>
-) Res<(), AllocError> {
-    f.tparams.len.eq(0).match({
-        true  => be.method_sig(
-            s.ty,
-            s.decl,
-            f,
-            s.decl.module.to_usize(),
-            inst,
-            sig
-        ),
-        false => {
-            owner = owner_of(
-                be.check,
-                s.decl.module.to_usize(),
-                f.name.text
-            ).try();
-            be.generic_method_sig(
-                s.ty,
-                s.decl,
-                f,
-                s.decl.module.to_usize(),
-                owner,
-                inst,
-                sig
-            )
-        },
-    })
 }
 
 // A method's instantiation is the receiver's parameters plus the parameters
@@ -866,7 +869,9 @@ method_sig* = (
 ) Res<(), AllocError> {
     sctx = be.check.self_ctx(mi, rty).try();
     mark = be.enter_struct_tparams(decl).try();
-    f.params.loop((h, p) { be.add_method_param(p, sctx, inst, sig).try() });
+    f.params.loop(
+        (h, p) { sig.add(be.method_param(p, sctx, inst).try()).try() }
+    );
     be.leave_tparams(mark).try();
     Ok(());
 }
@@ -888,20 +893,21 @@ generic_method_sig* = (
     sctx = be.check.self_ctx(mi, rty).try();
     mark = be.enter_struct_tparams(decl).try();
     be.enter_tparams(f.tparams, owner).try();
-    f.params.loop((h, p) { be.add_method_param(p, sctx, inst, sig).try() });
+    f.params.loop(
+        (h, p) { sig.add(be.method_param(p, sctx, inst).try()).try() }
+    );
     be.leave_tparams(mark).try();
     Ok(())
 }
 
-add_method_param = (
+method_param = (
     be   :: CBackend,
     p    : Param,
     sctx : Ctx,
-    inst : Inst,
-    sig  :: Vec<TyId>
-) Res<(), AllocError> {
+    inst : Inst
+) Res<TyId, AllocError> {
     declared = be.check.param_type(p, sctx).try();
-    sig.add(be.sub_with(declared, inst).try())
+    be.sub_with(declared, inst)
 }
 
 // Lowers compiler-generated member calls through the same static resolution
@@ -945,8 +951,7 @@ write_eq = (
     out :: String
 ) Res<bool, AllocError> {
     inst = be.recv_inst(s.ty).try();
-    sig ::= be.alloc.Vec<TyId>();
-    be.method_sig(s.ty, s.decl, f, s.decl.module.to_usize(), inst, sig).try();
+    sig  = s.signature(be, f, inst).try();
     (be.inst_open(inst) || be.any_open(sig)).match({
         true  => Ok(false),
         false => be.emit_eq(lhs, rhs, s, f, sig, inst, ctx, out),

@@ -7,43 +7,30 @@ Vec, Ordered = std.collections
 Alloc, AllocError = std.mem
 scan, Source, Token, TokenKind = std.lex
 write_text, written, obj, arr, Nest = std.json
-step_at, units_of, newline_in, zero_based = lsp.lsp_pos
+utf16_step_at, utf16_units, zero_based = lsp.lsp_pos
 
-Colour* = Keyword
-    | Text
-    | Number
-    | Comment
-    | Operator
-    | Variable
-    | Type
-    | Function
-    | Parameter
+// Variant names are the protocol spelling; indices stay explicit below.
+Colour* = keyword
+    | string
+    | number
+    | comment
+    | operator
+    | variable
+    | type
+    | function
+    | parameter
 
 index_of* = (colour: Colour) usize {
     colour.match({
-        Keyword   => 0,
-        Text      => 1,
-        Number    => 2,
-        Comment   => 3,
-        Operator  => 4,
-        Variable  => 5,
-        Type      => 6,
-        Function  => 7,
-        Parameter => 8,
-    })
-}
-
-name_of* = (colour: Colour) str {
-    colour.match({
-        Keyword   => "keyword",
-        Text      => "string",
-        Number    => "number",
-        Comment   => "comment",
-        Operator  => "operator",
-        Variable  => "variable",
-        Type      => "type",
-        Function  => "function",
-        Parameter => "parameter",
+        keyword   => 0,
+        string    => 1,
+        number    => 2,
+        comment   => 3,
+        operator  => 4,
+        variable  => 5,
+        type      => 6,
+        function  => 7,
+        parameter => 8,
     })
 }
 
@@ -51,15 +38,15 @@ write_legend* = (out :: String) Res<(), AllocError> {
     legend ::= obj(out).try();
     legend.key("tokenTypes", out).try();
     types ::= arr(out).try();
-    Colour.Keyword.listed(types, out).try();
-    Colour.Text.listed(types, out).try();
-    Colour.Number.listed(types, out).try();
-    Colour.Comment.listed(types, out).try();
-    Colour.Operator.listed(types, out).try();
-    Colour.Variable.listed(types, out).try();
-    Colour.Type.listed(types, out).try();
-    Colour.Function.listed(types, out).try();
-    Colour.Parameter.listed(types, out).try();
+    Colour.keyword.listed(types, out).try();
+    Colour.string.listed(types, out).try();
+    Colour.number.listed(types, out).try();
+    Colour.comment.listed(types, out).try();
+    Colour.operator.listed(types, out).try();
+    Colour.variable.listed(types, out).try();
+    Colour.type.listed(types, out).try();
+    Colour.function.listed(types, out).try();
+    Colour.parameter.listed(types, out).try();
     types.close(out).try();
     legend.key("tokenModifiers", out).try();
     modifiers ::= arr(out).try();
@@ -70,24 +57,24 @@ write_legend* = (out :: String) Res<(), AllocError> {
 listed = (colour: Colour, types :: Nest, out :: String)
          Res<(), AllocError> {
     types.next(out).try();
-    write_text(colour.name_of(), out)
+    write_text(colour.variant_name(), out)
 }
 
 colour_of* = (kind: TokenKind) Res<Colour> {
     kind.match({
-        Ident        => Ok(Colour.Variable),
-        Int(_)       => Ok(Colour.Number),
-        Float        => Ok(Colour.Number),
-        Str          => Ok(Colour.Text),
-        Char         => Ok(Colour.Text),
-        True         => Ok(Colour.Keyword),
-        False        => Ok(Colour.Keyword),
-        Consume      => Ok(Colour.Keyword),
-        AtSelf       => Ok(Colour.Keyword),
-        AtMeta       => Ok(Colour.Keyword),
-        AtScope      => Ok(Colour.Keyword),
-        LineComment  => Ok(Colour.Comment),
-        BlockComment => Ok(Colour.Comment),
+        Ident        => Ok(Colour.variable),
+        Int(_)       => Ok(Colour.number),
+        Float        => Ok(Colour.number),
+        Str          => Ok(Colour.string),
+        Char         => Ok(Colour.string),
+        True         => Ok(Colour.keyword),
+        False        => Ok(Colour.keyword),
+        Consume      => Ok(Colour.keyword),
+        AtSelf       => Ok(Colour.keyword),
+        AtMeta       => Ok(Colour.keyword),
+        AtScope      => Ok(Colour.keyword),
+        LineComment  => Ok(Colour.comment),
+        BlockComment => Ok(Colour.comment),
         ParenOpen    => None,
         ParenClose   => None,
         BracketOpen  => None,
@@ -97,31 +84,31 @@ colour_of* = (kind: TokenKind) Res<Colour> {
         Comma        => None,
         Semicolon    => None,
         Dot          => None,
-        Ellipsis     => Ok(Colour.Operator),
+        Ellipsis     => Ok(Colour.operator),
         Colon        => None,
-        ColonColon   => Ok(Colour.Operator),
-        ColonColonEq => Ok(Colour.Operator),
-        Eq           => Ok(Colour.Operator),
-        EqEq         => Ok(Colour.Operator),
-        Arrow        => Ok(Colour.Operator),
-        Bang         => Ok(Colour.Operator),
-        BangEq       => Ok(Colour.Operator),
-        Lt           => Ok(Colour.Operator),
-        LtEq         => Ok(Colour.Operator),
-        Gt           => Ok(Colour.Operator),
-        GtEq         => Ok(Colour.Operator),
-        Amp          => Ok(Colour.Operator),
-        AmpAmp       => Ok(Colour.Operator),
-        Bar          => Ok(Colour.Operator),
-        BarBar       => Ok(Colour.Operator),
-        Plus         => Ok(Colour.Operator),
-        PlusWrap     => Ok(Colour.Operator),
-        Minus        => Ok(Colour.Operator),
-        MinusWrap    => Ok(Colour.Operator),
-        Star         => Ok(Colour.Operator),
-        StarWrap     => Ok(Colour.Operator),
-        Slash        => Ok(Colour.Operator),
-        Percent      => Ok(Colour.Operator),
+        ColonColon   => Ok(Colour.operator),
+        ColonColonEq => Ok(Colour.operator),
+        Eq           => Ok(Colour.operator),
+        EqEq         => Ok(Colour.operator),
+        Arrow        => Ok(Colour.operator),
+        Bang         => Ok(Colour.operator),
+        BangEq       => Ok(Colour.operator),
+        Lt           => Ok(Colour.operator),
+        LtEq         => Ok(Colour.operator),
+        Gt           => Ok(Colour.operator),
+        GtEq         => Ok(Colour.operator),
+        Amp          => Ok(Colour.operator),
+        AmpAmp       => Ok(Colour.operator),
+        Bar          => Ok(Colour.operator),
+        BarBar       => Ok(Colour.operator),
+        Plus         => Ok(Colour.operator),
+        PlusWrap     => Ok(Colour.operator),
+        Minus        => Ok(Colour.operator),
+        MinusWrap    => Ok(Colour.operator),
+        Star         => Ok(Colour.operator),
+        StarWrap     => Ok(Colour.operator),
+        Slash        => Ok(Colour.operator),
+        Percent      => Ok(Colour.operator),
         Eof          => None,
     })
 }
@@ -179,7 +166,7 @@ Painter = {
                     self.source_units = 0;
                 },
                 false => {
-                    step              = step_at(text, self.source_at);
+                    step              = utf16_step_at(text, self.source_at);
                     self.source_at    = self.source_at + step.bytes;
                     self.source_units = self.source_units + step.units;
                 },
@@ -196,7 +183,7 @@ Painter = {
             true  => self.put(
                 line,
                 character,
-                units_of(text, from, upto),
+                utf16_units(text, from, upto),
                 colour,
                 runs,
                 out

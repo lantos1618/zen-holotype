@@ -90,29 +90,16 @@ blank_at = (bytes: str, at: usize) Res<usize, FrameFault> {
 }
 
 length_in = (bytes: str, at: usize, blank: usize) Res<usize, FrameFault> {
-    from  ::= at;
-    found ::= false;
-    value ::= 0;
-    bad   ::= false;
-    loop(() { !found && !bad && from < blank }, (h) {
+    from ::= at;
+    found: Res<str> = loop<str>(() { from < blank }, (h) {
         stop = bytes.line_end(from, blank);
         bytes.is_length(from, stop).then(() {
-            found = true;
-            given = bytes.slice(from + NAME.len, stop).trim().value_or("");
-            given.parse_usize().match({
-                Ok(n) => { value = n; },
-                None  => { bad = true; found = false; },
-            });
+            h.break(bytes.slice(from + NAME.len, stop));
         });
         from = stop + CRLF.len;
     });
-    bad.match({
-        true  => Err(FrameFault.BadLength(at)),
-        false => found.match({
-            true  => Ok(value),
-            false => Err(FrameFault.NoLength(at)),
-        }),
-    })
+    given           = found.ok_or(FrameFault.NoLength(at)).try();
+    given.trim().value_or("").parse_usize().ok_or(FrameFault.BadLength(at))
 }
 
 line_end = (bytes: str, from: usize, blank: usize) usize {

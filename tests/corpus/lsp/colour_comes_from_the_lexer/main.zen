@@ -10,12 +10,12 @@
 // THE ENCODING IS DECODED BACK, and that is the whole reason this test
 // is readable. A flat array of integers is unreviewable: nobody can see
 // that `[0,3,3,5,0]` is wrong. So every group is undone — the deltas
-// added up, and the resulting `line:character` handed to `to_pos`,
+// added up, and the resulting `line:character` handed to `source_position`,
 // which is the INVERSE conversion — and the bytes it names are printed.
 // A reader checks the arithmetic by reading the last column.
 //
-// That inverse is not decoration either: `to_wire` produced the numbers
-// and `to_pos` reads them back, so a conversion broken in BOTH
+// That inverse is not decoration either: `lsp_position` produced the numbers
+// and `source_position` reads them back, so a conversion broken in BOTH
 // directions is the only kind that could survive this, and
 // `positions_convert_both_ways` is the test that will not let it.
 //
@@ -52,8 +52,8 @@ Alloc, AllocError = std.mem
 Server, serve = lsp.lsp_serve
 write_frame, frame_at = lsp.lsp_frame
 write_text, Jsons, JsonId, read = std.json
-to_pos, run_of = lsp.lsp_pos
-Colour, index_of, name_of, write_legend = lsp.lsp_colour
+source_position, run_of = lsp.lsp_pos
+Colour, index_of, write_legend = lsp.lsp_colour
 
 DOC*: str = "// a note\nadd = (a: i32) i32 {\n    s = \"hé😀\" + a;\n    ok = true;\n    n = 42;\n    /* two\n\n       lines */\n    a\n}\n"
 
@@ -69,20 +69,20 @@ said_legend = (a: Alloc) Res<(), AllocError> {
     out ::= a.String().try();
     write_legend(out).try();
     println("legend {}", out.view());
-    one_colour(Colour.Keyword);
-    one_colour(Colour.Text);
-    one_colour(Colour.Number);
-    one_colour(Colour.Comment);
-    one_colour(Colour.Operator);
-    one_colour(Colour.Variable);
-    one_colour(Colour.Type);
-    one_colour(Colour.Function);
-    one_colour(Colour.Parameter);
+    one_colour(Colour.keyword);
+    one_colour(Colour.string);
+    one_colour(Colour.number);
+    one_colour(Colour.comment);
+    one_colour(Colour.operator);
+    one_colour(Colour.variable);
+    one_colour(Colour.type);
+    one_colour(Colour.function);
+    one_colour(Colour.parameter);
     Ok(());
 }
 
 one_colour = (colour: Colour) () {
-    println("  {} {}", index_of(colour), name_of(colour));
+    println("  {} {}", index_of(colour), colour.variant_name());
 }
 
 // --- the requests ------------------------------------------------------
@@ -249,7 +249,7 @@ whole_at = (tree: Jsons, array: JsonId, at: usize) usize {
 
 // One decoded token, and THE BYTES IT COVERS.
 //
-// The slice comes back through `to_pos`, the wire-to-Zen direction, so
+// The slice comes back through `source_position`, the wire-to-Zen direction, so
 // the last column is the answer of a conversion this file did not make:
 // a `length` counted in bytes prints a slice that ends in the middle of
 // a character, and a `character` counted in bytes prints one that starts
@@ -262,8 +262,8 @@ shown = (
     modifiers : usize
 ) () {
     run  = run_of(DOC, line);
-    from = run.start + to_pos(DOC, line, character).col - 1;
-    upto = run.start + to_pos(DOC, line, character + length).col - 1;
+    from = run.start + source_position(DOC, line, character).col - 1;
+    upto = run.start + source_position(DOC, line, character + length).col - 1;
     println(
         "  line {} char {} len {} type {} mod {}  [{}]",
         line,

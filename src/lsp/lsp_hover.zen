@@ -10,7 +10,7 @@ Variant = std.ast
 Checker = sema.sema_check
 TyId, TyNamed, Prim = sema.sema_ty
 Def, decl_at = sema.sema_def
-to_pos, to_wire, WirePos, WireRange = lsp.lsp_pos
+source_position, lsp_position, Position, TextRange = lsp.lsp_pos
 Tell, told_at = std.ast.ast_named
 check_standalone = lsp.lsp_query
 check_build = zen.zen_build
@@ -19,15 +19,15 @@ to_json = std.json
 Hover* = {
     found*: bool,
     shown*: str,
-    start*: WirePos,
-    end*: WirePos,
+    start*: Position,
+    end*: Position,
 
     // `null` when nothing was found, else a plaintext MarkupContent.
     write* = (self: @Self, a: Alloc, out :: String) Res<(), AllocError> {
         self.found.match({
             false => out.add("null"),
             true  => {
-                encoded ::= HoverResult(contents: MarkupContent(kind: "plaintext", value: self.shown), range: WireRange(start: self.start, end: self.end)).to_json(a).try();
+                encoded ::= HoverResult(contents: MarkupContent(kind: "plaintext", value: self.shown), range: TextRange(start: self.start, end: self.end)).to_json(a).try();
                 out.add(encoded.view())
             },
         })
@@ -41,13 +41,13 @@ MarkupContent = {
 
 HoverResult = {
     contents: MarkupContent,
-    range: WireRange,
+    range: TextRange,
 }
 
 hover_at* = (a: Alloc, name: str, text: str, line: usize, character: usize)
             Res<Hover, AllocError> {
     c ::= check_standalone(a, name, text).try();
-    pos = to_pos(text, line, character);
+    pos = source_position(text, line, character);
     c.said(a, text, told_at(c.tree, name, pos))
 }
 
@@ -61,7 +61,7 @@ hover_in* = (
     character : usize
 ) Res<Hover, AllocError> {
     checked = check_build(env, a, workspace, path, text).try();
-    pos     = to_pos(text, line, character);
+    pos     = source_position(text, line, character);
     checked.c.said(a, text, told_at(checked.c.tree, checked.rel, pos))
 }
 
@@ -73,7 +73,7 @@ hover_with* = (
     line      : usize,
     character : usize
 ) Res<Hover, AllocError> {
-    pos = to_pos(text, line, character);
+    pos = source_position(text, line, character);
     c.said(a, text, told_at(c.tree, rel, pos))
 }
 
@@ -81,8 +81,8 @@ no_type = () Hover {
     Hover(
         found: false,
         shown: "",
-        start: WirePos(line: 0, character: 0),
-        end: WirePos(line: 0, character: 0)
+        start: Position(line: 0, character: 0),
+        end: Position(line: 0, character: 0)
     )
 }
 
@@ -112,8 +112,8 @@ wired = (text: str, span: Span, known: bool, out :: String)
     Ok(Hover(
         found: known,
         shown: out.view(),
-        start: to_wire(text, span.start),
-        end: to_wire(text, span.end)
+        start: lsp_position(text, span.start),
+        end: lsp_position(text, span.end)
     ));
 }
 
@@ -193,16 +193,134 @@ write_decl_note = (c: Checker, dd: Decl, all: bool, out :: String)
         out.add(" — ").try();
         out.add(doc).try();
     });
-    c.write_members(dd, Shown(joined: joiner(doc), all: all), out)
+    note ::= ShapeNote(
+        check: c,
+        joined: joiner(doc),
+        all: all,
+        started: false,
+        names: c.alloc.Vec<str>(),
+        scratch: c.alloc.String().try()
+    );
+    note.write(dd, out)
 }
 
 EXPORTED_ONLY: bool = false
 
 WHOLE_SHAPE: bool = true
 
-Shown = {
+// A declaration note owns its formatting state. Member names are retained
+// only to collapse overloads; one scratch buffer handles incomplete signatures.
+// Prefixes are written lazily so hidden or empty shapes add no punctuation.
+ShapeNote = {
+    check: Checker,
     joined: str,
     all: bool,
+    started :: bool,
+    names :: Vec<str>,
+    scratch :: String,
+
+    write = (self :: @Self, dd: Decl, out :: String) Res<(), AllocError> {
+        dd.kind.match({
+            Struct(s) => {
+                s.members.loop((h, m) { self.member(m, out).try(); });
+                Ok(())
+            },
+            Enum(e)   => self.variants(e.variants, out),
+            _         => Ok(()),
+        })
+    }
+
+    member = (self :: @Self, m: Member, out :: String) Res<(), AllocError> {
+        m.kind.match({
+            Field(f)    => (self.all || f.exported).match({
+                true  => self.typed(f.name.text, f.type, out),
+                false => Ok(()),
+            }),
+            Const(k)    => (self.all || k.exported).match({
+                true  => self.typed(k.name.text, k.type, out),
+                false => Ok(()),
+            }),
+            Function(f) => self.function(f, out),
+        })
+    }
+
+    separate = (self :: @Self, out :: String) Res<(), AllocError> {
+        self.started.match({
+            true  => out.add(", "),
+            false => {
+                out.add(self.joined).try();
+                out.add("members: ").try();
+                self.started = true;
+                Ok(())
+            },
+        })
+    }
+
+    typed = (self :: @Self, name: str, ty: Res<TypeId>, out :: String)
+            Res<(), AllocError> {
+        self.separate(out).try();
+        out.add(name).try();
+        self.type_suffix(ty, ": ", "", out)
+    }
+
+    // The type writer cannot emit a partial type: validate before adding the
+    // punctuation, then write straight to the destination without scratch text.
+    type_suffix = (
+        self: @Self,
+        ty: Res<TypeId>,
+        before: str,
+        after: str,
+        out :: String
+    ) Res<(), AllocError> {
+        ty.match({
+            None   => Ok(()),
+            Ok(id) => self.check.type_memo.get(id).match({
+                None     => Ok(()),
+                Ok(memo) => {
+                    self.check.poison_free(memo).then(() {
+                        out.add(before).try();
+                        self.check.types.write_name(memo, out).try();
+                        out.add(after).try();
+                    });
+                    Ok(())
+                },
+            }),
+        })
+    }
+
+    // Arity overloads share a name; the first visible declaration is shown.
+    function = (self :: @Self, f: Function, out :: String)
+               Res<(), AllocError> {
+        (self.all || f.exported).then(() {
+            self.names.find((name) { name.eq(f.name.text) }).match({
+                Ok(_) => Ok(()),
+                None  => {
+                    self.names.add(f.name.text).try();
+                    self.scratch.clear();
+                    whole = self.check.write_decl_sig(f, self.scratch).try();
+                    self.separate(out).try();
+                    whole.match({
+                        true  => out.add(self.scratch.view()),
+                        false => out.add(f.name.text),
+                    })
+                },
+            }).try();
+        });
+        Ok(())
+    }
+
+    variants = (self :: @Self, vs: Vec<Variant>, out :: String)
+               Res<(), AllocError> {
+        vs.loop((h, i, v) {
+            out.add((i == 0).match({
+                true  => self.joined,
+                false => " | ",
+            })).try();
+            out.add(v.name.text).try();
+            self.type_suffix(v.payload, "(", ")", out).try();
+        });
+        Ok(());
+    }
 }
 
 joiner = (doc: str) str {
@@ -212,160 +330,16 @@ joiner = (doc: str) str {
     })
 }
 
-write_members = (c: Checker, dd: Decl, shown: Shown, out :: String)
-                Res<(), AllocError> {
-    body ::= c.alloc.String().try();
-    dd.kind.match({
-        Struct(s) => c.write_member_run(s.members, shown.all, body),
-        Enum(e)   => c.write_variant_run(e.variants, body),
-        _         => Ok(()),
-    }).try();
-    (body.len() > 0).then(() {
-        out.add(shown.joined).try();
-        out.add(body.view()).try();
-    });
-    Ok(());
-}
-
-write_member_run = (c: Checker, ms: Vec<Member>, all: bool, body :: String)
-                   Res<(), AllocError> {
-    list  ::= c.alloc.String().try();
-    names ::= c.alloc.Vec<str>();
-    ms.loop((h, m) { c.write_one_member(m, all, names, list).try(); });
-    (list.len() > 0).then(() {
-        body.add("members: ").try();
-        body.add(list.view()).try();
-    });
-    Ok(());
-}
-
-write_one_member = (
-    c     : Checker,
-    m     : Member,
-    all   : bool,
-    names :: Vec<str>,
-    body  :: String
-) Res<(), AllocError> {
-    m.kind.match({
-        Field(f)    => c.write_typed(
-            all || f.exported,
-            f.name.text,
-            f.type,
-            body
-        ),
-        Const(k)    => c.write_typed(
-            all || k.exported,
-            k.name.text,
-            k.type,
-            body
-        ),
-        Function(f) => c.write_fn_member(f, all, names, body),
-    })
-}
-
-write_typed = (
-    c    : Checker,
-    show : bool,
-    name : str,
-    ty   : Res<TypeId>,
-    body :: String
-) Res<(), AllocError> {
-    show.match({
-        false => Ok(()),
-        true  => {
-            body.separate().try();
-            body.add(name).try();
-            c.write_type_suffix(ty, body)
-        },
-    })
-}
-
-write_type_suffix = (c: Checker, ty: Res<TypeId>, body :: String)
-                    Res<(), AllocError> {
-    ty.match({
-        None   => Ok(()),
-        Ok(id) => {
-            scratch ::= c.alloc.String().try();
-            c.write_ty(id, scratch).try().then(() {
-                body.add(": ").try();
-                body.add(scratch.view()).try();
-            });
-            Ok(());
-        },
-    })
-}
-
-// Arity overloads share a name; the first declaration is the one shown.
-write_fn_member = (
-    c     : Checker,
-    f     : Function,
-    all   : bool,
-    names :: Vec<str>,
-    body  :: String
-) Res<(), AllocError> {
-    (all || f.exported).match({
-        false => Ok(()),
-        true  => names.find((name) { name.eq(f.name.text) }).match({
-            Ok(_) => Ok(()),
-            None  => {
-                names.add(f.name.text).try();
-                scratch ::= c.alloc.String().try();
-                whole = c.write_decl_sig(f, scratch).try();
-                body.separate().try();
-                whole.match({
-                    true  => body.add(scratch.view()),
-                    false => body.add(f.name.text),
-                })
-            },
-        }),
-    })
-}
-
-write_variant_run = (c: Checker, vs: Vec<Variant>, body :: String)
-                    Res<(), AllocError> {
-    vs.loop((h, i, v) {
-        (i > 0).then(() { body.add(" | ").try() });
-        body.add(v.name.text).try();
-        c.write_payload(v.payload, body).try();
-    });
-    Ok(());
-}
-
-write_payload = (c: Checker, payload: Res<TypeId>, body :: String)
-                Res<(), AllocError> {
-    payload.match({
-        None   => Ok(()),
-        Ok(id) => {
-            scratch ::= c.alloc.String().try();
-            c.write_ty(id, scratch).try().then(() {
-                body.add("(").try();
-                body.add(scratch.view()).try();
-                body.add(")").try();
-            });
-            Ok(());
-        },
-    })
-}
-
-separate = (body :: String) Res<(), AllocError> {
-    (body.len() > 0).match({ true => body.add(", "), false => Ok(()) })
-}
-
 // The doc is the line comments after the last blank line, joined by spaces,
 // cut at the first sentence-ending line.
 doc_block = (a: Alloc, tree: Ast, run: TriviaRun) Res<str, AllocError> {
     doc ::= a.String().try();
     Range(after_last_blank(tree, run), run.len).loop((h, i) {
+        doc.view().ended().then(() { h.break(); });
         piece = tree.trivia_at(run, i);
-        doc.view().ended().match({
-            true  => (),
-            false => piece.kind.match({
-                LineComment => add_doc_line(
-                    comment_text(piece.text),
-                    doc
-                ).try(),
-                _           => (),
-            }),
+        piece.kind.match({
+            LineComment => add_doc_line(comment_text(piece.text), doc).try(),
+            _           => (),
         });
     });
     Ok(doc.view());
@@ -434,9 +408,10 @@ poison_free = (c: Checker, id: TyId) bool {
 }
 
 all_poison_free = (c: Checker, ids: Vec<TyId>) bool {
-    every ::= true;
-    ids.loop((h, id) { every = every && c.poison_free(id); });
-    every;
+    ids.find((id) { !c.poison_free(id) }).match({
+        Ok(_) => false,
+        None  => true,
+    })
 }
 
 write_decl_sig = (c: Checker, f: Function, out :: String)

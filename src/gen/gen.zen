@@ -1,8 +1,149 @@
-// Public code-generation surface for the driver: the emitter, stable
-// ordering, and the C backend's entry points. Symbol naming and backend
-// diagnostics are reached through `gen.gen_name` and `gen.gen_diag`.
+// Code generation owns backend selection and artifact rendering. Drivers
+// publish each borrowed artifact synchronously; no filesystem policy lives here.
+// Direct C entry points remain available to compiler tools and backend tests.
 
-Emit*, order*                                        = gen.gen_emit
-
-CBackend*, emit_program*, render_symbol_map*         = gen.gen_c
+Emit*, order* = gen.gen_emit
+CBackend*, emit_program*, render_symbol_map* = gen.gen_c
 lower_program*, emit_header*, emit_unit*, unit_used* = gen.gen_c
+
+Alloc, AllocError, Mem = std.mem
+Ast = std.ast
+Checker = sema.sema
+Codegen = std.build
+String, str = std.text
+Range = std.core
+
+Layout* = Single | Modules
+ArtifactKind* = Source | Symbols
+
+// Names and bytes borrow the renderer's current buffer. Consumers must write
+// or copy them during the callback; retaining this record extends no lifetime.
+Artifact* = {
+    kind*: ArtifactKind,
+    name*: str,
+    text*: str,
+}
+
+Generation* = {
+    alloc*: Alloc,
+    mem*: Mem,
+    tree*: Ast,
+    check*: Checker,
+    backend*: Codegen,
+    entry*: usize,
+    layout*: Layout,
+    ffi*: bool,
+    symbols*: bool,
+
+    // Lowering diagnostics precede publication. The returned count includes
+    // backend faults and publication failures; allocation errors stay typed.
+    emit* = (self: @Self, report :: String,
+             publish: (artifact: Artifact) Res<usize, AllocError>)
+            Res<usize, AllocError> {
+        self.backend.match({
+            C => {
+                be ::= self.alloc.CBackend(self.tree, self.check).try();
+                self.ffi.then(() { be.enable_ffi(); });
+                output ::= COutput(generation: self, be: be);
+                faults = self.layout.match({
+                    Single  => output.single(
+                        report,
+                        (artifact) { publish(artifact) }
+                    ),
+                    Modules => output.modules(
+                        report,
+                        (artifact) { publish(artifact) }
+                    ),
+                }).try();
+                (faults == 0 && self.symbols).match({
+                    true  => output.symbols((artifact) { publish(artifact) }),
+                    false => Ok(faults),
+                })
+            },
+        })
+    }
+
+}
+
+// One backend owns lowering state throughout rendering. Split C lowers once,
+// retains its stable order, and releases each scratch buffer after publication.
+COutput = {
+    generation: Generation,
+    be :: CBackend,
+
+    single = (self :: @Self, report :: String,
+              publish: (artifact: Artifact) Res<usize, AllocError>)
+             Res<usize, AllocError> {
+        out ::= self.generation.alloc.Emit().try();
+        self.be.emit_program(self.generation.entry, out).try();
+        self.be.render_diags(report).try();
+        faults = self.be.diag_count();
+        (faults == 0).match({
+            false => Ok(faults),
+            true  => publish(Artifact(
+                kind: ArtifactKind.Source,
+                name: "zen.c",
+                text: out.view()
+            )),
+        })
+    }
+
+    modules = (self :: @Self, report :: String,
+               publish: (artifact: Artifact) Res<usize, AllocError>)
+              Res<usize, AllocError> {
+        self.be.use_externs();
+        self.be.lower_program(self.generation.entry).try();
+        header ::= self.generation.alloc.Emit().try();
+        self.be.emit_header(header).try();
+        self.be.render_diags(report).try();
+        faults = self.be.diag_count();
+        (faults == 0).match({
+            false => Ok(faults),
+            true  => {
+                seq = order(self.generation.alloc, self.be.fn_names).try();
+                failed ::= publish(Artifact(
+                    kind: ArtifactKind.Source,
+                    name: "zen.h",
+                    text: header.view()
+                )).try();
+                Range(0, self.generation.tree.module_count()).loop((h, unit) {
+                    ((unit == self.generation.entry) || self.be.unit_used(unit)).then(() {
+                        scratch ::= self.generation.mem.alloc();
+                        out     ::= scratch.Emit().try();
+                        self.be.emit_unit(
+                            self.generation.entry,
+                            unit,
+                            seq,
+                            out
+                        ).try();
+                        module_name = self.generation.tree.module_at(
+                            unit
+                        ).match({
+                            None    => "zg_unit",
+                            Ok(mod) => mod.name,
+                        });
+                        name        = scratch.String("{}.c", module_name).try();
+                        failed      = failed + publish(Artifact(
+                            kind: ArtifactKind.Source,
+                            name: name.view(),
+                            text: out.view()
+                        )).try();
+                    });
+                });
+                Ok(failed)
+            },
+        })
+    }
+
+    symbols = (self :: @Self,
+               publish: (artifact: Artifact) Res<usize, AllocError>)
+              Res<usize, AllocError> {
+        out ::= self.generation.alloc.String().try();
+        self.be.render_symbol_map(out).try();
+        publish(Artifact(
+            kind: ArtifactKind.Symbols,
+            name: "symbols",
+            text: out.view()
+        ))
+    }
+}

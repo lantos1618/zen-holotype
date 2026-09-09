@@ -80,6 +80,19 @@ Closure* = {
     floor*: usize,
     inst*: Inst,
     ctx*: Ctx,
+    // The function where this callback was written, even when it is inlined.
+    return_to*: Res<usize>,
+}
+
+// A function inlined into another C body returns to its result and end label.
+// The ledger keeps usage shared by callbacks that capture the target id.
+InlineReturn* = {
+    result*: str,
+    label*: str,
+    depth*: usize,
+    used* :: bool = false,
+
+    note_use* = (self :: @Self) () { self.used = true; }
 }
 
 // The two labels and the result of one loop being lowered.
@@ -90,6 +103,8 @@ Closure* = {
 LoopFrame* = {
     brk*: usize,        // the label a `break` jumps to
     cnt*: usize,        // the label the next pass starts at
+    next_used* :: bool = false,
+    break_used* :: bool = false,
     result*: str,       // the C name the loop's value lands in
     has_result*: bool,  // ..when it has one; a discarded loop has none
     ty*: TyId,          // the `Res<T>` that value is
@@ -100,6 +115,9 @@ LoopFrame* = {
     // block from the innermost out to this depth. Without it, the drops
     // simply never run, the one failure shape a backend may not have.
     depth*: usize,
+
+    note_next* = (self :: @Self) () { self.next_used = true; }
+    note_break* = (self :: @Self) () { self.break_used = true; }
 }
 
 // One binding a block must destroy when it leaves.

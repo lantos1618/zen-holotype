@@ -1,0 +1,35 @@
+// Concrete arguments excluded by a generic bound select their own overload,
+// regardless of declaration order. Literals and explicit types keep ordinary
+// bound inference and diagnostics.
+Marker = { tag* = (self: @Self) i32 }
+Marked = { value: i32 }
+Marked.impl(Marker, { tag = (self: @Self) i32 { self.value } })
+
+first = <T: Marker>(value: T) i32 { 11 }
+first = (value: bool) i32 { 12 }
+last = (value: bool) i32 { 21 }
+last = <T: Marker>(value: T) i32 { 22 }
+wide = <T: ToU64>(value: T) i32 { 31 }
+wide = (value: i32) i32 { 32 }
+wide_last = (value: i32) i32 { 33 }
+wide_last = <T: ToU64>(value: T) i32 { 34 }
+number = <T: ToI64>(value: T) i32 { 41 }
+number = (value: bool) i32 { 42 }
+
+// The generic wrapper comes first. Its element type remains unresolved
+// when only a lambda arity is available, so a proved condition fit wins.
+visit = <R: Range<T>, T>(range: R, body: (value: T) ()) i32 { 51 }
+visit = (cond: bool, body: (h: LoopHandle) ()) i32 { 52 }
+visit_closure = <R: Range<T>, T>(range: R, body: (value: T) ()) i32 { 61 }
+visit_closure = (cond: () bool, body: (h: LoopHandle) ()) i32 { 62 }
+
+main = (env: Env) Res<i32, AllocError> {
+    println("{} {}", first(true), first(Marked(1)));
+    println("{} {}", last(true), last(Marked(1)));
+    println("{} {}", wide(1), wide<u32>(1));
+    println("{} {}", wide_last(1), wide_last<u32>(1));
+    println("{} {}", number(1), number(false));
+    println("{} {}", visit(true, (h) {}), visit(Range(0, 1), (value) {}));
+    println("{}", visit_closure(() { true }, (h) {}));
+    Ok(0);
+}

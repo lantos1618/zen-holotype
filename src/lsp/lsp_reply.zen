@@ -4,8 +4,9 @@
 
 str, String = std.text
 Alloc, AllocError = std.mem
-Jsons, JsonId, write_text, written, obj, Nest,
-    JsonFault = std.json
+Jsons, JsonId, write_text, written, obj, arr, Nest,
+    JsonFault, to_json = std.json
+write_bool = std.json.json_meta
 write_legend = lsp.lsp_colour
 
 // Absent fields read as "" / 0 / the enclosing value.
@@ -78,45 +79,43 @@ RequestTurn* = {
             None    => written(),
             Ok(rid) => {
                 reply ::= self.head(request.tree, rid).try();
-                reply.key("error", self.response).try();
-                self.error(code, why).try();
-                reply.close(self.response)
+                self.finish_error(reply, code, why)
             },
         })
     }
 
     parse_error* = (self :: @Self, f: JsonFault) Res<(), AllocError> {
-        reply ::= obj(self.response).try();
-        reply.text("jsonrpc", "2.0", self.response).try();
-        reply.key("id", self.response).try();
+        reply ::= self.envelope().try();
         self.response.add("null").try();
-        reply.key("error", self.response).try();
         why ::= self.temporary.String().try();
         why.add(f.fault_text()).try();
         f.fault_at().match({
             None  => written(),
             Ok(i) => { why.add(" at byte ").try(); why.write_usize(i) },
         }).try();
-        self.error(RpcFault.ParseError, why.view()).try();
-        reply.close(self.response)
+        self.finish_error(reply, RpcFault.ParseError, why.view())
     }
 
-    head = (self :: @Self, tree: Jsons, rid: JsonId) Res<Nest, AllocError> {
+    envelope = (self :: @Self) Res<Nest, AllocError> {
         reply ::= obj(self.response).try();
         reply.text("jsonrpc", "2.0", self.response).try();
         reply.key("id", self.response).try();
+        Ok(reply)
+    }
+
+    head = (self :: @Self, tree: Jsons, rid: JsonId) Res<Nest, AllocError> {
+        reply ::= self.envelope().try();
         tree.write(rid, self.response).try();
         Ok(reply)
     }
 
-    error = (self :: @Self, code: RpcFault, why: str) Res<(), AllocError> {
-        fault ::= obj(self.response).try();
-        fault.key("code", self.response).try();
-        self.response.add('-').try();
-        self.response.write_usize(code.rpc_code()).try();
-        fault.key("message", self.response).try();
-        write_text(why, self.response).try();
-        fault.close(self.response)
+    finish_error = (self :: @Self, reply :: Nest, code: RpcFault, why: str)
+                   Res<(), AllocError> {
+        reply.key("error", self.response).try();
+        encoded ::= RpcError(code: code.rpc_code(), message: why)
+            .to_json(self.temporary).try();
+        self.response.add(encoded.view()).try();
+        reply.close(self.response)
     }
 }
 
@@ -148,14 +147,78 @@ fault_text = (f: JsonFault) str {
     })
 }
 
-write_capabilities* = (out :: String) Res<(), AllocError> {
-    out.add(
-        "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"definitionProvider\":true,\"documentSymbolProvider\":true,\"documentFormattingProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\"]},\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\"]},\"semanticTokensProvider\":{\"legend\":"
-    ).try();
-    write_legend(out).try();
-    out.add(
-        ",\"full\":true}},\"serverInfo\":{\"name\":\"zen\",\"version\":\"0\"}}"
-    )
+RpcError = {
+    code: i32,
+    message: str,
+}
+
+ServerInfo = {
+    name: str,
+    version: str,
+}
+
+// Scalar capability values are typed. The two string arrays and the dynamic
+// semantic legend use the streaming writer, which owns JSON punctuation.
+ServerCapabilities = {
+    textDocumentSync: usize = 1,
+    hoverProvider: bool = true,
+    definitionProvider: bool = true,
+    documentSymbolProvider: bool = true,
+    documentFormattingProvider: bool = true,
+    completionTrigger: str = ".",
+    codeActionKind: str = "quickfix",
+    semanticTokensFull: bool = true,
+
+    write = (self: @Self, out :: String) Res<(), AllocError> {
+        caps ::= obj(out).try();
+        caps.key("textDocumentSync", out).try();
+        out.write_usize(self.textDocumentSync).try();
+        caps.key("hoverProvider", out).try();
+        write_bool(out, self.hoverProvider).try();
+        caps.key("definitionProvider", out).try();
+        write_bool(out, self.definitionProvider).try();
+        caps.key("documentSymbolProvider", out).try();
+        write_bool(out, self.documentSymbolProvider).try();
+        caps.key("documentFormattingProvider", out).try();
+        write_bool(out, self.documentFormattingProvider).try();
+        caps.key("completionProvider", out).try();
+        StringListOption(name: "triggerCharacters", value: self.completionTrigger).write(out).try();
+        caps.key("codeActionProvider", out).try();
+        StringListOption(name: "codeActionKinds", value: self.codeActionKind).write(out).try();
+        caps.key("semanticTokensProvider", out).try();
+        semantic ::= obj(out).try();
+        semantic.key("legend", out).try();
+        write_legend(out).try();
+        semantic.key("full", out).try();
+        write_bool(out, self.semanticTokensFull).try();
+        semantic.close(out).try();
+        caps.close(out)
+    }
+}
+
+StringListOption = {
+    name: str,
+    value: str,
+
+    write = (self: @Self, out :: String) Res<(), AllocError> {
+        option ::= obj(out).try();
+        option.key(self.name, out).try();
+        values ::= arr(out).try();
+        values.next(out).try();
+        write_text(self.value, out).try();
+        values.close(out).try();
+        option.close(out)
+    }
+}
+
+write_capabilities* = (a: Alloc, out :: String) Res<(), AllocError> {
+    result ::= obj(out).try();
+    result.key("capabilities", out).try();
+    ServerCapabilities().write(out).try();
+    result.key("serverInfo", out).try();
+    info ::= ServerInfo(name: "zen", version: "0").to_json(a).try();
+    out.add(info.view()).try();
+    result.close(out)
 }
 
 SEMANTIC_TOKENS: str = "textDocument/semanticTokens/full"
@@ -210,17 +273,11 @@ notice_of* = (method: str) Notice {
 
 RpcFault* = ParseError | MethodNotFound | InvalidParams | NotInitialized
 
-rpc_code = (f: RpcFault) usize {
+rpc_code = (f: RpcFault) i32 {
     f.match({
-        ParseError     => 32700,
-        MethodNotFound => 32601,
-        InvalidParams  => 32602,
-        NotInitialized => 32002,
+        ParseError     => -32700,
+        MethodNotFound => -32601,
+        InvalidParams  => -32602,
+        NotInitialized => -32002,
     })
-}
-
-own_str* = (a: Alloc, s: str) Res<str, AllocError> {
-    out ::= a.String().try();
-    out.add(s).try();
-    Ok(out.view());
 }

@@ -3,7 +3,6 @@ Field, Const, Function, Span, Binary, BinOp = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
-Range = std.core
 ImplId = sema.sema_id
 TyId, TyNamed, Prim, is_prim, literal_default = sema.sema_ty
 Def, decl_at = sema.sema_def
@@ -12,7 +11,7 @@ Checker = sema.sema_check
 opaque, Found, members_of, member_type, named_as = sema.sema_member
 bound_members, bound_member_type, has_member, impl_span, impl_bound_type = sema.sema_supply
 storage_seat_name, LocalImpl, local_impls, prim_named = sema.sema_supply
-Cand, TBound, Actual, ty_at, is_tvar = sema.sema_cand
+Cand, TBound, is_tvar = sema.sema_cand
 Inst, module_name, subst, inst_of_named = sema.sema_inst
 res_sugar = sema.sema_denote
 
@@ -106,10 +105,9 @@ refuse_surplus_arg = (c :: Checker, call: Call, ty: TyId)
                      Res<bool, AllocError> {
     refused ::= false;
     call.args.loop((h, i, a) {
-        (refused == false).then(() {
-            c.refuse_surplus_one(a, i, ty).try().then(() {
-                refused = true;
-            });
+        c.refuse_surplus_one(a, i, ty).try().then(() {
+            refused = true;
+            h.break();
         });
     });
     Ok(refused)
@@ -117,27 +115,16 @@ refuse_surplus_arg = (c :: Checker, call: Call, ty: TyId)
 
 refuse_surplus_one = (c :: Checker, a: Arg, i: usize, ty: TyId)
                      Res<bool, AllocError> {
-    a.name.match({
-        Ok(_) => Ok(false),
-        None  => {
-            name = c.storage_seat_name(ty, i).try();
-            name.eq("").match({
-                false => Ok(false),
-                true  => {
-                    c.report(
-                        a.span.file,
-                        a.span,
-                        SemaFault.CtorSurplusArgument(TypeFault(
-                            name: "",
-                            expected: c.types.unknown().try(),
-                            found: ty,
-                        ))
-                    ).try();
-                    Ok(true)
-                },
-            })
-        },
-    })
+    positional = a.name.match({ Ok(_) => false, None => true });
+    surplus    = positional && c.storage_seat_name(ty, i).try().is_empty();
+    surplus.then(() {
+        c.report(a.span.file, a.span, SemaFault.CtorSurplusArgument(TypeFault(
+            name: "",
+            expected: c.types.unknown().try(),
+            found: ty,
+        ))).try();
+    });
+    Ok(surplus)
 }
 
 arg_fits_field = (c :: Checker, a: Arg, i: usize, ty: TyId)
@@ -380,14 +367,6 @@ named_impls_bound = (c :: Checker, n: TyNamed, bound: TyId)
     }))
 }
 
-check_bounds* = (c :: Checker, cand: Cand, actuals: Vec<Actual>, at: Span)
-                Res<(), AllocError> {
-    cand.tbounds.loop((h, tb) {
-        c.check_one_bound(cand, tb, actuals, at).try();
-    });
-    Ok(());
-}
-
 // Bounds belong to type parameters, not only to parameters whose complete
 // type is that variable. Validate the resolved substitution so explicit,
 // return-only and nested occurrences all take the same path.
@@ -452,62 +431,9 @@ inst_bound_holds = (
     })
 }
 
-check_one_bound = (
-    c       :: Checker,
-    cand    : Cand,
-    tb      : TBound,
-    actuals : Vec<Actual>,
-    at      : Span
-) Res<(), AllocError> {
-    c.param_of_var(cand, tb.name).match({
-        None  => Ok(()),
-        Ok(i) => actuals.get(i).match({
-            None  => Ok(()),
-            Ok(a) => c.check_actual_bound(tb, a, at),
-        }),
-    })
-}
-
-param_of_var = (c: Checker, cand: Cand, name: str) Res<usize> {
-    Range(0, cand.params.len).find((i) {
-        c.var_named(cand.params.ty_at(i), name, cand.owner)
-    })
-}
-
-var_named = (c: Checker, id: TyId, name: str, owner: str) bool {
-    c.types.at(id).match({
-        Var(v) => v.name.eq(name) && v.owner.eq(owner),
-        _      => false,
-    })
-}
-
-check_actual_bound = (c :: Checker, tb: TBound, a: Actual, at: Span)
-                     Res<(), AllocError> {
-    c.unbounded(a.ty).match({
-        true  => Ok(()),
-        false => c.prove_bound(tb, a, at),
-    })
-}
-
 // Poison, a hole and a type parameter carry no answer to check.
 unbounded = (c: Checker, ty: TyId) bool {
     c.opaque(ty) || c.is_tvar(ty)
-}
-
-prove_bound = (c :: Checker, tb: TBound, a: Actual, at: Span)
-              Res<(), AllocError> {
-    c.satisfies_bound(a.ty, tb.bound).try().match({
-        true  => Ok(()),
-        false => c.report(
-            at.file,
-            at,
-            SemaFault.BoundNotSatisfied(TypeFault(
-                name: tb.name,
-                expected: tb.bound,
-                found: a.ty
-            ))
-        ),
-    })
 }
 
 check_eq* = (c :: Checker, b: Binary, operand: TyId) Res<(), AllocError> {

@@ -91,7 +91,7 @@ map_and_propagate = (
             target: want,
             tmp: tmp,
             ctx: ctx,
-            unwind: 0,
+            unwind: be.return_depth(),
             keep: "",
         ).map(be, map),
         _         => be.report(
@@ -181,7 +181,7 @@ TryPropagation = {
     write_mapped_return = (self: @Self, be :: CBackend, mapped: str,
                            unit: bool) Res<(), AllocError> {
         line ::= be.alloc.String().try();
-        line.add("return (").try();
+        line.add("(").try();
         be.ctype(self.ctx.ret, line).try();
         line.add("){ .zg_tag = ").try();
         line.sym_variant(RES_PATH, "Err").try();
@@ -190,8 +190,8 @@ TryPropagation = {
             line.sym_member("Err").try();
             line.fmt(" = {mapped}").try();
         });
-        line.add(" };").try();
-        be.writeln(line.view())
+        line.add(" }").try();
+        write_return(be, line.view())
     }
 
     unwind_frame = (self: @Self, be :: CBackend) Res<(), AllocError> {
@@ -291,15 +291,15 @@ TryPropagation = {
     write_built = (self: @Self, be :: CBackend, into: Carry)
                   Res<(), AllocError> {
         line ::= be.alloc.String().try();
-        line.add("return (").try();
+        line.add("(").try();
         be.ctype(self.ctx.ret, line).try();
         line.add("){ .zg_tag = ").try();
         self.failure_tag(line).try();
         is_failure(self.source.form).then(() {
             self.carry_error(be, into, line).try()
         });
-        line.add(" };").try();
-        be.writeln(line.view())
+        line.add(" }").try();
+        write_return(be, line.view())
     }
 
     write_copy = (self: @Self, be :: CBackend) Res<(), AllocError> {
@@ -397,7 +397,7 @@ propagate = (be :: CBackend, node: Expr, r: TyRes, tmp: str, ctx: Ctx)
             target: want,
             tmp: tmp,
             ctx: ctx,
-            unwind: 0,
+            unwind: be.return_depth(),
             keep: "",
         ).propagate(be),
         _         => {
@@ -571,7 +571,14 @@ report_widening = (be :: CBackend, node: Expr) Res<(), AllocError> {
 Carry = Same | Variant(str) | Member(TyId) | Copy | Retag
 
 write_return = (be :: CBackend, w: str) Res<(), AllocError> {
-    be.fmt("return {w};\n")
+    be.return_to.match({
+        None      => be.fmt("return {w};\n"),
+        Ok(index) => {
+            target = be.inline_return(index);
+            be.note_inline_return(index);
+            be.fmt("{} = {w};\ngoto {};\n", target.result, target.label)
+        },
+    })
 }
 
 // Copy only the source-sized payload. The wider destination union may be

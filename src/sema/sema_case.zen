@@ -6,7 +6,7 @@ TyId, TyNamed, TyRes = sema.sema_ty
 decl_at = sema.sema_def
 Checker, Ctx = sema.sema_check
 type_from_ast = sema.sema_denote
-union_reading, union_member = sema.sema_union
+union_reading, union_member, member_of = sema.sema_union
 
 // One value a scrutinee can be. `payload` is `()` when there is none.
 Case* = {
@@ -19,15 +19,60 @@ Case* = {
     }
 }
 
-// The cases of a type, or false for one with none to enumerate: a struct
-// scrutinee is covered by `_` alone, and a structural union has no tags.
+// The cases of a type, or false when its alternatives cannot be enumerated.
+// Structural unions use member constructors just like declared unions.
 cases_of* = (c :: Checker, ty: TyId, out :: Vec<Case>) Res<bool, AllocError> {
     c.types.at(ty).match({
         Prim(p)  => c.bool_cases(p.name, out),
         Res(r)   => c.res_cases(r, out),
         Named(n) => c.named_cases(n, out),
+        Union(u) => c.structural_cases(ty, u.members, out),
         _        => Ok(false),
     })
+}
+
+// Only uniquely named members provide constructor patterns. Keep unknown or
+// otherwise unnamed alternatives conservative rather than claiming coverage.
+structural_cases = (
+    c       :: Checker,
+    ty      : TyId,
+    members : Vec<TyId>,
+    out     :: Vec<Case>
+) Res<bool, AllocError> {
+    complete ::= true;
+    members.loop((h, m) {
+        c.types.at(m).match({
+            Named(n) => c.structural_case(
+                ty,
+                m,
+                n.name.after_last('.'),
+                out
+            ).try(),
+            _        => false,
+        }).match({
+            true  => (),
+            false => { complete = false; },
+        });
+    });
+    Ok(complete);
+}
+
+structural_case = (
+    c      :: Checker,
+    ty     : TyId,
+    member : TyId,
+    name   : str,
+    out    :: Vec<Case>
+) Res<bool, AllocError> {
+    unique   = out.find_case(name).match({ Ok(_) => false, None => true });
+    resolves = c.member_of(ty, name).match({
+        Ok(found) => found.eq(member),
+        None      => false,
+    });
+    (unique && resolves).then(() {
+        out.add(Case(name: name, payload: member, has_payload: true)).try();
+    });
+    Ok(unique && resolves);
 }
 
 case_payload* = (c :: Checker, ty: TyId, name: str) Res<TyId, AllocError> {

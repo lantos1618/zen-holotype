@@ -102,6 +102,7 @@ Exe* = {
     src*: Path,
     deps*: Vec<Dep>,
 
+    backend* :: Codegen = Codegen.C,
     optimize* :: str = "speed",
     strip* :: bool = false,
 
@@ -148,8 +149,20 @@ Budget* = {
     bytes_op*: u64,
 }
 
-// Check emits nothing; CLI build requests must select a C output mode.
-Emission* = Check | CStdout | CFile(str) | CDir(str)
+// Generator choice is independent of artifact delivery and OS/arch/ABI.
+// Only implemented generators are admitted; unknown names never fall back.
+Codegen* = | C
+
+Codegen* = (name: str) Res<Codegen> {
+    name.match({ "c" => Ok(Codegen.C), _ => None })
+}
+
+Codegen.impl(StableName, {
+    stable_name = (self: @Self) str { self.match({ C => "c" }) }
+})
+
+// Check emits nothing. Other modes describe where generated artifacts go.
+Emission* = Check | Stdout | File(str) | Directory(str)
 
 Permutation* = Natural | Reverse | Rotate | Interleave
 
@@ -193,6 +206,7 @@ permutation* = (text: str) Permutation {
 BuildArgs* = {
     root*: str,
     emission* :: Emission = Emission.Check,
+    backend* :: Codegen = Codegen.C,
     entry* :: str = "",
     std_root* :: str = "",
     symbol_map* :: str = "",
@@ -205,7 +219,7 @@ BuildArgs* = {
     }
 
     writes_file* = (self: @Self) bool {
-        self.emission.match({ CFile(_) => true, _ => false })
+        self.emission.match({ File(_) => true, _ => false })
     }
 }
 
@@ -227,6 +241,7 @@ BuildFlags* = {
     std_root* :: str = "",
     symbol_map* :: str = "",
     emit_c* :: bool = false,
+    backend* :: str = "",
     ffi* :: bool = false,
     repeat* :: usize = 1,
     permute* :: str = "",
@@ -244,6 +259,7 @@ BuildFlags* = {
     }
     set_repeat* = (self :: @Self, value: usize) () { self.repeat = value; }
     set_permute* = (self :: @Self, value: str) () { self.permute = value; }
+    set_backend* = (self :: @Self, value: str) () { self.backend = value; }
     enable_emit_c* = (self :: @Self) () { self.emit_c = true; }
     enable_ffi* = (self :: @Self) () { self.ffi = true; }
 
@@ -261,6 +277,7 @@ BuildFlags* = {
             Out       => self.set_out(value),
             Entry     => self.set_entry(value),
             StdRoot   => self.set_std_root(value),
+            Backend   => self.set_backend(value),
             SymbolMap => self.set_symbol_map(value),
             Repeat    => self.set_repeat(value.repeat_count()),
             Permute   => self.set_permute(value),
@@ -271,7 +288,7 @@ BuildFlags* = {
     // Any compiler-output option selects the raw Zen-to-C interface. A build
     // command with no such option starts at build.zen instead.
     compiles_source* = (self: @Self) bool {
-        self.emit_c
+        self.emit_c || !self.backend.is_empty()
             || !self.out.is_empty()
             || !self.dir.is_empty()
             || !self.entry.is_empty()
@@ -284,10 +301,11 @@ BuildFlags* = {
     finish* = (self: @Self) Res<BuildArgs, BuildArgFault> {
         self.root.is_empty().match({
             true  => Err(BuildArgFault.MissingRoot),
-            false => self.emit_c.match({
+            false => (self.emit_c || !self.backend.is_empty()).match({
                 false => Err(BuildArgFault.MissingEmit),
                 true  => Ok(BuildArgs(
                     root: self.root,
+                    backend: self.selected_backend().try(),
                     emission: self.emission(),
                     entry: self.entry,
                     std_root: self.std_root,
@@ -300,24 +318,32 @@ BuildFlags* = {
         })
     }
 
+    selected_backend = (self: @Self) Res<Codegen, BuildArgFault> {
+        self.backend.is_empty().match({
+            true  => Ok(Codegen.C),
+            false => Codegen(self.backend).ok_or(BuildArgFault.UnavailableBackend(self.backend)),
+        })
+    }
+
     emission = (self: @Self) Emission {
         self.dir.is_empty().match({
-            false => Emission.CDir(self.dir),
+            false => Emission.Directory(self.dir),
             true  => self.out.is_empty().match({
-                true  => Emission.CStdout,
-                false => Emission.CFile(self.out),
+                true  => Emission.Stdout,
+                false => Emission.File(self.out),
             }),
         })
     }
 }
 
-BuildArgFault* = MissingRoot | MissingEmit
+BuildArgFault* = MissingRoot | MissingEmit | UnavailableBackend(str)
 
 BuildFlag* = EmitC
     | EmitDir
     | Out
     | Entry
     | StdRoot
+    | Backend
     | SymbolMap
     | Repeat
     | Permute
@@ -328,6 +354,7 @@ FLAG_EMIT_DIR*: str = "--emit-c-dir"
 FLAG_OUT*: str = "-o"
 FLAG_ENTRY*: str = "--entry"
 FLAG_STD*: str = "--std"
+FLAG_BACKEND*: str = "--backend"
 FLAG_SYMBOL_MAP*: str = "--symbol-map"
 FLAG_REPEAT*: str = "--repeat"
 FLAG_PERMUTE*: str = "--permute"
@@ -341,6 +368,7 @@ build_options* = (a: Alloc) Res<Options<BuildFlag>, AllocError> {
     declared.setting(FLAG_OUT, BuildFlag.Out).try();
     declared.setting(FLAG_ENTRY, BuildFlag.Entry).try();
     declared.setting(FLAG_STD, BuildFlag.StdRoot).try();
+    declared.setting(FLAG_BACKEND, BuildFlag.Backend).try();
     declared.setting(FLAG_SYMBOL_MAP, BuildFlag.SymbolMap).try();
     declared.setting(FLAG_REPEAT, BuildFlag.Repeat).try();
     declared.setting(FLAG_PERMUTE, BuildFlag.Permute).try();

@@ -2,7 +2,7 @@
 // keyed by the declaration the impl targets; receiver-site lookup remains in
 // `gen_c_member.zen`. Overload selection here narrows candidates by arity.
 
-Decl, Struct, Enum, Member, Function, Impl, Field, ExprId = std.ast
+Decl, Struct, Enum, Member, Function, Impl, ExprId = std.ast
 AllocError = std.mem
 Vec = std.collections
 str = std.text
@@ -117,35 +117,6 @@ member_fn = (m: Member) Res<Function> {
         Function(f) => Ok(f),
         _           => None,
     })
-}
-
-// The expression an impl supplies for a computed field. A range's
-// `start`/`end` and a bound's computed member are the same question
-// asked of the same member list.
-impl_field* = (be :: CBackend, im: Impl, name: str)
-              Res<Res<ExprId>, AllocError> {
-    found ::= be.alloc.Vec<ExprId>();
-    im.members.loop((h, m) { keep_field_value(m, name, found).try() });
-    Ok(found.get(0));
-}
-
-keep_field_value = (m: Member, name: str, out :: Vec<ExprId>)
-                   Res<(), AllocError> {
-    m.named(name).match({
-        false => Ok(()),
-        true  => add_field_value(m, out),
-    })
-}
-
-add_field_value = (m: Member, out :: Vec<ExprId>) Res<(), AllocError> {
-    m.kind.match({
-        Field(fl) => add_written_value(fl, out),
-        _         => Ok(()),
-    })
-}
-
-add_written_value = (fl: Field, out :: Vec<ExprId>) Res<(), AllocError> {
-    fl.value.match({ Ok(e) => out.add(e), None => Ok(()) })
 }
 
 // Every member an impl on `decl` supplies under `name`, with a body.
@@ -323,7 +294,7 @@ impl_alias_at = (be :: CBackend, i: ImplId, name: str, out :: Vec<str>)
     be.check.world.impl_at(be.tree, i).match({
         None   => Ok(()),
         Ok(im) => {
-            be.impl_field(im, name).try().match({
+            im.field_value(name).match({
                 None  => Ok(()),
                 Ok(x) => be.add_alias(x, out),
             })

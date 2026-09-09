@@ -27,7 +27,7 @@ src/std/...            // the stdlib specified below. ~34 modules.
 
 # How the compiler gets built
 
-The bootstrap was a throwaway: **Python + a tree-sitter grammar → the real compiler → `gen_c` → the generated C ships as stage 0.** It is deleted; a user needs only a C compiler, while the tree-sitter grammar remains for editors and LSP.
+The bootstrap was a throwaway: **Python + a tree-sitter grammar → the real compiler → `gen_c` → the generated C ships as stage 0.** It is deleted; `make bootstrap` needs only a C compiler, while the tree-sitter grammar remains for editors and LSP. `make build` adds a Python 3 orchestration script to reuse unchanged artifacts; it does not implement any language rules.
 
 **The grammar is written first, not extracted later.** It is the stage-0 artifact anyway, and writing the rules rather than more examples is what surfaces the ambiguities — the first one already found is that `Alias = Shape` is indistinguishable from a one-variant enum unless the grammar says which.
 
@@ -543,15 +543,30 @@ The distinction from a field: a field declares storage per value, a constant dec
 
 # Overloading
 
-Resolution is on **declared parameter types and arity**, and a closure's type is its full signature. There is no carve-out: `loop` overloads on `(h: LoopHandle, value: T)` versus `(h: LoopHandle, index: usize, value: T)` for exactly the reason `toString` overloads on a buffer versus an allocator.
+Resolution is on **declared parameter types and arity**, and a closure's type is its full signature. There is no carve-out: `loop` overloads on `(value: T)`, `(h: LoopHandle, value: T)`, and `(h: LoopHandle, index: usize, value: T)` for exactly the reason `toString` overloads on a buffer versus an allocator.
 
 **Parameter names are documentation, not identity.** `(a: i32, b: i32) i32` and `(x: i32, y: i32) i32` are the same type, and overload resolution never sees names. Two candidates that differ only in parameter names are the same signature, and declaring both is an error at the declaration site — named for both declarations, when the generic is instantiated.
 
 Function types must name their parameters: `(i32, i32) i32` says nothing about which `i32` is which. `() ()` has nothing to name and stays as it is.
 
-One consequence worth stating: a generic parameter swallows a concrete one, so `fold`'s `(init: A, body: ..)` and a hypothetical `(alloc: Alloc, body: ..)` cannot be overloads. The allocating variant gets its own name, `map` — which is honest anyway, since it is the one that allocates.
+One consequence worth stating: an unconstrained generic parameter swallows a concrete one, so `fold`'s `(init: A, body: ..)` and a hypothetical `(alloc: Alloc, body: ..)` cannot be overloads. The allocating variant gets its own name, `map` — which is honest anyway, since it is the one that allocates.
+
+A generic bound can prove that a structurally matching concrete parameter is
+excluded. For example, `R: Range<T>` excludes a concrete boolean condition when
+the substituted bound is known. An unresolved type or bound is not proof of
+disjointness. The current check is conservative for optional tails and does
+not attempt general logical reasoning between generic constraints.
 
 ---
+
+`str.split_once` accepts a byte or string separator and returns borrowed
+`before`/`after` views, or `None` when the separator is absent. `str.lines()`
+returns a borrowed cursor: LF and CRLF terminate lines, interior empty lines
+remain, and empty input or a final terminator adds no extra line. A lone CR
+remains data. `next()` advances the cursor; its three `loop` callback forms
+start from the beginning without advancing that cursor. These operations do
+not allocate or extend the input's lifetime. `Lines` currently supports direct
+`next`/`loop` traversal, not the generic indexed `Range` consumer APIs.
 
 ```groovy // just using this for highlighting
 // std.text.string
@@ -661,6 +676,12 @@ Res*<T, E> = Ok(T) | Err(E)
 // anything else — Ok(v) when true, None when false.
 // a plain ufcs function: first param is bool, so it calls as a method
 then* = <T>(b: bool, f: () T) Res<T>
+
+// boolean preconditions: absence or a caller-chosen error
+ensure* = (b: bool) Res<()>
+ensure* = <E>(b: bool, reason: E) Res<(), E>
+// ready.ensure().try() returns None from an optional-result function.
+// ready.ensure(Error.NotReady).try() propagates the named failure.
 
 // RAII: the compiler calls drop when a binding leaves scope,
 // reverse declaration order, exactly once. exactly-once is why
@@ -1032,8 +1053,8 @@ Budget* = {
 // compiles to a plain C for-loop. the one variant that can
 // allocate is map, and it is a different NAME rather than an
 // overload — a generic `init: A` would swallow `alloc: Alloc`,
-// so they could not be told apart. the rule holds std-wide:
-// no Alloc parameter, no allocation
+// so they could not be told apart. the traversal itself needs
+// no allocation; a callback may use its own allocation capability
 
 // while true
 loop*<T> = (body: (h: LoopHandle) ()) Res<T>
@@ -1045,22 +1066,27 @@ loop*<T> = (body: (h: LoopHandle, index: usize) ()) Res<T>
 loop*<T> = (cond: () bool, body: (h: LoopHandle) ()) Res<T>
 loop*<T> = (cond: bool, body: (h: LoopHandle) ()) Res<T>
 
-// ranged / collection iteration, with and without index
-loop*<T> = (range: Range, body: (h: LoopHandle, index: usize, value: T) ()) Res<T>
-loop*<T> = (range: Range, body: (h: LoopHandle, value: T) ()) Res<T>
+// ranged / collection iteration: value, control, or control and index
+loop*<R: Range<T>, T> = (range: R, body: (value: T) ()) Res<T>
+loop*<R: Range<T>, T> = (range: R, body: (h: LoopHandle, value: T) ()) Res<T>
+loop*<R: Range<T>, T> = (range: R, body: (h: LoopHandle, index: usize, value: T) ()) Res<T>
 
-// fold: init seeds acc, acc threads through iterations,
-// the loop evaluates to the final acc (or h.break(value))
-loop*<T, A> = (range: Range, init: A, body: (h: LoopHandle, index: usize, value: T, acc: A) A) Res<A>
+// fold: init seeds acc; natural completion returns Ok(acc).
+// at(None) exhausts a supplied range. h.break() returns None;
+// h.break(value) returns that value instead of the accumulator.
+loop*<R: Range<T>, T, A> = (range: R, init: A, body: (value: T, acc: A) A) Res<A>
+loop*<R: Range<T>, T, A> = (range: R, init: A, body: (h: LoopHandle, value: T, acc: A) A) Res<A>
+loop*<R: Range<T>, T, A> = (range: R, init: A, body: (h: LoopHandle, index: usize, value: T, acc: A) A) Res<A>
 
-// map: body returns a value per element, collected into a Vec.
-// allocation is explicit as always, and so is the name
-map*<T, U> = (range: Range, alloc: Alloc, body: (h: LoopHandle, index: usize, value: T) U) Res<Vec<U>>
+// map: collect one value per element in caller-chosen storage.
+// The handle forms can skip an element or stop with the values made so far.
+map*<R: Range<T>, T, U> = (range: R, alloc: Alloc, body: (value: T) U) Res<Vec<U>, AllocError>
+map*<R: Range<T>, T, U> = (range: R, alloc: Alloc, body: (h: LoopHandle, value: T) U) Res<Vec<U>, AllocError>
+map*<R: Range<T>, T, U> = (range: R, alloc: Alloc, body: (h: LoopHandle, index: usize, value: T) U) Res<Vec<U>, AllocError>
 
-// the loop words that delete guards: a `.then` inside a loop is
-// usually one of these
-find*<T> = (range: Range, pred: (value: T) bool) Res<T>
-filter*<T> = (range: Range, alloc: Alloc, pred: (value: T) bool) Res<Vec<T>>
+// find borrows; filter collects accepted elements in order.
+find*<R: Range<T>, T> = (range: R, pred: (value: T) bool) Res<T>
+filter*<R: Range<T>, T> = (range: R, alloc: Alloc, pred: (value: T) bool) Res<Vec<T>, AllocError>
 
 // key/value containers
 loop*<K, V> = (map: Map<K, V>, body: (h: LoopHandle, key: K, value: V) ()) Res<()>
@@ -1071,6 +1097,17 @@ loop*<K, V> = (map: Map<K, V>, body: (h: LoopHandle, key: K, value: V) ()) Res<(
 //   h.break()       break, loop evaluates to None
 //   h.break(value)  break with value, loop is an expression
 ```
+
+The collecting APIs return typed allocation failures. Older callers that
+matched `None` from `map` or `filter` must now handle `Err(error)`; no matches
+still produce `Ok` containing an empty vector. A `.try()` written in a callback
+returns through the function where that callback was written. The helper's own
+allocation `.try()` returns its allocation error to the helper's caller.
+
+Written parameter and return annotations on a nongeneric callback constrain
+generic inference before ordinary argument inference. For example, `acc: usize`
+can contextualize a literal fold seed. Explicit type arguments retain priority,
+and an incompatible already-typed argument is still rejected.
 
 ```groovy
 // ~/zen/src/std/actor.zen

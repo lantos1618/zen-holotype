@@ -2,7 +2,7 @@
 // partial name replaced by `DUMMY`, so the base expression has a type; the
 // member answer is cached per patched buffer.
 
-str, String = std.text
+str, String, dup = std.text
 Vec, Map, Ordered = std.collections
 Alloc, AllocError, Arena = std.mem
 Range = std.core
@@ -15,22 +15,31 @@ Found, members_of, first_hidden = sema.sema_member
 Case, cases_of = sema.sema_case
 def_type = sema.sema_type
 ImplId = sema.sema_id
-to_pos, run_of = lsp.lsp_pos
+source_position, run_of = lsp.lsp_pos
 check_standalone = lsp.lsp_query
 check_build = zen.zen_build
 obj, arr, Nest, written, to_json = std.json
-own_str = lsp.lsp_reply
 KEYWORD_COUNT, keyword_at = std.lex
+
+// Protocol values belong to the kind; convert only when writing JSON.
+CompletionKind* = | Method = 2
+    | Function = 3
+    | Field = 5
+    | Class = 7       // LSP has no type-alias completion kind.
+    | Enum = 13
+    | Keyword = 14
+    | EnumMember = 20
+    | Constant = 21
+    | Struct = 22
 
 Item* = {
     label*: str,
-    kind*: usize,
+    kind*: CompletionKind,
 
     write = (self: @Self, a: Alloc, offers :: Nest, out :: String)
             Res<(), AllocError> {
         offers.next(out).try();
-        encoded ::= CompletionItem(label: self.label, kind: self.kind)
-            .to_json(a).try();
+        encoded ::= CompletionItem(label: self.label, kind: self.kind.discriminant()).to_json(a).try();
         out.add(encoded.view())
     }
 }
@@ -38,16 +47,6 @@ Item* = {
 Item.impl(Ordered, {
     before = (self: @Self, other: @Self) bool { self.label.before(other.label) }
 })
-
-METHOD: usize = 2
-FUNCTION: usize = 3
-FIELD: usize = 5
-CLASS: usize = 7        // LSP has no type-alias completion kind.
-ENUM: usize = 13
-KEYWORD: usize = 14
-ENUM_MEMBER: usize = 20
-CONSTANT: usize = 21
-STRUCT: usize = 22
 
 DUMMY: str = "zen_wip"
 
@@ -138,14 +137,14 @@ MemberCache* = {
         kept_items  ::= fresh_arena.Vec<Item>();
         found.loop((h, item) {
             kept_items.add(Item(
-                label: own_str(fresh_arena, item.label).try(),
+                label: item.label.dup(fresh_arena).try(),
                 kind: item.kind
             )).try();
         });
         fresh = MemberAnswer(
-            workspace: own_str(fresh_arena, workspace).try(),
-            path: own_str(fresh_arena, path).try(),
-            patched: own_str(fresh_arena, patched).try(),
+            workspace: workspace.dup(fresh_arena).try(),
+            path: path.dup(fresh_arena).try(),
+            patched: patched.dup(fresh_arena).try(),
             items: kept_items
         );
 
@@ -224,7 +223,7 @@ items_from = (
 trigger_at = (a: Alloc, text: str, line: usize, character: usize)
              Res<Trigger, AllocError> {
     run    = run_of(text, line);
-    pos    = to_pos(text, line, character);
+    pos    = source_position(text, line, character);
     offset = run.start + pos.col - 1;
     from ::= offset;
     loop(() { from > 0 && text.index(from - 1).is_ident_cont() }, (h) {
@@ -260,9 +259,9 @@ no_access = () Access {
 member_names = (ms: Vec<Member>, cands :: Vec<Item>) Res<(), AllocError> {
     ms.loop((h, m) {
         kind = m.kind.match({
-            Field(_)    => FIELD,
-            Const(_)    => CONSTANT,
-            Function(_) => METHOD,
+            Field(_)    => CompletionKind.Field,
+            Const(_)    => CompletionKind.Constant,
+            Function(_) => CompletionKind.Method,
         });
         cands.add(Item(label: m.name().text, kind: kind)).try();
     });
@@ -355,7 +354,9 @@ Completion = {
         offers ::= self.offers(prefix, out).try();
         cases  ::= self.a.Vec<Case>();
         self.c.cases_of(ty, cases).try();
-        cases.loop((h, cs) { offers.offer(cs.name, ENUM_MEMBER).try(); });
+        cases.loop((h, cs) {
+            offers.offer(cs.name, CompletionKind.EnumMember).try();
+        });
         cands ::= self.a.Vec<Item>();
         self.collect_members(ty, cands).try();
         cands.loop((h, cand) { offers.offer_member(ty, cand).try(); });
@@ -491,7 +492,10 @@ Offers = {
     keyword_items = (self :: @Self) Res<(), AllocError> {
         Range(0, KEYWORD_COUNT).loop((h, i) {
             keyword_at(i).match({
-                Ok(keyword) => self.offer(keyword.text, KEYWORD).try(),
+                Ok(keyword) => self.offer(
+                    keyword.text,
+                    CompletionKind.Keyword
+                ).try(),
                 None        => (),
             });
         });
@@ -526,7 +530,7 @@ Offers = {
         })
     }
 
-    offer = (self :: @Self, label: str, kind: usize)
+    offer = (self :: @Self, label: str, kind: CompletionKind)
             Res<(), AllocError> {
         (label.starts_with(self.prefix) && !self.known(label)).match({
             true  => self.remember(Item(label: label, kind: kind)),
@@ -549,19 +553,19 @@ Offers = {
     }
 }
 
-global_kind = (k: DefKind) usize {
+global_kind = (k: DefKind) CompletionKind {
     k.match({
-        StructDef   => STRUCT,
-        EnumDef     => ENUM,
-        AliasDef    => CLASS,
-        FunctionDef => FUNCTION,
-        ConstDef    => CONSTANT,
+        StructDef   => CompletionKind.Struct,
+        EnumDef     => CompletionKind.Enum,
+        AliasDef    => CompletionKind.Class,
+        FunctionDef => CompletionKind.Function,
+        ConstDef    => CompletionKind.Constant,
     })
 }
 
 CompletionItem = {
     label: str,
-    kind: usize,
+    kind: u64,
 }
 
 write_items* = (a: Alloc, items: Vec<Item>, out :: String)

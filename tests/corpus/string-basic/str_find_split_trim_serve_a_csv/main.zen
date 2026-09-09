@@ -15,6 +15,8 @@
 
 FsError = std.env
 
+Error = FsError | AllocError
+
 digit_val = (b: u8) i64 { b.to_i64() - 48 }
 
 num_at = (s: str, at: usize) i64 {
@@ -29,7 +31,18 @@ num_at = (s: str, at: usize) i64 {
     acc;
 }
 
-main = (env: Env) Res<i32, FsError> {
+check_split = (env: Env, input: str, separator: str) {
+        input.split_once(separator).match({
+            Ok(parts) => env.out.println(
+                "[{}] [{}]",
+                parts.before,
+                parts.after
+            ),
+            None      => env.out.println("missing"),
+        });
+}
+
+main = (env: Env) Res<i32, Error> {
     alloc ::= env.mem.alloc();
     // the file arrives through env.fs -- written here, read back whole,
     // the same door any real CSV comes through
@@ -46,14 +59,14 @@ main = (env: Env) Res<i32, FsError> {
         line.trim().match({
             Ok(row) => {
                 rows = rows + 1;
-                row.find(',').match({
-                    Ok(c) => {
-                        row.slice(c + 1, row.len).trim_start().match({
+                row.split_once(',').match({
+                    Ok(parts) => {
+                        parts.after.trim_start().match({
                             Ok(field) => { total = total + num_at(field, 0); },
                             None      => {},
                         });
                     },
-                    None  => {},
+                    None      => {},
                 });
             },
             None    => {},
@@ -62,5 +75,23 @@ main = (env: Env) Res<i32, FsError> {
 
     println("total = {} (want 15)", total);
     println("rows = {} (want 4)", rows);
+    check_split(env, "key::value::tail", "::");
+    check_split(env, "::value", "::");
+    check_split(env, "key::", "::");
+    check_split(env, "key", "::");
+    check_split(env, "", "::");
+    check_split(env, "key", "");
+    check_split(env, "", "");
+
+    owned  = alloc.String("key::value::tail").try();
+    source = owned.view();
+    source.split_once("::").match({
+        Ok(parts) => println(
+            "borrowed {} {}",
+            parts.before.ptr().same(source.ptr()),
+            parts.after.ptr().same(source.ptr().offset(5))
+        ),
+        None      => println("missing borrowed split"),
+    });
     Ok(0);
 }

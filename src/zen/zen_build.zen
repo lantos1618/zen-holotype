@@ -25,7 +25,7 @@ Checker, check_all = sema.sema
 PRELUDE = sema.sema
 check_module_graph = sema.sema
 Def = sema.sema
-Emit, CBackend, emit_program = gen.gen
+Generation, Layout = gen.gen
 
 BuildArgs, Emission, Permutation = std.build
 
@@ -35,7 +35,7 @@ root_for, std_root_for = zen.zen_path
 ENTRY, entry_of = zen.zen_path
 Unit = zen.zen_path
 
-emit_units, write_symbol_map = zen.zen_write
+Publisher = zen.zen_write
 
 // One build: the phase inputs and the fault tally that becomes the exit code.
 Build* = {
@@ -482,77 +482,39 @@ Build* = {
     // emit
     // -----------------------------------------------------------------
 
-    // Called only after all frontend and graph checks succeed.
+    // Called only after all frontend and graph checks succeed. Generation
+    // owns backend state; Publisher owns the requested destinations.
     emit = (self :: @Self, c :: Checker, job: BuildArgs) Res<(), AllocError> {
-        job.emission.match({
-            Check     => Ok(()),
-            CStdout   => self.emit_one(c, job),
-            CFile(_)  => self.emit_one(c, job),
-            CDir(dir) => self.emit_many(c, job, dir),
-        })
-    }
-
-    emit_one = (self :: @Self, c :: Checker, job: BuildArgs) Res<(), AllocError> {
-        be ::= self.alloc.CBackend(self.tree, c).try();
-        (self.ffi).then(() { be.enable_ffi(); });
-        out ::= self.alloc.Emit().try();
-        emit_program(be, 0, out).try();
-        report ::= self.alloc.String("").try();
-        be.render_diags(report).try();
-        n           = be.diag_count();
-        self.faults = self.faults + n;
-        (n > 0).then(() { println("{}", report.view()); });
-        (n == 0).then(() {
-            before = self.faults;
-            self.deliver(job, out).try();
-            (self.faults == before).then(() {
-                self.faults = self.faults + write_symbol_map(
-                    self.alloc,
-                    self.env,
-                    be,
-                    job.symbol_map
-                ).try();
-            });
+        job.emits().then(() {
+            generation = Generation(
+                alloc: self.alloc,
+                mem: self.env.mem,
+                tree: self.tree,
+                check: c,
+                backend: job.backend,
+                entry: 0,
+                layout: job.emission.match({
+                    Directory(_) => Layout.Modules,
+                    _            => Layout.Single,
+                }),
+                ffi: self.ffi,
+                symbols: !job.symbol_map.is_empty()
+            );
+            publisher  = Publisher(
+                env: self.env,
+                emission: job.emission,
+                symbol_map: job.symbol_map
+            );
+            report ::= self.alloc.String().try();
+            faults      = generation.emit(report, (artifact) {
+                publisher.write(artifact)
+            }).try();
+            self.faults = self.faults + faults;
+            (!report.view().is_empty()).then(
+                () { println("{}", report.view()); }
+            );
         });
-        Ok(());
-    }
-
-    // zen_write owns per-module filenames and reports write faults here.
-    emit_many = (self :: @Self, c :: Checker, job: BuildArgs, dir: str)
-                Res<(), AllocError> {
-        n           = emit_units(
-            self.alloc,
-            self.env,
-            self.tree,
-            c,
-            dir,
-            self.ffi,
-            job.symbol_map
-        ).try();
-        self.faults = self.faults + n;
-        Ok(());
-    }
-
-    // A write failure is a build fault; stdout has no filesystem failure.
-    deliver = (self :: @Self, job: BuildArgs, out: Emit) Res<(), AllocError> {
-        job.emission.match({
-            CStdout     => { println("{}", out.view()); Ok(()) },
-            CFile(path) => self.write_out(path, out),
-            _           => Ok(()),
-        })
-    }
-
-    write_out = (self :: @Self, path: str, out: Emit) Res<(), AllocError> {
-        self.env.fs.write(path, out.view()).match({
-            Ok(_)  => Ok(()),
-            Err(e) => self.write_failed(path, e),
-        })
-    }
-
-    write_failed = (self :: @Self, path: str, e: FsError) Res<(), AllocError> {
-        self.faults = self.faults + 1;
-        println("-o {}: {}", path, fs_message(e));
-        Ok(());
+        Ok(())
     }
 
     // -----------------------------------------------------------------

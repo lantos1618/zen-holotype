@@ -6,7 +6,7 @@ str, String = std.text
 Vec = std.collections
 Range = std.core
 
-INDENT* : usize = 4
+INDENT: str = "    "
 
 Emit* = {
     text :: String,
@@ -33,27 +33,21 @@ Emit* = {
 
     // `s` holds no `\n`. Empty writes nothing, so a blank line stays blank.
     run = (self :: @Self, s: str) Res<(), AllocError> {
-        (s.len == 0).match({
-            true  => Ok(()),
-            false => self.open_run(s),
-        })
-    }
-
-    open_run = (self :: @Self, s: str) Res<(), AllocError> {
-        self.open_line().try();
-        self.text.add(s)
+        (!s.is_empty()).then(() {
+            self.open_line().try();
+            self.text.add(s).try();
+        });
+        Ok(())
     }
 
     byte* = (self :: @Self, b: u8) Res<(), AllocError> {
         (b == '\n').match({
             true  => self.line(),
-            false => self.open_byte(b),
+            false => {
+                self.open_line().try();
+                self.text.add(b)
+            },
         })
-    }
-
-    open_byte = (self :: @Self, b: u8) Res<(), AllocError> {
-        self.open_line().try();
-        self.text.add(b)
     }
 
     number* = (self :: @Self, v: usize) Res<(), AllocError> {
@@ -74,14 +68,11 @@ Emit* = {
     }
 
     open_line = (self :: @Self) Res<(), AllocError> {
-        self.fresh.then(() { self.write_indent().try() });
-        self.fresh = false;
-        Ok(());
-    }
-
-    write_indent = (self :: @Self) Res<(), AllocError> {
-        Range(0, self.depth * INDENT).loop((h, i) {
-            self.text.add(' ').try();
+        self.fresh.then(() {
+            Range(0, self.depth).loop((h, i) {
+                self.text.add(INDENT).try();
+            });
+            self.fresh = false;
         });
         Ok(());
     }
@@ -110,78 +101,65 @@ Emit* = (a: Alloc) Res<Emit, AllocError> {
     Ok(Emit(text: a.String().try(), depth: 0, fresh: true));
 }
 
-// The positions of `keys` in lexicographic byte order: a permutation, so
-// the caller keeps whatever the keys name. Stable, so equal keys keep
-// input order.
+// Stable lexicographic permutation: values stay in their original vectors.
 order* = (a: Alloc, keys: Vec<String>) Res<Vec<usize>, AllocError> {
-    out ::= a.Vec<usize>();
-    tmp ::= a.Vec<usize>();
-    Range(0, keys.len).loop((h, i) { out.add(i).try() });
-    width    ::= 1;
-    from_out ::= true;
-    loop(() { width < keys.len }, (h) {
-        from_out.match({
-            true  => out.merge_into(tmp, keys, width),
-            false => tmp.merge_into(out, keys, width),
-        }).try();
-        from_out = !from_out;
-        width    = width * 2;
-    });
-    Ok(from_out.match({ true => out, false => tmp }))
+    sorting ::= KeyOrder(keys: keys, out: a.Vec<usize>(), tmp: a.Vec<usize>());
+    sorting.sorted()
 }
 
-// One pass: every `width`-long sorted run of `src`, merged pairwise into `dst`.
-merge_into = (
-    src   : Vec<usize>,
-    dst   :: Vec<usize>,
-    keys  : Vec<String>,
-    width : usize
-)
-             Res<(), AllocError> {
-    dst.clear();
-    start ::= 0;
-    loop(() { start < src.len }, (h) {
-        mid = smaller(start + width, src.len);
-        end = smaller(mid + width, src.len);
-        src.merge_run(dst, keys, start, mid, end).try();
-        start = end;
-    });
-    Ok(())
+KeyOrder = {
+    keys: Vec<String>,
+    out :: Vec<usize>,
+    tmp :: Vec<usize>,
+
+    sorted = (self :: @Self) Res<Vec<usize>, AllocError> {
+        Range(0, self.keys.len).loop((h, i) { self.out.add(i).try() });
+        width: usize ::= 1;
+        from_out     ::= true;
+        loop(() { width < self.keys.len }, (h) {
+            from_out.match({
+                true  => self.merge_into(self.out, self.tmp, width),
+                false => self.merge_into(self.tmp, self.out, width),
+            }).try();
+            from_out = !from_out;
+            width    = width * 2;
+        });
+        Ok(from_out.match({ true => self.out, false => self.tmp }))
+    }
+
+    // Merge adjacent width-long runs. Strict comparison preserves equal keys.
+    merge_into = (self: @Self, src: Vec<usize>, dst :: Vec<usize>, width: usize)
+                 Res<(), AllocError> {
+        dst.clear();
+        start: usize ::= 0;
+        loop(() { start < src.len }, (h) {
+            mid = smaller(start + width, src.len);
+            end = smaller(mid + width, src.len);
+            left  ::= start;
+            right ::= mid;
+            Range(start, end).loop((h, i) {
+                from_right = (left == mid) || ((right < end)
+                    && self.key(src, right).before(self.key(src, left)));
+                from       = from_right.match({ true => right, false => left });
+                dst.add(src.get(from).value_or(0)).try();
+                from_right.match({
+                    true  => { right = right + 1; },
+                    false => { left = left + 1; },
+                });
+            });
+            start = end;
+        });
+        Ok(())
+    }
+
+    key = (self: @Self, src: Vec<usize>, i: usize) str {
+        self.keys.get(src.get(i).value_or(0)).match({
+            Ok(s) => s.view(),
+            None  => "",
+        })
+    }
 }
 
 smaller = (a: usize, b: usize) usize {
     (a < b).match({ true => a, false => b })
-}
-
-merge_run = (
-    src   : Vec<usize>,
-    dst   :: Vec<usize>,
-    keys  : Vec<String>,
-    start : usize,
-    mid   : usize,
-    end   : usize
-) Res<(), AllocError> {
-    left  ::= start;
-    right ::= mid;
-    Range(start, end).loop((h, i) {
-        right_wins = (right < end) && src.earlier(keys, right, left);
-        from_right = (left == mid) || right_wins;
-        from       = from_right.match({ true => right, false => left });
-        dst.add(src.get(from).value_or(0)).try();
-        from_right.match({
-            true  => { right = right + 1; },
-            false => { left = left + 1; },
-        });
-    });
-    Ok(())
-}
-
-// The key at `src[i]` is strictly before the key at `src[j]`; strict, so
-// equal keys never swap.
-earlier = (src: Vec<usize>, keys: Vec<String>, i: usize, j: usize) bool {
-    src.key(keys, i).before(src.key(keys, j))
-}
-
-key = (src: Vec<usize>, keys: Vec<String>, i: usize) str {
-    keys.get(src.get(i).value_or(0)).match({ Ok(s) => s.view(), None => "" })
 }

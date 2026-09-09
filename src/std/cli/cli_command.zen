@@ -495,15 +495,7 @@ Command*<T> = {
     }
 
     command_named = (self: @Self, name: str) Res<Command<T>> {
-        Range(0, self.commands.len).find((i) {
-            self.commands.get(i).match({
-                Ok(child) => child.name.eq(name),
-                None      => false,
-            })
-        }).match({
-            Ok(i) => self.commands.get(i),
-            None  => None,
-        })
+        self.commands.find((child) { child.name.eq(name) })
     }
 
     // Validate the grammar itself before looking at argv. Ambiguous or
@@ -511,28 +503,20 @@ Command*<T> = {
     // the same structured diagnostic channel so terminal applications never
     // need to trap to explain them.
     declaration_error* = (self: @Self) Res<Diagnostic> {
-        local = self.local_declaration_error();
-        local.match({
-            Ok(diagnostic) => Ok(diagnostic),
-            None           => {
-                found: Res<Diagnostic> = None;
-                Range(0, self.commands.len).loop((h, i) {
-                    found.match({
-                        Ok(_) => h.break(),
-                        None  => self.commands.get(i).match({
-                            None      => (),
-                            Ok(child) => child.declaration_error().match({
-                                Ok(diagnostic) => { found = Ok(
-                                    diagnostic
-                                ); h.break(); },
-                                None           => (),
-                            }),
-                        }),
-                    });
+        found: Res<Diagnostic> = loop((done) {
+            self.local_declaration_error().match({
+                Ok(diagnostic) => done.break(diagnostic),
+                None           => (),
+            });
+            self.commands.loop((h, child) {
+                child.declaration_error().match({
+                    Ok(diagnostic) => done.break(diagnostic),
+                    None           => (),
                 });
-                found
-            },
-        })
+            });
+            done.break();
+        });
+        found
     }
 
     local_declaration_error = (self: @Self) Res<Diagnostic> {

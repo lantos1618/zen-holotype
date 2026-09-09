@@ -3,7 +3,7 @@
 
 Ptr = std.mem.mem
 Eq, Hash, Hasher = std.core.core
-Range, loop = std.core.core
+Range, loop, LoopHandle = std.core.core
 
 str* = {
     data: Ptr<u8>,
@@ -171,7 +171,37 @@ str* = {
             .match({ Ok(_) => false, None => true })
     }
 
+    // First newline in the bounded byte run, or its end.
+    newline_in* = (self: @Self, from: usize, stop: usize) usize {
+        self.slice(from, stop).find('\n').match({
+            Ok(i) => from + i,
+            None  => stop,
+        })
+    }
+
+    // Borrow lines without their LF or CRLF terminators.
+    lines* = (self: @Self) Lines { Lines(parts: self.split('\n')) }
+
     split* = (self: @Self, sep: u8) Split { Split(bytes: self, sep: sep) }
+
+    // Borrow both sides of the first separator. None means it was absent;
+    // a leading or trailing separator preserves the empty side.
+    split_once* = (self: @Self, sep: u8) Res<SplitPair> {
+        at = self.find(sep).try();
+        Ok(SplitPair(
+            before: self.slice(0, at),
+            after: self.slice(at + 1, self.len),
+        ))
+    }
+
+    // An empty separator splits at zero: empty before, the full input after.
+    split_once* = (self: @Self, sep: str) Res<SplitPair> {
+        at = self.find(sep).try();
+        Ok(SplitPair(
+            before: self.slice(0, at),
+            after: self.slice(at + sep.len, self.len),
+        ))
+    }
 
     // Lexicographic byte order; the shorter string wins a prefix tie. This is
     // not language-aware collation.
@@ -193,6 +223,12 @@ str* = {
 // Borrows `len` bytes from `data`; the owner must keep them alive and stable.
 str_at* = (data: Ptr<u8>, len: usize) str { str(data: data, len: len) }
 
+// Two views into the original input; neither extends its owner's lifetime.
+SplitPair* = {
+    before*: str,
+    after*: str,
+}
+
 // Iterates borrowed byte slices without allocating. A trailing separator
 // yields a final empty piece; adjacent separators preserve empty pieces.
 Split* = {
@@ -201,6 +237,39 @@ Split* = {
 
     from :: usize = 0,
     done :: bool = false,
+
+    // Walk the full input in O(total bytes), without changing this cursor.
+    // Like Range.loop, completion is None and h.break(value) returns Ok(value).
+    loop* = (self: @Self, body: (h: LoopHandle, value: str) ()) Res<str> {
+        it ::= Split(bytes: self.bytes, sep: self.sep);
+        answer: Res<str> = loop((h) {
+            it.next().match({
+                None      => h.break(),
+                Ok(value) => body(h, value),
+            });
+        });
+        answer;
+    }
+
+    loop* = (self: @Self, body: (
+        h     : LoopHandle,
+        index : usize,
+        value : str
+    ) ()) Res<str> {
+        it ::= Split(bytes: self.bytes, sep: self.sep);
+        answer: Res<str> = loop((h, index) {
+            it.next().match({
+                None      => h.break(),
+                Ok(value) => body(h, index, value),
+            });
+        });
+        answer;
+    }
+
+    // Visit every piece without a handle; completion returns None.
+    loop* = (self: @Self, body: (value: str) ()) Res<str> {
+        self.loop((h, value) { body(value) })
+    }
 
     // Sequential iteration is O(total bytes); `at(k)` rescans for random access.
     next* = (self :: @Self) Res<str> {
@@ -247,6 +316,57 @@ Split.impl(Range<str>, {
         answer;
     }
 })
+
+// Borrowed LF/CRLF-delimited lines. Interior empty lines are retained;
+// empty input and a final line terminator add no extra line. A lone CR is data.
+Lines* = {
+    parts :: Split,
+
+    next* = (self :: @Self) Res<str> {
+        piece = self.parts.next().try();
+        self.parts.done.match({
+            true  => piece.is_empty().match({
+                true  => None,
+                false => Ok(piece),
+            }),
+            false => Ok(piece.ends_with("\r").match({
+                true  => piece.slice(0, piece.len - 1),
+                false => piece,
+            })),
+        })
+    }
+
+    // Each loop starts at the beginning and leaves this cursor unchanged.
+    loop* = (self: @Self, body: (h: LoopHandle, value: str) ()) Res<str> {
+        it ::= self.parts.bytes.lines();
+        answer: Res<str> = loop((h) {
+            it.next().match({
+                None      => h.break(),
+                Ok(value) => body(h, value),
+            });
+        });
+        answer;
+    }
+
+    loop* = (self: @Self, body: (
+        h     : LoopHandle,
+        index : usize,
+        value : str
+    ) ()) Res<str> {
+        it ::= self.parts.bytes.lines();
+        answer: Res<str> = loop((h, index) {
+            it.next().match({
+                None      => h.break(),
+                Ok(value) => body(h, index, value),
+            });
+        });
+        answer;
+    }
+
+    loop* = (self: @Self, body: (value: str) ()) Res<str> {
+        self.loop((h, value) { body(value) })
+    }
+}
 
 // FNV basis and prime, with wrapping addition in place of xor.
 STR_HASH_SEED: u64 = 14695981039346656037

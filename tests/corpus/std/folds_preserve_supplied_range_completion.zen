@@ -1,0 +1,75 @@
+// Supplied ranges fold their values, preserve a distinct accumulator type,
+// and treat at(None) as exhaustion rather than an explicit break.
+Window = { values: Vec<str>, start: usize }
+Window.impl(Range<str>, {
+    start: self.start,
+    end: self.start + self.values.len + 2,
+    at = (self: @Self, index: usize) Res<str> {
+        Ok(self.values.get(index - self.start).try())
+    }
+})
+
+source = (values: Vec<str>, calls :: usize) Window {
+    calls = calls + 1;
+    Window(values: values, start: 10)
+}
+
+stopped = (window: Window, seen :: usize) Res<usize> {
+    @scope.defer(() { println("fold cleanup"); });
+    total = window.loop(0, (h, index, value, acc: usize) {
+        (index < 2).ensure().try();
+        seen = seen + 1;
+        acc + value.len
+    }).try();
+    Ok(total)
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    arena  ::= env.mem.alloc();
+    values ::= arena.Vec<str>();
+    values.add("ab").try();
+    values.add("c").try();
+    values.add("def").try();
+    total = values.loop(5, (h, index, value, acc: usize) {
+        acc + value.len + index
+    });
+    println("vec {}", total.value_or(999));
+    concise = values.loop(5, (value, acc: usize) { acc + value.len });
+    println("values {}", concise.value_or(999));
+    calls: usize ::= 0;
+    window_total = source(values, calls).loop(5, (h, index, value, acc: usize) {
+        println("item {} {}", index, value);
+        acc + value.len + index
+    });
+    println("window {} calls {}", window_total.value_or(999), calls);
+    empty ::= arena.Vec<str>();
+    initial = Window(empty, 8).loop(17, (h, index, value, acc: usize) { acc + value.len });
+    println("empty {}", initial.value_or(999));
+    window     = Window(values, 10);
+    controlled = window.loop(5, (h, value, acc: usize) {
+        value.eq("c").then(() { h.next(); });
+        acc + value.len
+    });
+    println("controlled {}", controlled.value_or(999));
+    skipped = window.loop(5, (h, index, value, acc: usize) {
+        (index == 1).then(() { h.next(); });
+        acc + value.len + index
+    });
+    println("skipped {}", skipped.value_or(999));
+    broken = window.loop(5, (h, index, value, acc: usize) {
+        (index == 1).then(() { h.break(123); });
+        acc + value.len
+    });
+    println("break {}", broken.value_or(999));
+    missing = window.loop(5, (h, index, value, acc: usize) {
+        h.break();
+        acc
+    });
+    println("break none {}", missing.match({ None => true, Ok(_) => false }));
+    seen: usize ::= 0;
+    stopped(window, seen).match({
+        None  => println("stopped {}", seen),
+        Ok(_) => println("unexpected full fold"),
+    });
+    Ok(0)
+}

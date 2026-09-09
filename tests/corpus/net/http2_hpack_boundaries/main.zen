@@ -1,0 +1,83 @@
+// Every nested read stays inside the selected header block, including when
+// valid continuation bytes remain in the backing buffer after that block.
+hpack_status, huf_decode = std.net.http2
+block_add_user_header = std.net.http2.http2_hpack
+
+Refuse = {}
+Refuse.impl(Alloc, {
+    raw = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        Err(AllocError.OutOfMemory)
+    }
+    realloc = <T>(self: @Self, ptr: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        Err(AllocError.OutOfMemory)
+    }
+})
+
+status = (name: str, bytes: Vec<u8>, alloc: Alloc, from: usize, len: usize) {
+    bytes.hpack_status(alloc, from, len).match({
+        Ok(value)  => println("{} {}", name, value),
+        Err(error) => println("{} {}", name, error.variant_name()),
+    });
+}
+
+main = (env: Env) Res<(), AllocError> {
+    alloc   ::= env.mem.alloc();
+    literal ::= alloc.Vec<u8>();
+    [8, 3, 50, 48, 48].loop((byte: u8) {
+        literal.add(byte).try();
+    });
+    status("literal full", literal, alloc, 0, 5);
+    status("missing length", literal, alloc, 0, 1);
+    status("short string", literal, alloc, 0, 4);
+    status("outside start", literal, alloc, 6, 0);
+    status("wrapped length", literal, alloc, 1, usize.MAX);
+    status("borrowed literal", literal, Refuse(), 0, 5);
+
+    // A complete block after unrelated prefix bytes; the following indexed
+    // :status must not be consumed as a duplicate inside the selected block.
+    framed ::= alloc.Vec<u8>();
+    [255, 8, 3, 50, 48, 48, 136].loop((byte: u8) {
+        framed.add(byte).try();
+    });
+    status("offset block", framed, alloc, 1, 5);
+
+    // Saturated 4-bit name index 31 (content-type), then an empty value and
+    // an indexed :status. The continuation is outside the truncated block.
+    indexed ::= alloc.Vec<u8>();
+    [15, 16, 0, 136].loop((byte: u8) {
+        indexed.add(byte).try();
+    });
+    status("continued full", indexed, alloc, 0, 4);
+    status("short integer", indexed, alloc, 0, 1);
+
+    // Huffman coding for "200": 00010 00000 00000, padded with one 1 bit.
+    huffman ::= alloc.Vec<u8>();
+    [8, 130, 16, 1].loop((byte: u8) {
+        huffman.add(byte).try();
+    });
+    status("huffman full", huffman, alloc, 0, 4);
+    status("short huffman", huffman, alloc, 0, 3);
+    status("huffman needs storage", huffman, Refuse(), 0, 4);
+    huffman.huf_decode(alloc, 1, usize.MAX).match({
+        Ok(_)      => println("huffman range accepted"),
+        Err(error) => println("huffman range {}", error.variant_name()),
+    });
+
+    ["connection: close", "Connection: close", "CONTENT-LENGTH: 9", "Transfer-Encoding: chunked"].loop((line) {
+        encoded ::= alloc.String().try();
+        encoded.block_add_user_header(line).match({
+            Ok(_)      => println("filtered {} {}", line, encoded.len()),
+            Err(error) => println("filtered {} {}", line, error.variant_name()),
+        });
+    });
+    lower ::= alloc.String().try();
+    mixed ::= alloc.String().try();
+    lower.block_add_user_header("x-trace: kept").match({
+        Ok(_) => (), Err(_) => println("lower field failed"),
+    });
+    mixed.block_add_user_header("X-Trace: kept").match({
+        Ok(_) => (), Err(_) => println("mixed field failed"),
+    });
+    println("allowed names agree {}", lower.view().eq(mixed.view()));
+    Ok(())
+}

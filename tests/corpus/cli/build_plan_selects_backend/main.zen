@@ -1,0 +1,25 @@
+Build = zen.zen_build
+plan = zen.zen_build_plan
+Target, Os, Arch, Abi = std.build
+
+show = (env: Env, alloc: Alloc, root: str) Res<(), AllocError> {
+    build ::= alloc.Build(env, root);
+    build.set_std_root("src");
+    checked = build.whole("build.zen", alloc.Map<str, str>()).try();
+    println("checked {}", checked.diag_count());
+    target = Target(os: Os.Linux, arch: Arch.X86_64, abi: Abi.Gnu);
+    plan(alloc, build.tree, checked, target).match({
+        Err(_)   => println("refused"),
+        Ok(plan) => plan.exes.loop((exe) {
+            println("{} {}", exe.name, exe.spec.backend.stable_name());
+        }),
+    });
+    Ok(())
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    show(env, alloc, "src/accepted").try();
+    show(env, alloc, "src/refused").try();
+    Ok(0)
+}

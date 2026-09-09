@@ -2,10 +2,10 @@
 // parameters, and settle their result type. A user function named `loop` is
 // not special.
 
-ExprId = std.ast
+Ast, ExprId = std.ast
 Decl, Function, Param, TypeId = std.ast
 Access, Call, Span = std.ast
-AllocError = std.mem
+Alloc, AllocError = std.mem
 Vec = std.collections
 str = std.text
 Range = std.core
@@ -21,6 +21,35 @@ ty_of = gen.gen_c.gen_c_expr
 range_element_type = gen.gen_c.gen_c_range
 result_element = gen.gen_c.gen_c_fold
 settle_res = gen.gen_c.gen_c_loop
+
+// A borrowed call argument view. UFCS contributes a leading receiver without
+// copying AST argument ids into an allocator-backed vector.
+LoopArgs* = {
+    call*: Call,
+    receiver*: Res<ExprId>,
+
+    len* = (self: @Self) usize {
+        self.call.args.len + self.receiver.match({ None => 0, Ok(_) => 1 })
+    }
+
+    get* = (self: @Self, index: usize) Res<ExprId> {
+        self.receiver.match({
+            None         => arg_value(self.call, index),
+            Ok(receiver) => (index == 0).match({
+                true  => Ok(receiver),
+                false => arg_value(self.call, index - 1),
+            }),
+        })
+    }
+
+    // One means the last argument. Missing tails never underflow an index.
+    from_end* = (self: @Self, distance: usize) Res<ExprId> {
+        (distance <= self.len()).match({
+            true  => self.get(self.len() - distance),
+            false => None,
+        })
+    }
+}
 
 // recognising the intrinsic
 
@@ -241,74 +270,50 @@ broken_element* = (be :: CBackend, id: ExprId, ctx: Ctx)
     })
 }
 
-// The join over every `h.break(v)` addressed to this loop, or `None`
-// when no site spoke. scan, not walk (`ast_find.zen`): the arena is
-// flat, so the sites are a filter over one list and attribution is
-// span arithmetic, not traversal. Attribution has to be asked per
-// site: a nested loop's body sits inside this call's span too, and
-// the `h` written there names the nested loop. A site is ours exactly
-// when no lambda inside the call contains it — its innermost
-// containing lambda is then the body lambda, the one lambda holding
-// the call without being held by it (`owned_elsewhere`, below).
+// The parsed tree is fixed during lowering. Index only syntax relevant to
+// loop result inference, retaining expression order for the first typed break.
+LoopSyntax* = {
+    breaks* :: Vec<ExprId>,
+    lambdas :: Vec<Span>,
+
+    has_body = (self: @Self, site: Span, call: Span) bool {
+        self.lambdas.find((body) {
+            site.inside(body) && body.inside(call)
+        }).match({ Ok(_) => true, None => false })
+    }
+}
+
+LoopSyntax* = (a: Alloc, tree: Ast) Res<LoopSyntax, AllocError> {
+    sites ::= LoopSyntax(breaks: a.Vec<ExprId>(), lambdas: a.Vec<Span>());
+    tree.exprs_each((id, node) {
+        node.kind.match({
+            Lambda(_)  => sites.lambdas.add(node.span).try(),
+            Call(call) => ((call.args.len > 0) && tree.expr_at(call.callee)
+                .kind.match({
+                    Access(access) => access.name.text.eq("break"),
+                    _              => false,
+                })).then(() { sites.breaks.add(id).try(); }),
+            _          => (),
+        });
+    });
+    Ok(sites)
+}
+
+// Preserve the existing syntactic containment rule and first typed result.
+// Every eligible break is still checked; memoization and diagnostics do not
+// depend on which break first supplies a type.
 join_break_args* = (be :: CBackend, span: Span, ctx: Ctx)
                    Res<Res<TyId>, AllocError> {
-    unknown = be.check.types.unknown().try();
-    have ::= false;
-    got  ::= unknown;
-    be.tree.exprs_each((x, ex) {
-        ex.kind.match({
-            Call(_) => (ex.span.inside(span) && be.break_value_site(x)).then(() {
-                be.owned_elsewhere(ex.span, span).try().match({
-                    true  => (),
-                    false => be.break_arg_type(x, ctx).match({
-                        Err(e)  => Err(e),
-                        Ok(one) => one.match({
-                            None  => (),
-                            Ok(t) => have.match({
-                                false => { have = true; got = t; },
-                                true  => (),
-                            }),
-                        }),
-                    }).try(),
-                });
-            }),
-            _       => (),
+    sites = be.loop_sites().try();
+    got: Res<TyId> ::= None;
+    sites.breaks.loop((id) {
+        site = be.tree.expr_at(id).span;
+        (site.inside(span) && sites.has_body(site, span)).then(() {
+            one = be.break_arg_type(id, ctx).try();
+            got.match({ None => { got = one; }, Ok(_) => () });
         });
     });
-    have.match({
-        true  => Ok(Ok(got)),
-        false => Ok(None),
-    })
-}
-
-break_value_site = (be: CBackend, x: ExprId) bool {
-    be.tree.expr_at(x).kind.match({
-        Call(c) => (c.args.len > 0) && be.tree.expr_at(c.callee).kind.match({
-            Access(a) => a.name.text.eq("break"),
-            _         => false,
-        }),
-        _       => false,
-    })
-}
-
-// Whether a span sits in some nested lambda's body rather than the
-// loop's own: a lambda held by the loop's span and holding the site is
-// a loop between them, and a break written there addresses that loop.
-owned_elsewhere* = (
-    be   :: CBackend,
-    site : Span,
-    span : Span
-) Res<bool, AllocError> {
-    taken ::= false;
-    be.tree.exprs_each((x, ex) {
-        ex.kind.match({
-            Lambda(_) => (site.inside(ex.span) && ex.span.inside(span)).then(() {
-                taken = true;
-            }),
-            _         => (),
-        });
-    });
-    Ok(!taken)
+    Ok(got)
 }
 
 // Returns the payload type of a handle's `break` call. Bare breaks contribute

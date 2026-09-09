@@ -1,0 +1,75 @@
+// Collection helpers own allocation failures; callback failures leave their
+// lexical caller. Both stop before visiting any later element.
+Failure = | BadInput(str)
+
+Refuse = {}
+Refuse.impl(Alloc, {
+    raw = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        Err(AllocError.OutOfMemory)
+    }
+    realloc = <T>(self: @Self, p: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        Err(AllocError.OutOfMemory)
+    }
+})
+
+parse = (words: Vec<str>, alloc: Alloc, seen :: usize)
+        Res<Vec<i32>, Failure | AllocError> {
+    values = words.map(alloc, (word) {
+        seen = seen + 1;
+        word.parse_i32().ok_or(Failure.BadInput(word)).try()
+    }).try();
+    println("parsed all");
+    Ok(values)
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    arena ::= env.mem.alloc();
+    words ::= arena.Vec<str>();
+    words.add("12").try();
+    words.add("bad").try();
+    words.add("99").try();
+    seen: usize ::= 0;
+    parse(words, arena, seen).match({
+        Ok(_)      => println("unexpected parsed values"),
+        Err(error) => error.match({
+            Failure(failure) => failure.match({
+                BadInput(word) => println("bad {} seen {}", word, seen),
+            }),
+            AllocError(_)    => println("unexpected allocation failure"),
+        }),
+    });
+    words.set(1, "7");
+    seen = 0;
+    parse(words, arena, seen).match({
+        Ok(values) => println("parsed {} seen {}", values.len, seen),
+        Err(_)     => println("unexpected parse failure"),
+    });
+    seen   = 0;
+    failed = Range(0, 3).map(Refuse(), (value) {
+        seen = seen + 1;
+        value + 10
+    });
+    failed.match({
+        Ok(_)      => println("unexpected allocated map"),
+        Err(error) => println("map {} seen {}", error.variant_name(), seen),
+    });
+    println("caller continues");
+    seen = 0;
+    Range(0, 4).filter(Refuse(), (value) {
+        seen = seen + 1;
+        value > 0
+    }).match({
+        Ok(_)      => println("unexpected allocated filter"),
+        Err(error) => println("filter {} seen {}", error.variant_name(), seen),
+    });
+    empty    = Range(0, 0).map(Refuse(), (value) { value }).try();
+    rejected = Range(0, 3).filter(Refuse(), (value) { false }).try();
+    println("no allocation {} {}", empty.len, rejected.len);
+    kept = Range(10, 14).map(arena, (h, value) {
+        (value == 11).then(() { h.next(); });
+        (value == 13).then(() { h.break(); });
+        value * 2
+    }).try();
+    kept.loop((value) { println("kept {}", value); });
+    Ok(0)
+}

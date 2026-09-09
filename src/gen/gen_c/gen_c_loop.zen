@@ -7,7 +7,6 @@ ExprId, Lambda = std.ast
 Function, Param = std.ast
 Call = std.ast
 AllocError = std.mem
-Vec = std.collections
 str, String = std.text
 TyId = sema.sema_ty
 Ctx = sema.sema_check
@@ -15,7 +14,7 @@ sym_member, sym_gen, sym_variant = gen.gen_name
 RES_PATH = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 LoopFrame = gen.gen_c.gen_c_frame
-Shape, shape_of = gen.gen_c.gen_c_shape
+Shape, LoopArgs, shape_of = gen.gen_c.gen_c_shape
 Fold, no_fold, lower_fold, bind_acc = gen.gen_c.gen_c_fold
 write_fold_result = gen.gen_c.gen_c_fold
 unsupported = gen.gen_c.gen_c_report
@@ -47,13 +46,8 @@ lower_loop* = (
     out  :: String
 )
               Res<(), AllocError> {
-    args ::= be.alloc.Vec<ExprId>();
-    recv.match({
-        None  => Ok(()),
-        Ok(r) => args.add(r),
-    }).try();
-    c.args.loop((h, a) { args.add(a.value).try(); });
-    args.get(args.len - 1).match({
+    args = LoopArgs(call: c, receiver: recv);
+    args.from_end(1).match({
         None  => be.unsupported(id, "a loop with no body", out),
         Ok(b) => be.lower_with_body(id, f, args, b, ctx, want, out),
     })
@@ -63,7 +57,7 @@ lower_with_body = (
     be   :: CBackend,
     id   : ExprId,
     f    : Function,
-    args : Vec<ExprId>,
+    args : LoopArgs,
     body : ExprId,
     ctx  : Ctx,
     want : TyId,
@@ -87,7 +81,7 @@ lower_shaped = (
     be   :: CBackend,
     id   : ExprId,
     f    : Function,
-    args : Vec<ExprId>,
+    args : LoopArgs,
     lam  : Lambda,
     ctx  : Ctx,
     want : TyId,
@@ -119,7 +113,7 @@ lower_walk* = (
     be   :: CBackend,
     id   : ExprId,
     sh   : Shape,
-    args : Vec<ExprId>,
+    args : LoopArgs,
     lam  : Lambda,
     ctx  : Ctx,
     want : TyId,
@@ -156,6 +150,7 @@ write_cond_value = (be :: CBackend, one: ExprId, brk: usize, ctx: Ctx)
     value ::= be.alloc.String().try();
     be.expr(one, ctx, bool_ty, value).try();
     be.fmt("if (!{}) { goto ", value.view()).try();
+    be.note_break(brk);
     be.write_label("brk", brk).try();
     be.writeln("; }").try();
     Ok(())
@@ -174,6 +169,7 @@ write_cond_body = (be :: CBackend, lam: Lambda, brk: usize, ctx: Ctx)
     be.release(lmark).try();
     be.check.release(cmark).try();
     be.fmt("if (!{}) { goto ", tmp.view()).try();
+    be.note_break(brk);
     be.write_label("brk", brk).try();
     be.writeln("; }").try();
     Ok(());
@@ -190,17 +186,21 @@ write_cond_body = (be :: CBackend, lam: Lambda, brk: usize, ctx: Ctx)
 // result is opened, while control and fold state have their own owners.
 RangeWalk = {
     counter: str,
-    base: str,
+    base: Res<str>,
     limit: str,
     elem: TyId,
 
     start = (self: @Self, be :: CBackend) Res<(), AllocError> {
-        be.fmt("{} = {};\n", self.base, self.counter)
+        self.base.match({
+            Ok(base) => be.fmt("{} = {};\n", base, self.counter),
+            None     => Ok(()),
+        })
     }
 
     body = (self: @Self, be :: CBackend, site: LoopSite, value: str)
            Res<(), AllocError> {
-        site.run_body(be, self.counter, self.base, value, self.elem)
+        base = self.base.match({ Ok(name) => name, None => "" });
+        site.run_body(be, self.counter, base, value, self.elem)
     }
 }
 
@@ -214,9 +214,9 @@ LoopSite = {
     want: TyId,
     fold: Fold,
 
-    walk = (self: @Self, be :: CBackend, args: Vec<ExprId>, out :: String)
+    walk = (self: @Self, be :: CBackend, args: LoopArgs, out :: String)
            Res<(), AllocError> {
-        (args.len > 1).match({
+        (args.len() > 1).match({
             false => self.forever(be, None, out),
             true  => args.get(0).match({
                 None      => self.forever(be, None, out),
@@ -296,18 +296,10 @@ LoopSite = {
         })
     }
 
-    // Impl-supplied bounds cannot support folds and must settle an element.
+    // Impl-supplied bounds must settle an element before lowering the walk.
     impl_walk = (self: @Self, be :: CBackend, first: ExprId, rty: TyId,
                  out :: String) Res<(), AllocError> {
         loop((h) {
-            self.fold.has.then(() {
-                be.unsupported(
-                    self.id,
-                    "a fold over a range whose bounds an impl supplies",
-                    out
-                ).try();
-                h.break();
-            });
             be.range_impl(rty).try().match({
                 None     => {
                     be.unsupported(
@@ -347,12 +339,35 @@ LoopSite = {
         self.bounded(be, first, rty, want, out)
     }
 
+    // Only indexed callbacks need an origin separate from the current value.
+    range_walk = (self: @Self, be :: CBackend, elem: TyId)
+                 Res<RangeWalk, AllocError> {
+        counter = be.fresh_name("i").try();
+        be.declare_usize(counter.view()).try();
+        base: Res<str> = self.shape.wants_index.match({
+            true  => {
+                name = be.fresh_name("b").try();
+                be.declare_usize(name.view()).try();
+                Ok(name.view())
+            },
+            false => None,
+        });
+        limit          = be.fresh_name("n").try();
+        be.declare_usize(limit.view()).try();
+        Ok(RangeWalk(
+            counter: counter.view(),
+            base: base,
+            limit: limit.view(),
+            elem: elem,
+        ))
+    }
+
     bounded = (self: @Self, be :: CBackend, first: ExprId, rty: TyId,
                want: TyId, out :: String) Res<(), AllocError> {
         range = be.walk_temp(first, rty, self.ctx).try();
         frame = be.open_result(want, out).try();
         elem  = be.check.types.prim("usize").try();
-        walk  = be.range_walk(elem).try();
+        walk  = self.range_walk(be, elem).try();
         be.assign_member(walk.counter, range.view(), "start").try();
         be.assign_member(walk.limit, range.view(), "end").try();
         walk.start(be).try();
@@ -372,7 +387,7 @@ LoopSite = {
         want  = be.settle_res(self.want, elem).try();
         range = be.walk_temp(first, rty, self.ctx).try();
         frame = be.open_result(want, out).try();
-        walk  = be.range_walk(elem).try();
+        walk  = self.range_walk(be, elem).try();
         be.supplied_bound(
             impl,
             rty,
@@ -385,15 +400,7 @@ LoopSite = {
         be.fmt("while ({} < {}) {\n", walk.counter, walk.limit).try();
         be.indent();
         value ::= be.alloc.String().try();
-        be.take_pass(
-            impl,
-            rty,
-            pass,
-            walk.counter,
-            frame.brk,
-            range.view(),
-            value
-        ).try();
+        be.take_pass(impl, rty, pass, walk.counter, range.view(), value).try();
         walk.body(be, self, value.view()).try();
         be.close_pass(frame, walk.counter, self.fold).try();
         Ok(())
@@ -424,21 +431,6 @@ settle_res* = (be :: CBackend, want: TyId, elem: TyId)
         false => Ok(want),
         true  => intern_res_open(be.check, elem),
     })
-}
-
-range_walk = (be :: CBackend, elem: TyId) Res<RangeWalk, AllocError> {
-    counter ::= be.fresh_name("i").try();
-    base    ::= be.fresh_name("b").try();
-    be.declare_usize(counter.view()).try();
-    be.declare_usize(base.view()).try();
-    limit ::= be.fresh_name("n").try();
-    be.declare_usize(limit.view()).try();
-    Ok(RangeWalk(
-        counter: counter.view(),
-        base: base.view(),
-        limit: limit.view(),
-        elem: elem,
-    ))
 }
 
 // The collection is evaluated once, into a temporary of its own, and
@@ -700,8 +692,7 @@ open_counter = (be :: CBackend, counter :: String) Res<(), AllocError> {
 // reachable from inside any construct the body happened to open.
 close_pass* = (be :: CBackend, st: LoopFrame, counter: str, fold: Fold)
              Res<(), AllocError> {
-    be.write_label("cnt", st.cnt).try();
-    be.writeln(": ;").try();
+    be.write_next_label().try();
     (counter.len > 0).match({
         false => Ok(()),
         true  => be.step_counter(counter),
@@ -710,10 +701,35 @@ close_pass* = (be :: CBackend, st: LoopFrame, counter: str, fold: Fold)
     be.writeln("}").try();
     // Write normal fold completion before the break label so h.break wins.
     be.write_fold_result(st, fold).try();
-    be.write_label("brk", st.brk).try();
-    be.writeln(": ;").try();
+    be.write_break_label().try();
     be.pop_loop().try();
     Ok(());
+}
+
+// All next calls have been lowered before a pass closes. A fallthrough step
+// needs no label; keeping only referenced labels also keeps generated C quiet.
+write_next_label* = (be :: CBackend) Res<(), AllocError> {
+    be.loop_frame(be.loop_depth()).match({
+        None      => (),
+        Ok(frame) => frame.next_used.then(() {
+            be.write_label("cnt", frame.cnt).try();
+            be.writeln(": ;").try();
+        }),
+    });
+    Ok(())
+}
+
+// Consult the live frame: a nested body may have marked this loop through
+// an outer handle after the caller took its frame snapshot.
+write_break_label = (be :: CBackend) Res<(), AllocError> {
+    be.loop_frame(be.loop_depth()).match({
+        None      => (),
+        Ok(frame) => frame.break_used.then(() {
+            be.write_label("brk", frame.brk).try();
+            be.writeln(": ;").try();
+        }),
+    });
+    Ok(())
 }
 
 step_counter = (be :: CBackend, counter: str) Res<(), AllocError> {

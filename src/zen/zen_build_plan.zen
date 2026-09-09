@@ -10,7 +10,7 @@ Ast, ExprId, Expr, Call, Access, Record, Block, Function, Span, Try = std.ast
 nowhere = std.ast
 Stmt, Bind, Member, Field, Module = std.ast
 Checker = sema.sema
-CImport, Lib, Extern, Exe, Dep, Target = std.build
+CImport, Lib, Extern, Exe, Dep, Target, Codegen = std.build
 
 PlanFault* = MissingBuild(str)
     | CheckedFaults
@@ -61,6 +61,7 @@ Value = UnitValue
     | BoolValue(bool)
     | PathValue(Path)
     | TargetValue(Target)
+    | BackendValue(Codegen)
     | DepValue(Dep)
     | EmptyList
     | TextList(Vec<str>)
@@ -75,6 +76,7 @@ Local = {
 Executor = {
     alloc: Alloc,
     tree: Ast,
+    check: Checker,
     builder: str,
     locals :: Vec<Local>,
     plan :: BuildPlan,
@@ -124,10 +126,29 @@ Executor = {
                 _    => Err(unsupported(node.span)),
             }),
             Paren(p)   => self.eval(p.inner),
+            Access(a)  => self.backend_value(id, a, node.span),
             Array(a)   => self.array(a.elems, node.span),
             Try(t)     => self.eval_try(t),
             Call(c)    => self.call(id, c, node.span),
             _          => Err(unsupported(node.span)),
+        })
+    }
+
+    // Only the checked std.build.Codegen declaration admits a backend
+    // constant. A different enum's C case must not acquire build meaning.
+    backend_value = (self: @Self, id: ExprId, access: Access, at: Span)
+                    Res<Value, PlanError> {
+        known = self.check.expr_memo.get(id).match({
+            None   => false,
+            Ok(ty) => self.check.types.at(ty).match({
+                Named(named) => named.name.eq("Codegen")
+                    && self.check.world.module_name(named.decl).eq("std.build.build"),
+                _            => false,
+            }),
+        });
+        (known && access.name.text.eq("C")).match({
+            true  => Ok(Value.BackendValue(Codegen.C)),
+            false => Err(unsupported(at)),
         })
     }
 
@@ -401,6 +422,7 @@ Executor = {
         spec = Exe(
             src: self.path_field(r, "src").try(),
             deps: self.deps_field(r, "deps").try(),
+            backend: self.backend_field(r).try(),
             optimize: self.optional_text_field(r, "optimize", "speed"),
             strip: self.optional_bool_field(r, "strip", false),
             out: self.optional_path_field(r, "out")
@@ -515,6 +537,23 @@ Executor = {
         })
     }
 
+    // Omission preserves the C default. An explicitly written selection
+    // must evaluate successfully; unsupported expressions never fall back.
+    backend_field = (self :: @Self, record: Record) Res<Codegen, PlanError> {
+        record.entries.find((member) { member.named("backend") }).match({
+            None  => Ok(Codegen.C),
+            Ok(_) => {
+                id = self.field(record, "backend").try();
+                self.eval(id).try().match({
+                    BackendValue(backend) => Ok(backend),
+                    _                     => Err(unsupported(
+                        self.tree.expr_at(id).span
+                    )),
+                })
+            },
+        })
+    }
+
     // An absent, valueless, or refused optional field is None.
     optional_value = (self :: @Self, r: Record, name: str) Res<Value> {
         r.entries.find((m) { m.named(name) }).match({
@@ -594,7 +633,7 @@ plan* = (a: Alloc, tree: Ast, check: Checker, target: Target)
         true  => Err(refused(PlanFault.CheckedFaults)),
         false => tree.build_function().match({
             Err(e) => Err(e),
-            Ok(f)  => plan_function(a, tree, target, f),
+            Ok(f)  => plan_function(a, tree, check, target, f),
         }),
     })
 }
@@ -602,6 +641,7 @@ plan* = (a: Alloc, tree: Ast, check: Checker, target: Target)
 plan_function = (
     a      : Alloc,
     tree   : Ast,
+    check  : Checker,
     target : Target,
     f      : Function
 ) Res<BuildPlan, PlanError> {
@@ -612,6 +652,7 @@ plan_function = (
             Ok(p) => execute_function(
                 a,
                 tree,
+                check,
                 target,
                 p.name.text,
                 tree.block_at(body)
@@ -623,6 +664,7 @@ plan_function = (
 execute_function = (
     a       : Alloc,
     tree    : Ast,
+    check   : Checker,
     target  : Target,
     builder : str,
     body    : Block
@@ -630,6 +672,7 @@ execute_function = (
     ex ::= Executor(
         alloc: a,
         tree: tree,
+        check: check,
         builder: builder,
         locals: a.Vec<Local>(),
         plan: BuildPlan(

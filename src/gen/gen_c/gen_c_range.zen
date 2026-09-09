@@ -5,7 +5,7 @@
 
 ExprId = std.ast
 Function = std.ast
-Impl, Member, Field, Struct = std.ast
+Impl = std.ast
 AllocError = std.mem
 Vec = std.collections
 str, String = std.text
@@ -23,7 +23,6 @@ intern_res_open, recv_inst, sub_with = gen.gen_c.gen_c_mono
 enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 Dest, block, deliver = gen.gen_c.gen_c_stmt
 array_of = gen.gen_c.gen_c_array
-impl_field = gen.gen_c.gen_c_impl
 
 // A range that stores its bounds.
 
@@ -44,19 +43,8 @@ has_field = (be :: CBackend, rty: TyId, name: str) bool {
 decl_has_field = (be :: CBackend, decl: DeclId, name: str) bool {
     struct_decl(be, decl).match({
         None  => false,
-        Ok(s) => struct_has_field(s, name),
+        Ok(s) => s.has_field(name),
     })
-}
-
-struct_has_field = (s: Struct, name: str) bool {
-    got ::= false;
-    s.members.loop((h, m) {
-        m.kind.match({
-            Field(fl) => fl.name.text.eq(name).then(() { got = true; }),
-            _         => (),
-        });
-    });
-    got
 }
 
 // A real impl outranks coincidentally stored names because it may supply an
@@ -113,112 +101,46 @@ named_range_impl = (be :: CBackend, n: TyNamed)
                    Res<Res<RangeImpl>, AllocError> {
     ids ::= be.alloc.Vec<ImplId>();
     be.check.world.impls_named(be.tree, n.name, ids).try();
-    found ::= be.alloc.Vec<RangeImpl>();
-    ids.loop((h, i) { be.keep_range_impl(n, i, found).try() });
-    Ok(found.get(0));
+    found: Res<RangeImpl> = loop((done) {
+        ids.loop((h, i) {
+            // Only impls in the type's declaring module belong to the type.
+            (n.decl.module == i.decl.module).then(() {
+                be.check.world.impl_at(be.tree, i).match({
+                    None   => (),
+                    Ok(im) => be.range_candidate(n, im).try().match({
+                        None          => (),
+                        Ok(candidate) => done.break(candidate),
+                    }),
+                });
+            });
+        });
+        done.break();
+    });
+    Ok(found)
 }
 
-// Only impls in the type's declaring module belong to the type.
-keep_range_impl = (
-    be  :: CBackend,
-    n   : TyNamed,
-    i   : ImplId,
-    out :: Vec<RangeImpl>
-) Res<(), AllocError> {
-    (n.decl.module == i.decl.module)
-        .then(() { be.range_impl_at(n, i, out).try(); });
-    Ok(())
-}
-
-range_impl_at = (
-    be  :: CBackend,
-    n   : TyNamed,
-    i   : ImplId,
-    out :: Vec<RangeImpl>
-) Res<(), AllocError> {
-    be.check.world.impl_at(be.tree, i).match({
-        Ok(im) => be.keep_if_range(n, im, out),
-        None   => Ok(()),
-    })
-}
-
-keep_if_range = (
-    be  :: CBackend,
-    n   : TyNamed,
-    im  : Impl,
-    out :: Vec<RangeImpl>
-) Res<(), AllocError> {
+range_candidate = (be :: CBackend, n: TyNamed, im: Impl)
+                  Res<Res<RangeImpl>, AllocError> {
     mi    = n.decl.module.to_usize();
     bound = be.check.impl_bound_type(im, mi).try();
-    be.supplies_bounds(bound)
-        .then(() { be.add_range_impl(n, im, mi, out).try(); });
-    Ok(())
-}
-
-// An impl that names the bound and supplies neither `start` nor `end`
-// is not one to walk: `impl_field` finds nothing and the search moves
-// on rather than emitting a bound nothing wrote.
-add_range_impl = (
-    be  :: CBackend,
-    n   : TyNamed,
-    im  : Impl,
-    mi  : usize,
-    out :: Vec<RangeImpl>
-) Res<(), AllocError> {
-    lo = be.impl_field(im, "start").try();
-    lo.match({
-        None  => Ok(()),
-        Ok(s) => be.add_from_start(n, im, mi, s, out),
+    be.supplies_bounds(bound).match({
+        false => Ok(None),
+        true  => Ok(range_fields(n.decl, mi, im)),
     })
 }
 
-add_from_start = (
-    be  :: CBackend,
-    n   : TyNamed,
-    im  : Impl,
-    mi  : usize,
-    s   : ExprId,
-    out :: Vec<RangeImpl>
-) Res<(), AllocError> {
-    hi = be.impl_field(im, "end").try();
-    at = be.impl_fn(im, "at").try();
-    hi.match({
-        None  => Ok(()),
-        Ok(e) => out.add(RangeImpl(
-            decl: n.decl,
-            mi: mi,
-            start: s,
-            end: e,
-            at: at
-        )),
-    })
-}
-
-// The function an impl supplies under `name`, with a body. A required
-// member — `at ::= (..) Res<T>` with no body — is what the impl owes
-// rather than what it supplies.
-impl_fn = (be :: CBackend, im: Impl, name: str)
-          Res<Res<Function>, AllocError> {
-    found ::= be.alloc.Vec<Function>();
-    im.members.loop((h, m) { keep_bodied_fn(m, name, found).try() });
-    Ok(found.get(0));
-}
-
-keep_bodied_fn = (m: Member, name: str, out :: Vec<Function>)
-                 Res<(), AllocError> {
-    m.named(name).then(() { add_bodied_fn(m, out).try(); });
-    Ok(())
-}
-
-add_bodied_fn = (m: Member, out :: Vec<Function>) Res<(), AllocError> {
-    m.kind.match({
-        Function(f) => add_if_bodied(f, out),
-        _           => Ok(()),
-    })
-}
-
-add_if_bodied = (f: Function, out :: Vec<Function>) Res<(), AllocError> {
-    f.body.match({ Ok(_) => out.add(f), None => Ok(()) })
+// Missing bounds leave this impl ineligible, so declaration-order search
+// continues. A bodiless at hook is optional and does not produce a pass call.
+range_fields = (decl: DeclId, mi: usize, im: Impl) Res<RangeImpl> {
+    start = im.field_value("start").try();
+    end   = im.field_value("end").try();
+    Ok(RangeImpl(
+        decl: decl,
+        mi: mi,
+        start: start,
+        end: end,
+        at: im.bodied_fn("at")
+    ))
 }
 
 // Pass type shared by loop typing, lowering, and range-bound settlement.
@@ -394,14 +316,13 @@ take_pass* = (
     rty     : TyId,
     pass    : TyId,
     counter : str,
-    brk     : usize,
     rng     : str,
     value   :: String
 )
             Res<(), AllocError> {
     ri.at.match({
         None  => value.add(counter),
-        Ok(f) => be.run_at(ri, rty, pass, f, counter, brk, rng, value),
+        Ok(f) => be.run_at(ri, rty, pass, f, counter, rng, value),
     })
 }
 
@@ -412,7 +333,6 @@ run_at = (
     pass    : TyId,
     f       : Function,
     counter : str,
-    brk     : usize,
     rng     : str,
     value   :: String
 )
@@ -422,7 +342,7 @@ run_at = (
     be.declarator(pass, tmp.view(), decl).try();
     be.fmt("{};\n", decl.view()).try();
     be.inline_at(ri, rty, pass, f, counter, rng, tmp.view()).try();
-    be.write_pass_guard(tmp.view(), brk).try();
+    be.write_pass_guard(tmp.view()).try();
     value.fmt("{}.zg_data.", tmp.view()).try();
     sym_member(value, "Ok")
 }
@@ -479,18 +399,22 @@ run_at_body = (be :: CBackend, f: Function, ictx: Ctx, pass: TyId, tmp: str)
               Res<(), AllocError> {
     f.body.match({
         None    => Ok(()),
-        Ok(blk) => block(be, blk, ictx, pass, Dest.Into(tmp)),
+        Ok(blk) => {
+            held_return = be.return_to;
+            target      = be.open_inline_return(tmp).try();
+            be.enter_return(Ok(target));
+            lowered = block(be, blk, ictx, pass, Dest.Into(tmp));
+            be.enter_return(held_return);
+            lowered.try();
+            be.finish_inline_return(target)
+        },
     })
 }
 
-// A pass that missed ends the walk, through `h.break`'s own label so it
-// lands after the closing brace and not inside whatever construct the
-// body opened.
-write_pass_guard = (be :: CBackend, tmp: str, brk: usize)
-                   Res<(), AllocError> {
+// The guard is emitted directly in the walk's while body. Missing an element
+// completes iteration naturally, so a fold still publishes its accumulator.
+write_pass_guard = (be :: CBackend, tmp: str) Res<(), AllocError> {
     tag ::= be.alloc.String().try();
     sym_variant(tag, RES_PATH, "Ok").try();
-    be.fmt("if ({tmp}.zg_tag != {}) { goto ", tag.view()).try();
-    be.write_label("brk", brk).try();
-    be.writeln("; }")
+    be.fmt("if ({tmp}.zg_tag != {}) { break; }\n", tag.view())
 }

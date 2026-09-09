@@ -19,6 +19,7 @@ Cli* = Build(BuildArgs)
      | Fmt(FmtJob)
      | Later(str)     // test / lsp — named, and not yet written
      | Usage(str)     // the word that made no sense; empty means nothing was said
+     | UnavailableBackend(str)
      | Missing(str)   // a flag the build needs and did not get
 
 // `zen fmt` takes files; zen_fmt validates that they are not directories.
@@ -51,6 +52,7 @@ HelpArg = Root
     | BuildRoot
     | EmitC
     | EmitDir
+    | Backend
     | Out
     | Entry
     | StdRoot
@@ -88,6 +90,13 @@ help_model = (a: Alloc) Res<Command<HelpArg>, AllocError> {
         "PROJECT-OR-ROOT",
         ValueType.Text,
         "Project directory, target name, or compilation root"
+    ).try();
+    build.option(
+        "--backend",
+        HelpArg.Backend,
+        "NAME",
+        ValueType.Text,
+        "Select a source generator (available: c)"
     ).try();
     build.flag("--emit-c", HelpArg.EmitC, "Emit C to standard output").try();
     build.option(
@@ -345,9 +354,10 @@ verdict = (args: BuildFlags, bad: str) Cli {
     bad.is_empty().match({
         false => Cli.Usage(bad),
         true  => args.finish().match({
-            Err(MissingRoot) => Cli.Usage(""),
-            Err(MissingEmit) => Cli.Missing(FLAG_EMIT_C),
-            Ok(job)          => Cli.Build(job),
+            Err(MissingRoot)              => Cli.Usage(""),
+            Err(MissingEmit)              => Cli.Missing(FLAG_EMIT_C),
+            Err(UnavailableBackend(name)) => Cli.UnavailableBackend(name),
+            Ok(job)                       => Cli.Build(job),
         }),
     })
 }

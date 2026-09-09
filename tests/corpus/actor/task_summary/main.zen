@@ -1,0 +1,78 @@
+// A task actor borrows its message, builds a result in request-local storage,
+// and reports malformed input before printing any partial summary.
+
+Status = Todo | Done
+
+Task = {
+    status: Status,
+    title: str,
+
+    parse = (line: str) Res<Task> {
+        parts  = line.split_once(' ').try();
+        title  = parts.after.trim().try();
+        status = parts.before.match({
+            "todo" => Ok(Status.Todo),
+            "done" => Ok(Status.Done),
+            _      => None,
+        }).try();
+        Ok(Task(status: status, title: title))
+    }
+}
+
+SummaryError = InvalidLine(usize) | OutOfMemory
+
+Summary = {
+    done :: usize = 0,
+    remaining :: Vec<str>,
+
+    parse = (text: str, alloc: Alloc) Res<Summary, SummaryError> {
+        summary ::= Summary(remaining: alloc.Vec<str>());
+        text.lines().loop((h, i, line) {
+            task = Task.parse(line).ok_or(SummaryError.InvalidLine(i + 1)).try();
+            task.status.match({
+                Done => { summary.done = summary.done + 1; },
+                Todo => summary.remaining.add(task.title)
+                    .try(SummaryError.OutOfMemory),
+            });
+        });
+        Ok(summary)
+    }
+
+    print = (self: @Self, env: Env) {
+        self.remaining.loop((title) { env.out.println("{}", title); });
+        env.out.println("{} done, {} remaining", self.done, self.remaining.len);
+    }
+}
+
+Summarizer = {}
+
+Summarizer.impl(Actor, {
+    summarize = (self :: @Self, ctx: Context, text: str) {
+        scratch ::= ctx.env.mem.alloc();
+        Summary.parse(text, scratch).match({
+            Ok(summary) => summary.print(ctx.env),
+            Err(error)  => error.match({
+                InvalidLine(line) => ctx.env.out.println(
+                    "invalid task on line {}",
+                    line
+                ),
+                OutOfMemory       => ctx.env.out.println("out of memory"),
+            }),
+        });
+    }
+})
+
+Error = ActorStartError | ActorError
+
+main = (env: Env) Res<i32, Error> {
+    worker = env.spawn(Summarizer()).try();
+    worker.summarize(
+        "done buy milk\r\ntodo fix bike\r\ntodo call Sam\r\n"
+    ).try();
+    worker.summarize("todo first\nbad second").try();
+    worker.summarize("todo   ").try();
+    worker.summarize("").try();
+    worker.stop();
+    worker.join();
+    Ok(0)
+}

@@ -70,13 +70,13 @@ StaticEntry = | Authority = 1
     | WwwAuthenticate = 61
     | Unknown(u8)
 
-StaticHeader = { name: str, value: str }
+Header = { name: str, value: str }
 
-known_header = (name: str, value: Res<str>) Res<StaticHeader> {
-    Ok(StaticHeader(name: name, value: value.value_or("")));
+known_header = (name: str, value: Res<str>) Res<Header> {
+    Ok(Header(name: name, value: value.value_or("")));
 }
 
-static_header = (self: StaticEntry) Res<StaticHeader> {
+static_header = (self: StaticEntry) Res<Header> {
     self.match({
         Authority                 => known_header(":authority"),
         MethodGet                 => known_header(":method", "GET"),
@@ -148,7 +148,7 @@ static_header = (self: StaticEntry) Res<StaticHeader> {
     })
 }
 
-static_header_at = (idx: usize) Res<StaticHeader> {
+static_header_at = (idx: usize) Res<Header> {
     idx.to_u8().match({
         Ok(raw) => StaticEntry.from_discriminant(raw).static_header(),
         None    => None,
@@ -187,33 +187,6 @@ static_find_name_folded = (name: str) usize {
             None  => false,
         })
     }).value_or(0)
-}
-
-// HPACK integer codec (RFC 7541 §5.1).
-
-H2Int = { val: usize, pos: usize }
-
-read_int = (buf: Vec<u8>, pos: usize, prefix: usize) Res<H2Int, H2Error> {
-    maxv = prefix.pow2() - 1;
-    b    = buf.get(pos).ok_or(H2Error.DecodeFailed).try();
-    val ::= b.to_usize() % prefix.pow2();
-    p   ::= pos + 1;
-    (val >= maxv).then(() {
-        mult: usize ::= 1;
-        done        ::= false;
-        steps       ::= 0;
-        loop((h) {
-            (done || steps > 8).then(() { h.break(); });
-            cb  = buf.get(p).ok_or(H2Error.DecodeFailed).try();
-            val = val + (cb.to_usize() % 128) * mult;
-            (cb < 128).then(() { done = true; });
-            mult  = mult * 128;
-            p     = p + 1;
-            steps = steps + 1;
-        });
-        done.ensure(H2Error.DecodeFailed).try();
-    });
-    Ok(H2Int(val: val, pos: p));
 }
 
 // Append an integer with the given prefix width and high-bit flags.
@@ -289,20 +262,32 @@ HUF_COUNT: [u32, 31] = [
 HUF_FIRST_IDX: [u32, 31] = [
         0, 0, 0, 0, 0, 0, 10, 36, 68, 0, 74, 79, 82, 84, 90, 92, 0, 0, 0, 95, 98, 106, 119, 145, 174, 186, 190, 205, 224, 0, 253,
     ]
+// The selected run is validated before pointer arithmetic or decoding.
 huf_decode* = (
     buf  : Vec<u8>,
     a    : Alloc,
     from : usize,
     len  : usize
 ) Res<String, H2Error> {
+    bytes = buf.header_bytes(from, len).try();
+    bytes.huffman(a)
+}
+
+header_bytes = (buf: Vec<u8>, from: usize, len: usize) Res<str, H2Error> {
+    (from <= buf.len).ensure(H2Error.DecodeFailed).try();
+    (len <= buf.len - from).ensure(H2Error.DecodeFailed).try();
+    Ok(str_at(buf.ptr().offset(from), len))
+}
+
+huffman = (bytes: str, a: Alloc) Res<String, H2Error> {
     out          ::= a.String().try(H2Error.DecodeFailed);
     code: u32    ::= 0;
     nbits: usize ::= 0;
     bad          ::= false;
 
-    Range(from, from + len).loop((h, i) {
+    Range(0, bytes.len).loop((h, i) {
         bad.then(() { h.break(); });
-        byte = buf.get(i).ok_or(H2Error.DecodeFailed).try();
+        byte = bytes[i];
         k: u32 ::= 128;
         Range(0, 8).loop((h2, j) {
             (bad || nbits > 30).then(() { bad = true; h2.break(); });
@@ -339,33 +324,107 @@ huf_decode* = (
     });
 }
 
-H2Str = { value: String, pos: usize }
+// One decoder borrows exactly one header block. Literal strings borrow its
+// bytes; Huffman strings use the caller's allocator. Neither extends an owner.
+Decoder = {
+    bytes: str,
+    alloc: Alloc,
+    pos :: usize = 0,
 
-read_string = (buf: Vec<u8>, a: Alloc, pos: usize) Res<H2Str, H2Error> {
-    b0 = buf.get(pos).ok_or(H2Error.DecodeFailed).try();
-    r  = buf.read_int(pos, 7).try();
-    (r.pos + r.val <= buf.len).ensure(H2Error.DecodeFailed).try();
+    peek = (self: @Self) Res<u8, H2Error> {
+        self.bytes.get(self.pos).ok_or(H2Error.DecodeFailed)
+    }
 
-    s ::= (b0 >= 128).match({
-        true  => buf.huf_decode(a, r.pos, r.val).try(),
-        false => {
-            raw ::= a.String().try(H2Error.DecodeFailed);
-            raw.add(str_at(buf.ptr().offset(r.pos), r.val))
-                .try(H2Error.DecodeFailed);
-            raw;
-        },
-    });
-    Ok(H2Str(value: s, pos: r.pos + r.val));
+    byte = (self :: @Self) Res<u8, H2Error> {
+        value    = self.peek().try();
+        self.pos = self.pos + 1;
+        Ok(value)
+    }
+
+    take = (self :: @Self, len: usize) Res<str, H2Error> {
+        (len <= self.bytes.len - self.pos).ensure(H2Error.DecodeFailed).try();
+        value    = self.bytes.slice(self.pos, self.pos + len);
+        self.pos = self.pos + len;
+        Ok(value)
+    }
+
+    // RFC 7541 §5.1: continuation arithmetic must fit before it is evaluated.
+    integer = (self :: @Self, prefix: usize) Res<usize, H2Error> {
+        limit = prefix.pow2() - 1;
+        value ::= self.byte().try().to_usize() % prefix.pow2();
+        (value == limit).then(() {
+            multiplier: usize ::= 1;
+            loop((h) {
+                next  = self.byte().try();
+                digit = next.to_usize() % 128;
+                (digit <= (usize.MAX - value) / multiplier)
+                    .ensure(H2Error.DecodeFailed).try();
+                value = value + digit * multiplier;
+                (next < 128).then(() { h.break(); });
+                (multiplier <= usize.MAX / 128)
+                    .ensure(H2Error.DecodeFailed).try();
+                multiplier = multiplier * 128;
+            });
+        });
+        Ok(value)
+    }
+
+    string = (self :: @Self) Res<str, H2Error> {
+        compressed = self.peek().try() >= 128;
+        len        = self.integer(7).try();
+        bytes      = self.take(len).try();
+        compressed.match({
+            false => Ok(bytes),
+            true  => {
+                decoded = bytes.huffman(self.alloc).try();
+                Ok(decoded.view())
+            },
+        })
+    }
+
+    field = (self :: @Self, prefix: usize) Res<Header, H2Error> {
+        index = self.integer(prefix).try();
+        name  = (index == 0).match({
+            true  => self.string().try(),
+            false => index.static_header_at().ok_or(
+                H2Error.DecodeFailed
+            ).try().name,
+        });
+        Ok(Header(name: name, value: self.string().try()))
+    }
+
+    headers = (self :: @Self) Res<DecodedHeaders, H2Error> {
+        decoded ::= DecodedHeaders();
+        loop(() { self.pos < self.bytes.len }, (h) {
+            kind = self.peek().try();
+            (kind >= 128).then(() {
+                index = self.integer(7).try();
+                decoded.add(index.static_header_at()
+                    .ok_or(H2Error.DecodeFailed).try()).try();
+                h.next();
+            });
+            (kind >= 32 && kind < 64).then(() {
+                size = self.integer(5).try();
+                (size <= 4096).ensure(H2Error.DecodeFailed).try();
+                h.next();
+            });
+            // Incremental indexing has a six-bit name prefix; the other two
+            // literal forms have four. This client retains no dynamic entries.
+            prefix: usize = (kind >= 64).match({ true => 6, false => 4 });
+            decoded.add(self.field(prefix).try()).try();
+        });
+        Ok(decoded)
+    }
 }
-
-H2Field = { name: String, value: String, pos: usize }
 
 DecodedHeaders = {
     status     :: Res<i32> = None,
     pseudo     :: bool = false,
     bad_pseudo :: bool = false,
 
-    add = (self :: @Self, name: str, value: str) Res<(), H2Error> {
+    add = (self :: @Self, field: Header) Res<(), H2Error> {
+        name  = field.name;
+        value = field.value;
         name.starts_with(":").then(() { self.pseudo = true; });
         (name.starts_with(":") && !name.eq(":status"))
             .then(() { self.bad_pseudo = true; });
@@ -382,59 +441,6 @@ DecodedHeaders = {
     }
 }
 
-decode_headers = (
-    buf  : Vec<u8>,
-    a    : Alloc,
-    from : usize,
-    len  : usize
-) Res<DecodedHeaders, H2Error> {
-    (from + len <= buf.len).ensure(H2Error.DecodeFailed).try();
-    pos: usize ::= from;
-    decoded    ::= DecodedHeaders();
-
-    loop((h) {
-        (pos >= from + len).then(() { h.break(); });
-        b = buf.get(pos).ok_or(H2Error.DecodeFailed).try();
-
-        (b >= 128).match({
-            true  => {
-                // indexed field — static only, the dynamic table is empty
-                r     = buf.read_int(pos, 7).try();
-                field = r.val.static_header_at()
-                    .ok_or(H2Error.DecodeFailed).try();
-                decoded.add(field.name, field.value).try();
-                pos = r.pos;
-            },
-            false => (b >= 64).match({
-                true  => {
-                    // literal with incremental indexing
-                    r = buf.read_int(pos, 6).try();
-                    p = buf.read_name_value(a, r.pos, r.val).try();
-                    decoded.add(p.name.view(), p.value.view()).try();
-                    pos = p.pos;
-                },
-                false => (b >= 32).match({
-                    true  => {
-                        // dynamic table size update
-                        r = buf.read_int(pos, 5).try();
-                        (r.val <= 4096).ensure(H2Error.DecodeFailed).try();
-                        pos = r.pos;
-                    },
-                    false => {
-                        // literal without indexing / never indexed
-                        r = buf.read_int(pos, 4).try();
-                        p = buf.read_name_value(a, r.pos, r.val).try();
-                        decoded.add(p.name.view(), p.value.view()).try();
-                        pos = p.pos;
-                    },
-                }),
-            }),
-        });
-    });
-
-    Ok(decoded);
-}
-
 // Decode initial response metadata. Exactly one :status field is required.
 hpack_response_headers* = (
     buf  : Vec<u8>,
@@ -442,7 +448,8 @@ hpack_response_headers* = (
     from : usize,
     len  : usize
 ) Res<H2Head, H2Error> {
-    decoded = buf.decode_headers(a, from, len).try();
+    decoder ::= Decoder(bytes: buf.header_bytes(from, len).try(), alloc: a);
+    decoded = decoder.headers().try();
     (!decoded.bad_pseudo).ensure(H2Error.ProtocolFailed).try();
     status = decoded.status.ok_or(H2Error.DecodeFailed).try();
     (status >= 100 && status <= 999)
@@ -460,7 +467,8 @@ hpack_trailer_headers* = (
     from : usize,
     len  : usize
 ) Res<H2Head, H2Error> {
-    decoded = buf.decode_headers(a, from, len).try();
+    decoder ::= Decoder(bytes: buf.header_bytes(from, len).try(), alloc: a);
+    decoded = decoder.headers().try();
     (!decoded.pseudo).ensure(H2Error.ProtocolFailed).try();
     Ok(H2Head.Trailers);
 }
@@ -477,30 +485,6 @@ hpack_status* = (
         Response(status)      => Ok(status),
         Trailers              => Err(H2Error.DecodeFailed),
     })
-}
-
-read_name_value = (
-    buf      : Vec<u8>,
-    a        : Alloc,
-    pos      : usize,
-    name_idx : usize
-) Res<H2Field, H2Error> {
-    name ::= a.String().try(H2Error.DecodeFailed);
-    p    ::= pos;
-    (name_idx > 0).match({
-        true  => {
-            field = name_idx.static_header_at()
-                .ok_or(H2Error.DecodeFailed).try();
-            name.add(field.name).try(H2Error.DecodeFailed);
-        },
-        false => {
-            ns   = buf.read_string(a, p).try();
-            name = ns.value;
-            p    = ns.pos;
-        },
-    });
-    vs = buf.read_string(a, p).try();
-    Ok(H2Field(name: name, value: vs.value, pos: vs.pos));
 }
 
 // Header block encode: literal-without-indexing, static names where they
@@ -537,10 +521,11 @@ block_add_lower = (blk :: String, s: str) Res<(), H2Error> {
 
 // Connection headers HTTP/2 forbids, plus the two set by send_post.
 header_skipped = (name: str) bool {
-    name.is_in([
+    [
         "host", "content-length", "connection", "keep-alive",
         "proxy-connection", "transfer-encoding", "upgrade", "te",
-    ]);
+    ].find((blocked) { name.eq_ignore_case(blocked) })
+        .match({ Ok(_) => true, None => false })
 }
 
 // Add one "Name: value" user header, lowercasing the name.

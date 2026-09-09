@@ -4,7 +4,6 @@
 str, String = std.text
 Vec, Map = std.collections
 Alloc, AllocError = std.mem
-Range = std.core
 ExprId, TypeId, Span, Pos, Access, QualifiedName = std.ast
 nowhere = std.ast
 Checker = sema.sema_check
@@ -13,7 +12,7 @@ Def, decl_at, dotted = sema.sema_def
 def_type = sema.sema_type
 DeclId = sema.sema_id
 Found, members_of, first_found = sema.sema_member
-to_pos, to_wire, WirePos, WireRange = lsp.lsp_pos
+source_position, lsp_position, Position, TextRange = lsp.lsp_pos
 path_of, uri_at, doc_text, disk_text = lsp.lsp_uri
 told_at, module_index_of = std.ast.ast_named
 check_standalone = lsp.lsp_query
@@ -23,15 +22,15 @@ to_json = std.json
 Target* = {
     found*: bool,
     uri*: str,
-    start*: WirePos,
-    end*: WirePos,
+    start*: Position,
+    end*: Position,
 
     // `null` when nothing was found, else a Location.
     write* = (self: @Self, a: Alloc, out :: String) Res<(), AllocError> {
         self.found.match({
             false => out.add("null"),
             true  => {
-                encoded ::= Location(uri: self.uri, range: WireRange(start: self.start, end: self.end)).to_json(a).try();
+                encoded ::= Location(uri: self.uri, range: TextRange(start: self.start, end: self.end)).to_json(a).try();
                 out.add(encoded.view())
             },
         })
@@ -40,7 +39,7 @@ Target* = {
 
 Location = {
     uri: str,
-    range: WireRange,
+    range: TextRange,
 }
 
 Defn* = {
@@ -57,12 +56,12 @@ definition_at* = (
 ) Res<Target, AllocError> {
     c ::= check_standalone(a, uri, text).try();
     seek = Seek(c: c, a: a, file: uri);
-    d    = seek.sought(to_pos(text, line, character)).try();
+    d    = seek.sought(source_position(text, line, character)).try();
     Ok(Target(
         found: d.found,
         uri: uri,
-        start: to_wire(text, d.span.start),
-        end: to_wire(text, d.span.end)
+        start: lsp_position(text, d.span.start),
+        end: lsp_position(text, d.span.end)
     ));
 }
 
@@ -79,8 +78,8 @@ definition_in* = (
                  Res<Target, AllocError> {
     checked = check_build(env, a, workspace, path, text).try();
     seek    = Seek(c: checked.c, a: a, file: checked.rel);
-    d       = seek.sought(to_pos(text, line, character)).try();
-    placed(env, a, checked.root, None, uri, text, checked.rel, d)
+    d       = seek.sought(source_position(text, line, character)).try();
+    DefinitionSource(env: env, alloc: a, root: checked.root, docs: None, uri: uri, text: text, rel: checked.rel).place(d)
 }
 
 definition_with* = (
@@ -97,57 +96,48 @@ definition_with* = (
 )
                    Res<Target, AllocError> {
     seek = Seek(c: c, a: a, file: rel);
-    d    = seek.sought(to_pos(text, line, character)).try();
-    placed(env, a, root, Ok(docs), uri, text, rel, d)
+    d    = seek.sought(source_position(text, line, character)).try();
+    DefinitionSource(env: env, alloc: a, root: root, docs: Ok(docs), uri: uri, text: text, rel: rel).place(d)
 }
 
-placed = (
-    env  : Env,
-    a    : Alloc,
-    root : str,
-    docs : Res<Map<str, str>>,
-    uri  : str,
-    text : str,
-    rel  : str,
-    d    : Defn
-) Res<Target, AllocError> {
-    d.found.match({
-        false => Ok(no_target()),
-        true  => wired_target(env, a, root, docs, uri, text, rel, d.span),
-    })
-}
+// Source buffers for one definition response. Foreign spans use the open
+// overlay when present, then disk; local spans use the querying buffer.
+DefinitionSource = {
+    env: Env,
+    alloc: Alloc,
+    root: str,
+    docs: Res<Map<str, str>>,
+    uri: str,
+    text: str,
+    rel: str,
 
-// A span in another file is positioned against that file's open buffer
-// when the client holds one, else against the disk.
-wired_target = (
-    env  : Env,
-    a    : Alloc,
-    root : str,
-    docs : Res<Map<str, str>>,
-    uri  : str,
-    text : str,
-    rel  : str,
-    span : Span
-) Res<Target, AllocError> {
-    same  = span.file.eq(rel);
-    at    = same.match({ true => uri, false => uri_at(
-        a,
-        root,
-        span.file
-    ).try() });
-    bytes = same.match({
-        true  => text,
-        false => docs.match({
-            None        => disk_text(env, a, path_of(at)),
-            Ok(overlay) => doc_text(env, a, overlay, at),
-        }),
-    });
-    Ok(Target(
-        found: true,
-        uri: at,
-        start: to_wire(bytes, span.start),
-        end: to_wire(bytes, span.end)
-    ));
+    place = (self: @Self, definition: Defn) Res<Target, AllocError> {
+        definition.found.match({
+            false => Ok(no_target()),
+            true  => self.wire(definition.span),
+        })
+    }
+
+    wire = (self: @Self, span: Span) Res<Target, AllocError> {
+        same  = span.file.eq(self.rel);
+        uri   = same.match({
+            true  => self.uri,
+            false => uri_at(self.alloc, self.root, span.file).try(),
+        });
+        bytes = same.match({
+            true  => self.text,
+            false => self.docs.match({
+                None        => disk_text(self.env, self.alloc, path_of(uri)),
+                Ok(overlay) => doc_text(self.env, self.alloc, overlay, uri),
+            }),
+        });
+        Ok(Target(
+            found: true,
+            uri: uri,
+            start: lsp_position(bytes, span.start),
+            end: lsp_position(bytes, span.end)
+        ))
+    }
 }
 
 // One definition lookup: the checker, the allocator for scratch, and the
@@ -311,27 +301,20 @@ Seek = {
     // The declaration a call through expression `id` resolved to.
     called_decl = (self: @Self, id: ExprId) Res<DeclId> {
         found: Res<DeclId> = loop((done) {
-            eid ::= ExprId(index: 0);
-            Range(0, self.c.tree.expr_ids()).loop((next, i) {
-                self.callee_of(eid, id).match({
-                    None    => (),
-                    Ok(did) => done.break(did),
+            self.c.tree.exprs_each((eid, expr) {
+                expr.kind.match({
+                    Call(call) => (call.callee.index == id.index).then(() {
+                        self.c.call_memo.get(eid).match({
+                            None     => (),
+                            Ok(decl) => done.break(decl),
+                        });
+                    }),
+                    _          => (),
                 });
-                eid = ExprId(index: eid.index + 1);
             });
             done.break();
         });
         found
-    }
-
-    callee_of = (self: @Self, eid: ExprId, id: ExprId) Res<DeclId> {
-        self.c.tree.expr_at(eid).kind.match({
-            Call(k) => (k.callee.index == id.index).match({
-                true  => self.c.call_memo.get(eid),
-                false => None,
-            }),
-            _       => None,
-        })
     }
 
     decl_defn = (self: @Self, id: DeclId) Res<Defn, AllocError> {
@@ -361,7 +344,7 @@ no_target = () Target {
     Target(
         found: false,
         uri: "",
-        start: WirePos(line: 0, character: 0),
-        end: WirePos(line: 0, character: 0)
+        start: Position(line: 0, character: 0),
+        end: Position(line: 0, character: 0)
     )
 }

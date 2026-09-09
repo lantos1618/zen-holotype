@@ -4,7 +4,7 @@
 // Two coordinate systems disagree on both axes: LSP counts lines from 0
 // and characters in UTF-16 code units, Zen counts lines from 1 and
 // columns in 1-based BYTES. Every row below is driven THROUGH BOTH
-// DIRECTIONS — `to_pos` then `to_wire` — because §3 says so and gives
+// DIRECTIONS — `source_position` then `lsp_position` — because §3 says so and gives
 // the reason: a conversion tested one way passes with the error present
 // in both.
 //
@@ -26,7 +26,7 @@
 //   a last line with no trailing newline
 //   a line past the end of the file
 //
-// MID-CHARACTER POSITIONS ARE THE OTHER HALF. `to_wire` is asked about
+// MID-CHARACTER POSITIONS ARE THE OTHER HALF. `lsp_position` is asked about
 // byte columns that land INSIDE a multi-byte sequence, and the answer
 // must round DOWN to that sequence's start — there is no wire position
 // between the two bytes of an `é`, and a conversion that invents one
@@ -35,7 +35,7 @@
 str = std.text
 AllocError = std.mem
 Pos = std.ast.ast_span
-to_pos, to_wire = lsp.lsp_pos
+source_position, lsp_position = lsp.lsp_pos
 
 // line 0  "ab"     ASCII
 // line 1  "é1"     2-byte lead
@@ -50,8 +50,8 @@ SRC: str = "ab\né1\n中x\n😀y\n\tz\n\ncr\r\nend"
 // wire -> zen -> wire, in one line, so a row surviving one direction
 // and not the other is visible rather than averaged away.
 round = (line: usize, character: usize) Res<(), AllocError> {
-    p = to_pos(SRC, line, character);
-    w = to_wire(SRC, p);
+    p = source_position(SRC, line, character);
+    w = lsp_position(SRC, p);
     println(
         "wire {}:{} -> zen {}:{} -> wire {}:{}",
         line,
@@ -64,10 +64,10 @@ round = (line: usize, character: usize) Res<(), AllocError> {
     Ok(());
 }
 
-// zen -> wire alone, for the byte columns no `to_pos` can produce: the
+// zen -> wire alone, for the byte columns no `source_position` can produce: the
 // ones inside a character.
 back = (line: usize, col: usize) Res<(), AllocError> {
-    w = to_wire(SRC, Pos(line: line, col: col));
+    w = lsp_position(SRC, Pos(line: line, col: col));
     println("zen {}:{} -> wire {}:{}", line, col, w.line, w.character);
     Ok(());
 }
@@ -131,5 +131,8 @@ main = (env: Env) Res<i32, AllocError> {
     println("-- impossible inputs clamp rather than trap");
     back(0, 0).try();        // line 0 and column 0 do not exist in Zen
     back(1, 99).try();
+    // Clamp before adding the line offset: MAX + a later line would overflow.
+    extreme = lsp_position(SRC, Pos(line: 8, col: usize.MAX));
+    println("largest column clamps {}:{}", extreme.line, extreme.character);
     Ok(0);
 }

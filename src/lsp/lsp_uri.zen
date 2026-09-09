@@ -8,23 +8,49 @@ Alloc, AllocError = std.mem
 FILE_SCHEME*: str = "file://"
 REMOTE_SCHEME: str = "vscode-remote://"
 
-path_of* = (uri: str) str {
-    uri.starts_with(FILE_SCHEME).match({
-        true  => uri.slice(FILE_SCHEME.len, uri.len),
-        false => uri.starts_with(REMOTE_SCHEME).match({
-            true  => remote_path(uri),
-            false => uri,
-        }),
-    })
+// Classification is closed even though unrecognized URI spellings pass
+// through unchanged. The prefix constants above remain the wire spelling.
+Scheme = File | Remote | Other
+
+Uri = {
+    raw: str,
+    scheme: Scheme,
+
+    path = (self: @Self) str {
+        self.scheme.match({
+            File   => self.raw.slice(FILE_SCHEME.len, self.raw.len),
+            Remote => {
+                tail = self.raw.slice(REMOTE_SCHEME.len, self.raw.len);
+                tail.find('/').match({
+                    Ok(at) => tail.slice(at, tail.len),
+                    None   => self.raw,
+                })
+            },
+            Other  => self.raw,
+        })
+    }
+
+    // Overlays are keyed by the client's exact spelling, not the local path.
+    text = (self: @Self, env: Env, a: Alloc, docs: Map<str, str>) str {
+        docs.get(self.raw).match({
+            Ok(text) => text,
+            None     => disk_text(env, a, self.path()),
+        })
+    }
 }
 
-remote_path = (uri: str) str {
-    tail = uri.slice(REMOTE_SCHEME.len, uri.len);
-    tail.find('/').match({
-        Ok(at) => tail.slice(at, tail.len),
-        None   => uri,
-    })
+parsed_uri = (raw: str) Uri {
+    scheme = raw.starts_with(FILE_SCHEME).match({
+        true  => Scheme.File,
+        false => raw.starts_with(REMOTE_SCHEME).match({
+            true  => Scheme.Remote,
+            false => Scheme.Other,
+        }),
+    });
+    Uri(raw: raw, scheme: scheme)
 }
+
+path_of* = (uri: str) str { parsed_uri(uri).path() }
 
 uri_at* = (a: Alloc, root: str, rel: str) Res<str, AllocError> {
     out ::= a.String("{}{}/{}", FILE_SCHEME, root, rel).try();
@@ -34,10 +60,7 @@ uri_at* = (a: Alloc, root: str, rel: str) Res<str, AllocError> {
 // The open buffer for `uri` when the client holds one, else the file on
 // disk; an unreadable file reads as empty.
 doc_text* = (env: Env, a: Alloc, docs: Map<str, str>, uri: str) str {
-    docs.get(uri).match({
-        Ok(text) => text,
-        None     => disk_text(env, a, path_of(uri)),
-    })
+    parsed_uri(uri).text(env, a, docs)
 }
 
 disk_text* = (env: Env, a: Alloc, path: str) str {

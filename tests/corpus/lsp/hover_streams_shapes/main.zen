@@ -1,0 +1,45 @@
+// Shape notes stream to the final buffer without leaking a previous signature,
+// repeating overload names, or adding punctuation for empty/unknown parts.
+Alloc, AllocError = std.mem
+String, str = std.text
+hover_at = lsp.lsp_hover
+
+show = (a: Alloc, label: str, declaration: str, name: str)
+       Res<(), AllocError> {
+    text ::= a.String().try();
+    text.add(declaration).try();
+    text.fmt("\ninspect = (value: {}) () {{}}", name).try();
+    hover = hover_at(
+        a,
+        "sample.zen",
+        text.view(),
+        declaration.count("\n") + 1,
+        18
+    ).try();
+    println("{}: {} / {}", label, hover.found, hover.shown);
+    Ok(())
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    show(a, "empty", "Empty = {}", "Empty").try();
+    show(
+        a,
+        "documented",
+        "// One sentence.\n// Not part of the summary.\nEmpty = {}",
+        "Empty"
+    ).try();
+    show(
+        a,
+        "variants",
+        "Choice = Nothing | Count(i32) | Broken(Missing) | Ready(bool)",
+        "Choice"
+    ).try();
+    show(
+        a,
+        "members",
+        "Shape = {\n    good: i32,\n    missing: Missing,\n    first = (self: @Self) i32 { 1 }\n    first = (self: @Self, value: i32) i32 { value }\n    broken = (self: @Self) Missing\n    last = (self: @Self) bool { true }\n}",
+        "Shape"
+    ).try();
+    Ok(0)
+}

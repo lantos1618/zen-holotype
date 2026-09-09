@@ -1,0 +1,43 @@
+cli = zen
+
+show = (env: Env, words: Vec<str>) Res<(), AllocError> {
+    cli(env, words).try().match({
+        Build(job)               => {
+            destination = job.emission.match({
+                Check => "check", Stdout => "stdout", File(_) => "file", Directory(_) => "directory"
+            });
+            println("{} {}", job.backend.stable_name(), destination);
+        },
+        UnavailableBackend(name) => println("unavailable {}", name),
+        Usage(word)              => println("usage {}", word),
+        _                        => println("unexpected command"),
+    });
+    Ok(())
+}
+
+args = (
+    alloc   : Alloc,
+    backend : str,
+    option  : str,
+    value   : str
+) Res<Vec<str>, AllocError> {
+    words ::= alloc.Vec<str>();
+    [str, 5]("zen", "build", "src", "--backend", backend).loop(
+        (word) { words.add(word).try(); }
+    );
+    (!option.is_empty()).then(() { words.add(option).try(); });
+    (!value.is_empty()).then(() { words.add(value).try(); });
+    Ok(words)
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    show(env, args(alloc, "c", "", "").try()).try();
+    show(env, args(alloc, "c", "-o", "out.c").try()).try();
+    show(env, args(alloc, "c", "--emit-c-dir", "gen").try()).try();
+    show(env, args(alloc, "js", "--emit-c", "").try()).try();
+    show(env, args(alloc, "asm", "--emit-c", "").try()).try();
+    show(env, args(alloc, "unknown", "-o", "out.c").try()).try();
+    show(env, args(alloc, "--emit-c", "", "").try()).try();
+    Ok(0)
+}

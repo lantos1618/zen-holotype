@@ -1,0 +1,101 @@
+// Helper failures return to the helper call; caller callbacks retain their lexical exit.
+// Every exited helper cleans up, while a caller handling the error remains alive.
+
+Fault = | Bad(i32)
+Other = Replaced | Mapped(i32)
+Noisy = { tag: str }
+Noisy.impl(Drop, {
+    drop = (self :: @Self) () { println("drop {}", self.tag) }
+})
+
+leaf = (bad: bool) Res<i64, Fault> {
+    bad.match({ true => Err(Fault.Bad(7)), false => Ok(42) })
+}
+missing = () Res<i32> { None }
+
+helper = (bad: bool, body: () ()) Res<i64, Fault> {
+    owned = Noisy("helper");
+    @scope.defer(() { println("defer helper") });
+    n = leaf(bad).try();
+    body();
+    Ok(n)
+}
+
+outer = (body: () ()) Res<i64, Fault> {
+    owned = Noisy("outer");
+    body();
+    helper(false, () { leaf(true).try(); }).match({
+        Ok(_)  => println("unreachable outer success"),
+        Err(_) => println("unreachable outer failure"),
+    });
+    Ok(0)
+}
+
+callback_exit = () Res<i32, Fault | Other> {
+    owned = Noisy("callback caller");
+    helper(false, () { leaf(true).try(); }).match({
+        Ok(_)  => println("unreachable callback success"),
+        Err(_) => println("unreachable callback failure"),
+    });
+    Ok(0)
+}
+
+replace = (body: () ()) Res<(), Other> {
+    body();
+    leaf(true).try(Other.Replaced);
+    Ok(())
+}
+map_error = (body: () ()) Res<str, Other> {
+    body();
+    leaf(true).try((error) {
+        error.match({ Bad(n) => Other.Mapped(n + 1) })
+    });
+    Ok("unreachable")
+}
+optional = (body: () ()) Res<str> {
+    owned = Noisy("optional");
+    body();
+    missing().try();
+    Ok("unreachable")
+}
+
+unit_error = () Res<i64, ()> { Err(()) }
+unit_helper = (body: () ()) Res<str, ()> {
+    body();
+    unit_error().try();
+    Ok("unreachable")
+}
+wide_helper = (body: () ()) Res<str, Fault | Other> {
+    body();
+    leaf(true).try();
+    Ok("unreachable")
+}
+
+main = (env: Env) Res<i32, Other> {
+    caller = Noisy("main");
+    helper(true, () {}).match({
+        Ok(_)  => println("unreachable helper success"),
+        Err(e) => e.match({ Bad(n) => println("caught {}", n) }),
+    });
+    println("main continued");
+    helper(false, () { println("success body") }).match({
+        Ok(n)  => println("success {}", n),
+        Err(_) => println("unreachable helper failure"),
+    });
+    outer(() {}).match({ Ok(_) => println("unreachable outer"), Err(_) => println("outer caught") });
+    callback_exit().match({ Ok(_) => println("unreachable callback"), Err(_) => println("callback caught") });
+    replace(() {}).match({ Ok(_) => println("unreachable replace"), Err(_) => println("replaced") });
+    map_error(() {}).match({
+        Ok(_)      => println("unreachable mapped"),
+        Err(error) => error.match({ Mapped(n) => println("mapped {}", n), Replaced => println("wrong mapping") }),
+    });
+    optional(() {}).match({ Ok(_) => println("unreachable optional"), None => println("absent") });
+    unit_helper(() {}).match({ Ok(_) => println("unreachable unit"), Err(_) => println("unit caught") });
+    wide_helper(() {}).match({ Ok(_) => println("unreachable widened"), Err(_) => println("widened caught") });
+    @scope.defer(() {
+        helper(true, () {}).match({ Ok(_) => println("unreachable defer"), Err(_) => println("defer caught") });
+        println("defer continued");
+    });
+    println("main ending");
+    Ok(0)
+}

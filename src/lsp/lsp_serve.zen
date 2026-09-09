@@ -1,7 +1,7 @@
 // Owns LSP session state and routes one decoded JSON-RPC message at a time.
 // Full-sync document contents are retained as an in-memory build overlay.
 
-str, String = std.text
+str, String, dup = std.text
 Vec, Map = std.collections
 Range = std.core
 Alloc, AllocError, Arena = std.mem
@@ -17,9 +17,9 @@ write_tokens = lsp.lsp_colour
 Diagnostics, Shared = lsp.lsp_diag
 write_actions = lsp.lsp_action
 relative_to = zen.zen_path
-WirePos = lsp.lsp_pos
+Position = lsp.lsp_pos
 Decoded, RequestTurn, write_capabilities = lsp.lsp_reply
-RpcFault, own_str, request_of, notice_of = lsp.lsp_reply
+RpcFault, request_of, notice_of = lsp.lsp_reply
 path_of = lsp.lsp_uri
 
 Server* = {
@@ -29,7 +29,8 @@ Server* = {
 
     docs_arena :: Arena,
 
-    workspace :: str = "",
+    // Session-backed view; construction must choose the initial workspace.
+    workspace :: str,
 
     docs :: Map<str, str>,
 
@@ -106,12 +107,9 @@ Server* = {
                    turn :: RequestTurn) Res<(), AllocError> {
         self.members.invalidate();
         self.ready     = true;
-        self.workspace = own_str(
-            self.a,
-            path_of(request.string_at(request.params(), "rootUri"))
-        ).try();
+        self.workspace = path_of(request.string_at(request.params(), "rootUri")).dup(self.a).try();
         caps ::= turn.alloc().String().try();
-        write_capabilities(caps).try();
+        write_capabilities(turn.alloc(), caps).try();
         turn.result(request, caps.view())
     }
 
@@ -192,7 +190,7 @@ Server* = {
     }
 
     forget = (self :: @Self, uri: str) Res<(), AllocError> {
-        stable = own_str(self.a, uri).try();
+        stable = uri.dup(self.a).try();
         self.members.invalidate();
         self.replace_docs(uri, None).try();
         Range(0, self.open.len).find((i) {
@@ -238,7 +236,7 @@ Server* = {
         self.open.find((u) { u.eq(uri) }).match({
             Ok(found) => Ok(found),
             None      => {
-                kept = own_str(self.a, uri).try();
+                kept = uri.dup(self.a).try();
                 self.open.add(kept).try();
                 Ok(kept)
             },
@@ -253,16 +251,16 @@ Server* = {
             key.eq(uri).match({
                 true  => written(),
                 false => fresh.set(
-                    own_str(fresh_arena, key).try(),
-                    own_str(fresh_arena, value).try()
+                    key.dup(fresh_arena).try(),
+                    value.dup(fresh_arena).try()
                 ),
             }).try();
         });
         text.match({
             None        => written(),
             Ok(replace) => fresh.set(
-                own_str(fresh_arena, uri).try(),
-                own_str(fresh_arena, replace).try()
+                uri.dup(fresh_arena).try(),
+                replace.dup(fresh_arena).try()
             ),
         }).try();
         self.docs_arena.drop();
@@ -477,11 +475,11 @@ Server* = {
                         t,
                         uri,
                         text,
-                        WirePos(
+                        Position(
                             line: request.number_at(first, "line"),
                             character: request.number_at(first, "character")
                         ),
-                        WirePos(
+                        Position(
                             line: request.number_at(last, "line"),
                             character: request.number_at(last, "character")
                         ),
@@ -494,7 +492,7 @@ Server* = {
     }
 
     shared_actions = (self :: @Self, t: Alloc, uri: str, text: str,
-                      from: WirePos, upto: WirePos, body :: String)
+                      from: Position, upto: Position, body :: String)
                      Res<(), AllocError> {
         path = path_of(uri);
         sh   = self.build_for(path, t).try();
@@ -650,6 +648,7 @@ server_with_docs = (a: Alloc, env: Env, docs_arena :: Arena) Server {
         a: a,
         env: env,
         docs_arena: consume docs_arena,
+        workspace: "",
         docs: docs,
         open: a.Vec<str>(),
         notes: a.Diagnostics(env),

@@ -1,0 +1,51 @@
+// Syntax queries distinguish supplied values and bodies from required hooks.
+// These queries borrow parsed members and need no scratch allocator.
+
+scan, Source = std.lex
+Parser, module = std.parse
+
+SOURCE: str = "Window = { start: usize, end: usize }\nWindow.impl(Bounds, {\n    start: 2,\n    end: 5,\n    stop ::= (self: @Self) ()\n    at ::= (self: @Self, index: usize) Res<usize> { Ok(index) }\n})\n"
+
+main = (env: Env) Res<i32, AllocError> {
+    alloc ::= env.mem.alloc();
+    lexed = scan(alloc, Source(file: "bounds.zen", text: SOURCE)).try();
+    parser ::= alloc.Parser(lexed);
+    parsed = parser.module("bounds").try();
+    println("lex {} parse {}", lexed.diags.len, parser.diags.len);
+    parsed.decls.loop((h, declaration) {
+        declaration.kind.match({
+            Struct(s) => println(
+                "fields {} {} {}",
+                s.has_field("start"),
+                s.has_field("end"),
+                s.has_field("missing")
+            ),
+            Impl(im)  => {
+                println(
+                    "bounds {} {}",
+                    im.field_value(
+                        "start"
+                    ).match({ Ok(_) => true, None => false }),
+                    im.field_value(
+                        "end"
+                    ).match({ Ok(_) => true, None => false })
+                );
+                println(
+                    "body {} hook {} field {} missing {}",
+                    im.bodied_fn("at").match({ Ok(_) => true, None => false }),
+                    im.bodied_fn(
+                        "stop"
+                    ).match({ Ok(_) => true, None => false }),
+                    im.bodied_fn(
+                        "start"
+                    ).match({ Ok(_) => true, None => false }),
+                    im.field_value(
+                        "missing"
+                    ).match({ Ok(_) => true, None => false })
+                );
+            },
+            _         => (),
+        });
+    });
+    Ok(0)
+}

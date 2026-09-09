@@ -157,137 +157,104 @@ lower_create* = (
     out :: String
 ) Res<bool, AllocError> {
     be.alloc_raw(rty, a.name.text).try().match({
-        None  => Ok(false),
-        Ok(r) => be.write_create(id, c, a, rty, r, ctx, out),
+        None    => Ok(false),
+        Ok(raw) => CreateCall(id: id, call: c, receiver: a.base, receiver_ty: rty, raw: raw, ctx: ctx).lower(be, out),
     })
 }
 
-write_create = (
-    be  :: CBackend,
-    id  : ExprId,
-    c   : Call,
-    a   : Access,
-    rty : TyId,
-    r   : RawFn,
-    ctx : Ctx,
-    out :: String
-) Res<bool, AllocError> {
-    be.created(c, rty, r, ctx).try().match({
-        None  => be.nothing_to_make(id, out),
-        Ok(x) => be.write_made(a, rty, r, x, ctx, out),
-    })
-}
+// A create call whose allocator raw member has been selected. Pointer types
+// and the instantiated raw signature are discovered later during lowering.
+CreateCall = {
+    id: ExprId,
+    call: Call,
+    receiver: ExprId,
+    receiver_ty: TyId,
+    raw: RawFn,
+    ctx: Ctx,
 
-nothing_to_make = (be :: CBackend, id: ExprId, out :: String)
-                  Res<bool, AllocError> {
-    be.untyped(id, "create", out).try();
-    Ok(true);
-}
+    lower = (self: @Self, be :: CBackend, out :: String)
+            Res<bool, AllocError> {
+        be.created(
+            self.call,
+            self.receiver_ty,
+            self.raw,
+            self.ctx
+        ).try().match({
+            None        => {
+                be.untyped(self.id, "create", out).try();
+                Ok(true)
+            },
+            Ok(created) => self.write_made(be, created, out),
+        })
+    }
 
-write_made = (
-    be  :: CBackend,
-    a   : Access,
-    rty : TyId,
-    r   : RawFn,
-    x   : Created,
-    ctx : Ctx,
-    out :: String
-) Res<bool, AllocError> {
-    call ::= be.alloc.String().try();
-    be.raw_call(a.base, rty, r, x, ctx, call).try().match({
-        false => Ok(false),
-        true  => be.rebuild_at_elem(call.view(), x, out),
-    })
-}
+    write_made = (self: @Self, be :: CBackend, created: Created, out :: String)
+                 Res<bool, AllocError> {
+        call ::= be.alloc.String().try();
+        self.raw_call(be, created, call).try().match({
+            false => Ok(false),
+            true  => {
+                be.request_type(created.ret).try();
+                be.convert(
+                    call.view(),
+                    created.raw_ret,
+                    created.ret,
+                    out
+                ).try();
+                Ok(true)
+            },
+        })
+    }
 
-rebuild_at_elem = (be :: CBackend, call: str, x: Created, out :: String)
-                  Res<bool, AllocError> {
-    be.request_type(x.ret).try();
-    be.convert(call, x.raw_ret, x.ret, out).try();
-    Ok(true);
-}
+    // Build the declared signature so the receiver has the type expected by
+    // raw. Open generic signatures must not reach either emission path.
+    raw_call = (self: @Self, be :: CBackend, created: Created, out :: String)
+               Res<bool, AllocError> {
+        inst = be.recv_inst(self.receiver_ty).try();
+        sig ::= be.alloc.Vec<TyId>();
+        be.method_sig(
+            self.receiver_ty,
+            self.raw.site.decl,
+            self.raw.f,
+            self.raw.site.decl.module.to_usize(),
+            inst,
+            sig
+        ).try();
+        (be.inst_open(inst) || be.any_open(sig)).match({
+            true  => Ok(false),
+            false => be.is_fat(self.receiver_ty).match({
+                true  => self.write_slot(be, created, sig, out),
+                false => self.write_static(be, created, sig, inst, out),
+            }),
+        })
+    }
 
-// Build the declared signature so the receiver is written at the type
-// expected by `raw`; the actual call still goes through the bound value.
-raw_call = (
-    be   :: CBackend,
-    recv : ExprId,
-    rty  : TyId,
-    r    : RawFn,
-    x    : Created,
-    ctx  : Ctx,
-    out  :: String
-) Res<bool, AllocError> {
-    inst = be.recv_inst(rty).try();
-    sig ::= be.alloc.Vec<TyId>();
-    be.method_sig(
-        rty,
-        r.site.decl,
-        r.f,
-        r.site.decl.module.to_usize(),
-        inst,
-        sig
-    ).try();
-    (be.inst_open(inst) || be.any_open(sig)).match({
-        true  => Ok(false),
-        false => be.write_raw_call(recv, rty, r, x, sig, inst, ctx, out),
-    })
-}
+    write_slot = (self: @Self, be :: CBackend, created: Created,
+                  sig: Vec<TyId>, out :: String) Res<bool, AllocError> {
+        value ::= be.alloc.String().try();
+        be.write_arg(self.receiver, 0, self.raw.f, sig, self.ctx, value).try();
+        held = be.init_temp(self.receiver_ty, "alloc", value.view()).try();
+        args ::= be.alloc.String().try();
+        be.write_sizeof(created.elem, args).try();
+        args.add(", 16").try();
+        be.slot_call(held.view(), self.receiver_ty, "raw", args.view(), 2, out)
+            .try().match({ None => Ok(false), Ok(_) => Ok(true) })
+    }
 
-write_raw_call = (
-    be   :: CBackend,
-    recv : ExprId,
-    rty  : TyId,
-    r    : RawFn,
-    x    : Created,
-    sig  : Vec<TyId>,
-    inst : Inst,
-    ctx  : Ctx,
-    out  :: String
-) Res<bool, AllocError> {
-    be.is_fat(rty).match({
-        true  => be.write_raw_slot(recv, rty, r, x, sig, ctx, out),
-        false => be.write_static_raw(recv, rty, r, x, sig, inst, ctx, out),
-    })
-}
-
-write_raw_slot = (
-    be   :: CBackend,
-    recv : ExprId,
-    rty  : TyId,
-    r    : RawFn,
-    x    : Created,
-    sig  : Vec<TyId>,
-    ctx  : Ctx,
-    out  :: String
-) Res<bool, AllocError> {
-    value ::= be.alloc.String().try();
-    be.write_arg(recv, 0, r.f, sig, ctx, value).try();
-    held = be.init_temp(rty, "alloc", value.view()).try();
-    args ::= be.alloc.String().try();
-    be.write_sizeof(x.elem, args).try();
-    args.add(", 16").try();
-    be.slot_call(held.view(), rty, "raw", args.view(), 2, out).try().match({
-        None     => Ok(false),
-        Ok(slot) => Ok(true),
-    })
-}
-
-write_static_raw = (
-    be   :: CBackend,
-    recv : ExprId,
-    rty  : TyId,
-    r    : RawFn,
-    x    : Created,
-    sig  : Vec<TyId>,
-    inst : Inst,
-    ctx  : Ctx,
-    out  :: String
-) Res<bool, AllocError> {
-    sym = be.member_symbol(rty, r.site, "raw", sig, inst).try();
-    out.fmt("{}(", sym.view()).try();
-    be.write_arg(recv, 0, r.f, sig, ctx, out).try();
-    be.write_sizeof(x.elem, out).try();
-    out.add(", 16)").try();
-    Ok(true);
+    write_static = (self: @Self, be :: CBackend, created: Created,
+                    sig: Vec<TyId>, inst: Inst, out :: String)
+                   Res<bool, AllocError> {
+        sym = be.member_symbol(
+            self.receiver_ty,
+            self.raw.site,
+            "raw",
+            sig,
+            inst
+        ).try();
+        out.fmt("{}(", sym.view()).try();
+        be.write_arg(self.receiver, 0, self.raw.f, sig, self.ctx, out).try();
+        be.write_sizeof(created.elem, out).try();
+        out.add(", 16)").try();
+        Ok(true)
+    }
 }

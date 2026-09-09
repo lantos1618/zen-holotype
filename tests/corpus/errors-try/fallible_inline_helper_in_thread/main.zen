@@ -1,0 +1,22 @@
+// A lifted thread has its own native return target even inside an inlined caller.
+Fault = | Failed
+fail = () Res<i64, Fault> { Err(Fault.Failed) }
+helper = (body: () ()) Res<i64, Fault> {
+    body();
+    fail().try();
+    Ok(0)
+}
+outer = (env: Env, arena: Alloc, body: () ()) Res<u64, ThreadError> {
+    body();
+    thread = env.threads.spawn(arena, () Res<u64, ThreadError> {
+        helper(() {}).match({ Ok(_) => println("unreachable thread"), Err(_) => println("thread caught") });
+        Ok(9)
+    }).try();
+    thread.join()
+}
+main = (env: Env) Res<i32, ThreadError> {
+    arena ::= env.mem.alloc();
+    value = outer(env, arena, () {}).try();
+    println("thread continued {}", value);
+    Ok(0)
+}

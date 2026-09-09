@@ -1,8 +1,8 @@
-// Derived loop operations. find does not allocate; filter and map collect into
-// caller-owned arena vectors.
+// Derived traversal operations. find borrows; filter and map collect into
+// storage chosen by the caller and preserve allocation failures.
 Res, Ok, None = std.core.result
 then          = std.core.bool
-Alloc         = std.mem
+Alloc, AllocError = std.mem
 Vec           = std.collections
 Range         = std.core.range
 LoopHandle    = std.core.loop.loop_handle
@@ -15,43 +15,42 @@ find*<R: Range<T>, T> = (range: R, pred: (value: T) bool) Res<T> {
     })
 }
 
-// Every accepted element in order. No matches yields an empty Vec; None means
-// allocation failed.
-filter*<R: Range<T>, T> = (range: R, alloc: Alloc, pred: (
-    value : T
-) bool) Res<Vec<T>> {
+// Every accepted element in order. No matches yields an empty Vec.
+filter*<R: Range<T>, T> = (range: R, alloc: Alloc, pred: (value: T) bool)
+                        Res<Vec<T>, AllocError> {
     kept ::= alloc.Vec<T>();
-    room ::= true;
-    range.loop((h, value) {
-        pred(value).then(() {
-            kept.add(value).match({
-                Ok(_)  => (),
-                Err(_) => { room = false; h.break(); },
-            });
-        });
+    range.loop((value) {
+        pred(value).then(() { kept.add(value).try(); });
     });
-    room.match({
-        true  => Ok(kept),
-        false => None,
-    })
+    Ok(kept)
 }
 
-// Collect one value per element. The handle permits an early, successful stop.
-map*<R: Range<T>, T, U> = (range: R, alloc: Alloc, body: (
-    h     : LoopHandle,
-    index : usize,
-    value : T
-) U) Res<Vec<U>> {
+// Collect one value per element. A callback's .try() retains its enclosing
+// function's return context; this operation propagates its own allocation error.
+map*<R: Range<T>, T, U> = (range: R, alloc: Alloc, body: (value: T) U)
+                        Res<Vec<U>, AllocError> {
     made ::= alloc.Vec<U>();
-    room ::= true;
-    range.loop((h, index, value) {
-        made.add(body(h, index, value)).match({
-            Ok(_)  => (),
-            Err(_) => { room = false; h.break(); },
-        });
-    });
-    room.match({
-        true  => Ok(made),
-        false => None,
-    })
+    range.loop((value) { made.add(body(value)).try(); });
+    Ok(made)
+}
+
+// A handle permits skipping an element or an early successful stop.
+map*<R: Range<T>, T, U> = (
+    range : R,
+    alloc : Alloc,
+    body  : (h: LoopHandle, value: T) U
+) Res<Vec<U>, AllocError> {
+    made ::= alloc.Vec<U>();
+    range.loop((h, value) { made.add(body(h, value)).try(); });
+    Ok(made)
+}
+
+map*<R: Range<T>, T, U> = (
+    range : R,
+    alloc : Alloc,
+    body  : (h: LoopHandle, index: usize, value: T) U
+) Res<Vec<U>, AllocError> {
+    made ::= alloc.Vec<U>();
+    range.loop((h, index, value) { made.add(body(h, index, value)).try(); });
+    Ok(made)
 }

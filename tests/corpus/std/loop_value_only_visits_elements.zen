@@ -1,0 +1,50 @@
+// One callback argument is the element. A handle and then an optional index
+// occupy the established two- and three-argument forms.
+source = (calls :: usize) Range<usize> {
+    calls = calls + 1;
+    Range<usize>(10, 13)
+}
+
+fail = () Res<(), AllocError> { Err(AllocError.OutOfMemory) }
+
+try_values = (values: Vec<str>, seen :: usize) Res<(), AllocError> {
+    values.loop((value) {
+        seen = seen + 1;
+        value.eq("stop").then(() { fail().try(); });
+    });
+    seen = seen + 100;
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    calls: usize ::= 0;
+    result: Res<usize> = source(calls).loop((value) {
+        println("range {}", value);
+    });
+    println(
+        "source {} none {}",
+        calls,
+        result.match({ None => true, Ok(_) => false })
+    );
+    xs = [str, 2]("array-a", "array-b");
+    xs.loop((value) { println("{}", value); });
+    alloc  ::= env.mem.alloc();
+    values ::= alloc.Vec<str>();
+    values.add("vec-a").try();
+    values.add("stop").try();
+    values.add("vec-c").try();
+    values.loop((value) { println("{}", value); });
+    seen: usize ::= 0;
+    try_values(values, seen).match({
+        Ok(_)  => println("unexpected success"),
+        Err(_) => println("try {}", seen),
+    });
+    values.loop((h, value) {
+        value.eq("stop").then(() { h.next(); });
+        println("handle {}", value);
+    });
+    xs.loop((h, index, value) { println("indexed {} {}", index, value); });
+    empty: Res<usize> = Range(4, 4).loop((value) { println("unexpected value {}", value); });
+    println("empty {}", empty.match({ None => true, Ok(_) => false }));
+    Ok(0);
+}

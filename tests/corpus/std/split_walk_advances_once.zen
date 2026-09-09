@@ -1,0 +1,87 @@
+// Split walks a fresh sequential cursor. Its callbacks keep the enclosing
+// function's return context, including through value-only loop overloads.
+Split = std.text
+
+source = (calls :: usize) Split {
+    calls = calls + 1;
+    "first,skip,last,unseen".split(',')
+}
+
+fail = () Res<(), AllocError> { Err(AllocError.OutOfMemory) }
+
+try_loop = (seen :: usize) Res<(), AllocError> {
+    "first,fail,unseen".split(',').loop((h, value) {
+        seen = seen + 1;
+        value.eq("fail").then(() { fail().try(); });
+    });
+    seen = seen + 100;
+    Ok(());
+}
+
+try_value_loop = (seen :: usize) Res<(), AllocError> {
+    "first,fail,unseen".split(',').loop((value) {
+        seen = seen + 1;
+        value.eq("fail").then(() { fail().try(); });
+    });
+    seen = seen + 100;
+    Ok(());
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    "".split(',').loop((value) { println("empty [{}]", value); });
+    ",a,,".split(',').loop((h, index, value) {
+        println("edge {} [{}]", index, value);
+    });
+    "whole".split(',').loop((value) { println("whole [{}]", value); });
+
+    calls: usize ::= 0;
+    stopped = source(calls).loop((h, index, value) {
+        value.eq("skip").then(() { h.next(); });
+        println("walk {} {}", index, value);
+        value.eq("last").then(() { h.break(value); });
+    });
+    stopped.match({
+        Ok(value) => println("stopped {} calls {}", value, calls),
+        None      => println("missing stop"),
+    });
+    calls = 0;
+    visits: usize ::= 0;
+    source(calls).loop((value) { visits = visits + 1; });
+    println("value source {} visits {}", calls, visits);
+    missing = "first,unseen".split(',').loop((h, value) {
+        println("break {}", value);
+        h.break();
+    });
+    println("break none {}", missing.match({ None => true, Ok(_) => false }));
+
+    cursor ::= "a,b,".split(',');
+    cursor.next();
+    cursor.loop((h, value) { println("fresh [{}]", value); });
+    cursor.next().match({
+        Ok(value) => println("cursor [{}]", value),
+        None      => println("cursor exhausted"),
+    });
+
+    seen: usize ::= 0;
+    try_loop(seen).match({
+        Ok(_)  => println("try unexpectedly succeeded"),
+        Err(_) => println("try loop {}", seen),
+    });
+    seen = 0;
+    try_value_loop(seen).match({
+        Ok(_)  => println("value loop unexpectedly succeeded"),
+        Err(_) => println("try value loop {}", seen),
+    });
+
+    alloc ::= env.mem.alloc();
+    text  ::= alloc.String().try();
+    Range(0, 16384).loop((h, i) { text.add("x,").try(); });
+    count: usize ::= 0;
+    bytes: usize ::= 0;
+    text.view().split(',').loop((value) {
+        count = count + 1;
+        bytes = bytes + value.len;
+    });
+    println("large {} {}", count, bytes);
+    Ok(0);
+}

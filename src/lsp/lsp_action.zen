@@ -10,14 +10,14 @@ Checker = sema.sema_check
 Diag = sema.sema_diag
 Def, module_display = sema.sema_def
 ModuleTable = sema.sema_def
-to_pos, to_wire, WirePos, WireRange = lsp.lsp_pos
+source_position, lsp_position, Position, TextRange = lsp.lsp_pos
 written, obj, arr, Nest, to_json = std.json
 
 Action = {
     name: str,
     module: str,
 
-    write = (self: @Self, t: Alloc, at: WirePos, uri: str, list :: Nest,
+    write = (self: @Self, t: Alloc, at: Position, uri: str, list :: Nest,
              out :: String) Res<(), AllocError> {
         stmt  ::= t.String("{} = {}", self.name, self.module).try();
         title ::= t.String("Import {}", stmt.view()).try();
@@ -34,7 +34,7 @@ Action = {
         changes.key(uri, out).try();
         edits ::= arr(out).try();
         edits.next(out).try();
-        encoded ::= ActionTextEdit(range: WireRange(start: at, end: at), newText: stmt.view()).to_json(t).try();
+        encoded ::= ActionTextEdit(range: TextRange(start: at, end: at), newText: stmt.view()).to_json(t).try();
         out.add(encoded.view()).try();
         edits.close(out).try();
         changes.close(out).try();
@@ -44,7 +44,7 @@ Action = {
 }
 
 ActionTextEdit = {
-    range: WireRange,
+    range: TextRange,
     newText: str,
 }
 
@@ -54,13 +54,13 @@ write_actions* = (
     file : str,
     text : str,
     uri  : str,
-    from : WirePos,
-    upto : WirePos,
+    from : Position,
+    upto : Position,
     out  :: String
 ) Res<(), AllocError> {
     fixes ::= Fixes(c: c, t: t, file: file, found: t.Vec<Action>());
-    lo = to_pos(text, from.line, from.character);
-    hi = to_pos(text, upto.line, upto.character);
+    lo = source_position(text, from.line, from.character);
+    hi = source_position(text, upto.line, upto.character);
     Range(0, c.diag_count()).loop((h, i) {
         c.diag_at(i).match({
             None  => written(),
@@ -145,7 +145,7 @@ Fixes = {
     }
 
     // Fixes insert after the last import of the file.
-    insert_at = (self: @Self, text: str) WirePos {
+    insert_at = (self: @Self, text: str) Position {
         line ::= 1;
         module_index_of(self.c.tree, self.file).match({
             None   => {},
@@ -159,7 +159,7 @@ Fixes = {
                 }),
             }),
         });
-        to_wire(text, Pos(line: line, col: 1))
+        lsp_position(text, Pos(line: line, col: 1))
     }
 
     write = (self: @Self, text: str, uri: str, out :: String)

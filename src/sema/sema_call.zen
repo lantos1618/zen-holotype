@@ -6,7 +6,7 @@ Vec = std.collections
 str = std.text
 Range = std.core
 DeclId = sema.sema_id
-TyId, TyFn, TyNamed = sema.sema_ty
+TyId, TyFn, TyNamed, literal_default = sema.sema_ty
 Def = sema.sema_def
 SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
 Checker, Ctx = sema.sema_check
@@ -16,14 +16,14 @@ meta_member_call, MetaCall = sema.sema_meta
 discriminant_member_call, DiscriminantAnswer = sema.sema_discriminant
 variant_name_member_call, VariantNameAnswer = sema.sema_variant_name
 construct, instantiate, variant_call_type = sema.sema_apply
-refuse_variant_surplus = sema.sema_apply
+refuse_variant_surplus, call_inst, callback_types_fit, annotated_callback = sema.sema_apply
 Inst, subst, subst_list, unify_list, tparam_vars, zip, owner_of = sema.sema_inst
 is_case = sema.sema_case
 Found, Base, base_of, members_of, actor_spawn_ret, ref_of_actor = sema.sema_member
 is_type_def, opaque, first_found, named_as = sema.sema_member
 static_access = sema.sema_static
 filter_visible, hidden_member = sema.sema_member
-check_bounds, inst_bounds_hold = sema.sema_bound
+inst_bounds_hold, satisfies_bound = sema.sema_bound
 check_literal = sema.sema_trap
 check_arms, check_arms_agree, hoist_at = sema.sema_hoist
 bound_declares = sema.sema_supply
@@ -34,7 +34,7 @@ alias_module, module_not_a_value, module_named_by = sema.sema_module
 Cand, TBound, Actual, cands_of, exported_cands = sema.sema_cand
 travelled_cands, matches = sema.sema_cand
 ty_at, is_tvar, sig_fits, signature_matches = sema.sema_cand
-omittable_tail, collect_bounds = sema.sema_cand
+omittable_tail, collect_bounds, tail_swallows = sema.sema_cand
 actor_payload_unsafe = sema.sema_actor_payload
 
 // A recovery signature supplies expected types to argument diagnostics, but
@@ -180,7 +180,7 @@ CallCheck = {
                 Ok(a) => c.travelled_cands(name, Ok(a.ty), cands),
             }),
         }).try();
-        c.first_matching(cands, actuals).try().match({
+        self.first_matching(c, cands, actuals).try().match({
             Ok(k) => self.chosen(c, k, actuals),
             None  => self.construct_or_fail(c, name, recv, cands, recovery),
         })
@@ -224,7 +224,6 @@ CallCheck = {
             None    => c.types.unknown(),
             Ok(ret) => {
                 c.resolve_call(self.id, k.id).try();
-                c.check_bounds(k, actuals, self.node.span).try();
                 params ::= c.alloc.Vec<TyId>();
                 c.settled_params(self.id, k, params).try();
                 c.arg_lambdas(self.call.args, params, off, self.ctx).try();
@@ -341,7 +340,7 @@ CallCheck = {
                       Res<TyId, AllocError> {
         cands ::= c.alloc.Vec<Cand>();
         c.exported_cands(module, ac.name.text, cands).try();
-        c.first_matching(cands, self.actuals).try().match({
+        self.first_matching(c, cands, self.actuals).try().match({
             Ok(cand) => self.chosen(c, cand, self.actuals),
             None     => c.no_overload(self.node, ac.name.text, cands),
         })
@@ -832,21 +831,201 @@ infer_member_inst = (
     Ok(())
 }
 
+BoundFit = BoundSatisfied | BoundUnresolved | BoundDisjoint
+
 first_matching = (
+    site    : CallCheck,
     c       :: Checker,
     cands   : Vec<Cand>,
     actuals : Vec<Actual>
 ) Res<Res<Cand>, AllocError> {
-    hit: Res<Cand> = None;
+    written             = site.call.targs.len;
+    annotated           = c.callback_annotated(site.call);
+    hit: Res<Cand>      = None;
+    pending: Res<Cand>  = None;
+    rejected: Res<Cand> = None;
     cands.loop((h, k) {
-        c.matches(k, actuals).try().then(() {
-            hit.match({
-                None  => { hit = Ok(k); },
-                Ok(_) => {},
+        c.candidate_compatible(k, actuals).try().then(() {
+            fit = (annotated && (written == 0 || written == k.tvars.len)).match({
+                true  => site.annotated_fit(c, k, actuals),
+                false => (written > 0).match({
+                    true  => Ok((written == k.tvars.len).match({
+                        true  => BoundSatisfied,
+                        false => BoundDisjoint,
+                    })),
+                    false => c.actual_bound_fit(k, actuals),
+                }),
+            }).try();
+            fit.match({
+                BoundSatisfied  => { hit = Ok(k); h.break(); },
+                BoundUnresolved => pending.match({
+                    None  => { pending = Ok(k); },
+                    Ok(_) => (),
+                }),
+                BoundDisjoint   => rejected.match({
+                    None  => { rejected = Ok(k); },
+                    Ok(_) => (),
+                }),
             });
         });
     });
-    Ok(hit)
+    // A still-open lambda or type argument does not outrank a proved fit.
+    // If no candidate fits, retain the ordinary bound diagnostic.
+    Ok(hit.match({
+        Ok(k) => Ok(k),
+        None  => pending.match({ Ok(k) => Ok(k), None => rejected }),
+    }));
+}
+
+// Callback annotations are candidate evidence, including for a concrete
+// overload declared before its generic sibling. Use the selected-call
+// inference order so literals cannot default before this evidence arrives.
+annotated_fit = (site: CallCheck, c :: Checker, k: Cand, actuals: Vec<Actual>)
+                Res<BoundFit, AllocError> {
+    inst = c.call_inst(site.call, k, actuals, site.ctx).try();
+    c.callback_types_fit(
+        site.call,
+        k,
+        recv_off(site.call, actuals),
+        site.ctx,
+        inst
+    )
+        .try().match({
+            false => Ok(BoundDisjoint),
+            true  => c.inst_bound_fit(k, inst),
+        })
+}
+
+callback_annotated = (c :: Checker, call: Call) bool {
+    call.args.find((arg) {
+        c.annotated_callback(arg.value).match({ Ok(_) => true, None => false })
+    }).match({ Ok(_) => true, None => false })
+}
+
+// An unresolved argument is not evidence for every concrete overload. Its
+// declared bounds can already rule out exact parameter types before a call
+// instantiates the enclosing generic function.
+candidate_compatible = (c :: Checker, k: Cand, actuals: Vec<Actual>)
+                       Res<bool, AllocError> {
+    c.matches(k, actuals).try().match({
+        false => Ok(false),
+        true  => Ok(c.bounded_actual_excludes(k, actuals).try() == false),
+    })
+}
+
+bounded_actual_excludes = (c :: Checker, k: Cand, actuals: Vec<Actual>)
+                         Res<bool, AllocError> {
+    tail = k.params.get(k.params.len -% 1).match({
+        Ok(t) => c.tail_swallows(t),
+        None  => false,
+    });
+    tail.match({
+        true  => Ok(false),
+        false => c.fixed_bounded_actual_excludes(k, actuals),
+    })
+}
+
+fixed_bounded_actual_excludes = (c :: Checker, k: Cand, actuals: Vec<Actual>)
+                               Res<bool, AllocError> {
+    excluded ::= false;
+    actuals.loop((h, i, a) {
+        (a.is_lambda == false).then(() {
+            k.params.get(i).match({
+                None    => (),
+                Ok(pty) => c.actual_bound_excludes(a.ty, pty).try().then(() {
+                    excluded = true;
+                    h.break();
+                }),
+            });
+        });
+    });
+    Ok(excluded);
+}
+
+actual_bound_excludes = (c :: Checker, actual: TyId, param: TyId)
+                       Res<bool, AllocError> {
+    exact = c.types.at(param).match({
+        Prim(_)  => true,
+        Fn(_)    => true,
+        Array(_) => true,
+        _        => false,
+    });
+    // Nominal parameters may accept a bound projection; result and union
+    // parameters may hoist an argument. Do not treat those as exact types.
+    (exact && c.overload_concrete(param)).match({
+        false => Ok(false),
+        true  => c.types.at(actual).match({
+            Var(v) => c.declared_bound_excludes(v.name, actual, param),
+            _      => Ok(false),
+        }),
+    })
+}
+
+declared_bound_excludes = (c :: Checker, name: str, actual: TyId, param: TyId)
+                         Res<bool, AllocError> {
+    bounds ::= c.alloc.Vec<TyId>();
+    c.unshadowed_tvar(name, actual).then(() {
+        c.bounds_of(name, bounds).try();
+    });
+    excluded ::= false;
+    bounds.loop((h, bound) {
+        c.types.at(bound).match({
+            // Direct holes compare conservatively in bound arguments.
+            // Nested open types need fuller compatibility evidence.
+            Named(n) => c.probeable_bound_args(n.args).then(() {
+                c.concrete_bound_fit(param, bound).try().match({
+                    BoundDisjoint => { excluded = true; h.break(); },
+                    _             => (),
+                });
+            }),
+            _        => (),
+        });
+    });
+    Ok(excluded);
+}
+
+probeable_bound_args = (c: Checker, args: Vec<TyId>) bool {
+    args.find((ty) {
+        c.types.at(ty).match({
+            Var(_)  => false,
+            Unknown => false,
+            Infer   => false,
+            _       => c.overload_concrete(ty) == false,
+        })
+    }).match({ Ok(_) => false, None => true })
+}
+
+actual_bound_fit = (c :: Checker, k: Cand, actuals: Vec<Actual>)
+                   Res<BoundFit, AllocError> {
+    (k.tbounds.len == 0).match({
+        true  => Ok(BoundSatisfied),
+        false => c.inferred_bound_fit(k, actuals),
+    })
+}
+
+inferred_bound_fit = (c :: Checker, k: Cand, actuals: Vec<Actual>)
+                     Res<BoundFit, AllocError> {
+    tail = k.params.get(k.params.len -% 1).match({
+        Ok(t) => c.tail_swallows(t),
+        None  => false,
+    });
+    // Explicit arguments, variadic tails, and omitted slots retain the
+    // ordinary inference path rather than guessing a substitution here.
+    (tail || k.params.len != actuals.len).match({
+        true  => Ok(BoundUnresolved),
+        false => c.fixed_actual_bound_fit(k, actuals),
+    })
+}
+
+fixed_actual_bound_fit = (c :: Checker, k: Cand, actuals: Vec<Actual>)
+                         Res<BoundFit, AllocError> {
+    inst ::= c.alloc.Inst();
+    actuals.loop((h, i, a) {
+        (a.is_lambda == false).then(() {
+            c.unify(k.params.ty_at(i), a.ty, inst).try();
+        });
+    });
+    c.inst_bound_fit(k, inst)
 }
 
 // Bound-declared intrinsic methods may be lowered without an ordinary member.
@@ -1269,18 +1448,109 @@ same_param = (c: Checker, x: TyId, y: TyId) bool {
 
 maybe_swallow = (c :: Checker, name: str, a: Cand, b: Cand)
                 Res<(), AllocError> {
-    ((a.generic || b.generic) && c.swallows(a, b)).match({
+    c.swallows(a, b).try().match({
         true  => c.ambiguous(name, a, b),
         false => Ok(()),
     })
 }
 
-swallows = (c: Checker, a: Cand, b: Cand) bool {
-    c.all_eat(a, b) || c.all_eat(b, a)
+swallows = (c :: Checker, a: Cand, b: Cand) Res<bool, AllocError> {
+    first  = c.all_eat(a, b).try();
+    second = c.all_eat(b, a).try();
+    Ok(first || second)
 }
 
-all_eat = (c: Checker, g: Cand, k: Cand) bool {
-    g.generic && c.all_eats(g.params, k.params, g.owner)
+all_eat = (c :: Checker, g: Cand, k: Cand) Res<bool, AllocError> {
+    (g.generic && c.all_eats(g.params, k.params, g.owner)).match({
+        false => Ok(false),
+        true  => c.bounds_disjoint(g, k).try().match({
+            true  => Ok(false),
+            false => Ok(true),
+        }),
+    })
+}
+
+// Structural swallowing is only a possible overlap: a concrete argument
+// must also satisfy the generic declaration's bounds. Unresolved types keep
+// the conservative overlap answer. Bound lookup preserves real declaration
+// diagnostics and restores the caller's type-parameter scope.
+bounds_disjoint = (c :: Checker, g: Cand, k: Cand) Res<bool, AllocError> {
+    inst ::= c.alloc.Inst();
+    c.unify_list(g.params, k.params, inst).try();
+    Ok(c.inst_bound_fit(g, inst).try().match({
+        BoundDisjoint => true,
+        _             => false,
+    }));
+}
+
+inst_bound_fit = (c :: Checker, g: Cand, inst: Inst) Res<BoundFit, AllocError> {
+    fit ::= BoundSatisfied;
+    g.tbounds.loop((h, tb) {
+        var = c.types.var(tb.name, g.owner).try();
+        one = inst.lookup(var).match({
+            None       => Ok(BoundUnresolved),
+            Ok(actual) => c.substituted_bound_fit(actual, tb.bound, inst),
+        }).try();
+        one.match({
+            BoundSatisfied  => (),
+            BoundUnresolved => { fit = BoundUnresolved; },
+            BoundDisjoint   => { fit = BoundDisjoint; h.break(); },
+        });
+    });
+    Ok(fit);
+}
+
+substituted_bound_fit = (c :: Checker, actual: TyId, bound: TyId, inst: Inst)
+                        Res<BoundFit, AllocError> {
+    settled  = c.is_literal_ty(actual).match({
+        true  => c.types.prim(c.prim_name(actual).literal_default()),
+        false => Ok(actual),
+    }).try();
+    expected = c.subst(bound, inst).try();
+    (c.overload_concrete(settled) && c.overload_concrete(expected)).match({
+        true  => c.concrete_bound_fit(settled, expected),
+        false => Ok(BoundUnresolved),
+    })
+}
+
+overload_concrete = (c: Checker, ty: TyId) bool {
+    c.types.at(ty).match({
+        Prim(_)  => true,
+        Var(_)   => false,
+        Unknown  => false,
+        Infer    => false,
+        Named(n) => c.overload_concretes(n.args),
+        Fn(f)    => c.overload_concretes(f.params) && c.overload_concrete(f.ret),
+        Res(r)   => c.overload_concrete(r.value) && c.overload_concrete(r.error),
+        Union(u) => c.overload_concretes(u.members),
+        Array(a) => c.overload_concrete(a.elem),
+    })
+}
+
+overload_concretes = (c: Checker, tys: Vec<TyId>) bool {
+    tys.find((ty) { c.overload_concrete(ty) == false }).match({
+        Ok(_) => false,
+        None  => true,
+    })
+}
+
+concrete_bound_fit = (c :: Checker, actual: TyId, bound: TyId)
+                     Res<BoundFit, AllocError> {
+    tmark   = c.tvar_mark();
+    dmark   = c.diag_count();
+    checked = c.satisfies_bound(actual, bound);
+    c.release_tvars(tmark).try();
+    holds = checked.try();
+    // Resolving an invalid impl can report a real declaration error and
+    // memoize poison. Keep both for ordinary checking; poison proves no
+    // disjointness and must not make a candidate preferred.
+    (c.diag_count() != dmark).match({
+        true  => Ok(BoundUnresolved),
+        false => Ok(holds.match({
+            true  => BoundSatisfied,
+            false => BoundDisjoint,
+        })),
+    })
 }
 
 eats = (c: Checker, x: TyId, y: TyId, owner: str) bool {
