@@ -1,23 +1,4 @@
-// editors/vscode/src/extension.ts
-//
-// Launch `zen lsp` and speak LSP to it.
-//
-// This file does one thing and refuses to do a second: it resolves the
-// server command, starts a LanguageClient over its stdio, restarts it on
-// demand, and — the part that earns its length — SAYS WHAT WENT WRONG WHEN
-// THAT FAILS. The
-// transport now exists, so the happy path is reachable; the failure path
-// keeps its length because the most likely failure left is a `zen` binary
-// older than the transport, which looks exactly like a crash from here.
-//
-// THIS IS A REMOTE WORKSPACE. `package.json` declares
-// `"extensionKind": ["workspace"]`, so this code runs on the machine that
-// holds the source and the compiler — not on the machine showing the
-// window. Every path below is therefore a remote path, `vscode.workspace.fs`
-// is the only correct way to stat one, and `require("fs")` would silently
-// look at the wrong disk. `console.log` from here lands in the REMOTE
-// extension host log, which is why everything user-facing goes to the
-// output channel instead.
+// Launch the workspace compiler over stdio and serialize its lifecycle.
 
 import * as path from "path";
 import * as vscode from "vscode";
@@ -34,52 +15,17 @@ let client: LanguageClient | undefined;
 let output: vscode.OutputChannel;
 let sourceEvents: vscode.FileSystemWatcher;
 let restarts: Promise<void> = Promise.resolve();
+let deactivating = false;
 
-// The one thing this extension knows how to explain. It is written once,
-// here, because it is the answer to every startup failure this extension
-// can currently produce and repeating it would let the copies drift.
 const STARTUP_FAILED =
-  "Things to rule out, in the order they are worth checking:\n" +
-  "\n" +
-  "  1. THE BINARY IS STALE. `zen lsp` speaks over a pipe only if it was\n" +
-  "     built after the `Stdin` capability landed. An older `zen` prints a\n" +
-  "     usage message and exits 2 — which looks exactly like a crash from\n" +
-  "     here. Run `zen lsp` in a terminal: if it prints usage, rebuild.\n" +
-  "     Note `make build` alone is not enough if the seed predates it.\n" +
-  "\n" +
-  "  2. THE PATH IS WRONG. `zen.server.path` defaults to `./zen`, resolved\n" +
-  "     against the workspace folder, with a fallback to `zen` on PATH.\n" +
-  "     A checkout that has never been built has no `zen` at all.\n" +
-  "\n" +
-  "  3. A GENUINE SERVER FAILURE, in which case the trace above is the\n" +
-  "     evidence — set `zen.trace.server` to `verbose` and reload.\n" +
-  "\n" +
-  "Worth knowing before you file anything: this server answers hover,\n" +
-  "definition, completion, document symbols, semantic tokens and\n" +
-  "formatting, publishes diagnostics, and refuses everything else with\n" +
-  "`-32601`.\n" +
-  "\n" +
-  "Colour comes from `textDocument/semanticTokens`, which is why this\n" +
-  "extension ships no TextMate grammar — see editors/README.md for that\n" +
-  "argument. It is the one answer that needs no build and no workspace,\n" +
-  "so if hover and diagnostics are quiet, colour should still work.\n" +
-  "\n" +
-  "Diagnostics are lex's, parse's and sema's, grouped per file — an error\n" +
-  "in a module you are not looking at is reported against that module —\n" +
-  "and a file you have fixed is cleared rather than left underlined. They\n" +
-  "need a workspace folder: with no `rootUri` the server publishes nothing\n" +
-  "at all, on purpose, because the only thing it could check without a\n" +
-  "root is the open file alone, and that calls every imported name\n" +
-  "undefined. A build runs per change, so squiggles lag your typing in a\n" +
-  "large module — about a second — and are instant in a small one.\n" +
-  "\n" +
-  "Hover answers on an identifier's use, on a parameter or local at its\n" +
-  "declaration, on a written type name, and on a function's name — where\n" +
-  "it hands the declaration back. With a workspace it answers imported\n" +
-  "names too. It answers nothing on a struct's own name, a pattern binder,\n" +
-  "or anything whose type did not resolve.";
+  "Check the server command and standard library root logged above.\n" +
+  "Rebuild the checkout with `make build`, then run Zen: Restart Language Server.\n" +
+  "For an explicitly configured binary, check `zen.server.path` on the extension host.\n" +
+  "If startup still fails, set `zen.trace.server` to `verbose` and restart to capture the failure.\n" +
+  "Import diagnostics also depend on the workspace folder and `zen.sourceRoots`.";
 
 export async function activate(context: vscode.ExtensionContext) {
+  deactivating = false;
   output = vscode.window.createOutputChannel("Zen");
   context.subscriptions.push(output);
   sourceEvents = vscode.workspace.createFileSystemWatcher("**/*.zen");
@@ -100,7 +46,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }),
   );
 
-  await startClient();
+  await restartServer("extension activated");
 }
 
 // The server's `closed` handler returns `DoNotRestart` — crashing in a loop
@@ -110,9 +56,10 @@ export async function activate(context: vscode.ExtensionContext) {
 // are "I rebuilt the binary" and "I changed the setting".
 function restartServer(reason: string): Promise<void> {
   const next = restarts.then(async () => {
+    if (deactivating) return;
     output.appendLine(`zen: ${reason}.`);
     await stopClient();
-    await startClient();
+    if (!deactivating) await startClient();
   });
   // Keep one failed launch from poisoning every later restart while still
   // returning that failure to the command which requested it.
@@ -255,8 +202,10 @@ async function startClient(): Promise<void> {
   }
 }
 
-export function deactivate(): Thenable<void> | undefined {
-  return client?.stop();
+export async function deactivate(): Promise<void> {
+  deactivating = true;
+  await restarts;
+  await stopClient();
 }
 
 // NO CLIENT CODE REGISTERS SEMANTIC TOKENS, and that is not an omission.

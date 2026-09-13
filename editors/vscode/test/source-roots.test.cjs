@@ -13,6 +13,7 @@ function host(sourceRoots) {
   const messages = [];
   let configurationChanged;
   let stopGate;
+  let startGate;
   const disposable = { dispose() {} };
   const vscode = {
     FileType: { File: 1 },
@@ -54,6 +55,9 @@ function host(sourceRoots) {
       assert.ok(!clients.some((client) => client.active), "server starts overlapped");
       this.active = true;
       lifecycle.push(`start ${this.index}`);
+      const gate = startGate;
+      startGate = undefined;
+      if (gate) await gate;
     }
     async stop() {
       lifecycle.push(`stop ${this.index}`);
@@ -92,6 +96,11 @@ function host(sourceRoots) {
     activate: () => exports.activate({ subscriptions: [] }),
     deactivate: () => exports.deactivate(),
     change: (key) => configurationChanged({ affectsConfiguration: (value) => value === key }),
+    holdStart: () => {
+      let release;
+      startGate = new Promise((resolve) => { release = resolve; });
+      return release;
+    },
     holdStop: () => {
       let release;
       stopGate = new Promise((resolve) => { release = resolve; });
@@ -147,4 +156,35 @@ test("unconfigured roots leave initialization unchanged; invalid entries reach s
   await tick();
   assert.equal(extension.clients[2].clientOptions.initializationOptions, undefined);
   await extension.deactivate();
+});
+
+
+test("configuration changes wait for initial startup to complete", async () => {
+  const extension = host([]);
+  const release = extension.holdStart();
+  const activating = extension.activate();
+  await tick();
+  extension.change("zen.sourceRoots");
+  await tick();
+  assert.deepEqual(extension.lifecycle, ["start 0"]);
+  release();
+  await activating;
+  await tick();
+  assert.deepEqual(extension.lifecycle, ["start 0", "stop 0", "start 1"]);
+  await extension.deactivate();
+});
+
+test("deactivation drains restarts without launching another server", async () => {
+  const extension = host([]);
+  await extension.activate();
+  const release = extension.holdStop();
+  extension.change("zen.sourceRoots");
+  await tick();
+  extension.change("zen.server.args");
+  const deactivating = extension.deactivate();
+  release();
+  await deactivating;
+  await tick();
+  assert.deepEqual(extension.lifecycle, ["start 0", "stop 0"]);
+  assert.ok(extension.clients.every((client) => !client.active));
 });
