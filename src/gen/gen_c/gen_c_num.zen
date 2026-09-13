@@ -1,41 +1,81 @@
-// Checked primitive narrowing. The standard library declares the operation;
-// the C backend owns the range test and cast because C is the only layer that
-// can narrow without rebuilding the value one increment at a time.
-
+// Render sema-validated numeric operations. Widening preserves every value;
+// checked conversion evaluates its operand once and returns None on overflow.
 ExprId = std.ast
 AllocError = std.mem
-String = std.text
-TyId = sema.sema_ty
+String, str = std.text
+NumericConversion, NarrowTarget = sema.sema_numeric
 Ctx = sema.sema_check
 CBackend = gen.gen_c.gen_c_state
 expr = gen.gen_c.gen_c_expr
+c_prim = gen.gen_c.gen_c_type
 temp, write_assign_none, write_assign_ok = gen.gen_c.gen_c_flow
 
-lower_checked_narrow* = (
-    be    :: CBackend,
-    id    : ExprId,
-    value : ExprId,
-    src   : TyId,
-    ret   : TyId,
-    ctx   : Ctx,
-    out   :: String
+lower_numeric* = (
+    be        :: CBackend,
+    value     : ExprId,
+    operation : NumericConversion,
+    ctx       : Ctx,
+    out       :: String
 ) Res<(), AllocError> {
-    be.request_type(ret).try();
+    target = be.check.prim_name(operation.target);
+    operation.kind.match({
+        Widen          => {
+            out.fmt("({})(", c_prim(target)).try();
+            be.expr(value, ctx, operation.source, out).try();
+            out.add(")")
+        },
+        Checked(range) => be.checked_numeric(value, operation, range, ctx, out),
+    })
+}
+
+checked_numeric = (
+    be        :: CBackend,
+    value     : ExprId,
+    operation : NumericConversion,
+    range     : NarrowTarget,
+    ctx       : Ctx,
+    out       :: String
+) Res<(), AllocError> {
+    be.request_type(operation.result).try();
     code ::= be.alloc.String().try();
-    expr(be, value, ctx, src, code).try();
-    held = be.temp(src, "n").try();
+    be.expr(value, ctx, operation.source, code).try();
+    held = be.temp(operation.source, "n").try();
     be.set_line(held.view(), code.view()).try();
-    dst = be.temp(ret, "t").try();
-    be.fmt("if ({} <= UINT8_MAX) {{\n", held.view()).try();
+    dst    = be.temp(operation.result, "t").try();
+    target = be.check.prim_name(operation.target);
+    source = be.check.prim_name(operation.source);
+    be.write("if (").try();
+    be.numeric_fits(held.view(), source, range).try();
+    be.writeln(") {").try();
     be.indent();
     cast ::= be.alloc.String().try();
-    cast.fmt("(uint8_t){}", held.view()).try();
-    be.write_assign_ok(ret, cast.view(), dst.view()).try();
+    cast.fmt("({}){}", c_prim(target), held.view()).try();
+    be.write_assign_ok(operation.result, cast.view(), dst.view()).try();
     be.dedent();
     be.writeln("} else {").try();
     be.indent();
-    be.write_assign_none(ret, dst.view()).try();
+    be.write_assign_none(operation.result, dst.view()).try();
     be.dedent();
     be.writeln("}").try();
     out.add(dst.view())
+}
+
+numeric_fits = (be :: CBackend, value: str, source: str, target: NarrowTarget)
+               Res<(), AllocError> {
+    signed  = source.is_in(["i64", "i32", "c_int"]);
+    minimum = target.match({ I32 => "INT32_MIN", CInt => "INT_MIN", U8 => "0", U16 => "0", Usize => "0" });
+    maximum = target.match({
+        U8 => "UINT8_MAX", U16 => "UINT16_MAX", Usize => "SIZE_MAX",
+        I32 => "INT32_MAX", CInt => "INT_MAX",
+    });
+    signed.match({
+        true  => be.fmt(
+            "(intmax_t){} >= {} && (intmax_t){} <= {}",
+            value,
+            minimum,
+            value,
+            maximum
+        ),
+        false => be.fmt("(uintmax_t){} <= (uintmax_t){}", value, maximum),
+    })
 }

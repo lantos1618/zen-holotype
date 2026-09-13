@@ -1,0 +1,92 @@
+scan, Source = std.lex
+Parser, module = std.parse
+ExprId = std.ast
+Checker, Ctx = sema.sema_check
+DeclId = sema.sema_id
+CBackend = gen.gen_c.gen_c_state
+selected_def, lower_plain_call = gen.gen_c.gen_c_call
+
+SelectionAlloc = {
+    base: Alloc,
+    calls: Ptr<usize>,
+}
+SelectionAlloc.impl(Alloc, {
+    raw = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        self.calls.write(0, self.calls.read(0) + 1);
+        self.base.raw(size, align)
+    }
+    realloc = <T>(self: @Self, ptr: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        self.calls.write(0, self.calls.read(0) + 1);
+        self.base.realloc(ptr, count)
+    }
+})
+
+main = (env: Env) Res<(), AllocError> {
+    a      = env.mem.alloc();
+    source = "Unused = absent.module\nBox = {}\nmain = () { Box() }\n";
+    lexed  = scan(a, Source(file: "calls.zen", text: source)).try();
+    parser ::= a.Parser(lexed);
+    parsed = parser.module("calls").try();
+    parser.tree.add_module(parsed).try();
+    check       ::= a.Checker(parser.tree).try();
+    allocations ::= a.Vec<usize>();
+    allocations.add(0).try();
+    backend ::= CBackend(
+        SelectionAlloc(base: a, calls: allocations.ptr()),
+        parser.tree,
+        check
+    ).try();
+    id      ::= ExprId(index: 0);
+    Range(0, parser.tree.expr_ids()).loop((index) {
+        parser.tree.expr_at(id).kind.match({
+            Call(call) => {
+                backend.check.resolve_call(
+                    id,
+                    DeclId(module: 0, decl: 1)
+                ).try();
+                before = allocations.ptr().read(0);
+                Range(0, 1000).loop((index) { backend.selected_def(id).ok_or(AllocError.OutOfMemory).try(); });
+                println(
+                    "selection lookup allocations {}",
+                    allocations.ptr().read(0) - before
+                );
+                found = backend.selected_def(id);
+                println("noncontiguous declaration {}", found.match({
+                    Ok(definition) => definition.id.decl == 1 && definition.name.eq(
+                        "Box"
+                    ),
+                    None           => false,
+                }));
+                backend.check.resolve_call(
+                    id,
+                    DeclId(module: 0, decl: 100000)
+                ).try();
+                want = backend.check.types.unknown().try();
+                ctx  = Ctx(
+                    module: 0,
+                    ret: want,
+                    has_ret: false,
+                    self_ty: want,
+                    has_self: false
+                );
+                out ::= a.String().try();
+                backend.lower_plain_call(
+                    id,
+                    call,
+                    "Box",
+                    None,
+                    ctx,
+                    want,
+                    out
+                ).try();
+                println(
+                    "stale selection refused {}",
+                    backend.diag_count() == 1 && out.view().eq("0")
+                );
+            },
+            _          => (),
+        });
+        id = ExprId(index: id.index + 1);
+    });
+    Ok(())
+}

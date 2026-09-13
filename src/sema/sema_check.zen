@@ -15,6 +15,7 @@ ExportFault = sema.sema_diag
 Inst, InstEdge = sema.sema_inst
 DiscriminantCall = sema.sema_discriminant
 VariantNameCall = sema.sema_variant_name
+NumericConversion = sema.sema_numeric
 
 // One scoped name. Mutability feeds receiver/ownership checks, param feeds LSP
 // classification, and span identifies the original binding in diagnostics.
@@ -55,6 +56,10 @@ Checker* = {
     // Query results keyed by stable AST node ids.
     expr_memo* :: Map<ExprId, TyId>,
     type_memo* :: Map<TypeId, TyId>,
+    // Written types successfully resolved in any context during this check.
+    // This records classification only; it is never a cache of a Self type.
+    resolved_types :: Vec<bool>,
+    resolved_type_decls* :: Map<TypeId, DeclId>,
 
     // Successful `@meta(name: Type).name` folds, keyed by the written type.
     meta_memo* :: Map<TypeId, str>,
@@ -85,6 +90,12 @@ Checker* = {
 
     // Declaration selected for each successfully resolved call.
     call_memo* :: Map<ExprId, DeclId>,
+
+    // Supplying bound or inherent owner of the selected checked member.
+    member_call_providers :: Map<ExprId, TyId>,
+
+    // Validated standard numeric operations, keyed by declaration identity.
+    numeric_conversions* :: Map<DeclId, NumericConversion>,
 
     // Compiler-provided represented-enum conversions.
     discriminant_calls* :: Map<ExprId, DiscriminantCall>,
@@ -130,6 +141,25 @@ Checker* = {
 
     type_store* = (self: @Self) Types { self.types }
 
+    // Observations survive later queries in contexts where the type is unknown.
+    type_was_resolved* = (self: @Self, id: TypeId) bool {
+        self.resolved_types.get(id.index.to_usize()).value_or(false)
+    }
+
+    note_resolved_type* = (self :: @Self, id: TypeId) Res<(), AllocError> {
+        index = id.index.to_usize();
+        (index >= self.resolved_types.len).then(() {
+            end = index + 1;
+            self.resolved_types.reserve(end - self.resolved_types.len).try();
+            loop(() { self.resolved_types.len < end }, (h) {
+                self.resolved_types.add(false).try();
+            });
+        });
+        // Growth initializes every slot before this indexed write.
+        self.resolved_types.ptr().write(index, true);
+        Ok(())
+    }
+
     // The declaration this call resolved to, if resolution reached one.
     resolved_call* = (self: @Self, id: ExprId) Res<DeclId> {
         self.call_memo.get(id)
@@ -138,6 +168,29 @@ Checker* = {
     resolve_call* = (self :: @Self, id: ExprId, d: DeclId)
                     Res<(), AllocError> {
         self.call_memo.set(id, d)
+    }
+
+    resolved_member_provider* = (self: @Self, id: ExprId) Res<TyId> {
+        bound = self.member_call_providers.get(id).try();
+        self.types.at(bound).match({
+            Unknown => None,
+            _       => Ok(bound),
+        })
+    }
+
+    resolve_member_provider* = (self :: @Self, id: ExprId, bound: TyId)
+                            Res<(), AllocError> {
+        self.member_call_providers.set(id, bound)
+    }
+
+    clear_member_provider* = (self :: @Self, id: ExprId) Res<(), AllocError> {
+        self.member_call_providers.get(id).match({
+            Ok(_) => self.member_call_providers.set(
+                id,
+                self.types.unknown().try()
+            ),
+            None  => Ok(()),
+        })
     }
 
     mark_discriminant_call* = (
@@ -693,6 +746,8 @@ Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
         diags: a.Vec<Diag>(),
         expr_memo: a.Map<ExprId, TyId>(),
         type_memo: a.Map<TypeId, TyId>(),
+        resolved_types: a.Vec<bool>(),
+        resolved_type_decls: a.Map<TypeId, DeclId>(),
         meta_memo: a.Map<TypeId, str>(),
         meta_count_memo: a.Map<TypeId, usize>(),
         meta_walks: a.Map<ExprId, Vec<str>>(),
@@ -703,6 +758,8 @@ Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
         meta_recheck: 0,
         supply_memo: a.Map<ExprId, TyId>(),
         call_memo: a.Map<ExprId, DeclId>(),
+        member_call_providers: a.Map<ExprId, TyId>(),
+        numeric_conversions: a.Map<DeclId, NumericConversion>(),
         discriminant_calls: a.Map<ExprId, DiscriminantCall>(),
         variant_name_calls: a.Map<ExprId, VariantNameCall>(),
         param_memo: a.Map<ExprId, bool>(),

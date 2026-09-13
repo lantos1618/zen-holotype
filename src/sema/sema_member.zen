@@ -11,7 +11,8 @@ SemaFault, TypeFault, PairFault = sema.sema_diag
 ExportFault = sema.sema_diag
 Checker, Ctx, Binding = sema.sema_check
 Inst, subst, inst_of_named, owner_of, push_tparams = sema.sema_inst
-is_prim = sema.sema_ty
+is_prim, literal_default = sema.sema_ty
+check_literal = sema.sema_trap
 impl_members, bound_member_types, LocalImpl, local_impls = sema.sema_supply
 bound_module = sema.sema_supply
 impl_bound_type, impl_span, prim_named = sema.sema_supply
@@ -111,6 +112,24 @@ base_of* = (c :: Checker, id: ExprId, ctx: Ctx) Res<Base, AllocError> {
         Name(n) => c.named_base(id, node, n.text, ctx),
         _       => {
             ty = c.type_of(id, ctx).try();
+            Ok(Base(ty: ty, is_type: false))
+        },
+    })
+}
+
+// Member lookup needs a concrete receiver. Keep literal families available
+// to ordinary argument inference until a value is used at this boundary.
+materialize_receiver* = (
+    c    :: Checker,
+    id   : ExprId,
+    base : Base
+) Res<Base, AllocError> {
+    (!base.is_type && c.is_literal_ty(base.ty)).match({
+        false => Ok(base),
+        true  => {
+            ty = c.types.prim(c.prim_name(base.ty).literal_default()).try();
+            c.check_literal(id, ty).try();
+            c.expr_memo.set(id, ty).try();
             Ok(Base(ty: ty, is_type: false))
         },
     })

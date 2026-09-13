@@ -1,6 +1,6 @@
 // Lower resolved calls, construction-shaped calls, and structural `Res`
-// constructors. Overload choices come from sema's call memo; this module does
-// not repeat resolution.
+// constructors. Recorded sema choices are authoritative. Deferred defaults
+// and contextual bodies without a recorded choice retain candidate lookup.
 
 ExprId = std.ast
 Decl, Function = std.ast
@@ -8,16 +8,17 @@ Access, Call, Arg = std.ast
 Param, TypeId = std.ast
 ModuleOrigin, CBinding, CBindingId = std.ast
 AllocError = std.mem
+DeclId = sema.sema_id
+satisfies_bound = sema.sema_bound
+materialize_literal = gen.gen_c.gen_c_mono
 Vec = std.collections
 str, String = std.text
 Range = std.core
-DeclId = sema.sema_id
 TyId, TyRes = sema.sema_ty
 Def, decl_at = sema.sema_def
 Ctx = sema.sema_check
 Inst = sema.sema_inst
 type_from_ast = sema.sema_denote
-satisfies_bound = sema.sema_bound
 pack_slot, pack_elem = sema.sema_vararg
 sym_member, sym_variant, sym_fn = gen.gen_name
 RES_PATH = gen.gen_name
@@ -27,8 +28,8 @@ sub_with, any_open, inst_at = gen.gen_c.gen_c_mono
 settled_inst, inst_open, enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
 complete_inst = gen.gen_c.gen_c_infer
 ctype, is_unit, has_storage, c_prim, spellable, declared_ret = gen.gen_c.gen_c_type
-c_prim_known, write_none = gen.gen_c.gen_c_type
-lower_checked_narrow = gen.gen_c.gen_c_num
+write_none = gen.gen_c.gen_c_type
+lower_numeric = gen.gen_c.gen_c_num
 expr, ty_of, want_of = gen.gen_c.gen_c_expr
 value_held, holds = gen.gen_c.gen_c_expr
 Dest, deliver = gen.gen_c.gen_c_stmt
@@ -56,13 +57,24 @@ CallSite = {
 
     resolve = (self: @Self, be :: CBackend, name: str, want: TyId,
                out :: String) Res<(), AllocError> {
+        be.check.resolved_call(self.id).match({
+            Ok(_) => be.selected_def(self.id).match({
+                Ok(d) => self.lower(be, d, want, out),
+                None  => be.unresolved(self.id, name, out),
+            }),
+            None  => self.unselected(be, name, want, out),
+        })
+    }
+
+    // Field defaults and context-dependent generic bodies can reach lowering
+    // before sema records a selection. Keep their existing lookup boundary;
+    // an existing selection never reaches this path, even if it is invalid.
+    unselected = (self: @Self, be :: CBackend, name: str, want: TyId,
+                  out :: String) Res<(), AllocError> {
         found ::= be.alloc.Vec<Def>();
         be.check.world.defs_of(self.ctx.module, name, found).try();
         self.add_travelled(be, name, found).try();
-        be.check.resolved_call(self.id).match({
-            Ok(d) => self.selected(be, name, found, d, want, out),
-            None  => self.only(be, name, found, want, out),
-        })
+        self.only(be, name, found, want, out)
     }
 
     // Use the same travelled-function pool as sema. Dot form reads the
@@ -70,20 +82,16 @@ CallSite = {
     add_travelled = (self: @Self, be :: CBackend, name: str,
                      found :: Vec<Def>) Res<(), AllocError> {
         self.recv.match({
-            Ok(r) => be.travelled_for(name, r, self.ctx, found),
+            Ok(r) => {
+                unknown = be.check.types.unknown().try();
+                raw     = be.ty_of(r, self.ctx, unknown).try();
+                rty     = be.materialize_literal(raw).try();
+                be.travelled_for_type(name, rty, found)
+            },
             None  => self.c.args.get(0).match({
                 None  => Ok(()),
                 Ok(a) => be.travelled_for(name, a.value, self.ctx, found),
             }),
-        })
-    }
-
-    selected = (self: @Self, be :: CBackend, name: str, found: Vec<Def>,
-                want: DeclId, dest: TyId, out :: String)
-               Res<(), AllocError> {
-        def_with_id(found, want).match({
-            Ok(d) => self.lower(be, d, dest, out),
-            None  => self.only(be, name, found, dest, out),
         })
     }
 
@@ -221,40 +229,16 @@ CallSite = {
 
     convert_or_call = (self: @Self, be :: CBackend, d: Def, f: Function,
                        out :: String) Res<(), AllocError> {
-        checked_narrow(d, f).match({
-            true  => self.lower_narrow(be, d, out),
-            false => convert_target(d, f).match({
-                Ok(t) => be.lower_convert(
-                    self.c,
-                    d,
-                    t,
-                    self.recv,
-                    self.ctx,
+        be.check.numeric_conversions.get(d.id).match({
+            None          => self.plain_or_foreign(be, d, f, out),
+            Ok(operation) => recv_arg(self.c, self.recv).match({
+                None      => be.unsupported(
+                    self.id,
+                    "a numeric conversion without its operand",
                     out
                 ),
-                None  => self.plain_or_foreign(be, d, f, out),
+                Ok(value) => be.lower_numeric(value, operation, self.ctx, out),
             }),
-        })
-    }
-
-    lower_narrow = (self: @Self, be :: CBackend, d: Def, out :: String)
-                   Res<(), AllocError> {
-        inst ::= be.alloc.Inst();
-        sig  ::= be.alloc.Vec<TyId>();
-        be.signature_of(d, inst, sig).try();
-        unknown = be.check.types.unknown().try();
-        src     = sig.get(0).match({ Ok(t) => t, None => unknown });
-        ret     = be.check.type_of(self.id, self.ctx).try();
-        recv_arg(self.c, self.recv).match({
-            None      => out.add("0"),
-            Ok(value) => be.lower_checked_narrow(
-                self.id,
-                value,
-                src,
-                ret,
-                self.ctx,
-                out
-            ),
         })
     }
 
@@ -909,6 +893,15 @@ travelled_for = (
 ) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
     rty     = be.ty_of(r, ctx, unknown).try();
+    be.travelled_for_type(name, rty, found)
+}
+
+travelled_for_type = (
+    be    :: CBackend,
+    name  : str,
+    rty   : TyId,
+    found :: Vec<Def>
+) Res<(), AllocError> {
     defs ::= be.alloc.Vec<Def>();
     be.check.world.exported_named(name, defs).try();
     defs.loop((h, d) { be.keep_travelled(d, rty, found).try() });
@@ -960,10 +953,7 @@ has_def = (found: Vec<Def>, id: DeclId) bool {
     def_with_id(found, id).match({ Ok(_) => true, None => false })
 }
 
-// The candidate sema resolved to. Read out of the queue's own
-// entries, so a query and a lowering that both start from the same
-// `resolved_call` cannot disagree about which declaration it named.
-def_with_id* = (found: Vec<Def>, want: DeclId) Res<Def> {
+def_with_id = (found: Vec<Def>, want: DeclId) Res<Def> {
     Range(0, found.len).find((i) {
         found.get(i).match({ Ok(d) => d.id.eq(want), None => false })
     }).match({
@@ -972,8 +962,25 @@ def_with_id* = (found: Vec<Def>, want: DeclId) Res<Def> {
     })
 }
 
-checked_narrow = (d: Def, f: Function) bool {
-    d.qname.eq("std.core.num.to_u8") && d.name.eq("to_u8") && convert_shape(f)
+// The checked declaration is authoritative even when its name travelled
+// through an import or receiver. Module definition rows preserve declaration
+// order but omit imports and impls, so search the stable coordinate, not a row
+// offset or another visible candidate set.
+selected_def* = (be: CBackend, id: ExprId) Res<Def> {
+    selected = be.check.resolved_call(id).try();
+    table    = be.check.world.table_at(selected.module.to_usize()).try();
+    from: usize ::= 0;
+    to: usize   ::= table.defs.len;
+    loop(() { from < to }, (h) {
+        middle = from + (to - from) / 2;
+        (table.defs.ptr().read(middle).id.decl < selected.decl).match({
+            true  => { from = middle + 1; },
+            false => { to = middle; },
+        });
+    });
+    found = table.defs.get(from).try();
+    found.id.eq(selected).ensure().try();
+    Ok(found)
 }
 
 write_extern* = (
@@ -1048,72 +1055,8 @@ foreign_params = (be :: CBackend, f: Function, sig: Vec<TyId>, out :: String)
     Ok(())
 }
 
-// The primitive a bodyless one-parameter `to_<prim>` names. Asked of
-// the declaration and not of the name alone: a module's own `to_thing`
-// with a body is its own function and is called like any other.
-convert_target = (d: Def, f: Function) Res<str> {
-    convert_shape(f).match({
-        false => None,
-        true  => keep_prim(after_to(d.name)),
-    })
-}
-
-convert_shape = (f: Function) bool {
-    bodyless(f) && (f.params.len == 1) && (f.tparams.len == 0)
-}
-
 bodyless = (f: Function) bool {
     f.body.match({ Ok(_) => false, None => true })
-}
-
-after_to = (name: str) str {
-    ((name.len > 3) && name.slice(0, 3).eq("to_")).match({
-        true  => name.slice(3, name.len),
-        false => "",
-    })
-}
-
-keep_prim = (target: str) Res<str> {
-    c_prim_known(target).match({ true => Ok(target), false => None })
-}
-
-// The receiver, or the sole written argument: `b.to_u64()` and
-// `to_u64(b)` are one call written two ways, which is what UFCS means.
-lower_convert = (
-    be     :: CBackend,
-    c      : Call,
-    d      : Def,
-    target : str,
-    recv   : Res<ExprId>,
-    ctx    : Ctx,
-    out    :: String
-)
-                Res<(), AllocError> {
-    recv_arg(c, recv).match({
-        None  => out.add("0"),
-        Ok(v) => be.write_convert(d, v, target, ctx, out),
-    })
-}
-
-// The operand takes the declared parameter's type, not the target's, so
-// a literal argument is written at the width it's converted from — the
-// width the declaration chose the overload on.
-write_convert = (
-    be     :: CBackend,
-    d      : Def,
-    v      : ExprId,
-    target : str,
-    ctx    : Ctx,
-    out    :: String
-) Res<(), AllocError> {
-    inst ::= be.alloc.Inst();
-    sig  ::= be.alloc.Vec<TyId>();
-    be.signature_of(d, inst, sig).try();
-    unknown = be.check.types.unknown().try();
-    src     = sig.get(0).match({ Ok(t) => t, None => unknown });
-    out.fmt("({})(", c_prim(target)).try();
-    be.expr(v, ctx, src, out).try();
-    out.add(")")
 }
 
 // Which of the things a callee can be that this backend does not lower.

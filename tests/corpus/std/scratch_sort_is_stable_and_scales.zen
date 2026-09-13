@@ -1,0 +1,69 @@
+Ordered, sort = std.collections
+
+Item = { key: usize, index: usize, comparisons: Ptr<usize> }
+Item.impl(Ordered, {
+    before = (self: @Self, other: @Self) bool {
+        self.comparisons.write(0, self.comparisons.read(0) + 1);
+        self.key < other.key
+    }
+})
+
+Refuse = {}
+Refuse.impl(Alloc, {
+    raw = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        Err(AllocError.OutOfMemory)
+    }
+    realloc = <T>(self: @Self, p: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        Err(AllocError.OutOfMemory)
+    }
+})
+
+reverse = (a: Alloc, comparisons: Ptr<usize>, n: usize) Res<(), AllocError> {
+    values ::= a.Vec<Item>();
+    Range(0, n).loop((i) {
+        values.add(Item(key: n - i, index: i, comparisons: comparisons)).try();
+    });
+    comparisons.write(0, 0);
+    values.sort(a).try();
+    correct ::= true;
+    values.loop((h, i, item) { correct = correct && item.key == i + 1; });
+    println(
+        "reverse {} comparisons {} sorted {}",
+        n,
+        comparisons.read(0),
+        correct
+    );
+    Ok(())
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    comparisons = a.raw(8, 8).try().to<usize>();
+    comparisons.write(0, 0);
+    reverse(a, comparisons, 128).try();
+    reverse(a, comparisons, 256).try();
+    reverse(a, comparisons, 129).try();
+    values ::= a.Vec<Item>();
+    keys: [usize, 7] = [3, 1, 2, 1, 3, 2, 1];
+    keys.loop((h, i, key) {
+        values.add(Item(key: key, index: i, comparisons: comparisons)).try();
+    });
+    values.sort(a).try();
+    values.loop((item) { println("tie {} {}", item.key, item.index); });
+    values.clear();
+    refused_keys: [usize, 3] = [3, 1, 2];
+    refused_keys.loop((h, i, key) {
+        values.add(Item(key: key, index: i, comparisons: comparisons)).try();
+    });
+    values.sort(Refuse()).match({
+        Ok(_)  => println("unexpected sort"),
+        Err(e) => println("refused {}", e.variant_name()),
+    });
+    values.loop((item) { println("unchanged {}", item.key); });
+    values.clear();
+    values.sort(Refuse()).try();
+    values.add(Item(key: 7, index: 0, comparisons: comparisons)).try();
+    values.sort(Refuse()).try();
+    println("empty and singleton need no scratch");
+    Ok(0)
+}

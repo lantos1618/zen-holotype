@@ -1,5 +1,5 @@
-// Renders types and signatures already settled by sema. Missing or poisoned
-// semantic information produces a hover whose `found` field is false.
+// Renders settled types or independently validated written annotations.
+// Without either source of evidence, the hover has `found` set to false.
 
 str, String = std.text
 Vec = std.collections
@@ -11,6 +11,7 @@ Checker = sema.sema_check
 TyId, TyNamed, Prim = sema.sema_ty
 Def, decl_at = sema.sema_def
 source_position, lsp_position, Position, TextRange = lsp.lsp_pos
+run_of, zero_based = lsp.lsp_pos
 Tell, told_at = std.ast.ast_named
 check_standalone = lsp.lsp_query
 check_build = zen.zen_build
@@ -99,7 +100,7 @@ said = (c: Checker, a: Alloc, text: str, t: Tell) Res<Hover, AllocError> {
         OfType(ta)  => wired(
             text,
             ta.span,
-            c.write_written_ty(ta.id, out).try(),
+            c.write_written_ty(ta.id, text, out).try(),
             out
         ),
         OfValue(v)  => wired(text, v.span, c.write_val(v.id, out).try(), out),
@@ -118,11 +119,48 @@ wired = (text: str, span: Span, known: bool, out :: String)
 }
 
 // The bool each writer returns is whether every type it wrote was settled.
-write_written_ty = (c: Checker, id: TypeId, out :: String)
+write_written_ty = (c: Checker, id: TypeId, text: str, out :: String)
                    Res<bool, AllocError> {
     c.type_memo.get(id).match({
-        None     => Ok(false),
-        Ok(memo) => c.write_ty_named(memo, out),
+        None     => c.write_observed_type(id, text, out),
+        Ok(memo) => c.poison_free(memo).match({
+            true  => c.write_ty_named(memo, out),
+            false => c.write_observed_type(id, text, out),
+        }),
+    })
+}
+
+// Self-dependent annotations have no context-free type memo. Show the
+// validated written spelling rather than an arbitrary instantiation's type.
+write_observed_type = (c: Checker, id: TypeId, text: str, out :: String)
+                      Res<bool, AllocError> {
+    c.observed_type(id).match({
+        false => Ok(false),
+        true  => {
+            span  = c.tree.type_at(id).span;
+            start = run_of(text, zero_based(span.start.line));
+            end   = run_of(text, zero_based(span.end.line));
+            from  = start.start + zero_based(span.start.col);
+            upto  = end.start + zero_based(span.end.col);
+            (from <= upto && upto <= text.len).match({
+                false => Ok(false),
+                true  => { out.add(text.slice(from, upto)).try(); Ok(true) },
+            })
+        },
+    })
+}
+
+observed_type = (c: Checker, id: TypeId) bool {
+    c.type_was_resolved(id).match({
+        false => false,
+        true  => c.tree.type_at(id).kind.match({
+            Named(n) => n.args.find(
+                (arg) { !c.observed_type(arg) }
+            ).match({ None => true, Ok(_) => false }),
+            SelfType => true,
+            Unit     => true,
+            _        => false,
+        }),
     })
 }
 

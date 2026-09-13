@@ -16,10 +16,24 @@ inst_bounds_hold = sema.sema_bound
 
 type_from_ast* = (c :: Checker, id: TypeId, ctx: Ctx)
                  Res<TyId, AllocError> {
-    ctx.has_self.match({
+    ty = ctx.has_self.match({
         true  => c.type_kind(c.tree.type_at(id), ctx),
         false => c.memoized_type(id, ctx),
-    })
+    }).try();
+    (!c.is_unknown(ty)).then(() {
+        c.note_resolved_type(id).try();
+        c.tree.type_at(id).kind.match({
+            Named(written) => c.lookup_tvar(written.name.text).match({
+                Ok(_) => Ok(()),
+                None  => c.types.at(ty).match({
+                    Named(n) => c.resolved_type_decls.set(id, n.decl),
+                    _        => Ok(()),
+                }),
+            }),
+            _              => Ok(()),
+        }).try();
+    });
+    Ok(ty)
 }
 
 memoized_type = (c :: Checker, id: TypeId, ctx: Ctx)

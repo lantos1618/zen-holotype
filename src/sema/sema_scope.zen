@@ -1,6 +1,8 @@
 ExprId, BlockId, Block, Call, Struct = std.ast
 Paren, Access, Member, Function, Param, Span, TypeId = std.ast
 Try, Name, Expr = std.ast
+Vec = std.collections
+spelled_name = sema.sema_handle
 AllocError = std.mem
 str = std.text
 Range = std.core
@@ -9,9 +11,10 @@ decl_at = sema.sema_def
 Checker, UNRESOLVED = sema.sema_check
 tail_expr = sema.sema_hoist
 SemaFault, NameFault = sema.sema_diag
-Own, place_type = sema.sema_own
+Own, place_type, path_root, joined_source = sema.sema_own
 TyId = sema.sema_ty
 own_member = sema.sema_recv
+call_callee = sema.sema_call
 
 // `@scope` names the enclosing block: it may be passed inward but never
 // returned, stored in a construction, or read by an escaping closure. A
@@ -85,13 +88,45 @@ scope_escape = (c :: Checker, o :: Own, id: ExprId) Res<ExprId> {
 
 scope_escape_of = (c :: Checker, o :: Own, id: ExprId) Res<ExprId> {
     c.tree.expr_at(id).kind.match({
-        Scope     => Ok(id),
-        Name(n)   => o.scoped_var(n.text).match({ true => Ok(id), false => None }),
-        Paren(p)  => c.scope_escape(o, p.inner),
-        Try(t)    => c.scope_escape(o, t.operand),
-        Access(a) => c.scope_escape(o, a.base),
-        Call(k)   => c.scope_escape_in_args(o, k),
-        _         => None,
+        Scope         => Ok(id),
+        Name(n)       => o.scoped_var(n.text).match({ true => Ok(id), false => None }),
+        Paren(p)      => c.scope_escape(o, p.inner),
+        Try(t)        => c.scope_escape(o, t.operand),
+        Access(a)     => c.scope_field_escape(o, id, a),
+        Index(x)      => c.scope_escape(o, x.base),
+        Array(a)      => c.scope_escape_in_values(o, a.elems),
+        FixedArray(a) => c.scope_escape_in_values(o, a.elems),
+        Match(m)      => m.arms.find(
+            (arm) { c.scope_escapes(o, arm.body) }
+        ).match({
+            None => None, Ok(arm) => c.scope_escape(o, arm.body),
+        }),
+        Block(b)      => o.block_scoped(b).match({ true => Ok(id), false => None }),
+        Call(k)       => c.scope_escape_in_args(o, k),
+        _             => None,
+    })
+}
+
+scope_field_escape = (
+    c  :: Checker,
+    o  :: Own,
+    id : ExprId,
+    a  : Access
+) Res<ExprId> {
+    text = c.spelled_name(a.base);
+    (text.len > 0).match({
+        true  => o.scoped_field(text, a.name.text).match({ true => Ok(id), false => None }),
+        false => c.scope_escape(o, a.base),
+    })
+}
+
+scope_escape_in_values = (
+    c      :: Checker,
+    o      :: Own,
+    values : Vec<ExprId>
+) Res<ExprId> {
+    values.find((value) { c.scope_escapes(o, value) }).match({
+        None => None, Ok(value) => c.scope_escape(o, value),
     })
 }
 
@@ -107,13 +142,7 @@ scope_escapes = (c :: Checker, o :: Own, id: ExprId) bool {
 }
 
 scope_alias* = (c :: Checker, o :: Own, id: ExprId) bool {
-    node = c.tree.expr_at(id);
-    node.kind.match({
-        Scope    => true,
-        Paren(p) => c.scope_alias(o, p.inner),
-        Name(n)  => o.scoped_var(n.text),
-        _        => false,
-    })
+    c.scope_escapes(o, id)
 }
 
 refuse_scope_returned = (c :: Checker, o :: Own, id: ExprId)
@@ -221,7 +250,7 @@ is_arena_backed* = (c :: Checker, o :: Own, id: ExprId) bool {
 
 is_arena_ty = (c :: Checker, ty: TyId) bool {
     c.types.at(ty).match({
-        Named(n) => n.name.eq("Arena"),
+        Named(n) => n.name.eq("Arena") && c.world.module_name(n.decl).eq("std.mem.mem_arena"),
         _        => false,
     })
 }
@@ -240,24 +269,47 @@ arena_name = (c :: Checker, o :: Own, id: ExprId) Res<str> {
 
 arena_name_of = (c :: Checker, o :: Own, id: ExprId) Res<str> {
     c.tree.expr_at(id).kind.match({
-        Name(n)   => o.arena_var(n.text).match({ true => Ok(n.text), false => None }),
-        Paren(p)  => c.arena_name(o, p.inner),
-        Try(t)    => c.arena_name(o, t.operand),
-        Access(a) => c.arena_name(o, a.base),
-        Call(k)   => c.arena_name_in_call(o, k),
-        _         => None,
+        Name(n)       => o.arena_var(n.text).match({ true => Ok(n.text), false => None }),
+        Paren(p)      => c.arena_name(o, p.inner),
+        Try(t)        => c.arena_name(o, t.operand),
+        Access(a)     => c.arena_field_name(o, a),
+        Index(x)      => c.arena_name(o, x.base),
+        Array(a)      => c.arena_name_in_values(o, a.elems),
+        FixedArray(a) => c.arena_name_in_values(o, a.elems),
+        Match(m)      => m.arms.find(
+            (arm) { c.draws_on_arena(o, arm.body) }
+        ).match({
+            None => None, Ok(arm) => c.arena_name(o, arm.body),
+        }),
+        Block(b)      => o.block_arena(b),
+        Call(k)       => c.arena_name_in_call(o, k),
+        _             => None,
+    })
+}
+
+arena_field_name = (c :: Checker, o :: Own, a: Access) Res<str> {
+    text = c.spelled_name(a.base);
+    (text.len > 0).match({
+        true  => o.arena_field(text, a.name.text).match({ true => Ok(text), false => None }),
+        false => c.arena_name(o, a.base),
+    })
+}
+
+arena_name_in_values = (c :: Checker, o :: Own, values: Vec<ExprId>) Res<str> {
+    values.find((value) { c.draws_on_arena(o, value) }).match({
+        None => None, Ok(value) => c.arena_name(o, value),
     })
 }
 
 arena_name_in_call = (c :: Checker, o :: Own, k: Call) Res<str> {
-    c.arena_name_of_callee(o, k.callee).match({
+    c.arena_name_of_callee(o, k).match({
         Ok(n) => Ok(n),
         None  => c.arena_name_in_args(o, k),
     })
 }
 
-arena_name_of_callee = (c :: Checker, o :: Own, id: ExprId) Res<str> {
-    c.tree.expr_at(id).kind.match({
+arena_name_of_callee = (c :: Checker, o :: Own, k: Call) Res<str> {
+    c.tree.call_callee(k).kind.match({
         Access(a) => c.arena_name(o, a.base),
         _         => None,
     })
@@ -275,3 +327,134 @@ holds_pointer = (c :: Checker, o :: Own, id: ExprId) bool {
 }
 
 is_pointerish = (name: str) bool { name.len == 0 || name.eq("str") }
+
+// Preserve the completed value while the block's local names still exist.
+remember_block_origin* = (c :: Checker, o :: Own, id: BlockId, b: Block)
+                         Res<(), AllocError> {
+    c.tail_expr(b).match({
+        None      => o.remember_block(id, false, None, None),
+        Ok(value) => o.remember_block(
+            id,
+            c.scope_escapes(o, value),
+            c.arena_name(o, value),
+            c.arena_source(o, value)
+        ),
+    })
+}
+
+// A parameter's destination outlives this call. Local storage may retain
+// local arena views, but borrowed caller storage may not receive them.
+check_arena_stored* = (
+    c      :: Checker,
+    o      :: Own,
+    target : ExprId,
+    value  : ExprId
+) Res<(), AllocError> {
+    c.path_root(o, target).match({
+        None     => Ok(()),
+        Ok(root) => o.owned_at(root).match({
+            true  => Ok(()),
+            false => c.arena_name(o, value).match({
+                None     => Ok(()),
+                Ok(name) => c.refuse(
+                    c.tree.expr_at(target).span,
+                    SemaFault.ArenaStored(NameFault(name: name))
+                ),
+            }),
+        }),
+    })
+}
+
+Sources = {
+    local :: bool,
+    source :: Res<ExprId>,
+
+    add = (self :: @Self, c :: Checker, o :: Own, value: ExprId) () {
+        local       = c.is_arena_backed(o, value);
+        self.source = joined_source(
+            self.local,
+            self.source,
+            local,
+            c.arena_source(o, value)
+        );
+        self.local  = self.local || local;
+    }
+}
+
+arena_source* = (c :: Checker, o :: Own, id: ExprId) Res<ExprId> {
+    c.is_arena_backed(o, id).match({
+        false => None,
+        true  => c.tree.expr_at(id).kind.match({
+            Name(n)       => o.arena_source(n.text),
+            Consume(x)    => c.arena_source(o, x.operand),
+            Paren(p)      => c.arena_source(o, p.inner),
+            Try(t)        => c.arena_source(o, t.operand),
+            Access(a)     => (c.spelled_name(a.base).len > 0).match({
+                true  => o.field_source(c.spelled_name(a.base), a.name.text),
+                false => c.arena_source(o, a.base),
+            }),
+            Index(x)      => c.arena_source(o, x.base),
+            Array(a)      => c.array_source(o, a.elems),
+            FixedArray(a) => c.array_source(o, a.elems),
+            Block(b)      => o.block_source(b),
+            Match(m)      => {
+                found ::= Sources(local: false, source: None);
+                m.arms.loop((arm) { found.add(c, o, arm.body); });
+                found.source
+            },
+            Call(k)       => c.is_arena_ty(c.place_type(o, id)).match({
+                true  => Ok(id),
+                false => {
+                    found ::= Sources(local: false, source: None);
+                    c.tree.call_callee(k).kind.match({
+                        Access(a) => found.add(c, o, a.base),
+                        _         => (),
+                    });
+                    k.args.loop((arg) { found.add(c, o, arg.value); });
+                    found.source
+                },
+            }),
+            _             => None,
+        }),
+    })
+}
+
+array_source = (c :: Checker, o :: Own, values: Vec<ExprId>) Res<ExprId> {
+    found ::= Sources(local: false, source: None);
+    values.loop((value) { found.add(c, o, value); });
+    found.source
+}
+
+stored_arena_backed* = (
+    c      :: Checker,
+    o      :: Own,
+    target : ExprId,
+    value  : ExprId
+) bool {
+    external = c.path_root(o, target).match({
+        None => false, Ok(root) => !o.owned_at(root),
+    });
+    (!(external && c.is_arena_ty(c.place_type(o, value)))) && c.is_arena_backed(o, value)
+}
+
+// Moving the allocation owner into caller storage ends this body's ownership.
+// Only dependents with that definite source lose their local-arena origin.
+release_stored_arena* = (c :: Checker, o :: Own, target: ExprId, value: ExprId)
+                       Res<(), AllocError> {
+    c.path_root(o, target).match({
+        None     => Ok(()),
+        Ok(root) => o.owned_at(root).match({
+            true  => Ok(()),
+            false => c.tree.expr_at(value).kind.match({
+                Paren(p)   => c.release_stored_arena(o, target, p.inner),
+                Consume(x) => c.is_arena_ty(c.place_type(o, x.operand)).match({
+                    false => Ok(()),
+                    true  => c.arena_source(o, x.operand).match({
+                        None => Ok(()), Ok(source) => o.release_arena(source),
+                    }),
+                }),
+                _          => Ok(()),
+            }),
+        }),
+    })
+}

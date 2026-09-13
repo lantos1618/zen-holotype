@@ -1,0 +1,179 @@
+// The compiler/stdlib contract for primitive conversions. Only validated
+// declarations in std.core.num acquire an operation; renderers consume this
+// table by declaration identity instead of interpreting a callee's spelling.
+Function = std.ast
+AllocError = std.mem
+str = std.text
+Range = std.core
+Checker, Ctx = sema.sema_check
+TyId = sema.sema_ty
+Def, decl_at = sema.sema_def
+param_type, ret_type = sema.sema_denote
+SemaFault, NameFault = sema.sema_diag
+
+NarrowTarget* = U8 | U16 | Usize | I32 | CInt
+ConversionKind* = Widen | Checked(NarrowTarget)
+
+NumericConversion* = {
+    source*: TyId,
+    target*: TyId,
+    result*: TyId,
+    kind*: ConversionKind,
+}
+
+check_numeric_conversions* = (c :: Checker) Res<(), AllocError> {
+    Range(0, c.world.count()).loop((h, mi) {
+        c.world.table_at(mi).match({
+            None      => (),
+            Ok(table) => table.defs.loop(
+                (d) { c.numeric_declaration(d).try() }
+            ),
+        });
+    });
+    Ok(())
+}
+
+numeric_declaration = (c :: Checker, d: Def) Res<(), AllocError> {
+    // Translated C declarations retain their recorded foreign binding even
+    // when a native function happens to have a conversion-shaped name.
+    foreign = c.tree.module_origin_at(d.id.module.to_usize()).match({
+        Ok(origin) => origin.match({ CBinding(_) => true, Source => false }),
+        None       => false,
+    });
+    foreign.match({
+        true  => Ok(()),
+        false => c.source_numeric_declaration(d),
+    })
+}
+
+source_numeric_declaration = (c :: Checker, d: Def) Res<(), AllocError> {
+    decl_at(c.tree, d.id).match({
+        None    => Ok(()),
+        Ok(row) => row.kind.match({
+            Function(f) => f.body.match({
+                Ok(_) => Ok(()),
+                None  => conversion_name(f.name.text).match({
+                    None       => Ok(()),
+                    Ok(target) => c.numeric_signature(d, f, target),
+                }),
+            }),
+            _           => Ok(()),
+        }),
+    })
+}
+
+conversion_name = (name: str) Res<str> {
+    name.starts_with("to_").ensure().try();
+    target = name.slice(3, name.len);
+    target.is_in([
+        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+        "usize", "f32", "f64", "bool", "c_char", "c_schar", "c_uchar",
+        "c_short", "c_ushort", "c_int", "c_uint", "c_long", "c_ulong",
+        "c_longlong", "c_ulonglong", "int", "float", "str",
+    ]).ensure().try();
+    Ok(target)
+}
+
+numeric_signature = (c :: Checker, d: Def, f: Function, target: str)
+                    Res<(), AllocError> {
+    (c.world.module_name(d.id).eq("std.core.num") && f.exported
+        && f.params.len == 1 && f.tparams.len == 0).match({
+        false => c.invalid_numeric(d),
+        true  => {
+            p = f.params.get(0).ok_or(AllocError.OutOfMemory).try();
+            p.mutable.match({
+                true  => c.invalid_numeric(d),
+                false => {
+                    ctx    = Ctx(
+                        d.id.module.to_usize(),
+                        c.types.unknown().try()
+                    );
+                    source = c.param_type(p, ctx).try();
+                    result = c.ret_type(f, ctx).try();
+                    c.register_numeric(d, source, target, result)
+                },
+            })
+        },
+    })
+}
+
+register_numeric = (
+    c      :: Checker,
+    d      : Def,
+    source : TyId,
+    target : str,
+    result : TyId
+) Res<(), AllocError> {
+    conversion_kind(c.prim_name(source), target).match({
+        None     => c.invalid_numeric(d),
+        Ok(kind) => {
+            expected = kind.match({
+                Widen      => c.prim_name(result).eq(target),
+                Checked(_) => c.types.at(result).match({
+                    Res(r) => r.form.match({ Absence => true, _ => false })
+                        && c.prim_name(r.value).eq(target),
+                    _      => false,
+                }),
+            });
+            expected.match({
+                false => c.invalid_numeric(d),
+                true  => c.numeric_conversions.set(
+                    d.id,
+                    NumericConversion(
+                        source: source,
+                        target: c.types.prim(target).try(),
+                        result: result,
+                        kind: kind
+                    )
+                ),
+            })
+        },
+    })
+}
+
+// This finite list is the supported contract, not a general permission to
+// cast between machine representations. usize is currently a 64-bit target
+// type; its checked conversions retain the contract for narrower targets.
+conversion_kind = (source: str, target: str) Res<ConversionKind> {
+    lossless = source.match({
+        "u8"    => target.is_in(["u16", "u32", "u64", "usize", "i32", "i64"]),
+        "u16"   => target.is_in(["u32", "u64", "usize", "i64"]),
+        "u32"   => target.is_in(["u64", "usize", "i64"]),
+        "usize" => target.eq("u64"),
+        "i8"    => target.is_in(["i16", "i32", "i64"]),
+        "i16"   => target.is_in(["i32", "i64"]),
+        "i32"   => target.is_in(["i64", "f64"]),
+        "f32"   => target.eq("f64"),
+        _       => false,
+    });
+    lossless.match({
+        true  => Ok(ConversionKind.Widen),
+        false => source.match({
+            "usize" => target.eq("u8"),
+            "u32"   => target.eq("u8"),
+            "u64"   => target.is_in(["u16", "usize", "i32"]),
+            "i64"   => target.eq("i32"),
+            "c_int" => target.eq("i32"),
+            "i32"   => target.eq("c_int"),
+            _       => false,
+        }).ensure().match({
+            None  => None,
+            Ok(_) => target.match({
+                "u8"    => Ok(ConversionKind.Checked(NarrowTarget.U8)),
+                "u16"   => Ok(ConversionKind.Checked(NarrowTarget.U16)),
+                "usize" => Ok(ConversionKind.Checked(NarrowTarget.Usize)),
+                "i32"   => Ok(ConversionKind.Checked(NarrowTarget.I32)),
+                "c_int" => Ok(ConversionKind.Checked(NarrowTarget.CInt)),
+                _       => None,
+            }),
+        }),
+    })
+}
+
+invalid_numeric = (c :: Checker, d: Def) Res<(), AllocError> {
+    c.report(
+        d.span.file,
+        d.span,
+        SemaFault.InvalidNumericConversion(NameFault(name: d.name))
+    )
+}

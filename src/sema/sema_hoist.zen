@@ -212,34 +212,32 @@ hoist_at* = (c :: Checker, id: ExprId, got: TyId, want: TyId)
 }
 
 // The block's value, with or without its closing `;`; a trailing block
-// statement supplies its own tail.
+// statement supplies its own tail. Walk that chain without growing the stack
+// or copying the checker at each level of a recovered nested block.
 tail_expr* = (c: Checker, blk: Block) Res<ExprId> {
-    blk.value.match({
-        Ok(e) => Ok(e),
-        None  => c.last_stmt_expr(blk),
-    })
+    current             ::= blk;
+    result: Res<ExprId> ::= None;
+    walking             ::= true;
+    loop(() { walking }, (h) {
+        current.value.match({
+            Ok(e) => { result = Ok(e); walking = false; },
+            None  => current.last_stmt().match({
+                None  => { walking = false; },
+                Ok(s) => s.kind.match({
+                    Expr(e)  => { result = Ok(e.expr); walking = false; },
+                    Block(b) => { current = c.tree.block_at(b); },
+                    _        => { walking = false; },
+                }),
+            }),
+        });
+    });
+    result
 }
 
-// Ask about an empty block before subtracting from its unsigned length.
-last_stmt_expr = (c: Checker, blk: Block) Res<ExprId> {
+last_stmt = (blk: Block) Res<Stmt> {
     (blk.stmts.len > 0).match({
         false => None,
-        true  => c.last_stmt_of(blk.stmts),
-    })
-}
-
-last_stmt_of = (c: Checker, stmts: Vec<Stmt>) Res<ExprId> {
-    stmts.get(stmts.len - 1).match({
-        None  => None,
-        Ok(s) => c.stmt_tail_expr(s),
-    })
-}
-
-stmt_tail_expr = (c: Checker, s: Stmt) Res<ExprId> {
-    s.kind.match({
-        Expr(e)  => Ok(e.expr),
-        Block(b) => c.tail_expr(c.tree.block_at(b)),
-        _        => None,
+        true  => blk.stmts.get(blk.stmts.len - 1),
     })
 }
 

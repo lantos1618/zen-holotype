@@ -16,7 +16,7 @@ Item, MemberCache, complete_at, complete_shared, write_items = lsp.lsp_compl
 write_tokens = lsp.lsp_colour
 Diagnostics, Shared = lsp.lsp_diag
 write_actions = lsp.lsp_action
-relative_to, SourceRoot = zen.zen_path
+SourceRoot = zen.zen_path
 join_path = std.core.path
 Position = lsp.lsp_pos
 Decoded, RequestTurn, write_capabilities = lsp.lsp_reply
@@ -444,14 +444,7 @@ Server* = {
                     .try()
                     .write(qa, body)
             },
-            Ok(c) => hover_with(
-                c,
-                t,
-                relative_to(sh.root, path),
-                text,
-                line,
-                character
-            )
+            Ok(c) => hover_with(c, t, sh.file, text, line, character)
                 .try()
                 .write(t, body),
         })
@@ -499,7 +492,7 @@ Server* = {
                 qa ::= self.env.mem.alloc();
                 definition_in(self.env, qa, self.workspace, path, uri, text, line, character).try().write(qa, body)
             },
-            Ok(c) => definition_with(self.env, c, t, sh.root, self.docs, uri, text, relative_to(sh.root, path), line, character).try().write(t, body),
+            Ok(c) => definition_with(self.env, c, t, sh.root, self.docs, uri, text, sh.file, line, character).try().write(t, body),
         })
     }
 
@@ -572,16 +565,7 @@ Server* = {
         sh   = self.build_for(path, t).try();
         sh.c.match({
             None  => body.add("[]"),
-            Ok(c) => write_actions(
-                c,
-                t,
-                relative_to(sh.root, path),
-                text,
-                uri,
-                from,
-                upto,
-                body
-            ),
+            Ok(c) => write_actions(c, t, sh.file, text, uri, from, upto, body),
         })
     }
 
@@ -640,8 +624,7 @@ Server* = {
             Ok(c) => self.shared_completion(
                 c,
                 t,
-                sh.root,
-                path,
+                sh.file,
                 text,
                 line,
                 character,
@@ -661,19 +644,11 @@ Server* = {
         })
     }
 
-    shared_completion = (self :: @Self, c: Checker, t: Alloc, root: str,
-                         path: str, text: str, line: usize, character: usize,
+    shared_completion = (self :: @Self, c: Checker, t: Alloc, file: str,
+                         text: str, line: usize, character: usize,
                          body :: String) Res<bool, AllocError> {
         items ::= t.Vec<Item>();
-        done = complete_shared(
-            c,
-            t,
-            relative_to(root, path),
-            text,
-            line,
-            character,
-            items
-        ).try();
+        done = complete_shared(c, t, file, text, line, character, items).try();
         done.match({
             false => written(),
             true  => {

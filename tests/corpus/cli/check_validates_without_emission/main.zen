@@ -1,0 +1,60 @@
+cli, build = zen
+help = zen.zen_cli
+
+args = (a: Alloc, root: str, flag: str, value: str) Res<Vec<str>, AllocError> {
+    words ::= a.Vec<str>();
+    words.add("zen").try();
+    words.add("check").try();
+    [str, 3](root, flag, value).loop((word) {
+        (!word.is_empty()).then(() { words.add(word).try(); });
+    });
+    Ok(words)
+}
+
+show = (env: Env, words: Vec<str>) Res<(), AllocError> {
+    a ::= env.mem.alloc();
+    cli(env, a, words).try().match({
+        Build(job)  => println(
+            "check {} entry={} emit={} ffi={}",
+            job.root,
+            job.entry,
+            job.emits(),
+            job.ffi
+        ),
+        Usage(word) => println("usage `{}`", word),
+        _           => println("unexpected"),
+    });
+    Ok(())
+}
+
+main = (env: Env) Res<i32, AllocError | FsError> {
+    a ::= env.mem.alloc();
+    show(env, args(a, "src/library", "--entry", "library.zen").try()).try();
+    show(env, args(a, "src/library", "--ffi", "").try()).try();
+    show(env, args(a, "src/library", "--emit-c", "").try()).try();
+    show(env, args(a, "src/library", "-o", "out.c").try()).try();
+    show(env, args(a, "src/library", "--entry", "").try()).try();
+    show(env, args(a, "", "", "").try()).try();
+    text = help(a, "check").try();
+    println(
+        "help {} {}",
+        text.view().contains("--entry"),
+        text.view().contains("--emit-c")
+    );
+    job = cli(env, a, args(a, "src/library", "", "").try()).try();
+    job.match({
+        Build(selected) => {
+            valid = build(env, a, selected).try();
+            println("valid {}", valid);
+            env.fs.write(
+                "src/library/library.zen",
+                "value = () Missing { 0 }\n"
+            ).try();
+            invalid = build(env, a, selected).try();
+            println("invalid {}", invalid);
+        },
+        _               => println("missing check job"),
+    });
+    println("artifact {}", env.fs.exists("src/library/zen.c"));
+    Ok(0)
+}

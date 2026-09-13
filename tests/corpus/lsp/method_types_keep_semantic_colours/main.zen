@@ -1,0 +1,69 @@
+// Method annotations are resolved with Self context and must still classify
+// without storing that context-dependent type in the global type cache.
+Alloc, AllocError = std.mem
+Range = std.core
+TypeId = std.ast
+check_standalone, parse_standalone = lsp.lsp_query
+classify = lsp.lsp_names
+hover_at = lsp.lsp_hover
+definition_at = lsp.lsp_def
+Colour, index_of = lsp.lsp_colour
+
+VALID: str = "Vec<T> = {}\nBox = {\n    key = (self: @Self, ranks: Vec<Vec<usize>>, id: usize) usize { id }\n    pick = <U>(self: @Self, item: U, items: Vec<U>) U { item }\n}\nsmaller = (id: usize) usize { id }\n"
+INVALID: str = "Box = {\n    key = (self: @Self, value: Missing, id: usize) usize { id }\n}\n"
+
+show = (a: Alloc, text: str) Res<(), AllocError> {
+    parsed ::= parse_standalone(a, "doc.zen", text).try();
+    parsed.module("doc").try();
+    println("parse diagnostics {}", parsed.diags.len);
+    c = check_standalone(a, "doc.zen", text).try();
+    println("diagnostics {}", c.diag_count());
+    rows = classify(a, c, "doc.zen").try();
+    id ::= TypeId(index: 0);
+    Range(0, c.tree.type_ids()).loop((h, i) {
+        c.tree.type_at(id).kind.match({
+            Named(n) => {
+                found ::= false;
+                rows.loop((h2, row) {
+                    (row.line == n.name.span.start.line && row.col == n.name.span.start.col).then(() {
+                        found = row.colour.index_of() == Colour.type.index_of();
+                    });
+                });
+                println(
+                    "{} {}:{} {}",
+                    n.name.text,
+                    n.name.span.start.line,
+                    n.name.span.start.col,
+                    found
+                );
+            },
+            _        => (),
+        });
+        id = TypeId(index: id.index + 1);
+    });
+    Ok(())
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    println("valid");
+    show(a, VALID).try();
+    hover = hover_at(a, "doc.zen", VALID, 2, 31).try();
+    println("hover nested {} {}", hover.found, hover.shown);
+    primitive = hover_at(a, "doc.zen", VALID, 2, 52).try();
+    println("hover primitive {} {}", primitive.found, primitive.shown);
+    generic = hover_at(a, "doc.zen", VALID, 3, 34).try();
+    println("hover generic {} {}", generic.found, generic.shown);
+    target = definition_at(a, "doc.zen", VALID, 2, 31).try();
+    println(
+        "definition {} {}:{}",
+        target.found,
+        target.start.line,
+        target.start.character
+    );
+    missing = hover_at(a, "doc.zen", INVALID, 1, 31).try();
+    println("hover unknown {}", missing.found);
+    println("unknown");
+    show(a, INVALID).try();
+    Ok(0)
+}

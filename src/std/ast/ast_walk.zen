@@ -1,10 +1,10 @@
 // Structural traversal follows every child edge, including expressions in
 // types and defaults. Shared arena nodes are visited once per edge, preserving
-// their enclosing owner. No temporary collections are allocated.
+// their enclosing owner. Pending events use caller-chosen allocation.
 Ast = std.ast.ast_arena
 ExprId, TypeId, PatternId, BlockId = std.ast.ast_id
 Decl, Member, Stmt, Function, TParam, Param = std.ast.ast_node
-AllocError = std.mem
+Alloc, AllocError = std.mem
 
 DeclParent* = Module(usize) | Block(BlockId)
 DeclSite* = { parent*: DeclParent, index*: usize }
@@ -32,20 +32,57 @@ WalkVisitor* = {
 
 // The root must belong to this immutable Ast snapshot. Successful traversal
 // emits balanced Enter/Leave events in child order. Visitor failure stops
-// immediately; pending Leave events are not delivered after an error.
+// immediately; pending Leave events are not delivered after visitor or
+// allocation failure. Each edge uses constant host stack space.
 walk* = (
     tree    : Ast,
+    alloc   : Alloc,
     root    : WalkNode,
     visitor :: WalkVisitor
 ) Res<(), AllocError> {
-    walker ::= Walker(tree: tree, visitor: visitor);
-    walker.node(root)
+    walker ::= Walker(tree: tree, pending: alloc.Vec<WalkEvent>());
+    walker.node(root).try();
+    loop(() { walker.pending.len > 0 }, (h) {
+        walker.pending.take(walker.pending.len - 1).match({
+            None      => h.break(),
+            Ok(event) => {
+                visitor.visit(event).try();
+                event.match({
+                    Leave(_)    => (),
+                    Enter(node) => {
+                        walker.pending.add(WalkEvent.Leave(node)).try();
+                        first = walker.pending.len;
+                        walker.children(node).try();
+                        walker.reverse_children(first);
+                    },
+                });
+            },
+        });
+    });
+    Ok(())
 }
 
-Walker = { tree: Ast, visitor :: WalkVisitor }
+Walker = { tree: Ast, pending :: Vec<WalkEvent> }
 
-node = (walker :: Walker, root: WalkNode) Res<(), AllocError> {
-    walker.visitor.visit(WalkEvent.Enter(root)).try();
+// Children are recorded in source order. Reverse only the new segment so the
+// LIFO event stack delivers them in that order before their parent's Leave.
+reverse_children = (walker :: Walker, first: usize) () {
+    left  ::= first;
+    right ::= walker.pending.len;
+    loop(() { left < right }, (h) {
+        right = right - 1;
+        value = walker.pending.ptr().read(left);
+        walker.pending.ptr().write(left, walker.pending.ptr().read(right));
+        walker.pending.ptr().write(right, value);
+        left = left + 1;
+    });
+}
+
+node = (walker :: Walker, node: WalkNode) Res<(), AllocError> {
+    walker.pending.add(WalkEvent.Enter(node))
+}
+
+children = (walker :: Walker, root: WalkNode) Res<(), AllocError> {
     root.match({
         Declaration(d) => walker.declaration(d).try(),
         Member(m)      => walker.member(m).try(),
@@ -72,7 +109,7 @@ node = (walker :: Walker, root: WalkNode) Res<(), AllocError> {
             });
         },
     });
-    walker.visitor.visit(WalkEvent.Leave(root))
+    Ok(())
 }
 
 signature = (

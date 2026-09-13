@@ -14,7 +14,7 @@ Classed = lsp.lsp_colour
 classify = lsp.lsp_names
 uri_at, path_of = lsp.lsp_uri
 written = std.json
-relative_to = zen.zen_path
+relative_to, anchored_path = zen.zen_path
 
 Spot* = {
     uri*: str,
@@ -26,6 +26,7 @@ Spot* = {
 Inner = {
     root: str,          // the compilation root, copied into the arena
     entry: str,         // the open document, relative to the root
+    directory: Res<str>,
     b: Build,
     c: Checker,
     spots: Vec<Spot>,   // every diagnostic of the build, in report order
@@ -61,11 +62,15 @@ Built* = {
 
     rebuild = (self :: @Self, env: Env, root: str, entry: str,
                uris: Vec<str>, docs: Map<str, str>) Res<(), AllocError> {
+        // A refused rebuild must not expose values owned by the old arena.
+        self.cur   = None;
+        self.stale = true;
+        fresh ::= env.mem.alloc();
+        // Source selection may borrow the previous snapshot.
+        kept_root  = root.dup(fresh).try();
+        kept_entry = entry.dup(fresh).try();
         self.arena.drop();
-        self.arena = env.mem.alloc();
-
-        kept_root  = root.dup(self.arena).try();
-        kept_entry = entry.dup(self.arena).try();
+        self.arena = consume fresh;
 
         over ::= self.arena.Map<str, str>();
         uris.loop((h, u) {
@@ -88,11 +93,22 @@ Built* = {
         spots ::= self.arena.Vec<Spot>();
         checked.b.parse_spots(self.arena, kept_root, spots).try();
         checked.c.sema_spots(self.arena, kept_root, spots).try();
+        // A diagnostic for an open buffer keeps the client's URI spelling,
+        // even when module discovery removed redundant path components.
+        directory: Res<str> = env.fs.cwd(self.arena).match({
+            Ok(path) => Ok(path.view()),
+            Err(_)   => None,
+        });
+        directory.match({
+            Ok(path) => spots.restore_uris(self.arena, path, uris).try(),
+            None     => (),
+        });
         classed ::= self.arena.Map<str, Vec<Classed>>();
 
         self.cur   = Ok(Inner(
             root: kept_root,
             entry: kept_entry,
+            directory: directory,
             b: checked.b,
             c: checked.c,
             spots: spots,
@@ -110,6 +126,14 @@ Built* = {
         self.cur.match({ None => "", Ok(i) => i.root })
     }
 
+    source_file* = (self: @Self, a: Alloc, path: str)
+                   Res<str, AllocError> {
+        self.cur.match({
+            None  => Ok(path),
+            Ok(i) => i.source_file(a, path),
+        })
+    }
+
     spots* = (self: @Self) Res<Vec<Spot>> {
         self.cur.match({ None => None, Ok(i) => Ok(i.spots) })
     }
@@ -121,7 +145,7 @@ Built* = {
             Ok(i) => (i.b.diag_count() == 0 && i.c.diag_count() == 0).match({
                 false => Ok(a.Vec<Classed>()),
                 true  => {
-                    file = relative_to(i.root, path_of(uri));
+                    file = i.source_file(a, path_of(uri)).try();
                     i.classed.get(file).match({
                         Ok(rows) => Ok(rows),
                         None     => {
@@ -136,6 +160,42 @@ Built* = {
             }),
         })
     }
+}
+
+source_file = (inner: Inner, a: Alloc, path: str) Res<str, AllocError> {
+    inner.directory.match({
+        None          => Ok(relative_to(inner.root, path)),
+        Ok(directory) => Ok(relative_to(
+            inner.b.root,
+            anchored_path(a, directory, path).try()
+        )),
+    })
+}
+
+restore_uris = (spots :: Vec<Spot>, a: Alloc, directory: str, uris: Vec<str>)
+               Res<(), AllocError> {
+    paths ::= a.Map<str, str>();
+    uris.loop((uri) {
+        paths.set(anchored_path(a, directory, path_of(uri)).try(), uri).try();
+    });
+    spots.loop((h, index, spot) {
+        path = anchored_path(a, directory, path_of(spot.uri)).try();
+        paths.get(path).match({
+            None    => (),
+            Ok(uri) => {
+                spots.set(
+                    index,
+                    Spot(
+                        uri: uri,
+                        message: spot.message,
+                        span: spot.span,
+                        note: spot.note
+                    )
+                );
+            },
+        });
+    });
+    Ok(())
 }
 
 Built.impl(Drop, {

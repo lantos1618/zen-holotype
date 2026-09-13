@@ -14,33 +14,133 @@ check_receiver, check_write_place = sema.sema_recv
 check_scope_returned, check_scope_stored = sema.sema_scope
 check_scope_captured, is_scope_value, call_escapes = sema.sema_scope
 check_arena_returned, is_arena_backed = sema.sema_scope
-scope_alias = sema.sema_scope
+scope_alias, remember_block_origin, check_arena_stored = sema.sema_scope
+arena_source, release_stored_arena, stored_arena_backed = sema.sema_scope
 Pin, pin_captured, refuse_pinned, refuse_pinned_at = sema.sema_pin
-check_drop_copy = sema.sema_drop
+check_drop_copy, is_drop_type = sema.sema_drop
 is_handle_ty, refuse_handle_at, spelled_name = sema.sema_handle
-spelled_lambda = sema.sema_call
+spelled_lambda, call_callee = sema.sema_call
 
 OwnVar* = {
     name*: str,
     ty*: TyId,
     mutable*: bool,
     owned*: bool,
-    scoped*: bool,
-    arena*: bool,
+    scoped* :: bool,
+    arena* :: bool,
+    source :: Res<ExprId>,
+    fields :: Vec<FieldOrigin>,
     span*: Span,
+}
+
+// Field overrides are immutable between snapshots. An absent field inherits
+// the root's origin; whole-value reads include every recorded field.
+FieldOrigin = {
+    name: str,
+    scoped: bool,
+    arena: bool,
+    source: Res<ExprId>,
+}
+
+// Storage origins reaching a binding at one point in the ownership walk.
+Provenance = {
+    scoped: bool,
+    arena: bool,
+    source: Res<ExprId>,
+    fields: Vec<FieldOrigin>,
+
+    field = (self: @Self, name: str) FieldOrigin {
+        self.fields.find((field) { field.name.eq(name) }).value_or(FieldOrigin(name: name, scoped: self.scoped, arena: self.arena, source: self.source))
+    }
+
+    eq = (self: @Self, other: Provenance) bool {
+        self.scoped == other.scoped && self.arena == other.arena && same_source(
+            self.source,
+            other.source
+        ) &&
+            self.fields.find((f) {
+                right = other.field(f.name);
+                f.scoped != right.scoped || f.arena != right.arena || !same_source(
+                    f.source,
+                    right.source
+                )
+            }).match({ None => true, Ok(_) => false }) && other.fields.find((f) {
+                left = self.field(f.name);
+                f.scoped != left.scoped || f.arena != left.arena || !same_source(
+                    f.source,
+                    left.source
+                )
+            }).match({ None => true, Ok(_) => false })
+    }
+
+    join = (self: @Self, other: Provenance, alloc: Alloc) Res<Provenance, AllocError> {
+        fields ::= alloc.Vec<FieldOrigin>();
+        self.fields.loop((h, field) {
+            right = other.field(field.name);
+            fields.add(FieldOrigin(
+                name: field.name,
+                scoped: field.scoped || right.scoped,
+                arena: field.arena || right.arena,
+                source: joined_source(
+                    field.arena,
+                    field.source,
+                    right.arena,
+                    right.source
+                )
+            )).try();
+        });
+        other.fields.loop((h, field) {
+            self.fields.find(
+                (left) { left.name.eq(field.name) }
+            ).match({ Ok(_) => true, None => false }).match({
+                true  => (),
+                false => fields.add(FieldOrigin(
+                    name: field.name,
+                    scoped: self.scoped || field.scoped,
+                    arena: self.arena || field.arena,
+                    source: joined_source(
+                        self.arena,
+                        self.source,
+                        field.arena,
+                        field.source
+                    )
+                )).try(),
+            });
+        });
+        Ok(Provenance(
+            scoped: self.scoped || other.scoped,
+            arena: self.arena || other.arena,
+            source: joined_source(
+                self.arena,
+                self.source,
+                other.arena,
+                other.source
+            ),
+            fields: fields
+        ))
+    }
 }
 
 // A moved-out place: a binding, or one field of it.
 Place* = {
     root*: usize,
     field*: str,
+    invalidated: bool,
     span*: Span,
 }
 
 // One body's ownership frame. `vars` is a scope stack indexed by
 // declaration order; `escaped` is the index above which bindings were
 // declared inside an escaping closure, 0 while no closure is open.
+BlockOrigin = {
+    block: BlockId,
+    scoped: bool,
+    arena: Res<str>,
+    source: Res<ExprId>,
+}
+
 Own* = {
+    results :: Vec<BlockOrigin>,
     vars :: Vec<OwnVar>,
     dead :: Vec<Place>,
     pinned* :: Vec<Pin>,
@@ -48,6 +148,44 @@ Own* = {
     method* :: str,
     body* :: BlockId,
     alloc*: Alloc,
+
+    block_scoped* = (self: @Self, id: BlockId) bool {
+        self.results.find((r) { r.block.index == id.index }).match({
+            None => false, Ok(r) => r.scoped,
+        })
+    }
+
+    block_arena* = (self: @Self, id: BlockId) Res<str> {
+        self.results.find((r) { r.block.index == id.index }).match({
+            None => None, Ok(r) => r.arena,
+        })
+    }
+
+    block_source* = (self: @Self, id: BlockId) Res<ExprId> {
+        self.results.find((r) { r.block.index == id.index }).match({
+            None => None, Ok(r) => r.source,
+        })
+    }
+
+    remember_block* = (
+        self :: @Self, id: BlockId, scoped: bool, arena: Res<str>, source: Res<ExprId>
+    ) Res<(), AllocError> {
+        value = BlockOrigin(
+            block: id,
+            scoped: scoped,
+            arena: arena,
+            source: source
+        );
+        Range(0, self.results.len).find((i) {
+            self.results.get(i).match({
+                None => false, Ok(r) => r.block.index == id.index,
+            })
+        }).match({
+            None  => self.results.add(value).try(),
+            Ok(i) => self.results.set(i, value),
+        });
+        Ok(())
+    }
 
     // The innermost binding of `text`, as an index into `vars`.
     find_var* = (self: @Self, text: str) Res<usize> {
@@ -77,12 +215,119 @@ Own* = {
     }
 
     scoped_var* = (self: @Self, text: str) bool {
-        self.var_at(text).match({ None => false, Ok(v) => v.scoped })
+        self.var_at(text).match({ None => false, Ok(v) => v.scoped || v.fields.find((f) { f.scoped }).match({ Ok(_) => true, None => false }) })
     }
 
     // Whether this name is, or views into, an arena this frame made.
     arena_var* = (self: @Self, text: str) bool {
-        self.var_at(text).match({ None => false, Ok(v) => v.arena })
+        self.var_at(text).match({ None => false, Ok(v) => v.arena || v.fields.find((f) { f.arena }).match({ Ok(_) => true, None => false }) })
+    }
+
+    arena_field* = (self: @Self, text: str, name: str) bool {
+        self.var_at(text).match({ None => false, Ok(v) =>
+            v.fields.find((f) { f.name.eq(name) }).match({
+                None => v.arena, Ok(f) => f.arena,
+            }),
+        })
+    }
+
+    arena_source* = (self: @Self, text: str) Res<ExprId> {
+        self.var_at(text).match({
+            None  => None,
+            Ok(v) => {
+                source ::= v.source;
+                seen   ::= v.arena;
+                v.fields.loop((f) {
+                    source = joined_source(seen, source, f.arena, f.source);
+                    seen   = seen || f.arena;
+                });
+                source
+            },
+        })
+    }
+
+    field_source* = (self: @Self, text: str, name: str) Res<ExprId> {
+        self.var_at(text).match({
+            None  => None,
+            Ok(v) => v.fields.find((f) { f.name.eq(name) }).match({
+                None => v.source, Ok(f) => f.source,
+            }),
+        })
+    }
+
+    release_arena* = (self :: @Self, source: ExprId) Res<(), AllocError> {
+        self.vars.loop((h, i, old) {
+            row ::= old;
+            same_source(row.source, Ok(source)).then(() {
+                row.arena  = false;
+                row.source = None;
+            });
+            fields ::= self.alloc.Vec<FieldOrigin>();
+            old.fields.loop((h, f) {
+                same_source(f.source, Ok(source)).match({
+                    false => fields.add(f).try(),
+                    true  => fields.add(FieldOrigin(
+                        name: f.name,
+                        scoped: f.scoped,
+                        arena: false,
+                        source: None
+                    )).try(),
+                });
+            });
+            row.fields = fields;
+            self.vars.set(i, row);
+        });
+        Ok(())
+    }
+
+    scoped_field* = (self: @Self, text: str, name: str) bool {
+        self.var_at(text).match({ None => false, Ok(v) =>
+            v.fields.find((f) { f.name.eq(name) }).match({
+                None => v.scoped, Ok(f) => f.scoped,
+            }),
+        })
+    }
+
+    taint_root = (self :: @Self, root: usize, value: Provenance) () {
+        self.vars.get(root).match({
+            None    => (),
+            Ok(old) => {
+                row ::= old;
+                row.scoped = old.scoped || old.fields.find(
+                    (f) { f.scoped }
+                ).match({ Ok(_) => true, None => false }) || value.scoped;
+                row.source = None;
+                row.arena  = old.arena || old.fields.find(
+                    (f) { f.arena }
+                ).match({ Ok(_) => true, None => false }) || value.arena;
+                // A write through a deeper path may affect any prior override.
+                row.fields = self.alloc.Vec<FieldOrigin>();
+                self.vars.set(root, row);
+            },
+        });
+    }
+
+    assign_field = (self :: @Self, root: usize, name: str, value: Provenance)
+                   Res<(), AllocError> {
+        self.vars.get(root).match({
+            None    => Ok(()),
+            Ok(old) => {
+                row    ::= old;
+                fields ::= old.fields.filter(
+                    self.alloc,
+                    (f) { !f.name.eq(name) }
+                ).try();
+                fields.add(FieldOrigin(
+                    name: name,
+                    scoped: value.scoped,
+                    arena: value.arena,
+                    source: value.source
+                )).try();
+                row.fields = fields;
+                self.vars.set(root, row);
+                Ok(())
+            },
+        })
     }
 
     // A `@scope` binding read from inside an escaping closure.
@@ -94,7 +339,7 @@ Own* = {
     }
 
     scoped_at = (self: @Self, i: usize) bool {
-        self.vars.get(i).match({ Ok(v) => v.scoped, None => false })
+        self.vars.get(i).match({ Ok(v) => v.scoped || v.fields.find((f) { f.scoped }).match({ Ok(_) => true, None => false }), None => false })
     }
 
     owned_at* = (self: @Self, root: usize) bool {
@@ -107,13 +352,40 @@ Own* = {
     }
 
     has_dead_field = (self: @Self, root: usize) bool {
-        self.dead.find((p) { (p.root == root) && (p.field.len > 0) })
+        self.dead.find(
+            (p) { (p.root == root) && (p.field.len > 0) && !p.invalidated }
+        )
             .match({ Ok(_) => true, None => false })
     }
 
     kill = (self :: @Self, root: usize, field: str, span: Span)
            Res<(), AllocError> {
-        self.dead.add(Place(root: root, field: field, span: span))
+        self.dead.add(Place(
+            root: root,
+            field: field,
+            invalidated: false,
+            span: span
+        ))
+    }
+
+    // Destruction invalidates both definite dependents and unknown local origins.
+    invalidate_arena = (self :: @Self, source: Res<ExprId>, span: Span)
+                       Res<(), AllocError> {
+        self.vars.loop((h, i, v) {
+            dependent       = v.arena && may_share_source(v.source, source);
+            field_dependent = v.fields.find((f) {
+                f.arena && may_share_source(f.source, source)
+            }).match({ None => false, Ok(_) => true });
+            (dependent || field_dependent).then(() {
+                self.dead.add(Place(
+                    root: i,
+                    field: "",
+                    invalidated: true,
+                    span: span
+                )).try();
+            });
+        });
+        Ok(())
     }
 
     // A write fills the hole.
@@ -122,6 +394,76 @@ Own* = {
             ((p.root == root) && p.field.eq(field)) == false
         }).try();
         Ok(());
+    }
+
+    assign_provenance = (self :: @Self, root: usize, value: Provenance) () {
+        self.vars.get(root).match({
+            None    => (),
+            Ok(old) => {
+                row ::= old;
+                row.scoped = value.scoped;
+                row.arena  = value.arena;
+                row.source = value.source;
+                row.fields = value.fields;
+                self.vars.set(root, row);
+            },
+        });
+    }
+
+    provenance = (self: @Self) Res<Vec<Provenance>, AllocError> {
+        out ::= self.alloc.Vec<Provenance>();
+        self.vars.loop((h, v) {
+            out.add(Provenance(
+                scoped: v.scoped,
+                arena: v.arena,
+                source: v.source,
+                fields: v.fields
+            )).try();
+        });
+        Ok(out)
+    }
+
+    restore_provenance = (self :: @Self, saved: Vec<Provenance>) () {
+        saved.loop((h, i, value) { self.assign_provenance(i, value); });
+    }
+
+    join_provenance = (self: @Self, joined :: Vec<Provenance>) Res<(), AllocError> {
+        joined.loop((h, i, before) {
+            self.vars.get(i).match({
+                None    => (),
+                Ok(now) => joined.set(
+                    i,
+                    before.join(
+                        Provenance(
+                            scoped: now.scoped,
+                            arena: now.arena,
+                            source: now.source,
+                            fields: now.fields
+                        ),
+                        self.alloc
+                    ).try()
+                ),
+            });
+        });
+        Ok(())
+    }
+
+    provenance_eq = (self: @Self, saved: Vec<Provenance>) bool {
+        equal ::= true;
+        saved.loop((h, i, before) {
+            self.vars.get(i).match({
+                None    => { equal = false; },
+                Ok(now) => {
+                    equal = equal && before.eq(Provenance(
+                        scoped: now.scoped,
+                        arena: now.arena,
+                        source: now.source,
+                        fields: now.fields
+                    ));
+                },
+            });
+        });
+        equal
     }
 
     // Move out every place killed since `mark`.
@@ -151,6 +493,7 @@ Own* = {
 
 Own* = (a: Alloc) Res<Own, AllocError> {
     Ok(Own(
+        results: a.Vec<BlockOrigin>(),
         vars: a.Vec<OwnVar>(),
         dead: a.Vec<Place>(),
         pinned: a.Vec<Pin>(),
@@ -200,6 +543,8 @@ own_param = (c :: Checker, o :: Own, p: Param) Res<(), AllocError> {
         owned: false,
         scoped: false,
         arena: false,
+        source: None,
+        fields: o.alloc.Vec<FieldOrigin>(),
         span: p.name.span
     ))
 }
@@ -214,6 +559,7 @@ own_block = (c :: Checker, o :: Own, id: BlockId, ctx: Ctx)
         Ok(v) => c.own_expr(o, v, ctx),
         None  => Ok(()),
     }).try();
+    c.remember_block_origin(o, id, b).try();
     c.check_scope_returned(o, id, b).try();
     c.check_arena_returned(o, id, b).try();
     c.check_partial_moves(o, mark).try();
@@ -243,9 +589,15 @@ own_target = (c :: Checker, o :: Own, b: Bind, ctx: Ctx)
              Res<(), AllocError> {
     node = c.tree.expr_at(b.target);
     c.check_write_place(o, b.target).try();
+    c.release_stored_arena(o, b.target, b.value).try();
+    c.check_arena_stored(o, b.target, b.value).try();
     node.kind.match({
         Name(n)   => c.bind_name(o, b, n.text, node.span, ctx),
-        Access(a) => c.revive_field(o, a, ctx),
+        Access(a) => c.revive_field(o, a, b.value, ctx),
+        Index(_)  => {
+            c.flow_bind(o, b, ctx).try();
+            c.own_expr(o, b.target, ctx)
+        },
         _         => c.own_expr(o, b.target, ctx),
     })
 }
@@ -259,7 +611,17 @@ bind_name = (
     ctx  : Ctx
 ) Res<(), AllocError> {
     o.find_var(text).match({
-        Ok(i) => o.revive(i, ""),
+        Ok(i) => {
+            value = Provenance(
+                scoped: c.is_scope_value(b.value) || c.scope_alias(o, b.value),
+                arena: c.stored_arena_backed(o, b.target, b.value),
+                source: c.arena_source(o, b.value),
+                fields: o.alloc.Vec<FieldOrigin>()
+            );
+            o.revive(i, "").try();
+            o.assign_provenance(i, value);
+            Ok(())
+        },
         None  => c.declare_var(o, b, text, span, ctx),
     })
 }
@@ -278,16 +640,30 @@ declare_var = (
         mutable: b.mutable,
         owned: true,
         scoped: c.is_scope_value(b.value) || c.scope_alias(o, b.value),
-        arena: c.is_arena_backed(o, b.value),
+        arena: c.stored_arena_backed(o, b.target, b.value),
+        source: c.arena_source(o, b.value),
+        fields: o.alloc.Vec<FieldOrigin>(),
         span: span
     ))
 }
 
-revive_field = (c :: Checker, o :: Own, a: Access, ctx: Ctx)
+revive_field = (c :: Checker, o :: Own, a: Access, value: ExprId, ctx: Ctx)
                Res<(), AllocError> {
     c.path_root(o, a.base).match({
         None  => Ok(()),
-        Ok(i) => o.revive(i, a.name.text),
+        Ok(i) => {
+            origin = Provenance(
+                scoped: c.is_scope_value(value) || c.scope_alias(o, value),
+                arena: c.stored_arena_backed(o, a.base, value),
+                source: c.arena_source(o, value),
+                fields: o.alloc.Vec<FieldOrigin>()
+            );
+            (c.spelled_name(a.base).len > 0).match({
+                true  => o.assign_field(i, a.name.text, origin).try(),
+                false => o.taint_root(i, origin),
+            });
+            o.revive(i, a.name.text)
+        },
     }).try();
     c.own_expr(o, a.base, ctx).try();
     Ok(());
@@ -427,8 +803,14 @@ report_consumed = (
     root  : usize,
     field : str
 ) Res<(), AllocError> {
-    name = c.place_name(o, root, field).try();
-    c.refuse(span, SemaFault.ConsumedUse(NameFault(name: name)))
+    name        = c.place_name(o, root, field).try();
+    invalidated = o.dead.find((p) {
+        p.root == root && p.field.eq(field) && p.invalidated
+    }).match({ None => false, Ok(_) => true });
+    c.refuse(span, invalidated.match({
+        true  => SemaFault.ArenaInvalidated(NameFault(name: name)),
+        false => SemaFault.ConsumedUse(NameFault(name: name)),
+    }))
 }
 
 // `consume` moves only a place owned by the current frame.
@@ -436,6 +818,7 @@ own_consume = (c :: Checker, o :: Own, x: Consume, ctx: Ctx)
               Res<(), AllocError> {
     node = c.tree.expr_at(x.operand);
     node.kind.match({
+        Paren(p)  => c.own_consume(o, Consume(operand: p.inner), ctx),
         Index(_)  => c.refuse(
             node.span,
             SemaFault.ConsumeNotAPlace(NameFault(name: ""))
@@ -522,13 +905,81 @@ own_call = (c :: Checker, o :: Own, id: ExprId, k: Call, ctx: Ctx)
     c.check_receiver(o, k, ctx).try();
     c.check_scope_stored(id, k).try();
     c.own_expr(o, k.callee, ctx).try();
-    c.own_args(o, k, ctx).try();
+    c.own_args(o, id, k, ctx).try();
+    c.own_destruction(o, id, k).try();
     Ok(());
 }
 
-own_args = (c :: Checker, o :: Own, k: Call, ctx: Ctx)
+// Only the standard Drop requirement ends an owner's lifetime. A same-named
+// inherent operation or unrelated interface does not carry this contract.
+own_destruction = (c :: Checker, o :: Own, id: ExprId, k: Call)
+                  Res<(), AllocError> {
+    c.resolved_member_provider(id).match({
+        None      => Ok(()),
+        Ok(bound) => c.types.at(bound).match({
+            Named(n) => c.world.is_prelude_decl(n.decl, "Drop").try().match({
+                false => Ok(()),
+                true  => c.drop_receiver(k).match({
+                    None         => Ok(()),
+                    Ok(receiver) => c.destroy_owner(o, id, receiver),
+                }),
+            }),
+            _        => Ok(()),
+        }),
+    })
+}
+
+drop_receiver = (c: Checker, k: Call) Res<ExprId> {
+    k.args.get(0).match({
+        Ok(arg) => Ok(arg.value),
+        None    => c.tree.call_callee(k).kind.match({
+            Access(a) => Ok(a.base),
+            _         => None,
+        }),
+    })
+}
+
+destroy_owner = (c :: Checker, o :: Own, id: ExprId, receiver: ExprId)
+                Res<(), AllocError> {
+    c.tree.expr_at(receiver).kind.match({
+        Paren(p)   => c.destroy_owner(o, id, p.inner),
+        Consume(x) => {
+            owned = c.path_root(o, x.operand).match({
+                None => true, Ok(root) => o.owned_at(root),
+            });
+            (owned && c.is_drop_type(c.place_type(o, x.operand)).try()).match({
+                false => c.refuse(
+                    c.tree.expr_at(receiver).span,
+                    SemaFault.ExplicitDropBorrow(NameFault(name: c.spelled_name(
+                        x.operand
+                    )))
+                ),
+                true  => {
+                    c.is_arena_backed(o, x.operand).then(() {
+                        o.invalidate_arena(
+                            c.arena_source(o, x.operand),
+                            c.tree.expr_at(id).span
+                        ).try();
+                    });
+                    Ok(())
+                },
+            })
+        },
+        // Fields are not recursively dropped. Their owner explicitly destroys
+        // them and remains responsible for restoring any live field afterward.
+        Access(_)  => Ok(()),
+        _          => c.refuse(
+            c.tree.expr_at(receiver).span,
+            SemaFault.ExplicitDropBorrow(NameFault(name: c.spelled_name(
+                receiver
+            )))
+        ),
+    })
+}
+
+own_args = (c :: Checker, o :: Own, id: ExprId, k: Call, ctx: Ctx)
            Res<(), AllocError> {
-    repeats = c.repeating_body(k);
+    repeats = c.repeating_body(id).try();
     escapes = c.call_escapes(o, k);
     k.args.loop((h, a) { c.own_arg(o, a, repeats, escapes, ctx).try() });
     Ok(());
@@ -548,11 +999,15 @@ own_arg = (
     })
 }
 
-// Every lambda argument but a `.then` body may run more than once.
-repeating_body = (c :: Checker, k: Call) bool {
-    c.tree.expr_at(k.callee).kind.match({
-        Access(a) => a.name.text.eq("then") == false,
-        _         => true,
+// Only the resolved standard conditional guarantees at most one invocation.
+// A source-local method with the same spelling has no such contract.
+repeating_body = (c :: Checker, id: ExprId) Res<bool, AllocError> {
+    c.resolved_call(id).match({
+        None     => Ok(true),
+        Ok(decl) => c.world.module_name(decl).eq("std.core.bool").match({
+            false => Ok(true),
+            true  => Ok(!c.world.is_prelude_decl(decl, "then").try()),
+        }),
     })
 }
 
@@ -564,6 +1019,8 @@ own_lambda = (
     repeats : bool,
     escapes : bool
 ) Res<(), AllocError> {
+    repeats.then(() { c.loop_provenance(o, l, ctx).try() });
+    before    = o.provenance().try();
     dmark     = o.dead.len;
     vmark     = o.vars.len;
     outer     = o.escaped;
@@ -575,8 +1032,165 @@ own_lambda = (
     c.own_block(o, l.body, ctx).try();
     o.escaped = outer;
     o.release(vmark).try();
+    o.join_provenance(before).try();
+    o.restore_provenance(before);
     repeats.then(() { c.report_back_edge(o, dmark).try() });
     Ok(());
+}
+
+// Solve loop-carried origins before the diagnostic walk. This transfer walk
+// changes provenance only: moves, captures, and diagnostics run exactly once.
+loop_provenance = (c :: Checker, o :: Own, l: Lambda, ctx: Ctx)
+                  Res<(), AllocError> {
+    stable ::= false;
+    loop(() { !stable }, (h) {
+        before   = o.provenance().try();
+        previous = o.provenance().try();
+        mark     = o.vars.len;
+        l.params.loop((h, p) { c.own_param(o, p).try() });
+        c.flow_block(o, l.body, ctx).try();
+        truncate(o.vars, mark);
+        o.join_provenance(before).try();
+        o.restore_provenance(before);
+        stable = o.provenance_eq(previous);
+    });
+    Ok(())
+}
+
+flow_block = (c :: Checker, o :: Own, id: BlockId, ctx: Ctx)
+             Res<(), AllocError> {
+    block = c.tree.block_at(id);
+    mark  = o.vars.len;
+    block.stmts.loop((h, stmt) {
+        stmt.kind.match({
+            Bind(b)  => {
+                c.flow_expr(o, b.value, ctx).try();
+                c.flow_bind(o, b, ctx).try();
+            },
+            Expr(e)  => c.flow_expr(o, e.expr, ctx).try(),
+            Block(b) => c.flow_block(o, b, ctx).try(),
+            Decl(_)  => (),
+        });
+    });
+    block.value.match({
+        None => (), Ok(value) => c.flow_expr(o, value, ctx).try(),
+    });
+    c.remember_block_origin(o, id, block).try();
+    truncate(o.vars, mark);
+    Ok(())
+}
+
+flow_bind = (c :: Checker, o :: Own, b: Bind, ctx: Ctx)
+            Res<(), AllocError> {
+    c.release_stored_arena(o, b.target, b.value).try();
+    node  = c.tree.expr_at(b.target);
+    value = Provenance(
+        scoped: c.is_scope_value(b.value) || c.scope_alias(o, b.value),
+        arena: c.stored_arena_backed(o, b.target, b.value),
+        source: c.arena_source(o, b.value),
+        fields: o.alloc.Vec<FieldOrigin>()
+    );
+    node.kind.match({
+        Name(n)   => o.find_var(n.text).match({
+            None  => c.declare_var(o, b, n.text, node.span, ctx).try(),
+            Ok(i) => o.assign_provenance(i, value),
+        }),
+        Access(a) => c.path_root(o, a.base).match({
+            None  => (),
+            Ok(i) => (c.spelled_name(a.base).len > 0).match({
+                true  => o.assign_field(i, a.name.text, value).try(),
+                false => o.taint_root(i, value),
+            }),
+        }),
+        Index(x)  => c.path_root(o, x.base).match({
+            None => (), Ok(i) => o.taint_root(i, value),
+        }),
+        _         => (),
+    });
+    Ok(())
+}
+
+flow_expr = (c :: Checker, o :: Own, id: ExprId, ctx: Ctx)
+            Res<(), AllocError> {
+    c.tree.expr_at(id).kind.match({
+        Block(b)      => c.flow_block(o, b, ctx).try(),
+        Paren(p)      => c.flow_expr(o, p.inner, ctx).try(),
+        Try(t)        => {
+            c.flow_expr(o, t.operand, ctx).try();
+            t.error.match({ None => (), Ok(e) => c.flow_expr(
+                o,
+                e,
+                ctx
+            ).try() });
+        },
+        Unary(u)      => c.flow_expr(o, u.operand, ctx).try(),
+        Binary(b)     => c.flow_binary(o, b, ctx).try(),
+        Access(a)     => c.flow_expr(o, a.base, ctx).try(),
+        Index(x)      => {
+            c.flow_expr(o, x.base, ctx).try();
+            c.flow_expr(o, x.index, ctx).try();
+        },
+        Array(a)      => a.elems.loop((h, e) { c.flow_expr(o, e, ctx).try() }),
+        FixedArray(a) => a.elems.loop((h, e) { c.flow_expr(o, e, ctx).try() }),
+        Call(k)       => {
+            c.flow_expr(o, k.callee, ctx).try();
+            k.args.loop((h, a) {
+                c.spelled_lambda(a.value).match({
+                    None  => c.flow_expr(o, a.value, ctx).try(),
+                    Ok(l) => c.repeating_body(id).try().match({
+                        true  => c.loop_provenance(o, l, ctx).try(),
+                        false => {
+                            before = o.provenance().try();
+                            mark   = o.vars.len;
+                            l.params.loop((h, p) { c.own_param(o, p).try() });
+                            c.flow_block(o, l.body, ctx).try();
+                            truncate(o.vars, mark);
+                            o.join_provenance(before).try();
+                            o.restore_provenance(before);
+                        },
+                    }),
+                });
+            });
+        },
+        Match(m)      => {
+            c.flow_expr(o, m.scrutinee, ctx).try();
+            before = o.provenance().try();
+            joined = o.provenance().try();
+            m.arms.loop((h, arm) {
+                o.restore_provenance(before);
+                c.flow_expr(o, arm.body, ctx).try();
+                o.join_provenance(joined).try();
+            });
+            o.restore_provenance(joined);
+        },
+        _             => (),
+    });
+    Ok(())
+}
+
+// Preserve left-to-right transfers without recursing down a binary spine.
+flow_binary = (c :: Checker, o :: Own, first: Binary, ctx: Ctx)
+              Res<(), AllocError> {
+    rights ::= o.alloc.Vec<ExprId>();
+    left   ::= first.lhs;
+    done   ::= false;
+    rights.add(first.rhs).try();
+    loop(() { !done }, (h) {
+        c.tree.expr_at(left).kind.match({
+            Binary(next) => {
+                rights.add(next.rhs).try();
+                left = next.lhs;
+            },
+            _            => { done = true; },
+        });
+    });
+    c.flow_expr(o, left, ctx).try();
+    Range(0, rights.len).loop((h, i) {
+        rights.get(rights.len - 1 - i).match({
+            None => (), Ok(value) => c.flow_expr(o, value, ctx).try(),
+        });
+    });
+    Ok(())
 }
 
 // Everything moved inside the body that outlives it names a binding the
@@ -602,12 +1216,25 @@ report_moved_again = (c :: Checker, o :: Own, i: usize)
 own_match = (c :: Checker, o :: Own, m: Match, ctx: Ctx)
             Res<(), AllocError> {
     c.own_expr(o, m.scrutinee, ctx).try();
-    dmark = o.dead.len;
+    dmark  = o.dead.len;
+    before = o.provenance().try();
+    origins ::= c.alloc.Vec<Provenance>();
+    before.loop((h, _) {
+        origins.add(Provenance(
+            scoped: false,
+            arena: false,
+            source: None,
+            fields: o.alloc.Vec<FieldOrigin>()
+        )).try();
+    });
     joined ::= c.alloc.Vec<Place>();
     m.arms.loop((h, a) {
+        o.restore_provenance(before);
         c.own_expr(o, a.body, ctx).try();
+        o.join_provenance(origins).try();
         o.take_dead(dmark, joined).try();
     });
+    o.restore_provenance(origins);
     joined.loop((h, p) { o.dead.add(p).try() });
     Ok(());
 }
@@ -620,6 +1247,7 @@ path_root* = (c :: Checker, o :: Own, id: ExprId) Res<usize> {
         Name(n)   => o.find_var(n.text),
         Paren(p)  => c.path_root(o, p.inner),
         Access(a) => c.path_root(o, a.base),
+        Index(x)  => c.path_root(o, x.base),
         _         => None,
     })
 }
@@ -663,5 +1291,33 @@ place_type* = (c :: Checker, o :: Own, id: ExprId) TyId {
         Name(n)  => o.var_type(n.text),
         Paren(p) => c.place_type(o, p.inner),
         _        => c.memo_type(id),
+    })
+}
+
+same_source = (left: Res<ExprId>, right: Res<ExprId>) bool {
+    left.match({
+        None  => right.match({ None => true, Ok(_) => false }),
+        Ok(l) => right.match({ None => false, Ok(r) => l.index == r.index }),
+    })
+}
+
+joined_source* = (
+    left_local  : bool,
+    left        : Res<ExprId>,
+    right_local : bool,
+    right       : Res<ExprId>
+) Res<ExprId> {
+    left_local.match({
+        false => right,
+        true  => (!right_local || same_source(left, right)).match({
+            true => left, false => None,
+        }),
+    })
+}
+
+may_share_source = (left: Res<ExprId>, right: Res<ExprId>) bool {
+    left.match({
+        None  => true,
+        Ok(l) => right.match({ None => true, Ok(r) => l.index == r.index }),
     })
 }

@@ -1,0 +1,22 @@
+scan, Source = std.lex
+Parser, module = std.parse
+Checker = sema.sema_check
+check_all = sema.sema_decl
+main = (env: Env) Res<(), AllocError> {
+    a            = env.mem.alloc();
+    count: usize = 10000;
+    text ::= a.String(
+        "run = (body: () ()) () { body(); }\nmain = () { run(() { value = 1"
+    ).try();
+    Range(1, count).loop((_) { text.add(" + 1").try(); });
+    text.add("; }); }\n").try();
+    lexed = scan(a, Source(file: "deep.zen", text: text.view())).try();
+    parser ::= a.Parser(lexed);
+    parsed = parser.module("main").try();
+    parser.tree.add_module(parsed).try();
+    println("lex {} parse {}", lexed.diags.len, parser.diags.len);
+    check ::= a.Checker(parser.tree).try();
+    check.check_all().try();
+    println("sema {}", check.diag_count());
+    Ok(())
+}

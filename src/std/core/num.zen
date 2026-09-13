@@ -76,6 +76,10 @@ f64* = {
     BITS*: usize = 64,
 }
 
+// Compiler-provided conversions: sema_numeric validates these declarations
+// and records their operations; gen_c_num supplies the C implementation.
+// Bodyless numeric declarations in other modules are rejected.
+//
 // Lossless widening conversions.
 to_u16* = (self: u8) u16
 to_u32* = (self: u8) u32
@@ -106,10 +110,22 @@ to_i64* = (self: u32) i64
 to_f64* = (self: i32) f64
 to_f64* = (self: f32) f64
 
-// Checked narrowing is a backend intrinsic: C performs one range test and
-// cast, returning None when the value does not fit.
+// Checked conversions evaluate the receiver once and return None when its
+// value does not fit. They never truncate, wrap, saturate, or allocate.
 to_u8* = (self: usize) Res<u8>
 to_u8* = (self: u32) Res<u8>
+to_u16* = (self: u64) Res<u16>
+to_usize* = (self: u64) Res<usize>
+to_i32* = (self: u64) Res<i32>
+to_i32* = (self: i64) Res<i32>
+
+// C int follows the native ABI; both directions check the destination range.
+to_c_int* = (self: i32) Res<c_int>
+to_i32* = (self: c_int) Res<i32>
+
+min* = (self: usize, other: usize) usize {
+    (self < other).match({ true => self, false => other })
+}
 
 // 2^self; ordinary usize overflow traps.
 pow2* = (self: usize) usize {

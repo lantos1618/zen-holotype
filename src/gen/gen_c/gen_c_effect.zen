@@ -1,0 +1,115 @@
+// Syntactic call summaries belong to the immutable AST, not a generic
+// instantiation. Completed child answers can be reused across all bodies.
+Ast, ExprId = std.ast
+Alloc, AllocError = std.mem
+Vec = std.collections
+
+UNKNOWN: u8 = 0
+PURE: u8 = 1
+MAY_CALL: u8 = 2
+
+CallVisit = { id: ExprId, finish: bool }
+CallPair = { left: ExprId, right: ExprId }
+CallChildren = Leaf(bool) | One(ExprId) | Two(CallPair)
+
+CallEffects* = {
+    tree: Ast,
+    alloc: Alloc,
+    answers: Vec<u8>,
+
+    // Unknown syntax or scratch refusal may add a temporary, but must never
+    // let C reorder an effect. Only completed answers enter the cache.
+    has_call* = (self: @Self, id: ExprId) bool {
+        self.answer(id).match({
+            Ok(found) => found,
+            None      => self.walk(
+                id
+            ).match({ Ok(found) => found, Err(_) => true }),
+        })
+    }
+
+    answer = (self: @Self, id: ExprId) Res<bool> {
+        value = self.answers.get(id.index.to_usize()).try();
+        (value != UNKNOWN).ensure().try();
+        Ok(value == MAY_CALL)
+    }
+
+    remember = (self: @Self, id: ExprId, found: bool) () {
+        self.answers.ptr().write(id.index.to_usize(), found.match({
+            true => MAY_CALL, false => PURE,
+        }));
+    }
+
+    children = (self: @Self, id: ExprId) CallChildren {
+        self.tree.expr_at(id).kind.match({
+            Literal(_) => CallChildren.Leaf(false),
+            Name(_)    => CallChildren.Leaf(false),
+            Unit       => CallChildren.Leaf(false),
+            Scope      => CallChildren.Leaf(false),
+            SelfType   => CallChildren.Leaf(false),
+            Paren(p)   => CallChildren.One(p.inner),
+            Unary(u)   => CallChildren.One(u.operand),
+            Binary(b)  => CallChildren.Two(CallPair(left: b.lhs, right: b.rhs)),
+            Access(a)  => CallChildren.One(a.base),
+            Index(x)   => CallChildren.Two(CallPair(
+                left: x.base,
+                right: x.index
+            )),
+            Consume(x) => CallChildren.One(x.operand),
+            _          => CallChildren.Leaf(true),
+        })
+    }
+
+    walk = (self: @Self, id: ExprId) Res<bool, AllocError> {
+        work ::= self.alloc.Vec<CallVisit>();
+        work.add(CallVisit(id: id, finish: false)).try();
+        loop(() { work.len > 0 }, (h) {
+            work.take(work.len - 1).match({
+                None      => h.break(),
+                Ok(visit) => self.answer(visit.id).match({
+                    Ok(_) => (),
+                    None  => self.visit(visit, work).try(),
+                }),
+            });
+        });
+        Ok(self.answer(id).match({ Ok(found) => found, None => true }))
+    }
+
+    visit = (self: @Self, visit: CallVisit, work :: Vec<CallVisit>)
+            Res<(), AllocError> {
+        self.children(visit.id).match({
+            Leaf(found) => { self.remember(visit.id, found); Ok(()) },
+            One(child)  => visit.finish.match({
+                true  => { self.remember(visit.id, self.has_call(child)); Ok(()) },
+                false => {
+                    work.add(CallVisit(id: visit.id, finish: true)).try();
+                    work.add(CallVisit(id: child, finish: false))
+                },
+            }),
+            Two(pair)   => visit.finish.match({
+                true  => {
+                    self.remember(
+                        visit.id,
+                        self.has_call(pair.left) || self.has_call(pair.right)
+                    );
+                    Ok(())
+                },
+                false => {
+                    work.add(CallVisit(id: visit.id, finish: true)).try();
+                    work.add(CallVisit(id: pair.right, finish: false)).try();
+                    work.add(CallVisit(id: pair.left, finish: false))
+                },
+            }),
+        })
+    }
+}
+
+CallEffects* = (a: Alloc, tree: Ast) Res<CallEffects, AllocError> {
+    answers ::= a.Vec<u8>();
+    answers.reserve(tree.expr_ids()).try();
+    loop(
+        () { answers.len < tree.expr_ids() },
+        (h) { answers.add(UNKNOWN).try(); }
+    );
+    Ok(CallEffects(tree: tree, alloc: a, answers: answers))
+}

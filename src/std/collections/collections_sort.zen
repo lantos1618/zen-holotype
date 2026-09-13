@@ -1,13 +1,16 @@
-// Stable insertion sort over Ordered elements.
+// Stable ordering over Ordered elements.
 
 Vec        = std.collections.collections_vec
 Range      = std.core.range
+Alloc, AllocError, Ptr = std.mem
+min = std.core.num
 
 // Strict ordering; equal elements compare false and retain input order.
 Ordered* = {
     before* = (self: @Self, other: @Self) bool
 }
 
+// Allocation-free insertion sort; quadratic on reversed input.
 sort*<T: Ordered> = (xs :: Vec<T>) () {
     Range(1, xs.len).loop((h, i) { xs.sink(i); });
     ();
@@ -46,4 +49,72 @@ swap_pair<T> = (xs :: Vec<T>, j: usize, lft: T, rgt: T) () {
     xs.set(j - 1, rgt).match({ Ok(_) => (), None => () });
     xs.set(j, lft).match({ Ok(_) => (), None => () });
     ();
+}
+
+// Stable O(n log n) sorting with O(n) scratch from the caller's allocator.
+// Allocation failure leaves the input unchanged. Scratch storage follows the
+// allocator owner's lifetime and reclamation policy.
+sort*<T: Ordered> = (xs :: Vec<T>, a: Alloc) Res<(), AllocError> {
+    (xs.len > 1).then(() {
+        scratch ::= a.Vec<T>();
+        scratch.reserve(xs.len).try();
+        sorting ::= MergeSort(
+            source: xs.ptr(),
+            destination: scratch.ptr(),
+            len: xs.len
+        );
+        sorting.run();
+        (!sorting.source.same(xs.ptr())).then(() {
+            xs.ptr().copy_from(sorting.source, xs.len);
+        });
+    });
+    Ok(())
+}
+
+// Each pass initializes the entire destination before it becomes the source.
+// The source is always a complete initialized run; the scratch Vec's public
+// length never includes its uninitialized capacity.
+MergeSort<T> = {
+    source :: Ptr<T>,
+    destination :: Ptr<T>,
+    len: usize,
+
+    run = (self :: @Self) () {
+        width: usize ::= 1;
+        loop(() { width < self.len }, (h) {
+            start: usize ::= 0;
+            loop(() { start < self.len }, (h) {
+                mid = start + width.min(self.len - start);
+                end = mid + width.min(self.len - mid);
+                self.merge(start, mid, end);
+                start = end;
+            });
+            previous         = self.source;
+            self.source      = self.destination;
+            self.destination = previous;
+            width            = (width < self.len - width).match({
+                true  => width * 2,
+                false => self.len,
+            });
+        });
+    }
+
+    merge = (self: @Self, start: usize, mid: usize, end: usize) () {
+        left  ::= start;
+        right ::= mid;
+        Range(start, end).loop((at) {
+            take_left = left < mid && (right == end
+                || !self.source.read(right).before(self.source.read(left)));
+            take_left.match({
+                true  => {
+                    self.destination.write(at, self.source.read(left));
+                    left = left + 1;
+                },
+                false => {
+                    self.destination.write(at, self.source.read(right));
+                    right = right + 1;
+                },
+            });
+        });
+    }
 }

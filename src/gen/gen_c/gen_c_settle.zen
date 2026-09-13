@@ -22,7 +22,7 @@ sub_with, inst_at, settled_inst, materialize_literal = gen.gen_c.gen_c_mono
 enter_tparams, leave_tparams = gen.gen_c.gen_c_mono
 declared_ret = gen.gen_c.gen_c_type
 ty_of = gen.gen_c.gen_c_expr
-def_with_id = gen.gen_c.gen_c_call
+selected_def = gen.gen_c.gen_c_call
 plain_ctx = gen.gen_c.gen_c_decl
 range_element_type = gen.gen_c.gen_c_range
 inlines = gen.gen_c.gen_c_inline
@@ -489,22 +489,19 @@ named_result = (
     ctx  : Ctx,
     got  : TyId
 ) Res<TyId, AllocError> {
-    found ::= be.alloc.Vec<Def>();
-    be.check.world.defs_of(ctx.module, name, found).try();
-    be.pick_def(id, found).match({
-        Ok(d) => be.def_result(id, c, d, ctx, got),
-        None  => Ok(got),
-    })
-}
-
-// Sema's own answer where it recorded one, and otherwise the only
-// candidate — the same rule `lower_plain_call` follows, because a query
-// that resolved differently from the lowering would be worse than no
-// query at all.
-pick_def = (be :: CBackend, id: ExprId, found: Vec<Def>) Res<Def> {
     be.check.resolved_call(id).match({
-        Ok(w) => def_with_id(found, w),
-        None  => sole_of(found),
+        Ok(_) => be.selected_def(id).match({
+            Ok(d) => be.def_result(id, c, d, ctx, got),
+            None  => Ok(got),
+        }),
+        None  => {
+            found ::= be.alloc.Vec<Def>();
+            be.check.world.defs_of(ctx.module, name, found).try();
+            sole_of(found).match({
+                Ok(d) => be.def_result(id, c, d, ctx, got),
+                None  => Ok(got),
+            })
+        },
     })
 }
 

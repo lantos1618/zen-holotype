@@ -3,7 +3,7 @@
 
 Alloc, AllocError = std.mem
 str, String = std.text
-Vec = std.collections
+Vec, Ordered, sort = std.collections
 Range = std.core
 
 INDENT: str = "    "
@@ -103,63 +103,19 @@ Emit* = (a: Alloc) Res<Emit, AllocError> {
 
 // Stable lexicographic permutation: values stay in their original vectors.
 order* = (a: Alloc, keys: Vec<String>) Res<Vec<usize>, AllocError> {
-    sorting ::= KeyOrder(keys: keys, out: a.Vec<usize>(), tmp: a.Vec<usize>());
-    sorting.sorted()
+    keyed ::= a.Vec<KeyIndex>();
+    keys.loop((h, index, key) {
+        keyed.add(KeyIndex(key: key.view(), index: index)).try();
+    });
+    keyed.sort(a).try();
+    indices ::= a.Vec<usize>();
+    indices.reserve(keys.len).try();
+    keyed.loop((entry) { indices.add(entry.index).try(); });
+    Ok(indices)
 }
 
-KeyOrder = {
-    keys: Vec<String>,
-    out :: Vec<usize>,
-    tmp :: Vec<usize>,
+KeyIndex = { key: str, index: usize }
 
-    sorted = (self :: @Self) Res<Vec<usize>, AllocError> {
-        Range(0, self.keys.len).loop((h, i) { self.out.add(i).try() });
-        width: usize ::= 1;
-        from_out     ::= true;
-        loop(() { width < self.keys.len }, (h) {
-            from_out.match({
-                true  => self.merge_into(self.out, self.tmp, width),
-                false => self.merge_into(self.tmp, self.out, width),
-            }).try();
-            from_out = !from_out;
-            width    = width * 2;
-        });
-        Ok(from_out.match({ true => self.out, false => self.tmp }))
-    }
-
-    // Merge adjacent width-long runs. Strict comparison preserves equal keys.
-    merge_into = (self: @Self, src: Vec<usize>, dst :: Vec<usize>, width: usize)
-                 Res<(), AllocError> {
-        dst.clear();
-        start: usize ::= 0;
-        loop(() { start < src.len }, (h) {
-            mid = smaller(start + width, src.len);
-            end = smaller(mid + width, src.len);
-            left  ::= start;
-            right ::= mid;
-            Range(start, end).loop((h, i) {
-                from_right = (left == mid) || ((right < end)
-                    && self.key(src, right).before(self.key(src, left)));
-                from       = from_right.match({ true => right, false => left });
-                dst.add(src.get(from).value_or(0)).try();
-                from_right.match({
-                    true  => { right = right + 1; },
-                    false => { left = left + 1; },
-                });
-            });
-            start = end;
-        });
-        Ok(())
-    }
-
-    key = (self: @Self, src: Vec<usize>, i: usize) str {
-        self.keys.get(src.get(i).value_or(0)).match({
-            Ok(s) => s.view(),
-            None  => "",
-        })
-    }
-}
-
-smaller = (a: usize, b: usize) usize {
-    (a < b).match({ true => a, false => b })
-}
+KeyIndex.impl(Ordered, {
+    before = (self: @Self, other: @Self) bool { self.key.before(other.key) }
+})

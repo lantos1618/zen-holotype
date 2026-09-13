@@ -1,0 +1,86 @@
+Ast, Type, TypeKind, TypeId, nowhere, no_trivia = std.ast
+Checker = sema.sema_check
+
+AllocationProbe = { backing: Alloc, refuse: Ptr<bool>, calls: Ptr<usize>, bytes: Ptr<usize> }
+AllocationProbe.impl(Alloc, {
+    raw = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        (!self.refuse.read(0)).ensure(AllocError.OutOfMemory).try();
+        self.calls.write(0, self.calls.read(0) + 1);
+        self.bytes.write(0, self.bytes.read(0) + size);
+        self.backing.raw(size, align)
+    }
+    realloc = <T>(self: @Self, p: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        (!self.refuse.read(0)).ensure(AllocError.OutOfMemory).try();
+        self.calls.write(0, self.calls.read(0) + 1);
+        self.bytes.write(0, self.bytes.read(0) + p.bytes(count));
+        self.backing.realloc(p, count)
+    }
+})
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    refuse = a.raw(1, 1).try().to<bool>();
+    refuse.write(0, false);
+    calls = a.raw(8, 8).try().to<usize>();
+    bytes = a.raw(8, 8).try().to<usize>();
+    calls.write(0, 0);
+    bytes.write(0, 0);
+    probe = AllocationProbe(
+        backing: a,
+        refuse: refuse,
+        calls: calls,
+        bytes: bytes
+    );
+    tree ::= a.Ast();
+    Range(0, 1025).loop((i) {
+        tree.add_type(Type(
+            kind: TypeKind.Unit,
+            span: nowhere(),
+            leading: no_trivia(),
+            trailing: no_trivia()
+        )).try();
+    });
+    checker ::= probe.Checker(tree).try();
+    calls.write(0, 0);
+    bytes.write(0, 0);
+    low    = TypeId(index: 0);
+    middle = TypeId(index: 64);
+    high   = TypeId(index: 1024);
+    println(
+        "unobserved {} {}",
+        checker.type_was_resolved(low),
+        checker.type_was_resolved(high)
+    );
+    checker.note_resolved_type(middle).try();
+    checker.note_resolved_type(low).try();
+    Range(0, 1000).loop((i) { checker.note_resolved_type(middle).try(); });
+    println(
+        "observed {} {} gap {} allocations {} bytes {}",
+        checker.type_was_resolved(low),
+        checker.type_was_resolved(middle),
+        checker.type_was_resolved(TypeId(index: 1)),
+        calls.read(0),
+        bytes.read(0)
+    );
+    refuse.write(0, true);
+    checker.note_resolved_type(high).match({
+        Ok(_)  => println("unexpected observation"),
+        Err(e) => println("refused {}", e.variant_name()),
+    });
+    println(
+        "after refusal {} {}",
+        checker.type_was_resolved(middle),
+        checker.type_was_resolved(high)
+    );
+    refuse.write(0, false);
+    checker.note_resolved_type(high).try();
+    println(
+        "grown {} {} gap {} allocations {} bytes {}",
+        checker.type_was_resolved(middle),
+        checker.type_was_resolved(high),
+        checker.type_was_resolved(TypeId(index: 512)),
+        calls.read(0),
+        bytes.read(0)
+    );
+    Ok(0)
+}

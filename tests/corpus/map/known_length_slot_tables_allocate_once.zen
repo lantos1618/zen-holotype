@@ -1,0 +1,41 @@
+// Known-length hash slot tables allocate once per rehash.
+// The old geometric slot initializer makes 40 calls instead of 18.
+Key = { value: usize }
+Key.impl(Eq, { eq = (self: @Self, other: @Self) bool { self.value == other.value } })
+Key.impl(Hash, {
+    hash = (self: @Self, hasher :: Hasher) u64 {
+        hasher.write_u64(self.value.to_u64());
+        hasher.finish()
+    }
+})
+Counting = { inner: Alloc, calls: Ptr<usize> }
+Counting.impl(Alloc, {
+    raw = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        self.calls.write(0, self.calls.read(0) + 1);
+        self.inner.raw(size, align)
+    }
+    realloc = <T>(self: @Self, p: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        self.calls.write(0, self.calls.read(0) + 1);
+        self.inner.realloc(p, count)
+    }
+})
+main = (env: Env) Res<i32, AllocError> {
+    arena ::= env.mem.alloc();
+    calls = arena.raw(8, 8).try().to<usize>();
+    calls.write(0, 0);
+    a        = Counting(inner: arena, calls: calls);
+    n: usize = 64;
+    sum: usize ::= 0;
+    values     ::= a.Vec<usize>();
+    index      ::= a.Map<Key, usize>();
+    Range(0, n).loop((i) {
+        values.add(i * 3 + 7).try();
+        index.set(Key(value: i), i).try();
+    });
+    Range(0, n).loop((i) {
+        at  = index.get(Key(value: n - i - 1)).ok_or(AllocError.OutOfMemory).try();
+        sum = sum + values.get(at).ok_or(AllocError.OutOfMemory).try();
+    });
+    println("{} {}", sum, calls.read(0));
+    Ok(0)
+}

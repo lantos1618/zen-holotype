@@ -21,6 +21,7 @@ infer_callback_targs = sema.sema_apply
 Inst, subst, subst_list, unify_list, tparam_vars, zip, owner_of = sema.sema_inst
 is_case = sema.sema_case
 Found, Base, base_of, members_of, actor_spawn_ret, ref_of_actor = sema.sema_member
+materialize_receiver = sema.sema_member
 is_type_def, opaque, first_found, named_as = sema.sema_member
 static_access = sema.sema_static
 filter_visible, hidden_member = sema.sema_member
@@ -88,6 +89,7 @@ CallCheck = {
     actuals :: Vec<Actual>,
 
     run = (self :: @Self, c :: Checker) Res<TyId, AllocError> {
+        c.clear_member_provider(self.id).try();
         callee = c.tree.call_callee(self.call);
         callee.kind.match({
             Access(a) => self.member(c, a),
@@ -303,9 +305,7 @@ CallCheck = {
                         )
                     },
                     false => {
-                        settled = self.written_associated(c, ac, ty, got)
-                            .try();
-                        self.fitted_signature(c, settled, 0)
+                        self.written_associated(c, ac, ty, got)
                     },
                 })
             },
@@ -347,16 +347,16 @@ CallCheck = {
         })
     }
 
-    written_associated = (self: @Self, c :: Checker, ac: Access, ty: TyId,
+    written_associated = (self :: @Self, c :: Checker, ac: Access, ty: TyId,
                           got: TyId) Res<TyId, AllocError> {
         found ::= c.alloc.Vec<Found>();
         c.members_of(ty, ac.name.text, found).try();
         c.pick_fitting(found, self.actuals, 0).try().match({
             None    => (self.call.targs.len > 0).match({
                 true  => self.invalid_member_instantiation(c, ac.name.text),
-                false => Ok(got),
+                false => self.fitted_signature(c, got, 0),
             }),
-            Ok(mem) => self.written_found(c, ac, mem, 0),
+            Ok(mem) => self.checked_member(c, ac, mem, 0),
         })
     }
 
@@ -364,13 +364,40 @@ CallCheck = {
                Res<TyId, AllocError> {
         c.opaque(b.ty).match({
             true  => c.types.unknown(),
-            false => self.known_receiver(c, ac, b),
+            false => {
+                self.load_actuals(c).try();
+                c.is_literal_ty(b.ty).match({
+                    true  => self.contextual_literal_receiver(c, ac, b),
+                    false => self.known_receiver(c, ac, b),
+                })
+            },
+        })
+    }
+
+    // Generic UFCS inference gets the literal family before the primitive
+    // default is used to discover methods travelling with a concrete type.
+    contextual_literal_receiver = (self :: @Self, c :: Checker, ac: Access,
+                                   b: Base) Res<TyId, AllocError> {
+        cands ::= c.alloc.Vec<Cand>();
+        c.cands_of(self.ctx.module, ac.name.text, cands).try();
+        c.travelled_cands(ac.name.text, Ok(b.ty), cands).try();
+        generic = cands.filter(
+            c.alloc,
+            (candidate) { candidate.generic }
+        ).try();
+        actuals = self.receiver_actuals(c, b).try();
+        self.first_matching(c, generic, actuals).try().match({
+            Ok(k) => self.chosen(c, k, actuals),
+            None  => self.known_receiver(
+                c,
+                ac,
+                c.materialize_receiver(ac.base, b).try()
+            ),
         })
     }
 
     known_receiver = (self :: @Self, c :: Checker, ac: Access, b: Base)
                      Res<TyId, AllocError> {
-        self.load_actuals(c).try();
         found ::= c.alloc.Vec<Found>();
         c.members_of(b.ty, ac.name.text, found).try();
         visible ::= c.alloc.Vec<Found>();
@@ -414,30 +441,41 @@ CallCheck = {
     )
              Res<TyId, AllocError> {
         c.pick_fitting(found, self.actuals, 1).try().match({
-            Ok(f) => self.signature(
-                c,
-                self.written_member(c, ac, f).try(),
-                1,
-                SignatureFit.Exact
-            ),
+            Ok(f) => self.checked_member(c, ac, f, 1),
             None  => c.ref_of_actor(b.ty).try().match({
                 None  => self.by_arity(c, ac, b, found, 1),
                 Ok(_) => c.pick_fitting(found, self.actuals, 0).try().match({
-                    Ok(f) => self.signature(c, f.ty, 0, SignatureFit.Exact),
+                    Ok(f) => self.checked_member(c, ac, f, 0),
                     None  => self.by_arity(c, ac, b, found, 1),
                 }),
             }),
         })
     }
 
+    // Publish only a successfully checked member, never a recovery signature.
+    checked_member = (self :: @Self, c :: Checker, ac: Access, f: Found,
+                      off: usize) Res<TyId, AllocError> {
+        mark = c.diag_count();
+        ty   = self.written_found(c, ac, f, off).try();
+        got  = self.signature(c, ty, off, SignatureFit.Exact).try();
+        (c.diag_count() == mark).then(() {
+            c.types.at(ty).match({
+                Fn(_) => {
+                    provider = c.types.at(f.bound).match({
+                        Unknown => f.decl_owner,
+                        _       => f.bound,
+                    });
+                    c.resolve_member_provider(self.id, provider)
+                },
+                _     => Ok(()),
+            }).try();
+        });
+        Ok(got)
+    }
+
     // A member's own type parameters are settled before the signature is
     // fitted. Written arguments handle return-only doors such as
     // `env.args<Cli>()`; ordinary arguments infer nested uses too.
-    written_member = (self: @Self, c :: Checker, ac: Access, f: Found)
-                     Res<TyId, AllocError> {
-        self.written_found(c, ac, f, 1)
-    }
-
     written_found = (self: @Self, c :: Checker, ac: Access, f: Found,
                      off: usize) Res<TyId, AllocError> {
         c.member_fn(f.decl_owner, ac.name.text, f.decl_span).match({
@@ -587,6 +625,12 @@ CallCheck = {
         b        : Base,
         recovery : Res<RecoverySig>
     ) Res<TyId, AllocError> {
+        all = self.receiver_actuals(c, b).try();
+        self.decl(c, ac.name.text, Ok(b.ty), all, recovery)
+    }
+
+    receiver_actuals = (self: @Self, c: Checker, b: Base)
+                       Res<Vec<Actual>, AllocError> {
         all ::= c.alloc.Vec<Actual>();
         all.add(Actual(
             ty: b.ty,
@@ -596,7 +640,7 @@ CallCheck = {
             span: self.node.span
         )).try();
         self.actuals.loop((h, a) { all.add(a).try() });
-        self.decl(c, ac.name.text, Ok(b.ty), all, recovery)
+        Ok(all)
     }
 
     indirect = (self :: @Self, c :: Checker) Res<TyId, AllocError> {

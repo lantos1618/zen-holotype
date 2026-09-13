@@ -65,14 +65,6 @@ Cand = {
             false => 0,
         })
     }
-
-    encloses = (self: @Self, other: Cand) bool {
-        self.lo <= other.lo && self.hi >= other.hi
-    }
-
-    disjoint = (self: @Self, other: Cand) bool {
-        self.lo >= other.hi || self.hi <= other.lo
-    }
 }
 
 // Outer lists first: a container sorts before what it contains.
@@ -139,10 +131,6 @@ Round = {
     cands :: Vec<Cand>,
     edits :: Vec<Edit>,
 
-    // Per candidate: broken this round, so a nested list waits a round
-    // and is measured from reparsed text.
-    moved :: Vec<bool>,
-
     collect = (self :: @Self, tree: Ast, m: Module) Res<(), AllocError> {
         id ::= ExprId(index: 0);
         Range(0, tree.expr_ids()).loop((h, i) {
@@ -176,7 +164,7 @@ Round = {
             });
             bid = BlockId(index: bid.index + 1);
         });
-        self.cands.sort();
+        self.cands.sort(self.a).try();
         Ok(());
     }
 
@@ -274,59 +262,34 @@ Round = {
     }
 
     judge = (self :: @Self, join: bool) Res<(), AllocError> {
-        Range(0, self.cands.len).loop((h, i) { self.moved.add(false).try(); });
-        Range(0, self.cands.len).loop((h, i) {
-            c = self.cands.ptr().read(i);
-            self.relaid(c, join).match({
-                false => Ok(()),
-                true  => join.match({
-                    true  => self.emit_join(c),
-                    false => {
-                        self.moved.ptr().write(i, self.emit_break(c).try());
-                        Ok(())
-                    },
-                }),
-            }).try();
+        join.match({
+            true  => self.pack(),
+            false => self.break_candidates(),
+        }).try();
+        self.edits.sort(self.a)
+    }
+
+    pack = (self :: @Self) Res<(), AllocError> {
+        self.cands.loop((candidate) {
+            (self.src.may_relay(candidate) && self.src.may_join(candidate)).then(() {
+                self.emit_join(candidate).try();
+            });
         });
-        self.edits.sort();
-        Ok(());
+        Ok(())
     }
 
-    // Packing needs safe gaps. Breaking also needs a list untouched this
-    // round, not the sole item of a wrapper, alone among vetoing lists on
-    // its line, and too wide when packed.
-    relaid = (self: @Self, c: Cand, join: bool) bool {
-        self.src.may_relay(c) && join.match({
-            true  => self.src.may_join(c),
-            false => !self.inside_moved(c)
-                  && !self.wraps_one_list(c)
-                  && !self.shares_line(c)
-                  && self.src.too_wide(c),
-        })
-    }
-
-    inside_moved = (self: @Self, c: Cand) bool {
-        Range(0, self.cands.len).find((j) {
-            self.moved.ptr().read(j) && self.cands.ptr().read(j).encloses(c)
-        }).match({ Ok(_) => true, None => false })
-    }
-
-    // A one-item wrapper stays packed when a nested list ending with that
-    // item can solve the width by itself.
-    wraps_one_list = (self: @Self, c: Cand) bool {
-        c.items.len == 1 && self.cands.find((d) {
-            d.lo > c.lo && d.hi == c.first().hi
-        }).match({ Ok(_) => true, None => false })
-    }
-
-    // Nested lists do not count: only a disjoint vetoing list on the
-    // same line.
-    shares_line = (self: @Self, c: Cand) bool {
-        ls = self.src.line_at(c.line);
-        le = self.src.after_line(c.line);
-        self.cands.find((d) {
-            d.vetoes() && d.disjoint(c) && d.lo < le && d.hi > ls
-        }).match({ Ok(_) => true, None => false })
+    break_candidates = (self :: @Self) Res<(), AllocError> {
+        relations ::= self.a.ListRelations(self.cands).try();
+        self.cands.loop((candidate) {
+            (self.src.may_relay(candidate)
+                && !relations.inside_moved(candidate)
+                && !relations.wraps_one_list(candidate)
+                && !relations.shares_line(self.src, candidate)
+                && self.src.too_wide(candidate)).then(() {
+                self.emit_break(candidate).try().then(() { relations.moved(candidate); });
+            });
+        });
+        Ok(())
     }
 
     // Packed form: brackets hug their items and separators carry one space.
@@ -452,13 +415,107 @@ Round = {
 }
 
 Round = (a: Alloc, src: Src) Round {
-    Round(
-        a: a,
-        src: src,
-        cands: a.Vec<Cand>(),
-        edits: a.Vec<Edit>(),
-        moved: a.Vec<bool>()
-    )
+    Round(a: a, src: src, cands: a.Vec<Cand>(), edits: a.Vec<Edit>())
+}
+
+// Endpoints answer interval relations without changing candidate judgement
+// order. Offsets are half-open source byte positions.
+Offset = { at: usize }
+Offset.impl(Ordered, {
+    before = (self: @Self, other: @Self) bool { self.at < other.at }
+})
+
+Ending = { at: usize, start: usize }
+Ending.impl(Ordered, {
+    before = (self: @Self, other: @Self) bool {
+        self.at < other.at || (self.at == other.at && self.start > other.start)
+    }
+})
+
+ListRelations = {
+    starts: Vec<Offset>,
+    ends: Vec<Offset>,
+    ending_at: Vec<Ending>,
+    moved_end :: usize = 0,
+
+    // Candidates are judged by ascending start. Any already-moved candidate
+    // starts before this one, so its greatest end answers containment.
+    inside_moved = (self: @Self, candidate: Cand) bool {
+        candidate.hi <= self.moved_end
+    }
+
+    moved = (self :: @Self, candidate: Cand) () {
+        (candidate.hi > self.moved_end).then(
+            () { self.moved_end = candidate.hi; }
+        );
+    }
+
+    wraps_one_list = (self: @Self, candidate: Cand) bool {
+        (candidate.items.len == 1).match({
+            false => false,
+            true  => {
+                end = candidate.first().hi;
+                from: usize ::= 0;
+                to: usize   ::= self.ending_at.len;
+                loop(() { from < to }, (h) {
+                    middle = from + (to - from) / 2;
+                    (self.ending_at.ptr().read(middle).at < end).match({
+                        true  => { from = middle + 1; },
+                        false => { to = middle; },
+                    });
+                });
+                from < self.ending_at.len && self.ending_at.ptr().read(
+                    from
+                ).at == end
+                    && self.ending_at.ptr().read(from).start > candidate.lo
+            },
+        })
+    }
+
+    // A disjoint left neighbour ends at/before this list; a right neighbour
+    // starts at/after it. The nearest such endpoint decides whether any veto
+    // intersects the line where this list opens, including multiline lists.
+    shares_line = (self: @Self, source: Src, candidate: Cand) bool {
+        left      = self.ends.at_or_after(candidate.lo);
+        right     = self.starts.at_or_after(candidate.hi);
+        left_same = (left < self.ends.len && self.ends.ptr().read(left).at == candidate.lo && candidate.lo > source.line_at(candidate.line))
+            || (left > 0 && self.ends.ptr().read(left - 1).at > source.line_at(candidate.line));
+        left_same || (right < self.starts.len
+            && self.starts.ptr().read(right).at < source.after_line(candidate.line))
+    }
+}
+
+ListRelations = (
+    a          : Alloc,
+    candidates : Vec<Cand>
+) Res<ListRelations, AllocError> {
+    starts    ::= a.Vec<Offset>();
+    ends      ::= a.Vec<Offset>();
+    ending_at ::= a.Vec<Ending>();
+    candidates.loop((candidate) {
+        ending_at.add(Ending(at: candidate.hi, start: candidate.lo)).try();
+        candidate.vetoes().then(() {
+            starts.add(Offset(at: candidate.lo)).try();
+            ends.add(Offset(at: candidate.hi)).try();
+        });
+    });
+    // Starts already follow candidate order; ends can close in nested order.
+    ends.sort(a).try();
+    ending_at.sort(a).try();
+    Ok(ListRelations(starts: starts, ends: ends, ending_at: ending_at))
+}
+
+at_or_after = (offsets: Vec<Offset>, value: usize) usize {
+    from: usize ::= 0;
+    to: usize   ::= offsets.len;
+    loop(() { from < to }, (h) {
+        middle = from + (to - from) / 2;
+        (offsets.ptr().read(middle).at < value).match({
+            true  => { from = middle + 1; },
+            false => { to = middle; },
+        });
+    });
+    from
 }
 
 // Comments and already-columnar parameter lists keep their layout.

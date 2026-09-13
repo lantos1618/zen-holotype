@@ -8,7 +8,7 @@ One stage per module, and modules are `<folder>/<folder>.zen` — a folder carri
 
 ```
 build.zen              // this project's own build graph
-src/zen/zen.zen        // thin cli: build / fmt / test / lsp
+src/zen/zen.zen        // thin cli: build / check / fmt / test / lsp
 src/std/ast/ast.zen    // THE ast. the compiler, @meta and gen_c all consume these nodes
 src/std/lex/lex.zen
 src/std/parse/parse.zen
@@ -76,6 +76,14 @@ still compiles.
 
 **Compilation is whole-program.** One merged module graph; `gen_c` emits each generic instantiation exactly once. Separate compilation would have to decide which object file owns `Vec<Circle>` when `Vec` and `Circle` come from different modules, and every language that tries pays for that forever. The cost is that build time scales with the tree, which is exactly what `b.budget` exists to watch.
 
+
+`zen check <root> [--entry <file>] [--std <path>] [--ffi]` uses the same module
+loader and semantic checker as source emission. It accepts a library without
+`main`, writes no generated artifacts, returns zero for a clean check and one
+for source diagnostics. Invalid command arguments return two. Emission and
+output flags are rejected by this command. The programmatic CLI parser takes
+an explicit caller allocator: `cli(env, alloc, argv)`.
+
 ---
 
 # The laws
@@ -90,6 +98,13 @@ Everything below follows from these. When two rules seem to conflict, the law wi
 5. **`Res` is for failure a caller can act on. A trap is for a bug.**
 6. **`*` means this name crosses a module boundary** — and therefore its type is written, not inferred.
 7. **The signature answers the question.** Does it allocate, does it mutate, can it fail, does it escape — read the signature.
+
+**Primitive conversions have one standard-library owner.** Lossless widening
+returns a value; checked conversion returns `Res<T>` and refuses out-of-range
+values with `None`. Only validated declarations in `std.core.num` acquire
+compiler-provided conversion behavior. A local bodyless `to_<primitive>`
+declaration cannot manufacture a cast. See [numeric conversions](NUMERIC_CONVERSIONS.md)
+for the supported surface and compiler boundary.
 
 ---
 
@@ -397,6 +412,14 @@ Three consequences worth stating, because each one is a place the rule looks lik
 - **A handle is not a `Drop` value.** `Alloc` is an interface, so an `Alloc` value is a fat value pointing at an arena. The *arena* is `Drop`; the handle is two words and copies freely. That is why `Vec` can store `alloc: Alloc` by value and why `fill(alloc, v)` is not an illegal copy.
 - **Passing a `Drop` value to a parameter is a borrow, not a move.** `v.add(1)` does not consume `v`, and a receiver is just the first parameter — so nothing else could be true. A move is spelled `consume` at the call site, and only there.
 - **The compiler-inserted `drop` is exempt from the receiver rule.** `drop` is declared `(self :: @Self)`, but scope exit runs it on `:` bindings too. Destroying a value is not mutating it through a binding.
+
+A source-written standard destructor call on a local owner must explicitly
+consume that concrete owner: `(consume value).drop()` or
+`Type.drop(consume value)`. Consuming an interface handle does not transfer
+ownership of the concrete resource behind it. Calls merely named `drop` on
+unrelated types or requirements do not carry this destruction contract.
+Fields still require owner-managed destruction and reinitialization; the
+compiler does not yet prove those field lifetimes.
 
 ```groovy fragment
 f = alloc.File("x.txt").try();

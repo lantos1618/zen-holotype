@@ -195,52 +195,7 @@ infix_operand_held* = (be: CBackend, b: Binary) bool {
 // forms and allocation failure conservatively answer true, which may add a
 // temporary but cannot expose C's unspecified evaluation order.
 has_call* = (be: CBackend, id: ExprId) bool {
-    be.has_call_walk(id).match({
-        Ok(found) => found,
-        Err(_)    => true,
-    })
-}
-
-// The allocating worklist walk used by `has_call`.
-has_call_walk = (be: CBackend, id: ExprId) Res<bool, AllocError> {
-    work ::= be.alloc.Vec<ExprId>();
-    work.add(id).try();
-    found ::= false;
-    loop(() { found == false && work.len > 0 }, (h) {
-        // A miss is unreachable while the guard holds; conservatively stop
-        // with `found` if the collection nevertheless reports one.
-        popped = work.take(work.len - 1);
-        popped.match({
-            Ok(at) => be.tree.expr_at(at).kind.match({
-                Literal(_) => Ok(()),
-                Name(_)    => Ok(()),
-                Unit       => Ok(()),
-                Scope      => Ok(()),
-                SelfType   => Ok(()),
-                Paren(p)   => work.add(p.inner),
-                Unary(u)   => work.add(u.operand),
-                Binary(b)  => has_call_push2(work, b.lhs, b.rhs),
-                Access(a)  => work.add(a.base),
-                Index(x)   => has_call_push2(work, x.base, x.index),
-                Consume(x) => work.add(x.operand),
-                _          => { found = true; Ok(()) },
-            }).try(),
-            None   => { found = true; },
-        });
-    });
-    Ok(found)
-}
-
-// Two children onto the worklist, one `Res` for the caller's match.
-// Order is irrelevant to the answer, so whichever pops first is fine.
-has_call_push2 = (
-    work :: Vec<ExprId>,
-    a    : ExprId,
-    b    : ExprId
-) Res<(), AllocError> {
-    work.add(a).try();
-    work.add(b).try();
-    Ok(())
+    be.call_effects.has_call(id)
 }
 
 // Whether a value may be copied to a temporary without changing move,

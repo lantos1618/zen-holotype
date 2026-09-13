@@ -1,0 +1,42 @@
+Refuse = {}
+
+Refuse.impl(Alloc, {
+    raw = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        Err(AllocError.OutOfMemory)
+    }
+    realloc = <T>(self: @Self, ptr: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        Err(AllocError.OutOfMemory)
+    }
+})
+
+Noisy = { env: Env, id: i32 }
+
+Noisy.impl(Drop, {
+    drop = (self :: @Self) () { self.env.out.println("drop {}", self.id) }
+})
+
+append = (env: Env, alloc: Alloc) Res<(), AllocError> {
+    outer = Noisy(env: env, id: 1);
+    {
+        inner = Noisy(env: env, id: 2);
+        @scope.defer(() { println("defer") });
+        values ::= alloc.Vec<i32>();
+        values.add(7).try();
+        println("len {}", values.len);
+    }
+    Ok(())
+}
+
+main = (env: Env) i32 {
+    refuse = Refuse();
+    append(env, refuse).match({
+        Ok(_)      => println("unexpected success"),
+        Err(error) => println("{}", error.variant_name()),
+    });
+    arena ::= env.mem.alloc();
+    append(env, arena).match({
+        Ok(_)  => println("success"),
+        Err(_) => println("unexpected refusal"),
+    });
+    0
+}

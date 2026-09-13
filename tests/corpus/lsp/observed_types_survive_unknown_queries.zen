@@ -1,0 +1,63 @@
+check_standalone = lsp.lsp_query
+hover_with = lsp.lsp_hover
+definition_with = lsp.lsp_def
+Ctx = sema.sema_check
+type_from_ast = sema.sema_denote
+TypeId = std.ast
+
+TEXT: str = "Wrap<T> = { item: T }\nBox = { key = (self: @Self, item: Wrap<@Self>) () {} }\n"
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    c ::= check_standalone(a, "doc.zen", TEXT).try();
+    println("diagnostics {}", c.diag_count());
+    unknown = c.types.unknown().try();
+    next: u32 ::= 0;
+    Range(0, c.tree.type_ids()).loop((h, i) {
+        id       = TypeId(index: next);
+        next     = next + 1;
+        node     = c.tree.type_at(id);
+        selected = node.kind.match({
+            SelfType => true,
+            Named(n) => n.name.text.eq("Wrap"),
+            _        => false,
+        });
+        selected.then(() {
+            line   = node.span.start.line - 1;
+            col    = node.span.start.col - 1;
+            before = hover_with(c, a, "doc.zen", TEXT, line, col).try();
+            c.type_from_ast(id, Ctx(0, unknown)).try();
+            after = hover_with(c, a, "doc.zen", TEXT, line, col).try();
+            println(
+                "hover {} {} {}",
+                before.found,
+                after.found,
+                before.shown.eq(after.shown)
+            );
+            node.kind.match({
+                Named(_) => {
+                    c.type_memo.set(id, unknown).try();
+                    target = definition_with(
+                        env,
+                        c,
+                        a,
+                        ".",
+                        a.Map<str, str>(),
+                        "file:///doc.zen",
+                        TEXT,
+                        "doc.zen",
+                        line,
+                        col
+                    ).try();
+                    println(
+                        "definition {} {}",
+                        target.found,
+                        target.start.line == 0
+                    );
+                },
+                _        => (),
+            });
+        });
+    });
+    Ok(0)
+}

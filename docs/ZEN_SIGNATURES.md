@@ -1,18 +1,37 @@
-# Zen source signature inventory
+# Zen signatures — historical snapshot
 
-Generated from every `src/**/*.zen` file by
-`python3 scripts/zen_signature_inventory.py`. The extractor uses the
-repository's tree-sitter grammar, preserves multiline source spelling,
-and omits implementation bodies. An omitted function return is rendered
-as `()` so the body-free declaration remains an explicit signature.
+This inventory was last refreshed on September 3, 2026, in `dbcfcdd02`.
+Its declarations, paths, and counts describe that source snapshot, not the
+current API. Preserve the historical entries below; generate new inventories
+under ignored `build/source_health/`:
 
-This is an inventory, not an architectural recommendation. Imports and
-constants are included so aliases and public surfaces are not mistaken for
-free functions during a later ownership review.
-The corresponding decisions are in
-[`SOURCE_OWNERSHIP_AUDIT.md`](SOURCE_OWNERSHIP_AUDIT.md).
+```sh
+python3 scripts/zen_signature_inventory.py
+```
 
-## Coverage
+The default output is `build/source_health/ZEN_SIGNATURES.md`.
+For current contracts, read [language design](DESIGN.md),
+[source style](STYLE.md), [implemented ergonomics and remaining work](ERGONOMICS_PLAN.md),
+and the linked source files themselves.
+
+## Reading the inventory
+
+- Function bodies are deliberately omitted. A signature here does **not** tell
+  you whether the source has a body, declares an intrinsic, or leaves an
+  implementation unfinished. Inspect the source before drawing that conclusion.
+- An omitted return type is printed as `()`. Multiline declarations retain
+  their source spelling; these excerpts are not standalone runnable programs.
+- Each file has its own section. Repeated names can be overloads, imports,
+  re-exports, or separate local declarations; matching names alone do not
+  establish shared implementation or justify duplication.
+- Imports and constants are included to distinguish aliases and public
+  surfaces from free functions. Counts measure inventory coverage, not API
+  quality or completion.
+
+[The ownership audit](SOURCE_OWNERSHIP_AUDIT.md) is a companion historical
+review. Maintained design decisions belong in the documents linked above.
+
+## Historical coverage
 
 | Item | Count |
 | --- | ---: |

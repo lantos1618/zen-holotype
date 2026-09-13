@@ -31,7 +31,7 @@ BuildArgs, Emission, Permutation = std.build
 
 slash_for, under = zen.zen_path
 unit_at, candidate, joined, relative_to = zen.zen_path
-root_for, std_root_for, SourceRoot = zen.zen_path
+root_for, std_root_for, SourceRoot, anchored_path = zen.zen_path
 ENTRY, entry_of = zen.zen_path
 Unit = zen.zen_path
 
@@ -590,15 +590,49 @@ check_workspace* = (
     entry : str,
     docs  : Map<str, str>
 ) Res<WorkspaceCheck, AllocError> {
-    b ::= a.Build(env, root);
-    b.set_std_root(std_root_for(env, a));
-    // Editor entries outside the import namespace retain their exact path for
-    // overlays and diagnostics; unit_at derives the matching CLI ../ identity.
-    unit = entry.starts_with("/").match({
-        true  => unit_at(a, root, entry).try(),
-        false => entry_of(env, a, root, entry).try(),
+    env.fs.cwd(a).match({
+        Ok(directory) => check_workspace_at(
+            env,
+            a,
+            directory.view(),
+            root,
+            entry,
+            docs
+        ),
+        Err(error)    => {
+            b ::= a.Build(env, root);
+            b.speaking = false;
+            b.fs_fault(entry, error);
+            c = b.checked().try();
+            Ok(WorkspaceCheck(b: b, c: c))
+        },
+    })
+}
+
+check_workspace_at = (
+    env       : Env,
+    a         : Alloc,
+    directory : str,
+    root      : str,
+    entry     : str,
+    docs      : Map<str, str>
+) Res<WorkspaceCheck, AllocError> {
+    absolute_root = anchored_path(a, directory, root).try();
+    b ::= a.Build(env, absolute_root);
+    std_root = std_root_for(env, a);
+    (!std_root.is_empty()).then(() {
+        b.set_std_root(anchored_path(a, directory, std_root).try());
     });
-    c    = b.whole(unit, docs).try();
+    over ::= a.Map<str, str>();
+    docs.pairs((h, path, text) {
+        over.set(anchored_path(a, directory, path).try(), text).try();
+    });
+    path = anchored_path(a, absolute_root, entry).try();
+    unit = entry.is_empty().match({
+        true  => entry_of(env, a, absolute_root, entry).try(),
+        false => unit_at(a, absolute_root, path).try(),
+    });
+    c    = b.whole(unit, over).try();
     Ok(WorkspaceCheck(b: b, c: c))
 }
 

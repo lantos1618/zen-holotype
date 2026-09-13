@@ -1,0 +1,78 @@
+scan, Source = std.lex
+Parser, module = std.parse
+ExprId = std.ast
+CallEffects = gen.gen_c.gen_c_effect
+
+CountAlloc = {
+    base: Alloc,
+    calls: Ptr<usize>,
+    fail: usize,
+
+    accepts = (self: @Self) bool {
+        index = self.calls.read(0);
+        self.calls.write(0, index + 1);
+        index != self.fail
+    }
+}
+CountAlloc.impl(Alloc, {
+    raw = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        self.accepts().ensure(AllocError.OutOfMemory).try();
+        self.base.raw(size, align)
+    }
+    realloc = <T>(self: @Self, ptr: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        self.accepts().ensure(AllocError.OutOfMemory).try();
+        self.base.realloc(ptr, count)
+    }
+})
+
+main = (env: Env) Res<(), AllocError> {
+    a = env.mem.alloc();
+    source ::= a.String("main = () i32 { 1").try();
+    Range(1, 10000).loop((index) { source.add(" + 1").try(); });
+    source.add(" }").try();
+    lexed = scan(a, Source(file: "deep.zen", text: source.view())).try();
+    parser ::= a.Parser(lexed);
+    parser.module("deep").try();
+    root ::= ExprId(index: 0);
+    at   ::= ExprId(index: 0);
+    Range(0, parser.tree.expr_ids()).loop((index) {
+        parser.tree.expr_at(
+            at
+        ).kind.match({ Binary(_) => { root = at; }, _ => () });
+        at = ExprId(index: at.index + 1);
+    });
+    calls ::= a.Vec<usize>();
+    calls.add(0).try();
+    effects = CallEffects(
+        CountAlloc(base: a, calls: calls.ptr(), fail: usize.MAX),
+        parser.tree
+    ).try();
+    pure    = !effects.has_call(root);
+    total   = calls.ptr().read(0);
+    at      = ExprId(index: 0);
+    answers ::= pure;
+    Range(0, parser.tree.expr_ids()).loop((index) {
+        parser.tree.expr_at(at).kind.match({
+            Binary(_)  => { answers = answers && !effects.has_call(at); },
+            Literal(_) => { answers = answers && !effects.has_call(at); },
+            _          => (),
+        });
+        at = ExprId(index: at.index + 1);
+    });
+    println("deep pure {} cached {}", answers, calls.ptr().read(0) == total);
+    refused ::= total > 0;
+    Range(0, total).loop((index) {
+        calls.ptr().write(0, 0);
+        CallEffects(
+            CountAlloc(base: a, calls: calls.ptr(), fail: index),
+            parser.tree
+        ).match({
+            Err(_)    => (),
+            Ok(retry) => {
+                refused = refused && retry.has_call(root) && !retry.has_call(root);
+            },
+        });
+    });
+    println("allocation refusal conservative {}", refused);
+    Ok(())
+}

@@ -12,10 +12,6 @@ Checker, DeclId, Def, TyId, decl_at, const_int = sema.sema
 Scalar, Op, UnaryOp, Const, Move, Unary, Binary, Invocation, Print, Branch = gen.gen_ir
 Instruction, Func, Program, BasicBlock, Terminator = gen.gen_ir
 
-// Range checked before this native numeric conversion.
-to_i32 = (value: u64) i32
-to_i32 = (value: i64) i32
-
 Fault* = { span*: Span, what*: str }
 LowerError* = OutOfMemory | Unsupported(Fault)
 
@@ -315,8 +311,7 @@ Lowering = {
             "integer arithmetic without a settled i32 type; annotate its operands"
         );
         value = self.check.const_int(id).ok_or(fault).try();
-        (value >= -2147483648 && value <= 2147483647).ensure(fault).try();
-        self.constant(value.to_i32(), Scalar.I32)
+        self.constant(value.to_i32().ok_or(fault).try(), Scalar.I32)
     }
 
     lower_expr = (self :: @Self, id: ExprId) Res<Value, LowerError> {
@@ -354,15 +349,15 @@ Lowering = {
               Res<Value, LowerError> {
         lit.kind.match({
             Int  => {
-                value = lit.integer.ok_or(unsupported(
+                value    = lit.integer.ok_or(unsupported(
                     span,
                     "an unparsed integer literal"
                 )).try();
-                (value <= 2147483647).ensure(unsupported(
+                narrowed = value.to_i32().ok_or(unsupported(
                     span,
                     "an integer outside i32"
                 )).try();
-                self.constant(value.to_i32(), ty)
+                self.constant(narrowed, ty)
             },
             Bool => self.constant(
                 lit.text.eq("true").match({ true => 1, false => 0 }),

@@ -49,6 +49,7 @@ SemaFault* =
     | MethodNotValue(TypeFault)        // the name is a method, and the call is missing
     | LiteralOutOfRange(TypeFault)     // the family fits, the value does not
     | ActorPayload(NameFault)          // payload storage cannot cross a mailbox
+    | InvalidNumericConversion(NameFault)
     | InvalidEnumRepresentation(NameFault)
     | InvalidEnumDiscriminant(NameFault)
     | DuplicateEnumDiscriminant(PairFault)
@@ -121,6 +122,9 @@ SemaFault* =
     | ConsumeThroughHandle(NameFault)  // move only what this frame owns
     | CopyOfDropValue(NameFault)       // `g = f` would drop twice
     | ScopeEscapes(NameFault)          // `@scope` left its block
+    | ExplicitDropBorrow(NameFault)
+    | ArenaInvalidated(NameFault)
+    | ArenaStored(NameFault)           // local storage escaped through a parameter
     | ArenaEscapes(NameFault)          // a view outlived the arena behind it
     | HandleNotAValue(NameFault)       // a loop handle names its loop, it is not a value
     | ConsumedByCapture(CaptureFault)  // a capture outlives the consume
@@ -160,6 +164,7 @@ message* = (fault: SemaFault) str {
         DuplicateEnumDiscriminant(_) => "duplicate enum discriminant: decoding one integer must select exactly one variant",
         CatchAllConstruction(_)      => "a represented enum's catch-all is constructed only by `from_discriminant`, which preserves the canonical known variants",
         NoOverload(_)                => "no overload matches: resolution is on declared parameter types and arity",
+        InvalidNumericConversion(_)  => "bodyless numeric conversion requires a supported std.core.num signature; import the shared conversion or provide a function body",
         InvalidInstantiation(_)      => "invalid generic instantiation: type arguments must match the declaration and every use of one parameter must agree",
         DuplicateSignature(_)        => "duplicate signature: parameter names are documentation, not identity",
         AmbiguousOverload(_)         => "ambiguous overload: these two signatures accept the same call",
@@ -210,6 +215,9 @@ message* = (fault: SemaFault) str {
         ConsumeThroughHandle(_)      => "cannot consume through a handle: you may only move what this frame owns, and a bitwise copy of a handle would be left pointing at a dead value",
         CopyOfDropValue(_)           => "cannot copy a Drop value: drop runs exactly once, so two live names for one value would drop it twice — construct a second one, or write `consume`",
         ScopeEscapes(_)              => "@scope may not escape: it names the enclosing block, so it may be passed inward but never stored in a struct, returned, or captured by an escaping closure",
+        ExplicitDropBorrow(_)        => "explicit destruction requires an owned value: use `(consume owner).drop()` to transfer cleanup responsibility",
+        ArenaInvalidated(_)          => "use after arena destruction: the backing allocation owner was explicitly dropped",
+        ArenaStored(_)               => "a value backed by an arena this body made may not be stored through a borrowed parameter: the arena is dropped when this body ends — take the allocation owner as a parameter",
         ArenaEscapes(_)              => "a value backed by an arena this body made may not be returned: the arena is dropped at the end of this body, so the caller would read freed pages — take the arena as a parameter, or move it into the value you return",
         HandleNotAValue(_)           => "a loop handle is not a value: it names the loop it came from and has no storage, so only `h.break(..)` and `h.next()` may read it",
         ConsumedByCapture(_)         => "consume after capture:",
@@ -225,6 +233,7 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         ModuleNotAValue(f)           => out.write_module(f),
         NoOverload(f)                => out.write_name(f),
         InvalidInstantiation(f)      => out.write_name(f),
+        InvalidNumericConversion(f)  => out.write_name(f),
         ImplMissingField(f)          => out.write_missing(f),
         CtorMissingField(f)          => out.write_ctor_missing(f),
         CtorNamesNoMember(f)         => out.write_member(types, f),
@@ -256,6 +265,9 @@ write_detail* = (fault: SemaFault, types: Types, out :: String)
         ConsumeThroughHandle(f)      => out.write_name(f),
         CopyOfDropValue(f)           => out.write_name(f),
         ScopeEscapes(f)              => out.write_name(f),
+        ExplicitDropBorrow(f)        => out.write_name(f),
+        ArenaInvalidated(f)          => out.write_name(f),
+        ArenaStored(f)               => out.write_name(f),
         ArenaEscapes(f)              => out.write_name(f),
         HandleNotAValue(f)           => out.write_name(f),
 

@@ -1,10 +1,9 @@
-// Lower `Type.name(..)` and `module.name(..)` calls. A type member is an
-// associated function when its resolved first parameter is not the receiver
-// type; methods remain the receiver-taking path owned by `gen_c_member.zen`.
-// Both paths use the same qualified symbols and queued definitions.
+// Lower `Type.name(..)` and `module.name(..)` calls. Type-qualified methods
+// take their receiver as an explicit argument. Both calling forms use the
+// same qualified symbols and queued definitions.
 
 ExprId, Member = std.ast
-Function, Param, Access, Call = std.ast
+Function, Access, Call = std.ast
 AllocError = std.mem
 Vec = std.collections
 String = std.text
@@ -13,21 +12,18 @@ Ctx = sema.sema_check
 Actual, sig_fits = sema.sema_cand
 Inst = sema.sema_inst
 Def, decl_at = sema.sema_def
-self_ctx = sema.sema_member
 module_named_by = sema.sema_module
-param_type = sema.sema_denote
 sym_fn = gen.gen_name
 CBackend = gen.gen_c.gen_c_state
 unsupported = gen.gen_c.gen_c_report
 any_open, recv_inst, inst_open = gen.gen_c.gen_c_mono
-enter_struct_tparams, leave_tparams = gen.gen_c.gen_c_mono
 signature_of, plain, write_extern, write_call_args = gen.gen_c.gen_c_call
 write_arg_at = gen.gen_c.gen_c_arg
 holds = gen.gen_c.gen_c_expr
 construct = gen.gen_c.gen_c_build
 Site, site_of, member_at, method_sig, call_actuals = gen.gen_c.gen_c_member
 member_symbol = gen.gen_c.gen_c_member
-by_arity, kept_or_arity, has_body = gen.gen_c.gen_c_impl
+by_arity, kept_or_arity, has_body, impl_member_at = gen.gen_c.gen_c_impl
 
 // Lower a call whose base was resolved as a type or module. `false` leaves
 // non-associated members to the caller without producing a second diagnostic.
@@ -202,8 +198,14 @@ AssocSite = {
             Res<bool, AllocError> {
         found ::= be.alloc.Vec<Member>();
         member_at(be, self.site, self.access.name.text, found).try();
+        be.impl_member_at(self.site.decl, self.access.name.text, found).try();
         kept ::= be.alloc.Vec<Member>();
-        found.loop((h, member) { self.keep(be, member, kept).try() });
+        found.loop((h, member) {
+            member.kind.match({
+                Function(_) => kept.add(member),
+                _           => Ok(()),
+            }).try();
+        });
         actuals ::= be.alloc.Vec<Actual>();
         be.call_actuals(self.call, self.ctx, actuals).try();
         fitting ::= be.alloc.Vec<Member>();
@@ -241,43 +243,6 @@ AssocSite = {
             },
             _           => Ok(()),
         })
-    }
-
-    keep = (self: @Self, be :: CBackend, member: Member,
-            out :: Vec<Member>) Res<(), AllocError> {
-        member.kind.match({
-            Function(f) => self.keep_function(be, member, f, out),
-            _           => Ok(()),
-        })
-    }
-
-    keep_function = (self: @Self, be :: CBackend, member: Member,
-                     f: Function, out :: Vec<Member>) Res<(), AllocError> {
-        self.takes_receiver(be, f).try().match({
-            true  => Ok(()),
-            false => out.add(member),
-        })
-    }
-
-    // Resolve the first parameter with `@Self` bound to this receiver.
-    takes_receiver = (self: @Self, be :: CBackend, f: Function)
-                     Res<bool, AllocError> {
-        f.params.get(0).match({
-            None      => Ok(false),
-            Ok(param) => self.first_is_receiver(be, param),
-        })
-    }
-
-    first_is_receiver = (self: @Self, be :: CBackend, param: Param)
-                        Res<bool, AllocError> {
-        sctx     = be.check.self_ctx(
-            self.site.decl.module.to_usize(),
-            self.site.ty
-        ).try();
-        mark     = be.enter_struct_tparams(self.site.decl).try();
-        declared = be.check.param_type(param, sctx);
-        be.leave_tparams(mark).try();
-        Ok(declared.try().eq(self.site.ty))
     }
 
     lower_member = (self: @Self, be :: CBackend, member: Member,

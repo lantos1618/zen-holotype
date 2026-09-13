@@ -1,0 +1,46 @@
+Moving = { arena: Alloc, refuse: Ptr<bool>, calls: Ptr<usize> }
+Moving.impl(Alloc, {
+    raw = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        self.arena.raw(size, align)
+    }
+    // Every resize moves storage and poisons the old bytes immediately.
+    realloc = <T>(self: @Self, source: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        (!self.refuse.read(0)).ensure(AllocError.OutOfMemory).try();
+        size  = source.bytes(count);
+        block = self.arena.raw(size + 8, 8).try();
+        block.to<usize>().write(0, size);
+        out = block.offset(8);
+        (!source.is_null()).then(() {
+            bytes = source.to<u8>();
+            old   = bytes.back(8).to<usize>().read(0);
+            out.copy_from(bytes, old);
+            Range(0, old).loop((i) { bytes.write(i, 0); });
+        });
+        self.calls.write(0, self.calls.read(0) + 1);
+        Ok(out.to<T>())
+    }
+})
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+    refuse = a.raw(1, 1).try().to<bool>();
+    refuse.write(0, false);
+    calls = a.raw(8, 8).try().to<usize>();
+    calls.write(0, 0);
+    moving = Moving(arena: a, refuse: refuse, calls: calls);
+    text ::= moving.String().try();
+    text.add("abcd").try();
+    text.add(text.view()).try();
+    text.add(text.view().slice(1, 4)).try();
+    println("{} allocations {}", text.view(), calls.read(0));
+    refuse.write(0, true);
+    text.add("twenty bytes of text!").match({
+        Ok(_)  => println("unexpected success"),
+        Err(_) => println("refused {} {}", text.len(), text.view()),
+    });
+    text.add("").try();
+    empty ::= moving.Vec<u8>();
+    empty.add_all(null_ptr<u8>(), 0).try();
+    println("empty {} allocations {}", empty.len, calls.read(0));
+    Ok(0)
+}

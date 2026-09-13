@@ -6,7 +6,8 @@ str = std.text
 Vec = std.collections
 Range = std.core
 Env = std.env
-BuildArgs, ProjectArgs, BuildFlags, build_options = std.build
+BuildArgs, ProjectArgs, BuildFlags, BuildFlag, build_options = std.build
+FLAG_ENTRY, FLAG_STD, FLAG_FFI = std.build
 FLAG_EMIT_C, ZEN_STD_ENV = std.build
 Options, options, is_word, arg_at, OPTIONS_END = std.cli
 Command, command, ValueType = std.cli
@@ -46,7 +47,7 @@ FmtJob* = {
 // argv[0] is the program and argv[1] is the command.
 ARGS*: usize = 2
 
-USAGE*: str = "usage: zen build [<project-or-target>]\n       zen run [<project-or-target>] [-- <args>...]\n       zen build <root> [--entry <file>] [--std <path>] [--ffi] [--symbol-map <file>] --emit-c -o <file.c>\n       zen build <root> [--entry <file>] [--std <path>] [--ffi] [--symbol-map <file>] --emit-c-dir <dir>\n       zen fmt [--check] <file.zen>..."
+USAGE*: str = "usage: zen build [<project-or-target>]\n       zen check <root> [--entry <file>] [--std <path>] [--ffi]\n       zen run [<project-or-target>] [-- <args>...]\n       zen build <root> [--entry <file>] [--std <path>] [--ffi] [--symbol-map <file>] --emit-c -o <file.c>\n       zen build <root> [--entry <file>] [--std <path>] [--ffi] [--symbol-map <file>] --emit-c-dir <dir>\n       zen fmt [--check] <file.zen>..."
 
 HelpArg = Root
     | BuildRoot
@@ -113,20 +114,7 @@ help_model = (a: Alloc) Res<Command<HelpArg>, AllocError> {
         ValueType.Text,
         "Write generated source to FILE"
     ).try();
-    build.option(
-        "--entry",
-        HelpArg.Entry,
-        "FILE",
-        ValueType.Text,
-        "Select the entry file inside ROOT"
-    ).try();
-    build.option(
-        "--std",
-        HelpArg.StdRoot,
-        "PATH",
-        ValueType.Text,
-        "Use PATH as the standard-library root"
-    ).try();
+    build.source_help().try();
     build.option(
         "--symbol-map",
         HelpArg.SymbolMap,
@@ -134,12 +122,23 @@ help_model = (a: Alloc) Res<Command<HelpArg>, AllocError> {
         ValueType.Text,
         "Write the generated symbol map"
     ).try();
-    build.flag(
-        "--ffi",
-        HelpArg.Ffi,
-        "Enable foreign-function interfaces"
-    ).try();
     app.subcommand(build).try();
+
+    check ::= command<HelpArg>(
+        a,
+        "check",
+        "Check source without generating artifacts"
+    );
+    check.positional(
+        "root",
+        HelpArg.Root,
+        "ROOT",
+        ValueType.Text,
+        "Compilation root directory"
+    ).try();
+    check.required("root");
+    check.source_help().try();
+    app.subcommand(check).try();
 
     run ::= command<HelpArg>(a, "run", "Build and run a project target");
     run.positional(
@@ -190,8 +189,32 @@ help_model = (a: Alloc) Res<Command<HelpArg>, AllocError> {
     Ok(app)
 }
 
+source_help = (model :: Command<HelpArg>) Res<(), AllocError> {
+    model.option(
+        "--entry",
+        HelpArg.Entry,
+        "FILE",
+        ValueType.Text,
+        "Select the entry file inside ROOT"
+    ).try();
+    model.option(
+        "--std",
+        HelpArg.StdRoot,
+        "PATH",
+        ValueType.Text,
+        "Use PATH as the standard-library root"
+    ).try();
+    model.flag(
+        "--ffi",
+        HelpArg.Ffi,
+        "Enable foreign-function interfaces"
+    ).try();
+    Ok(())
+}
+
 FLAG_FMT_CHECK: str = "--check"
 HELP_ROOT: str = "@help/root"
+HELP_CHECK: str = "@help/check"
 HELP_BUILD: str = "@help/build"
 HELP_RUN: str = "@help/run"
 HELP_FMT: str = "@help/fmt"
@@ -200,8 +223,7 @@ HELP_LSP: str = "@help/lsp"
 
 FmtFlag = | Check
 
-cli* = (env: Env, argv: Vec<str>) Res<Cli, AllocError> {
-    alloc = env.mem.alloc();
+cli* = (env: Env, alloc: Alloc, argv: Vec<str>) Res<Cli, AllocError> {
     argv.get(1).match({
         None     => Ok(Cli.Usage("")),
         Ok(name) => command(env, alloc, argv, name),
@@ -215,6 +237,9 @@ command = (env: Env, a: Alloc, argv: Vec<str>, name: str)
         "-h"     => Ok(Cli.Usage(HELP_ROOT)),
         "build"  => help_requested(argv).match({
             true => Ok(Cli.Usage(HELP_BUILD)), false => job_of(env, a, argv)
+        }),
+        "check"  => help_requested(argv).match({
+            true => Ok(Cli.Usage(HELP_CHECK)), false => check_of(a, argv, env.var(ZEN_STD_ENV).match({ Ok(p) => p, None => "" }))
         }),
         "run"    => help_requested(argv).match({
             true => Ok(Cli.Usage(HELP_RUN)), false => project_of(env, a, argv, true)
@@ -290,11 +315,44 @@ fmt_verdict = (argv: Vec<str>, check: bool, bad: str, words: usize) Cli {
 
 // Parse shared option syntax into BuildFlags, then validate it as a command.
 job_of = (env: Env, a: Alloc, argv: Vec<str>) Res<Cli, AllocError> {
-    parsed ::= BuildFlags(
-        std_root: env.var(ZEN_STD_ENV).match({ Ok(p) => p, None => "" })
-    );
-    declared = build_options(a).try();
-    scan ::= declared.args(argv, ARGS);
+    parsed = scan_build(
+        argv,
+        build_options(a).try(),
+        env.var(ZEN_STD_ENV).match({ Ok(p) => p, None => "" })
+    ).try();
+    parsed.flags.compiles_source().match({
+        true  => Ok(verdict(parsed.flags, parsed.bad)),
+        false => project_of(env, a, argv, false),
+    })
+}
+
+// Check accepts source selection and FFI flags, but no artifact destinations.
+check_of = (a: Alloc, argv: Vec<str>, std_root: str) Res<Cli, AllocError> {
+    declared ::= options<BuildFlag>(a);
+    declared.setting(FLAG_ENTRY, BuildFlag.Entry).try();
+    declared.setting(FLAG_STD, BuildFlag.StdRoot).try();
+    declared.flag(FLAG_FFI, BuildFlag.Ffi).try();
+    parsed = scan_build(argv, declared, std_root).try();
+    (!parsed.bad.is_empty()).match({
+        true  => Ok(Cli.Usage(parsed.bad)),
+        false => parsed.flags.root.is_empty().match({
+            true  => Ok(Cli.Usage("")),
+            false => Ok(Cli.Build(BuildArgs(
+                root: parsed.flags.root,
+                entry: parsed.flags.entry,
+                std_root: parsed.flags.std_root,
+                ffi: parsed.flags.ffi
+            ))),
+        }),
+    })
+}
+
+ParsedBuild = { flags: BuildFlags, bad: str }
+
+scan_build = (argv: Vec<str>, declared: Options<BuildFlag>, std_root: str)
+             Res<ParsedBuild, AllocError> {
+    parsed ::= BuildFlags(std_root: std_root);
+    scan   ::= declared.args(argv, ARGS);
     loop(() { !scan.done() }, (h) {
         scan.next().match({
             Ok(item) => item.named.match({
@@ -310,14 +368,10 @@ job_of = (env: Env, a: Alloc, argv: Vec<str>) Res<Cli, AllocError> {
             None     => (),
         });
     });
-    parsed.compiles_source().match({
-        true  => Ok(verdict(parsed, scan.bad)),
-        false => project_of(env, a, argv, false),
-    })
+    Ok(ParsedBuild(flags: parsed, bad: scan.bad))
 }
 
-// The stdlib root is left empty: `cli` allocates in a scratch arena, and
-// `zen.project_cli` resolves the root in one that outlives the build.
+// Project configuration resolves its stdlib root when the build begins.
 project_of = (env: Env, a: Alloc, argv: Vec<str>, run: bool)
              Res<Cli, AllocError> {
     first = arg_at(argv, ARGS);

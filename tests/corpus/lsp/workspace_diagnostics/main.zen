@@ -1,0 +1,54 @@
+// Workspace roots and absolute overlays must identify the same standard
+// module, including when the executable supplies an absolute stdlib root.
+check_workspace = zen.zen_build
+anchored_path = zen.zen_path
+Built = lsp.lsp_built
+
+main = (env: Env) Res<i32, AllocError | FsError> {
+    a ::= env.mem.alloc();
+    cwd = env.fs.cwd(a).try().view();
+    println("root {}", anchored_path(a, cwd, "/").try());
+    println(
+        "separators {}",
+        anchored_path(a, "/work", "./src//./main.zen").try()
+    );
+    println(
+        "parent {}",
+        anchored_path(a, "/work", "../link/../main.zen").try()
+    );
+
+    docs ::= a.Map<str, str>();
+    disk = check_workspace(env, a, "src", "std/core/num.zen", docs).try();
+    println("disk {} {}", disk.b.diag_count(), disk.c.diag_count());
+
+    source = env.fs.read(a, "src/std/core/num.zen").try();
+    edited ::= a.String(
+        "{}\nworkspace_unsaved* = () i32 {{ absent_workspace_name }}\n",
+        source.view()
+    ).try();
+    path = anchored_path(a, cwd, "src/std/core/num.zen").try();
+    docs.set(path, edited.view()).try();
+    overlay = check_workspace(env, a, "src", "std/core/num.zen", docs).try();
+    println("overlay {} {}", overlay.b.diag_count(), overlay.c.diag_count());
+    uri = "file://src/./std/core/num.zen";
+    uris ::= a.Vec<str>();
+    uris.add(uri).try();
+    buffers ::= a.Map<str, str>();
+    buffers.set(uri, edited.view()).try();
+    built ::= env.Built();
+    built.ensure(env, "src", "./std/core/num.zen", uris, buffers).try();
+    built.spots().match({
+        None      => println("missing workspace diagnostics"),
+        Ok(spots) => spots.loop((spot) { println("uri {}", spot.uri); }),
+    });
+    buffers.set(uri, source.view()).try();
+    built.invalidate();
+    built.ensure(env, "src", "./std/core/num.zen", uris, buffers).try();
+    println("classes {}", built.classed_for(a, uri).try().len > 0);
+    borrowed_root = built.root();
+    built.invalidate();
+    built.ensure(env, borrowed_root, "./std/core/num.zen", uris, buffers).try();
+    println("borrowed root {}", built.root().eq("src"));
+    println("rebuilt classes {}", built.classed_for(a, uri).try().len > 0);
+    Ok(0)
+}

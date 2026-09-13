@@ -1,5 +1,5 @@
 // Filesystem capability lowering. Paths stay borrowed `str` values; the C
-// floor supplies NUL termination. Only `read` allocates, through its `Alloc`
+// floor supplies NUL termination. Read and cwd allocate through their `Alloc`
 // bound. Floor error ordinals are converted back to variants by name here.
 
 ExprId = std.ast
@@ -106,6 +106,77 @@ FsSite = {
         out.add(dst.view())
     }
 
+    cwd = (self: @Self, be :: CBackend, aty: TyId, out :: String)
+          Res<(), AllocError> {
+        be.need_fs();
+        be.payload_type(self.ret, "Ok").match({
+            None    => self.reject(
+                be,
+                "Fs.cwd must return Res<String, FsError>",
+                out
+            ),
+            Ok(sty) => self.cwd_string(be, sty, aty, out),
+        })
+    }
+
+    cwd_string = (self: @Self, be :: CBackend, sty: TyId, aty: TyId, out :: String)
+                 Res<(), AllocError> {
+        be.field_of(sty, "data").try().match({
+            None    => self.reject(
+                be,
+                "Fs.cwd must return Res<String, FsError>",
+                out
+            ),
+            Ok(vty) => self.cwd_run(be, sty, vty, aty, out),
+        })
+    }
+
+    cwd_run = (self: @Self, be :: CBackend, sty: TyId, vty: TyId, aty: TyId,
+               out :: String) Res<(), AllocError> {
+        be.request_type(sty).try();
+        be.request_type(vty).try();
+        usize_ty = be.check.types.prim("usize").try();
+        i32_ty   = be.check.types.prim("i32").try();
+        al ::= be.alloc.String().try();
+        be.hold_alloc(self.c, aty, self.ctx, al).try();
+        snapshot = be.fresh_name("cwd").try();
+        want     = be.fresh_name("t").try();
+        got      = be.fresh_name("t").try();
+        rc       = be.fresh_name("t").try();
+        dst      = be.fresh_name("t").try();
+        be.fmt("char {}[ZG_PATH_MAX];\n", snapshot.view()).try();
+        be.declare_temp(usize_ty, want.view()).try();
+        be.declare_temp(usize_ty, got.view()).try();
+        be.declare_temp(i32_ty, rc.view()).try();
+        be.declare_temp(self.ret, dst.view()).try();
+        be.fmt(
+            "if (getcwd({}, sizeof {}) == NULL) {{\n",
+            snapshot.view(),
+            snapshot.view()
+        ).try();
+        be.indent();
+        be.set_line(rc.view(), "zg_fs_error(errno)").try();
+        be.fs_chain(self.ret, rc.view(), dst.view(), 1).try();
+        be.close_else().try();
+        be.fmt("{} = strlen({});\n", want.view(), snapshot.view()).try();
+        run = FsBuffer(
+            id: self.id,
+            ret: self.ret,
+            sty: sty,
+            vty: vty,
+            aty: aty,
+            al: al.view(),
+            source: FsBytes.Directory(snapshot.view()),
+            want: want.view(),
+            got: got.view(),
+            rc: rc.view(),
+            dst: dst.view()
+        );
+        run.body(be).try();
+        be.close_brace().try();
+        out.add(dst.view())
+    }
+
     read = (self: @Self, be :: CBackend, aty: TyId, out :: String)
            Res<(), AllocError> {
         be.need_fs();
@@ -155,14 +226,14 @@ FsSite = {
         be.open_rc_test(rc.view()).try();
         be.fs_chain(self.ret, rc.view(), dst.view(), 1).try();
         be.close_else().try();
-        run = FsRead(
+        run = FsBuffer(
             id: self.id,
             ret: self.ret,
             sty: sty,
             vty: vty,
             aty: aty,
             al: al.view(),
-            path: path.view(),
+            source: FsBytes.File(path.view()),
             want: want.view(),
             got: got.view(),
             rc: rc.view(),
@@ -174,17 +245,19 @@ FsSite = {
     }
 }
 
-// The C names and settled types created by the first half of `Fs.read`.
+FsBytes = File(str) | Directory(str)
+
+// The C names and settled types for a filesystem operation returning bytes.
 // Allocation, the floor call and result construction all consume this one
 // immutable snapshot instead of relaying eleven independent parameters.
-FsRead = {
+FsBuffer = {
     id: ExprId,
     ret: TyId,
     sty: TyId,
     vty: TyId,
     aty: TyId,
     al: str,
-    path: str,
+    source: FsBytes,
     want: str,
     got: str,
     rc: str,
@@ -198,7 +271,7 @@ FsRead = {
             .try().match({
                 None     => be.unsupported_line(
                     self.id,
-                    "Fs.read needs an Alloc"
+                    "filesystem byte results need an Alloc"
                 ),
                 Ok(slot) => self.run(be, slot, call.view()),
             })
@@ -213,13 +286,25 @@ FsRead = {
         buf ::= be.fresh_name("t").try();
         be.declare_ptr(buf.view()).try();
         be.read_ok_payload(run.view(), buf.view()).try();
-        be.write_read_call(
-            self.rc,
-            self.path,
-            buf.view(),
-            self.want,
-            self.got
-        ).try();
+        self.source.match({
+            File(path)          => be.write_read_call(
+                self.rc,
+                path,
+                buf.view(),
+                self.want,
+                self.got
+            ),
+            Directory(snapshot) => {
+                be.fmt(
+                    "memcpy({}, {}, {});\n",
+                    buf.view(),
+                    snapshot,
+                    self.want
+                ).try();
+                be.set_line(self.got, self.want).try();
+                be.set_line(self.rc, "ZG_FS_OK")
+            },
+        }).try();
         be.open_rc_test(self.rc).try();
         be.fs_chain(self.ret, self.rc, self.dst, 1).try();
         be.close_else().try();
@@ -593,4 +678,16 @@ open_ordinal_test = (be :: CBackend, rc: str, n: usize)
     be.fmt("if ({rc} == {}) {\n", ord.view()).try();
     be.indent();
     Ok(());
+}
+
+lower_cwd* = (
+    be  :: CBackend,
+    id  : ExprId,
+    c   : Call,
+    ret : TyId,
+    aty : TyId,
+    ctx : Ctx,
+    out :: String
+) Res<(), AllocError> {
+    FsSite(id: id, c: c, ret: ret, ctx: ctx).cwd(be, aty, out)
 }

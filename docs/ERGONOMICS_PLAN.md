@@ -3,8 +3,104 @@
 Status: the implementation batches below are in place; the remaining outline
 is grounded in the current compiler and an independent allocator/ownership review.
 Proposed APIs below are not promises that the current language implements them.
-The target is approximately 9/10 for realistic daily programming, not a score
-achieved by shortening one demo.
+The target is predictable daily programming with explicit allocation and tested
+contracts. Numerical reviews identify remaining work; passing tests alone does
+not establish an ergonomics score.
+
+## Numeric conversion ownership
+
+Numeric conversions now use a validated standard-library contract, described
+in [numeric conversions](NUMERIC_CONVERSIONS.md). The six local bodyless
+conversion declarations in scalar lowering, text parsing, and map indexing are
+removed. Parsing composes with checked results, and map indexing reduces the
+hash into the index domain before converting it. Failed scalar conversion
+retains the positioned backend diagnostic.
+
+Sema records the permitted standard declarations by identity; C lowering
+consumes that record. A primitive conversion name cannot grant a source-local
+bodyless function cast behavior. Existing generic widening bounds remain
+supported and tested. Other intrinsic families and general first-class
+callback support remain separate work.
+
+This improves one concrete trust boundary. It does not establish complete
+lifetime safety, whole-language backend parity, or an ergonomics score.
+
+`usize.min(other)` is an ordinary function in `std.core.num`; backend emission
+uses it instead of a private `smaller` definition. This requires no new
+compiler-recognized numeric operation.
+
+### Generic requirements
+
+Multiple requirements currently use conjunction: `f<T: Eq + Hash, R> = ...`.
+A proposed bracket spelling, `T: [Eq, Hash]`, is not implemented. Keep one
+canonical spelling if this changes, with matching parser, formatter, diagnostics
+and editor support. Requirements must identify operations the checker can
+prove; names such as `Numeric` or `Copy` are not existing blanket guarantees.
+Generalizing `min` requires an ordering contract, including its relationship
+to equality and behavior for floating-point NaN. Arithmetic and display are
+separate requirements and should not be added to a function that only orders.
+
+## Source-review implementation round
+
+- `Tester.expect_eq` is an ordinary generic `Eq` operation with executable
+  equal/unequal integer, string and custom-equality cases. Native test discovery
+  and benchmark execution remain separate work.
+- Generic method substitutions settle literal families to concrete defaults,
+  and literal receiver lookup considers contextual generic arguments before
+  defaulting. Free and method results use the same numeric conversion surface.
+- `Vec.add_all(source: Ptr<T>, count: usize)` reserves, copies initialized
+  elements, then publishes length. It replaces `grow_by` in String and HTTP/2
+  buffer writes. The caller owns the raw source bounds and lifetime; valid
+  self/interior appends survive moving reallocation. Exported `Vec.len` remains
+  externally readable, with mutation restricted to the declaring module.
+- `values.sort(alloc).try()` offers stable O(n log n) sorting with explicit
+  O(n) scratch. Allocation failure leaves the input unchanged. The existing
+  allocation-free `sort()` remains insertion sort. Formatter candidate and
+  edit ordering use the scalable overload and indexed interval queries.
+- Structural AST walking takes an explicit scratch allocator:
+  `tree.walk(alloc, root, visitor)`. Its iterative event stack preserves
+  structural order and stops on visitor or allocation failure without growing
+  the host stack with the expression depth.
+- Named-binding ownership provenance follows assignments and joins across
+  branches/callbacks. The standard `bool.then` is recognized by resolved
+  declaration identity for once-or-never callback handling. General field and
+  interprocedural allocator-region relations and repeated-loop fixed points
+  remain incomplete; these fixes do not establish whole-language memory safety.
+
+## Further ownership and compiler improvements
+
+- Ownership follows direct field overrides, aggregate/indexed values, match
+  results, and block-local result aliases. Repeated callback provenance is
+  iterated to a fixed point before ordinary diagnostics run once. Exact safe
+  field overwrites and caller-owned storage remain supported. Stores through
+  borrowed parameters refuse local-arena origins; definite owner identities
+  preserve explicit transfers without treating an unrelated transfer as safe. Deep/indexed
+  writes are conservative; arbitrary interprocedural region/effect guarantees
+  and complete actor sendability remain open work.
+- Successful written-type observations use initialized indexed storage separate
+  from context-sensitive type memoization. Repeated marks allocate nothing;
+  failed growth preserves recorded observations and remains fallible.
+- C lowering consumes an exact recorded call declaration without rediscovering
+  candidates or falling back to an unrelated singleton. Calls lacking a record
+  still use a compatibility lookup: field defaults and context-dependent generic
+  trait bodies need complete per-instantiation semantic records before it can
+  be removed. This is not a completed shared checked-call architecture.
+- Syntax-level may-call facts are memoized per immutable expression identity.
+  Iterative traversal avoids repeated subtree scans; allocation refusal remains
+  conservative to preserve operand evaluation order.
+- Editor cache rebuilds invalidate published values before fallible work and
+  preserve borrowed input paths before releasing their previous arena. Failed
+  rebuilding leaves empty accessors; retry remains supported. Written-type hover
+  and definition can use validated observations after an Unknown memo.
+- `zen check` validates source without emission or requiring `main`. The CLI
+  parser takes the caller's allocator, so parsed configuration need not borrow
+  local parsing storage after the parser returns.
+- Backend key ordering uses the shared allocator-explicit stable sort over
+  borrowed keys and original indices, eliminating a private merge algorithm
+  and fabricated zero/empty fallbacks from guaranteed ordering positions.
+- Aggregate differential checks include reproducible generated integer
+  expressions against an independent evaluator, including lazy match and
+  receiver effects, across C optimization levels and formatter roundtrips.
 
 ## First implementation batch
 
@@ -282,6 +378,15 @@ certain directly returned bindings during cleanup. This is distinct from
 String's current arena-backed descriptor semantics and from universal
 inference of last-use moves.
 
+Explicit standard destructor calls now require a consumed concrete local owner.
+The checker uses the selected member's supplying declaration, including
+interface dispatch, rather than the method's spelling. Destroying a tracked
+local arena invalidates its dependent views across the supported branch joins.
+This closes explicit-destruction cases; it does not establish general borrow
+regions, field destruction/reinitialization, or per-instantiation reflection
+lifetime facts. Type-qualified methods lower with an explicit receiver using
+the same method symbols as instance calls.
+
 Arbitrary defer callbacks run unconditionally, before automatic drops. Returning
 a value does not cancel its defer. Captures are copied at registration, so a
 later mutation of a scalar transfer flag is not a general workaround.
@@ -506,3 +611,15 @@ closures have not migrated. [Code generation](BACKENDS.md) records the
 implemented surface, runnable example, and acceptance criteria for extending
 the shared boundary. No numerical ergonomics or compilation-speed target is
 claimed by this change.
+
+## Generated-program runtime checks
+
+`make verify` includes `runtimecheck`: scalar loops, growing Vec/Map, String
+construction, stable sorting, and a capturing generic callback are checked
+against independent expected results and C references. Map allocation budgets
+are deterministic gates; execution times remain reported measurements. Run
+`tests/bench/runtime/run.py` for larger repeated samples. Reference container
+representations and formatting algorithms differ, so their timing ratios do
+not isolate backend overhead. Known-length Map slot initialization reserves
+once before filling the table. Generated reports remain under
+`build/source_health/`.

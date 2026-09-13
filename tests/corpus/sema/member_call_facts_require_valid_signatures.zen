@@ -1,0 +1,43 @@
+Source, scan = std.lex
+Parser, module = std.parse
+ExprId = std.ast
+Checker = sema.sema_check
+check_all = sema.sema_decl
+
+inspect = (a: Alloc, source: str) Res<(), AllocError> {
+    lexed = scan(a, Source(file: "members.zen", text: source)).try();
+    parser ::= a.Parser(lexed);
+    parsed = parser.module("members").try();
+    parser.tree.add_module(parsed).try();
+    checker ::= a.Checker(parser.tree).try();
+    checker.check_all().try();
+    selected: usize ::= 0;
+    id              ::= ExprId(index: 0);
+    Range(0, parser.tree.expr_ids()).loop((index) {
+        checker.resolved_member_provider(id).match({
+            Ok(_) => { selected = selected + 1; },
+            None  => (),
+        });
+        id = ExprId(index: id.index + 1);
+    });
+    println("valid {} selected {}", checker.diag_count() == 0, selected);
+    Ok(())
+}
+
+main = (env: Env) Res<(), AllocError> {
+    a      = env.mem.alloc();
+    prefix = "Readable = { read = (self: @Self) i32 }\nValue = {}\nValue.impl(Readable, { read = (self: @Self) i32 { 7 } })\n";
+    dot ::= a.String().try();
+    dot.add(prefix).try();
+    dot.add("main = () i32 { v = Value(); v.read() }\n").try();
+    inspect(a, dot.view()).try();
+    invalid ::= a.String().try();
+    invalid.add(prefix).try();
+    invalid.add("main = () i32 { v = Value(); v.read<i32>() }\n").try();
+    inspect(a, invalid.view()).try();
+    associated ::= a.String().try();
+    associated.add(prefix).try();
+    associated.add("main = () i32 { v = Value(); Value.read<i32>(v) }\n").try();
+    inspect(a, associated.view()).try();
+    Ok(())
+}

@@ -15,6 +15,26 @@ join_path = std.core.path
 QualifiedName = std.ast.ast_span
 ZEN_STD_ENV = std.build
 
+// Anchor a filesystem path at the actual process directory. Redundant `/`
+// and `.` components share one spelling; `..` stays intact because resolving
+// it lexically would change traversal through a symbolic link. No file needs
+// to exist, so the same operation applies to unsaved editor buffers.
+anchored_path* = (a: Alloc, directory: str, path: str)
+                 Res<str, AllocError> {
+    full = path.starts_with("/").match({
+        true  => path,
+        false => join_path(a, directory, path).try().view(),
+    });
+    out ::= a.String("/").try();
+    full.split('/').loop((part) {
+        (!part.is_empty() && !part.eq(".")).then(() {
+            (out.len() > 1).then(() { out.add('/').try(); });
+            out.add(part).try();
+        });
+    });
+    Ok(out.view());
+}
+
 // Derive a module's canonical dotted name from its root-relative path.
 module_name* = (a: Alloc, root: str, path: str) Res<str, AllocError> {
     base ::= root;
@@ -74,6 +94,9 @@ std_root_beside_program = (env: Env, a: Alloc) str {
 // selects its `src` child when the open file is beneath that child.
 inferred_root = (env: Env, a: Alloc, floor: str, path: str) str {
     dir ::= Path(path).parent().value_or(Path("")).text;
+    // The parent of an absolute root-level document is `/`, not an absent
+    // compilation root anchored at the process directory.
+    (dir.is_empty() && path.starts_with("/")).then(() { dir = "/"; });
     loop(() { dir.len > floor.len && holds_its_own_name(env, a, dir) }, (h) {
         dir = Path(dir).parent().value_or(Path("")).text;
     });

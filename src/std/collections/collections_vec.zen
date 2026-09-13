@@ -76,12 +76,26 @@ Vec*<T> = {
         })
     }
 
-    // Reserve and count n unwritten slots. The caller must initialize them
-    // before exposing the Vec.
-    grow_by* = (self :: @Self, n: usize) Res<(), AllocError> {
-        self.reserve(n).try();
-        self.len = self.len + n;
-        Ok(());
+    // Copy an initialized source run, publishing its length after the copy.
+    // The caller owns the source bounds and lifetime. An aliased run must
+    // lie wholly within this Vec's initialized prefix; that run remains
+    // supported even when reallocation moves storage.
+    add_all* = (self :: @Self, source: Ptr<T>, count: usize) Res<(), AllocError> {
+        (count > 0).then(() {
+            at                = self.len;
+            alias: Res<usize> = (at + count > self.capacity).match({
+                true  => Range(0, at).find((i) { self.data.offset(i).same(source) }),
+                false => None,
+            });
+            self.reserve(count).try();
+            from = alias.match({
+                Ok(i) => self.data.offset(i),
+                None  => source,
+            });
+            self.data.offset(at).copy_from(from, count);
+            self.len = at + count;
+        });
+        Ok(())
     }
 
     grow = (self :: @Self) Res<(), AllocError> {

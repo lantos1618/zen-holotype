@@ -1,0 +1,84 @@
+// A standard-library name grants an operation only after signature validation.
+Source, scan = std.lex
+Parser = std.parse.parser
+module = std.parse.parse_decl
+Checker = sema.sema_check
+check_all = sema.sema_decl
+DeclId = sema.sema_id
+CHeader, CTypeBinding, CBinding = std.ast
+
+accepts = (a: Alloc, text: str, owner: str) Res<bool, AllocError> {
+    lexed = scan(a, Source(file: "numeric.zen", text: text)).try();
+    parser ::= a.Parser(lexed);
+    parsed = parser.module(owner).try();
+    parser.tree.add_module(parsed).try();
+    checker ::= a.Checker(parser.tree).try();
+    checker.check_all().try();
+    operation = checker.numeric_conversions.get(DeclId(module: 0, decl: 0));
+    Ok(
+        checker.diag_count() == 0 && operation.match({ Ok(_) => true, None => false })
+    )
+}
+
+foreign_keeps_binding = (a: Alloc) Res<bool, AllocError> {
+    lexed = scan(
+        a,
+        Source(file: "native.zen", text: "to_i32* = (value: c_int) c_int\n")
+    ).try();
+    parser ::= a.Parser(lexed);
+    parsed = parser.module("native").try();
+    parser.tree.add_c_module(
+        parsed,
+        CBinding(headers: a.Vec<CHeader>(), types: a.Vec<CTypeBinding>())
+    ).try();
+    checker ::= a.Checker(parser.tree).try();
+    checker.check_all().try();
+    Ok(
+        checker.diag_count() == 0 && checker.numeric_conversions.get(DeclId(
+            module: 0,
+            decl: 0
+        )).match({ None => true, _ => false })
+    )
+}
+
+main = (env: Env) Res<(), AllocError> {
+    a = env.mem.alloc();
+    println(
+        "registered: {}",
+        accepts(a, "to_i64* = (self: i32) i64\n", "std.core.num").try()
+    );
+    println(
+        "owner: {}",
+        accepts(a, "to_i64* = (self: i32) i64\n", "pretend.num").try()
+    );
+    println(
+        "result: {}",
+        accepts(a, "to_i64* = (self: i32) bool\n", "std.core.num").try()
+    );
+    println(
+        "source: {}",
+        accepts(a, "to_i64* = (self: bool) i64\n", "std.core.num").try()
+    );
+    println(
+        "arity: {}",
+        accepts(a, "to_i64* = (a: i32, b: i32) i64\n", "std.core.num").try()
+    );
+    println(
+        "mutable: {}",
+        accepts(a, "to_i64* = (self :: i32) i64\n", "std.core.num").try()
+    );
+    println(
+        "private: {}",
+        accepts(a, "to_i64 = (self: i32) i64\n", "std.core.num").try()
+    );
+    println(
+        "generic: {}",
+        accepts(a, "to_i64* = <T>(self: T) i64\n", "std.core.num").try()
+    );
+    println(
+        "body: {}",
+        accepts(a, "to_i64* = (self: i32) i64 { 7 }\n", "std.core.num").try()
+    );
+    println("foreign: {}", foreign_keeps_binding(a).try());
+    Ok(())
+}
