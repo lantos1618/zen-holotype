@@ -34,3 +34,21 @@ and platform coverage.
 Each accepted semantic probe includes an observable process result in the
 manifest. Rejection probes pin a diagnostic fragment, so a crash or a later C
 failure cannot masquerade as the intended boundary.
+
+
+## Seeded execution oracle
+
+`randomized.py` generates bounded i32 expression trees from reproducible seeds.
+Its Python evaluator models arithmetic, generic identity, lazy boolean match,
+and a mutating receiver whose result reveals evaluation order. Original and
+formatted programs must agree with that evaluator under the configured C
+compiler at O0/O2 and Clang at O2. The formatter must also reach a fixpoint.
+A valid source mutation doubles the receiver effect and must be rejected by
+the output comparison after compiling and running successfully.
+
+`make verify` runs 96 cases across three seeds and 18 native variants. Replay or
+expand with `--seeds` and `--cases`; generated source, expected output, and
+results are kept only under ignored `build/source_health/randomized/`. The model
+deliberately avoids overflow and does not cover pointers, lifetimes, floating
+point, concurrency, or the whole language. It complements maintained minimized
+regressions rather than replacing them.

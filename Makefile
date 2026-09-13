@@ -41,7 +41,7 @@ J       ?= $(shell nproc 2>/dev/null || echo 4)
 CACHE   ?= $(shell command -v ccache 2>/dev/null)
 ZCC      = $(CACHE) $(CC)
 
-.PHONY: all build dev-build dev-check dev-run bootstrap buildcheck runnercheck seed test verify differential warnings lint parse cap dupcomments faults lextile determinism fixpoint grammar fmt asan ubsan leak profile clean help
+.PHONY: all build dev-build dev-check dev-run bootstrap buildcheck runnercheck editorcheck seed test verify differential runtimecheck warnings lint parse cap dupcomments faults lextile determinism fixpoint grammar fmt asan ubsan leak profile clean help
 
 # These gates share ./zen, build/, and grammar/zen.so. Keep their dependency
 # graphs serial even when an operator invokes `make -j verify`.
@@ -80,6 +80,14 @@ buildcheck:
 runnercheck:
 	$(PY) tests/quality/test_runner_parallel.py
 
+## editorcheck: compile the extension and execute its nonempty lifecycle suites.
+editorcheck: editors/vscode/node_modules/.zen-dependencies
+	$(PY) tests/quality/editor_check.py
+
+editors/vscode/node_modules/.zen-dependencies: editors/vscode/package.json editors/vscode/package-lock.json
+	npm ci --prefix editors/vscode --include=dev --no-audit --no-fund
+	@touch $@
+
 ## bootstrap: full seed/source bootstrap using only a C compiler and shell tools.
 ## This bypasses incremental state. Publish ./zen after both stages succeed.
 bootstrap: seed/zen.c
@@ -116,7 +124,7 @@ test: build lint parse cap dupcomments faults lextile
 ## Keep this target as the single list of required gates. Shared prerequisites
 ## are built once per invocation, then formatting and determinism inspect the
 ## same compiler that ran the test suite.
-verify: test fmt determinism fixpoint differential warnings ubsan buildcheck runnercheck
+verify: test fmt determinism fixpoint differential runtimecheck warnings ubsan buildcheck runnercheck editorcheck
 
 ## fixpoint: rebuilding the whole compiler preserves C and reproduces the seed.
 fixpoint: build
@@ -129,6 +137,11 @@ fixpoint: build
 ## bless it as an expected result.
 differential: build
 	$(PY) tests/differential/run.py --zen ./zen
+	$(PY) tests/differential/randomized.py --zen ./zen --cc "$(CC)"
+
+runtimecheck: build
+	$(PY) tests/bench/runtime/run.py --zen ./zen --cc "$(CC)" \
+	  --out build/source_health/runtime-check --quick --enforce-map-budget
 
 ## warnings: ratchet generated-C warnings under GCC and Clang. The gate proves
 ## both compilers diagnose its positive control before trusting recorded

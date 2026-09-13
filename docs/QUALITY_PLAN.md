@@ -1,5 +1,10 @@
 # Quality plan
 
+[Compiler and language metrics](COMPILER_METRICS.md) defines the measures,
+source owners, randomized-review rules, and acceptance evidence used to
+prioritize this work. Numerical milestones below are planning labels, not
+measured language-quality scores.
+
 The target is a repository where one green command means the compiler is
 releasable. Architecture work comes first because naming the compiler's phases
 exposes the semantic, performance, and ownership mistakes hidden by long relay
@@ -208,7 +213,8 @@ ASan and UBSan are clean; the complete stage-2/stage-3 fixpoint is byte-identica
 
 ### D. Language-native tests
 
-Finish `Tester.expect_eq`, `Module.functions`, test discovery, per-test
+`Tester.expect_eq` now executes ordinary generic `Eq` behavior. Finish
+`Module.functions`, test discovery, per-test
 allocation, failure reporting, and `zen test`. Every advertised `*_test.zen`
 must be collected and type-checked. Preserve the Python corpus runner as an
 outer compatibility oracle until the native runner proves the same collection.
