@@ -1,5 +1,5 @@
 Expr, ExprId, Call, Arg, Access, Lambda, Param, Span, Paren, nowhere = std.ast
-Struct, Function = std.ast
+Struct, Function, BlockId = std.ast
 Ast = std.ast.ast_arena
 Alloc, AllocError = std.mem
 Vec = std.collections
@@ -7,7 +7,7 @@ str = std.text
 Range = std.core
 DeclId = sema.sema_id
 TyId, TyFn, TyNamed, literal_default, is_integer = sema.sema_ty
-Def = sema.sema_def
+Def, decl_at = sema.sema_def
 SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
 Checker, Ctx, CheckedCall, CallSignature, CallResolution = sema.sema_check
 refuse_handle_argument = sema.sema_handle
@@ -91,6 +91,7 @@ CallCheck = {
     provider :: Res<TyId>,
     inst :: Inst,
     checked_signature :: Res<CallSignature>,
+    body :: Res<BlockId>,
     edge :: Res<InstEdge>,
 
     run = (self :: @Self, c :: Checker) Res<TyId, AllocError> {
@@ -252,6 +253,10 @@ CallCheck = {
                 k.generic.then(() {
                     self.edge = Ok(c.call_edge(self.id, k, self.inst).try());
                 });
+                self.body              = c.tree.decl_at(k.id).match({
+                    None     => None,
+                    Ok(decl) => decl.kind.match({ Function(fn) => fn.body, _ => None }),
+                });
                 self.declaration       = Ok(k.id);
                 self.checked_signature = Ok(CallSignature(
                     params: params,
@@ -271,7 +276,7 @@ CallCheck = {
         self.receiver_expr(c, off).when_ok((receiver) {
             ty   = c.type_of(receiver, self.ctx).try();
             want = settled.ty_at(0);
-            (c.is_literal_ty(ty) && c.numeric_literal_context(want)).then(() {
+            ((c.is_literal_ty(ty) || !want.eq(declared.ty_at(0))) && c.numeric_literal_context(want)).then(() {
                 c.check_literal(receiver, want).try();
             });
         });
@@ -510,9 +515,12 @@ CallCheck = {
     // Publish only a successfully checked member, never a recovery signature.
     checked_member = (self :: @Self, c :: Checker, ac: Access, f: Found,
                       off: usize) Res<TyId, AllocError> {
-        mark = c.diag_count();
-        ty   = self.written_found(c, ac, f, off).try();
-        got  = self.signature(c, ty, off, SignatureFit.Exact).try();
+        mark      = c.diag_count();
+        self.body = c.member_fn(f.decl_owner, ac.name.text, f.decl_span).match({
+            None => None, Ok(fn) => fn.body,
+        });
+        ty        = self.written_found(c, ac, f, off).try();
+        got       = self.signature(c, ty, off, SignatureFit.Exact).try();
         (c.diag_count() == mark).then(() {
             c.types.at(ty).match({
                 Fn(_) => {
@@ -801,6 +809,7 @@ CallCheck = (a: Alloc, id: ExprId, node: Expr, call: Call, ctx: Ctx)
         provider: None,
         inst: a.Inst(),
         checked_signature: None,
+        body: None,
         edge: None
     )
 }
@@ -843,7 +852,8 @@ call_type* = (c :: Checker, id: ExprId, node: Expr, call: Call, ctx: Ctx)
                     member_provider: check.provider,
                     inst: check.inst,
                     result: got,
-                    signature: check.checked_signature
+                    signature: check.checked_signature,
+                    body: check.body
                 ))
             )
         },

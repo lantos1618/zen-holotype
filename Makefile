@@ -124,7 +124,11 @@ test: build lint parse cap dupcomments faults lextile
 ## Keep this target as the single list of required gates. Shared prerequisites
 ## are built once per invocation, then formatting and determinism inspect the
 ## same compiler that ran the test suite.
-verify: test fmt determinism fixpoint differential runtimecheck warnings ubsan buildcheck runnercheck editorcheck
+verify: test fmt determinism fixpoint differential runtimecheck ownershipcheck warnings ubsan buildcheck runnercheck editorcheck
+
+.PHONY: ownershipcheck
+ownershipcheck: build
+	$(PY) tests/quality/ownership_sanitizers.py --zen ./zen --cc "$(CC)"
 
 ## fixpoint: rebuilding the whole compiler preserves C and reproduces the seed.
 fixpoint: build

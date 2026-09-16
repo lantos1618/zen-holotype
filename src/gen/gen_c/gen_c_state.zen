@@ -41,6 +41,9 @@ Cleanup* = {
     return_to*: Res<usize>,
 }
 
+QueuedFunction* = { definition*: Def, inst*: Inst }
+QueuedMethod* = { method*: MethodRef, inst*: Inst }
+
 CBackend* = {
     tree*: Ast,
     check* :: Checker,
@@ -85,11 +88,8 @@ CBackend* = {
     actor_sites :: usize,
 
     // Reachable free functions and methods waiting to be lowered.
-    fn_queue* :: Vec<Def>,
-    m_queue* :: Vec<MethodRef>,
-    // Instantiations are parallel to their queues.
-    fn_insts :: Vec<Inst>,
-    m_insts :: Vec<Inst>,
+    fn_queue* :: Vec<QueuedFunction>,
+    m_queue* :: Vec<QueuedMethod>,
     // Instantiation of the function currently being lowered.
     inst* :: Inst,
     fn_seen :: Vec<String>,
@@ -518,17 +518,17 @@ CBackend* = {
 
     push_method = (self :: @Self, m: MethodRef, inst: Inst, sym: str)
                   Res<(), AllocError> {
+        self.m_queue.reserve(1).try();
         self.remember(sym).try();
-        self.m_queue.add(m).try();
-        self.m_insts.add(inst).try();
+        self.m_queue.add(QueuedMethod(method: m, inst: inst)).try();
         Ok(());
     }
 
     push_function = (self :: @Self, d: Def, inst: Inst, sym: str)
                     Res<(), AllocError> {
+        self.fn_queue.reserve(1).try();
         self.remember(sym).try();
-        self.fn_queue.add(d).try();
-        self.fn_insts.add(inst).try();
+        self.fn_queue.add(QueuedFunction(definition: d, inst: inst)).try();
         Ok(());
     }
 
@@ -539,12 +539,6 @@ CBackend* = {
         self.fn_seen.add(owned).try();
         self.fn_lookup.set(key, true)
     }
-
-    // What the i-th queued thing is instantiated at. An entry with no
-    // row is not generic, which is what an empty `Inst` means.
-    queued_inst* = (self: @Self, i: usize) Res<Inst> { self.fn_insts.get(i) }
-
-    queued_m_inst* = (self: @Self, i: usize) Res<Inst> { self.m_insts.get(i) }
 
     // Entering an instantiation is not a stack. A body is lowered to
     // completion before the next queue entry is popped — a call inside
@@ -946,10 +940,8 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         defer_envs: a.Vec<String>(),
         defer_env_ids: a.Vec<usize>(),
         defer_sites: 0,
-        fn_queue: a.Vec<Def>(),
-        m_queue: a.Vec<MethodRef>(),
-        fn_insts: a.Vec<Inst>(),
-        m_insts: a.Vec<Inst>(),
+        fn_queue: a.Vec<QueuedFunction>(),
+        m_queue: a.Vec<QueuedMethod>(),
         inst: a.Inst(),
         fn_seen: a.Vec<String>(),
         fn_lookup: a.Map<str, bool>(),

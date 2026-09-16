@@ -1,4 +1,4 @@
-Ast, ExprId, TypeId, Span = std.ast
+Ast, ExprId, TypeId, Span, BlockId = std.ast
 nowhere = std.ast
 BinOp, Unary, Binary, Access = std.ast
 Alloc, AllocError = std.mem
@@ -16,6 +16,7 @@ Inst, InstEdge = sema.sema_inst
 DiscriminantCall = sema.sema_discriminant
 VariantNameCall = sema.sema_variant_name
 NumericConversion = sema.sema_numeric
+OwnCheck, StoreEffects = sema.sema_store
 
 // One scoped name. Mutability feeds receiver/ownership checks, param feeds LSP
 // classification, and span identifies the original binding in diagnostics.
@@ -62,6 +63,7 @@ CheckedCall* = {
     inst*: Inst,
     result*: TyId,
     signature*: Res<CallSignature>,
+    body*: Res<BlockId>,
 }
 
 // An absent entry has no recorded call check. In-progress and
@@ -111,6 +113,9 @@ Checker* = {
 
     calls :: Map<ExprId, CallResolution>,
 
+    own_checks* :: Vec<OwnCheck>,
+    store_effects* :: StoreEffects,
+
     // Validated standard numeric operations, keyed by declaration identity.
     numeric_conversions* :: Map<DeclId, NumericConversion>,
 
@@ -151,6 +156,14 @@ Checker* = {
     // -----------------------------------------------------------------
     // what came out
     // -----------------------------------------------------------------
+
+    saved_bindings* = (self: @Self) Res<Vec<Binding>, AllocError> {
+        self.locals.map(self.alloc, (binding) { binding })
+    }
+
+    use_bindings* = (self :: @Self, bindings: Vec<Binding>) () {
+        self.locals = bindings;
+    }
 
     diag_count* = (self: @Self) usize { self.diags.len }
 
@@ -769,6 +782,8 @@ Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
         meta_recheck: 0,
         supply_memo: a.Map<ExprId, TyId>(),
         calls: a.Map<ExprId, CallResolution>(),
+        own_checks: a.Vec<OwnCheck>(),
+        store_effects: a.StoreEffects(),
         numeric_conversions: a.Map<DeclId, NumericConversion>(),
         discriminant_calls: a.Map<ExprId, DiscriminantCall>(),
         variant_name_calls: a.Map<ExprId, VariantNameCall>(),

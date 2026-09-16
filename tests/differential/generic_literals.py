@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[2]
 DECLARATIONS = """identity = <T>(value: T) T { value }
 inferred = <T>(witness: T, value: T) T { value }
 apply = <T>(value: T, body: (value: T) T) T { body(value) }
+element = <T>(values: [T, 1]) T { values[0] }
+nested = <T>(values: [[T, 1], 1]) T { values[0][0] }
 Take = { run = <T>(self: @Self, value: T) T { value } }
 """
 
@@ -25,6 +27,11 @@ def expressions(ty: str, value: int) -> dict[str, str]:
         "inferred": f"inferred(witness, {value})",
         "callback": f"apply({value}, (v: {ty}) {{ v }})",
         "method": f"take.run<{ty}>({value})",
+        "array_argument": f"element<{ty}>([{value}])",
+        "array_receiver": f"[{value}].element<{ty}>()",
+        "paren_array_receiver": f"([{value}]).element<{ty}>()",
+        "nested_array_receiver": f"[[{value}]].nested<{ty}>()",
+        "match_array_receiver": f"(true.match({{ true => [{value}], false => [0] }})).element<{ty}>()",
     }
 
 
@@ -48,7 +55,7 @@ def require_rejection(result: subprocess.CompletedProcess[str], ty: str, label: 
     if result.returncode != 1 or f"does not fit {ty}" not in diagnostics:
         raise RuntimeError(f"{label}: expected a positioned {ty} range rejection, got "
                            f"{result.returncode}\n{result.stdout}{result.stderr}")
-    if "main.zen:5:" not in diagnostics:
+    if f"main.zen:{DECLARATIONS.count(chr(10)) + 1}:" not in diagnostics:
         raise RuntimeError(f"{label}: range rejection lost the call's source position")
 
 
@@ -118,7 +125,7 @@ def main() -> int:
         raise RuntimeError("widened source escaped the rejection oracle")
     report = {"compiler_sha256": hashlib.sha256(Path(zen).read_bytes()).hexdigest(),
               "cases": results, "accepted_native_runs": 3, "rejected": rejected,
-              "scope": "8/16-bit signed/unsigned literal boundaries in five generic call forms"}
+              "scope": "8/16-bit signed/unsigned literal boundaries in scalar and aggregate generic call forms"}
     (out / "results.json").write_text(json.dumps(report, indent=2))
     print(f"generic literals: {len(functions)} values preserved in 3 native runs, "
           f"{rejected} inputs rejected by check and build without publication, widened control detected")

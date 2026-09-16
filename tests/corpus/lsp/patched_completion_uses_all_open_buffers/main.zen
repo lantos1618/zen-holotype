@@ -1,0 +1,115 @@
+str, String = std.text
+Alloc, AllocError = std.mem
+Server, serve = lsp.lsp_serve
+write_frame, frame_at = lsp.lsp_frame
+write_text = std.json
+
+DOC*: str = "Point = app.shape\n\nnear = (q: Point) i32 {\n    q.\n}\n"
+
+URI*: str = "file://src/app/app.zen"
+
+ROOT_URI*: str = "file://."
+
+main = (env: Env) Res<i32, AllocError> {
+    a ::= env.mem.alloc();
+
+    input ::= a.String().try();
+    open_session(a, input).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}",
+        input
+    ).try();
+    open_doc(a, input).try();
+    dependency(a, "Point* = { fresh*: i32 }\n", input).try();
+    ask(a, input).try();
+    ask(a, input).try();
+    change_dependency(a, "Point* = { newer*: i32 }\n", input).try();
+    ask(a, input).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didClose\",\"params\":{\"textDocument\":{\"uri\":\"file://src/app/shape.zen\"}}}",
+        input
+    ).try();
+    ask(a, input).try();
+    write_frame(
+        "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}",
+        input
+    ).try();
+
+    s   ::= a.Server(env);
+    out ::= a.String().try();
+    serve(s, input.view(), out).try();
+    walk_replies(out.view());
+    println("builds {}", s.completion_builds());
+    Ok(0);
+}
+
+open_session = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":"
+    ).try();
+    write_text(ROOT_URI, body).try();
+    body.add("}}").try();
+    write_frame(body.view(), into)
+}
+
+open_doc = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":"
+    ).try();
+    write_text(URI, body).try();
+    body.add(",\"text\":").try();
+    write_text(DOC, body).try();
+    body.add("}}}").try();
+    write_frame(body.view(), into)
+}
+
+ask = (a: Alloc, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add(
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":"
+    ).try();
+    write_text(URI, body).try();
+    body.add("},\"position\":{\"line\":3,\"character\":6}}}").try();
+    write_frame(body.view(), into)
+}
+
+walk_replies = (out: str) () {
+    at    ::= 0;
+    seen  ::= 0;
+    going ::= true;
+    loop(() { going && at < out.len }, (h) {
+        frame_at(out, at).match({
+            Err(_) => { going = false; },
+            Ok(fr) => { at = fr.next; shown(seen, fr.body); seen = seen + 1; },
+        });
+    });
+}
+
+shown = (i: usize, body: str) () {
+    (i > 0 && i < 5).match({
+        true  => println("    {}", body),
+        false => (),
+    });
+}
+
+dependency = (a: Alloc, text: str, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"file://src/app/shape.zen\",\"text\":"
+    ).try();
+    write_text(text, body).try();
+    body.add("}}}").try();
+    write_frame(body.view(), into)
+}
+
+change_dependency = (a: Alloc, text: str, into :: String) Res<(), AllocError> {
+    body ::= a.String().try();
+    body.add(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":\"file://src/app/shape.zen\",\"version\":2},\"contentChanges\":[{\"text\":"
+    ).try();
+    write_text(text, body).try();
+    body.add("}]}}").try();
+    write_frame(body.view(), into)
+}

@@ -17,7 +17,9 @@ def_type = sema.sema_type
 ImplId = sema.sema_id
 run_of = lsp.lsp_pos
 check_standalone = lsp.lsp_query
-check_build = zen.zen_build
+check_workspace = zen.zen_build
+root_for, relative_to = zen.zen_path
+path_of = lsp.lsp_uri
 SourceRoot = zen.zen_path
 obj, arr, Nest, written, to_json = std.json
 KEYWORD_COUNT, keyword_at = std.lex
@@ -79,6 +81,13 @@ MemberCache* = {
 
     invalidate* = (self :: @Self) () { self.stale = true; }
 
+    // The patched document is part of the key; other buffers are dependencies.
+    changed* = (self :: @Self, path: str) () {
+        self.cur.when_ok((answer) {
+            (!answer.path.eq(path)).then(() { self.invalidate(); });
+        });
+    }
+
     complete* = (
         self      :: @Self,
         env       : Env,
@@ -86,6 +95,7 @@ MemberCache* = {
         workspace : str,
         path      : str,
         text      : str,
+        docs      : Map<str, str>,
         line      : usize,
         character : usize,
         out       :: Vec<Item>
@@ -96,7 +106,7 @@ MemberCache* = {
             true  => {
                 self.matches(workspace, path, trig.text).match({
                     true  => written(),
-                    false => self.refill(env, workspace, path, trig.text),
+                    false => self.refill(env, workspace, path, trig.text, docs),
                 }).try();
                 self.filtered(trig.prefix, out).try();
                 Ok(true)
@@ -117,7 +127,7 @@ MemberCache* = {
     }
 
     refill = (self :: @Self, env: Env, workspace: str, path: str,
-              patched: str) Res<(), AllocError> {
+              patched: str, docs: Map<str, str>) Res<(), AllocError> {
         qa    ::= env.mem.alloc();
         found ::= qa.Vec<Item>();
         workspace.is_empty().match({
@@ -131,17 +141,17 @@ MemberCache* = {
                 )
             },
             false => {
-                checked = check_build(
-                    env,
-                    qa,
-                    workspace,
-                    path,
-                    patched,
-                    self.roots
-                ).try();
+                root = root_for(env, qa, workspace, path, self.roots);
+                rel  = relative_to(root, path);
+                overlay ::= qa.Map<str, str>();
+                docs.pairs((h, uri, text) {
+                    overlay.set(path_of(uri), text).try();
+                });
+                overlay.set(path, patched).try();
+                checked = check_workspace(env, qa, root, rel, overlay).try();
                 checked.c.items_from(
                     qa,
-                    checked.rel,
+                    rel,
                     Trigger(text: patched, prefix: "", dot: true),
                     found
                 )

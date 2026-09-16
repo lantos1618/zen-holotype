@@ -67,8 +67,6 @@ separate requirements and should not be added to a function that only orders.
   interprocedural allocator-region relations and repeated-loop fixed points
   remain incomplete; these fixes do not establish whole-language memory safety.
 
-## Further ownership and compiler improvements
-
 - Ownership follows direct field overrides, aggregate/indexed values, match
   results, and block-local result aliases. Repeated callback provenance is
   iterated to a fixed point before ordinary diagnostics run once. Exact safe
@@ -101,6 +99,30 @@ separate requirements and should not be added to a function that only orders.
 - Aggregate differential checks include reproducible generated integer
   expressions against an independent evaluator, including lazy match and
   receiver effects, across C optimization levels and formatter roundtrips.
+
+## Further ownership and compiler improvements
+
+Checked helper calls now carry the selected function body. After type checking,
+whole-parameter store relations are solved to a fixed point across direct free,
+generic, and inherent method calls. Ownership then rejects passing local-arena
+views to helpers that store through borrowed destinations and carries those
+stores into local-record and loop provenance. Caller-owned allocation and
+explicit arena transfer remain supported. Field-projected parameter origins,
+raw pointer operations, indirect-call effects, and general return-region
+relations still require richer contracts; this is not whole-language lifetime
+safety.
+
+`make verify` includes generated-program AddressSanitizer checks for safe
+helper storage and arena transfer, with a deliberate use-after-free control.
+The generic literal matrix covers arrays, nested arrays, parentheses, and
+match-produced receivers as well as scalar calls. Byte and chunk JSON feeds
+both refuse input after completion, including a truncated finish.
+
+Patched member completion checks the complete open-document overlay. Changes
+to another buffer invalidate its cached member answer; equivalent patches in
+the requesting buffer retain reuse. Closing a dependency restores its disk
+contents. Full document snapshot copying remains a performance measurement
+and storage-design task.
 
 ## First implementation batch
 
@@ -589,6 +611,30 @@ The desired everyday experience is a caller choosing allocation scope once,
 helpers returning meaningful values, normal loops requiring little ceremony,
 and ownership errors explaining whose storage would expire. These properties
 must hold through helpers and modules, not only in one attractive snippet.
+
+The next implementation priorities are:
+
+1. Extend ownership summaries with field paths and return-region relations,
+   then define effects for indirect calls. Each supported relation needs both
+   an escaping-view rejection and a caller-owned/explicit-transfer acceptance
+   across modules, generics, and recursive calls. Run the accepted generated
+   programs under ASan. Keep unsupported relations explicit until these
+   contracts are enforced.
+2. Complete semantic call records for field defaults and generic trait bodies,
+   including argument binding and conversions. Remove backend compatibility
+   lookup only when every accepted call has authoritative per-instantiation
+   facts. Exercise receiver evaluation order, named arguments, and defaults
+   across bootstrap and generated-C checks.
+3. Measure open-document copying and dependency invalidation with representative
+   workspaces. Give document storage a lifetime separate from each edit before
+   replacing snapshots; gate allocations and verify cache reuse, unsaved
+   dependencies, close/reopen behavior, and recovery after failed checks.
+4. Migrate remaining related backend vectors to complete records, and shrink
+   generated-C warning baselines by fixing emission. Preserve fallible
+   publication and deterministic output through each migration.
+5. Reassess the representative applications above after these changes. A clean
+   verification run proves its covered behaviors; the review must separately
+   assess API clarity, diagnostic usefulness, and predictable cost.
 
 The independent earlier review put the synchronous task at Zen 7/10, Go 8/10,
 and Nim 8.5/10, with an approximate half-point uncertainty. Those are subjective

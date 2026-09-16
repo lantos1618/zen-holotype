@@ -157,7 +157,7 @@ not a numerical ergonomics rating.
 
 Call checking now publishes a `CheckedCall` containing the selected declaration
 or member provider, substitutions, result type, and optional function signature
-with its implicit receiver. These facts are published together after argument
+with its implicit receiver, plus the selected body when available. These facts are published together after argument
 and callback checking succeeds. `Checking` and `Rejected` states expose no
 selection, including when a contextual recheck replaces an earlier success.
 Generic-instantiation edges are published at the same successful boundary.
@@ -176,6 +176,10 @@ still need explicit shared representations. Checked generic facts can mention
 enclosing type parameters; successful checking does not mean specialization is
 finished. Calls in deferred contexts still require completion. A declaration
 ID alone remains insufficient evidence that a call is valid.
+
+Function and method worklists keep each target and its substitutions in one
+queue record. Queue storage is reserved before publishing the seen symbol,
+and lowering no longer substitutes an empty instantiation for a missing row.
 
 Keep instance discovery separate from building an individual function. Extend
 the IR one feature family at a time, with explicit places, aggregate values,

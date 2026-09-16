@@ -20,6 +20,7 @@ Pin, pin_captured, refuse_pinned, refuse_pinned_at = sema.sema_pin
 check_drop_copy, is_drop_type = sema.sema_drop
 is_handle_ty, refuse_handle_at, spelled_name = sema.sema_handle
 spelled_lambda, call_callee = sema.sema_call
+OwnCheck, call_stores, transfer_call_stores = sema.sema_store
 
 OwnVar* = {
     name*: str,
@@ -506,12 +507,52 @@ Own* = (a: Alloc) Res<Own, AllocError> {
 
 check_own* = (c :: Checker, f: Function, body: BlockId, ctx: Ctx)
              Res<(), AllocError> {
+    c.own_checks.add(OwnCheck(
+        function: f,
+        body: body,
+        ctx: ctx,
+        bindings: c.saved_bindings().try()
+    ))
+}
+
+check_own_body* = (c :: Checker, f: Function, body: BlockId, ctx: Ctx)
+                  Res<(), AllocError> {
     o ::= c.alloc.Own().try();
     o.method = receiver_method(f, ctx);
     o.body   = body;
     c.own_params(o, f).try();
     c.own_block(o, body, ctx).try();
     Ok(());
+}
+
+store_origin* = (c :: Checker, o :: Own, target: ExprId, value: ExprId)
+                Res<(), AllocError> {
+    c.check_arena_stored(o, target, value).try();
+    c.transfer_store_origin(o, target, value)
+}
+
+transfer_store_origin* = (c :: Checker, o :: Own, target: ExprId, value: ExprId)
+                         Res<(), AllocError> {
+    c.path_root(o, target).when_ok((root) {
+        source     = c.arena_source(o, value);
+        existing   = c.arena_source(o, target);
+        same_owner = source.match({
+            None     => false,
+            Ok(from) => existing.match({ None => false, Ok(to) => from.index == to.index }),
+        });
+        (c.is_arena_backed(o, value) && !same_owner).then(() {
+            o.taint_root(
+                root,
+                Provenance(
+                    scoped: c.scope_alias(o, value),
+                    arena: true,
+                    source: c.arena_source(o, value),
+                    fields: o.alloc.Vec<FieldOrigin>()
+                )
+            );
+        });
+    });
+    Ok(())
 }
 
 receiver_method = (f: Function, ctx: Ctx) str {
@@ -906,6 +947,7 @@ own_call = (c :: Checker, o :: Own, id: ExprId, k: Call, ctx: Ctx)
     c.check_scope_stored(id, k).try();
     c.own_expr(o, k.callee, ctx).try();
     c.own_args(o, id, k, ctx).try();
+    c.call_stores(o, id, k).try();
     c.own_destruction(o, id, k).try();
     Ok(());
 }
@@ -1151,6 +1193,7 @@ flow_expr = (c :: Checker, o :: Own, id: ExprId, ctx: Ctx)
                     }),
                 });
             });
+            c.transfer_call_stores(o, id, k).try();
         },
         Match(m)      => {
             c.flow_expr(o, m.scrutinee, ctx).try();

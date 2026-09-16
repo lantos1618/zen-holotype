@@ -61,7 +61,7 @@ Decoder* = {
         events :: Vec<JsonEvent>
     ) Res<(), JsonFault> {
         bytes.loop((h, i, byte) {
-            self.feed_byte(byte, events).try();
+            self.consume_byte(byte, events).try();
         });
         Ok(())
     }
@@ -73,6 +73,12 @@ Decoder* = {
         byte   : u8,
         events :: Vec<JsonEvent>
     ) Res<(), JsonFault> {
+        (!self.finished).ensure(JsonFault.Trailing(self.at)).try();
+        self.consume_byte(byte, events)
+    }
+
+    consume_byte = (self :: @Self, byte: u8, events :: Vec<JsonEvent>)
+                   Res<(), JsonFault> {
         consumed ::= false;
         loop(!consumed, (h) {
             consumed = self.step(byte, events).try();
@@ -387,12 +393,12 @@ Decoder* = {
         self.finished.match({
             true  => Err(JsonFault.Trailing(self.at)),
             false => {
+                self.finished = true;
                 self.mode.match({
                     Atom => self.finish_atom(events).try(),
                     _    => (),
                 });
-                self.finished = true;
-                incomplete    = self.mode.match({
+                incomplete = self.mode.match({
                     Quoted => true,
                     _      => self.frames.len > 0 || !self.root_done,
                 });

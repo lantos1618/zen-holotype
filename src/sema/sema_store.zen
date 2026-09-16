@@ -1,0 +1,347 @@
+// Borrowed parameter storage effects, solved after call checking. Summaries
+// form a finite monotone relation, including mutually recursive helpers.
+// Field-projected origins, raw pointer operations, and indirect calls need
+// richer region contracts; these summaries describe whole-parameter stores.
+
+Alloc, AllocError = std.mem
+Vec, Map = std.collections
+str = std.text
+Range = std.core
+Function, BlockId, ExprId, Call, Bind = std.ast
+WalkVisitor, WalkEvent, WalkNode, walk = std.ast
+Checker, Ctx, Binding, UNRESOLVED = sema.sema_check
+Own, check_own_body, store_origin, transfer_store_origin = sema.sema_own
+truncate = sema.sema_check
+
+OwnCheck* = {
+    function*: Function,
+    body*: BlockId,
+    ctx*: Ctx,
+    bindings*: Vec<Binding>,
+}
+
+Store = { target: usize, source: usize }
+Summary = { function: Function, stores :: Vec<Store> }
+StoreEffects* = { rows :: Map<BlockId, Summary>, alloc: Alloc }
+StoreEffects* = (a: Alloc) StoreEffects {
+    StoreEffects(rows: a.Map<BlockId, Summary>(), alloc: a)
+}
+
+finish_ownership* = (c :: Checker) Res<(), AllocError> {
+    c.store_effects.solve(c).try();
+    saved = c.saved_bindings().try();
+    c.own_checks.loop((job) {
+        c.use_bindings(job.bindings);
+        c.check_own_body(job.function, job.body, job.ctx).try();
+    });
+    c.use_bindings(saved);
+    Ok(())
+}
+
+solve = (effects :: StoreEffects, c: Checker) Res<(), AllocError> {
+    bodies ::= effects.alloc.Vec<BlockId>();
+    c.own_checks.loop((job) {
+        job.function.params.find((parameter) { parameter.mutable }).match({
+            None => false, Ok(_) => true,
+        }).then(() {
+            bodies.add(job.body).try();
+            effects.rows.set(
+                job.body,
+                Summary(
+                    function: job.function,
+                    stores: effects.alloc.Vec<Store>()
+                )
+            ).try();
+        });
+    });
+    changed ::= true;
+    loop(() { changed }, (h) {
+        changed = false;
+        bodies.loop((body) {
+            summary = effects.rows.get(body).ok_or(AllocError.OutOfMemory).try();
+            scan ::= effects.alloc.StoreScan(c, effects, summary).try();
+            c.tree.walk(effects.alloc, WalkNode.Block(body), scan).try();
+            changed = changed || scan.summary.stores.len > summary.stores.len;
+            effects.rows.set(body, scan.summary).try();
+        });
+    });
+    Ok(())
+}
+
+// Written arguments are matched by parameter identity, including named
+// arguments and an implicit receiver. Missing defaults carry no caller view.
+actual = (c: Checker, id: ExprId, call: Call, f: Function, index: usize)
+         Res<ExprId> {
+    signature  = c.checked_call(id).try().signature.try();
+    receiver   = signature.receiver;
+    off: usize = receiver.match({ None => 0, Ok(_) => 1 });
+    (index < off).match({
+        true  => receiver,
+        false => {
+            param = f.params.get(index).try();
+            named = call.args.find((arg) {
+                arg.name.match({ None => false, Ok(name) => name.text.eq(
+                    param.name.text
+                ) })
+            });
+            named.match({
+                Ok(arg) => Ok(arg.value),
+                None    => call.args.get(index - off).match({
+                    None    => None,
+                    Ok(arg) => arg.name.match({ None => Ok(
+                        arg.value
+                    ), Ok(_) => None }),
+                }),
+            })
+        },
+    })
+}
+
+selected_summary = (
+    effects : StoreEffects,
+    c       : Checker,
+    id      : ExprId
+) Res<Summary> {
+    effects.rows.get(c.checked_call(id).try().body.try())
+}
+
+call_stores* = (c :: Checker, own :: Own, id: ExprId, call: Call)
+               Res<(), AllocError> {
+    c.store_effects.selected_summary(c, id).when_ok((summary) {
+        summary.stores.loop((effect) {
+            actual(c, id, call, summary.function, effect.target).when_ok((target) {
+                actual(c, id, call, summary.function, effect.source).when_ok((source) {
+                    c.store_origin(own, target, source).try();
+                });
+            });
+        });
+    });
+    Ok(())
+}
+
+transfer_call_stores* = (c :: Checker, own :: Own, id: ExprId, call: Call)
+                        Res<(), AllocError> {
+    c.store_effects.selected_summary(c, id).when_ok((summary) {
+        summary.stores.loop((effect) {
+            actual(c, id, call, summary.function, effect.target).when_ok((target) {
+                actual(c, id, call, summary.function, effect.source).when_ok((source) {
+                    c.transfer_store_origin(own, target, source).try();
+                });
+            });
+        });
+    });
+    Ok(())
+}
+
+OriginBinding = { name: str, origins :: Vec<usize>, target: Res<usize> }
+StoreScan = {
+    check: Checker,
+    effects: StoreEffects,
+    summary :: Summary,
+    vars :: Vec<OriginBinding>,
+    scopes :: Vec<usize>,
+    values :: Map<ExprId, Vec<usize>>,
+    blocks :: Map<BlockId, Vec<usize>>,
+    alloc: Alloc,
+
+    binding = (self: @Self, name: str) Res<usize> {
+        reverse = Range(0, self.vars.len).find((i) {
+            self.vars.get(self.vars.len - 1 - i).match({
+                None => false, Ok(value) => value.name.eq(name),
+            })
+        }).try();
+        Ok(self.vars.len - 1 - reverse)
+    }
+
+    origins = (self: @Self, id: ExprId) Vec<usize> {
+        self.values.get(id).value_or(self.alloc.Vec<usize>())
+    }
+
+    root = (self: @Self, id: ExprId) Res<usize> {
+        self.check.tree.expr_at(id).kind.match({
+            Name(n)   => self.vars.get(self.binding(n.text).try()).try().target,
+            Access(a) => self.root(a.base),
+            Index(x)  => self.root(x.base),
+            Paren(p)  => self.root(p.inner),
+            _         => None,
+        })
+    }
+
+    add_store = (self :: @Self, target: usize, sources: Vec<usize>)
+                Res<(), AllocError> {
+        sources.loop((source) {
+            self.summary.stores.find(
+                (e) { e.target == target && e.source == source }
+            )
+                .match({
+                    Ok(_) => (),
+                    None  => self.summary.stores.add(Store(
+                        target: target,
+                        source: source
+                    )).try(),
+                });
+        });
+        Ok(())
+    }
+
+    bind = (self :: @Self, bind: Bind) Res<(), AllocError> {
+        sources = self.origins(bind.value);
+        self.root(bind.target).when_ok((target) { self.add_store(target, sources).try(); });
+        self.check.tree.expr_at(bind.target).kind.match({
+            Name(n) => self.binding(n.text).match({
+                None  => self.vars.add(OriginBinding(
+                    name: n.text,
+                    origins: sources,
+                    target: None
+                )),
+                Ok(i) => {
+                    row ::= self.vars.get(i).ok_or(AllocError.OutOfMemory).try();
+                    row.origins.merge(sources).try();
+                    self.vars.set(i, row);
+                    Ok(())
+                },
+            }),
+            _       => Ok(()),
+        })
+    }
+
+    expression = (self :: @Self, id: ExprId) Res<(), AllocError> {
+        node = self.check.tree.expr_at(id);
+        origins ::= self.alloc.Vec<usize>();
+        node.kind.match({
+            Name(n)       => self.binding(n.text).when_ok((i) {
+                origins.merge(
+                    self.vars.get(i).ok_or(AllocError.OutOfMemory).try().origins
+                ).try();
+            }),
+            Access(a)     => {
+                self.check.callee_access.get(id).value_or(false).then(() {
+                    origins.merge(self.origins(a.base)).try();
+                });
+            },
+            Index(x)      => { origins.merge(self.origins(x.base)).try(); },
+            Paren(p)      => { origins.merge(self.origins(p.inner)).try(); },
+            Try(t)        => { origins.merge(self.origins(t.operand)).try(); },
+            Consume(x)    => { origins.merge(self.origins(x.operand)).try(); },
+            Array(a)      => a.elems.loop(
+                (e) { origins.merge(self.origins(e)).try(); }
+            ),
+            FixedArray(a) => a.elems.loop(
+                (e) { origins.merge(self.origins(e)).try(); }
+            ),
+            Block(b)      => { origins.merge(self.blocks.get(b).value_or(self.alloc.Vec<usize>())).try(); },
+            Match(m)      => m.arms.loop(
+                (arm) { origins.merge(self.origins(arm.body)).try(); }
+            ),
+            Call(call)    => {
+                origins.merge(self.origins(call.callee)).try();
+                call.args.loop(
+                    (arg) { origins.merge(self.origins(arg.value)).try(); }
+                );
+                self.effects.selected_summary(self.check, id).when_ok((summary) {
+                    summary.stores.loop((effect) {
+                        actual(self.check, id, call, summary.function, effect.target).when_ok((target) {
+                            actual(self.check, id, call, summary.function, effect.source).when_ok((source) {
+                                self.root(target).when_ok((parameter) {
+                                    self.add_store(
+                                        parameter,
+                                        self.origins(source)
+                                    ).try();
+                                });
+                            });
+                        });
+                    });
+                });
+            },
+            _             => (),
+        });
+        primitive = self.check.prim_name(self.check.expr_memo.get(id).value_or(UNRESOLVED));
+        (!primitive.is_empty() && !primitive.eq("str")).then(() { origins = self.alloc.Vec<usize>(); });
+        self.values.set(id, origins)
+    }
+}
+
+StoreScan.impl(WalkVisitor, {
+    visit = (self :: @Self, event: WalkEvent) Res<(), AllocError> {
+        event.match({
+            Enter(node) => node.match({
+                Block(_) => self.scopes.add(self.vars.len).try(),
+                Expr(id) => self.check.tree.expr_at(id).kind.match({
+                    Lambda(l) => {
+                        self.scopes.add(self.vars.len).try();
+                        l.params.loop((p) {
+                            self.vars.add(OriginBinding(
+                                name: p.name.text,
+                                origins: self.alloc.Vec<usize>(),
+                                target: None
+                            )).try();
+                        });
+                    },
+                    _         => (),
+                }),
+                _        => (),
+            }),
+            Leave(node) => node.match({
+                Statement(s) => s.value.kind.match({ Bind(b) => self.bind(
+                    b
+                ).try(), _ => () }),
+                Expr(id)     => {
+                    self.expression(id).try();
+                    self.check.tree.expr_at(id).kind.match({
+                        Lambda(_) => truncate(
+                            self.vars,
+                            self.scopes.take(self.scopes.len - 1).ok_or(AllocError.OutOfMemory).try()
+                        ),
+                        _         => (),
+                    });
+                },
+                Block(id)    => {
+                    block = self.check.tree.block_at(id);
+                    self.blocks.set(
+                        id,
+                        block.value.match({ None => self.alloc.Vec<usize>(), Ok(value) => self.origins(
+                            value
+                        ) })
+                    ).try();
+                    truncate(
+                        self.vars,
+                        self.scopes.take(self.scopes.len - 1).ok_or(AllocError.OutOfMemory).try()
+                    );
+                },
+                _            => (),
+            }),
+        });
+        Ok(())
+    }
+})
+
+StoreScan = (a: Alloc, c: Checker, effects: StoreEffects, summary: Summary)
+            Res<StoreScan, AllocError> {
+    vars ::= a.Vec<OriginBinding>();
+    summary.function.params.loop((h, i, p) {
+        origins ::= a.Vec<usize>();
+        origins.add(i).try();
+        vars.add(OriginBinding(
+            name: p.name.text,
+            origins: origins,
+            target: p.mutable.match({ true => Ok(i), false => None })
+        )).try();
+    });
+    Ok(StoreScan(
+        check: c,
+        effects: effects,
+        summary: summary,
+        vars: vars,
+        scopes: a.Vec<usize>(),
+        values: a.Map<ExprId, Vec<usize>>(),
+        blocks: a.Map<BlockId, Vec<usize>>(),
+        alloc: a
+    ))
+}
+
+merge = (into :: Vec<usize>, values: Vec<usize>) Res<(), AllocError> {
+    values.loop(
+        (value) { (!value.is_in(into)).then(() { into.add(value).try(); }); }
+    );
+    Ok(())
+}

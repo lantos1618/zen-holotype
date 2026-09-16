@@ -203,8 +203,8 @@ overrun_at_fn = (be :: CBackend, fi: usize) Res<(), AllocError> {
     be.fn_queue.get(fi).match({
         None  => Ok(()),
         Ok(d) => be.report(
-            d.span.file,
-            d.span,
+            d.definition.span.file,
+            d.definition.span,
             GenFault.Overrun(MAX_FUNCTIONS)
         ),
     }).try();
@@ -214,7 +214,7 @@ overrun_at_fn = (be :: CBackend, fi: usize) Res<(), AllocError> {
 overrun_at_method = (be :: CBackend, mi: usize) Res<(), AllocError> {
     be.m_queue.get(mi).match({
         None  => Ok(()),
-        Ok(m) => be.overrun_at_decl(m),
+        Ok(m) => be.overrun_at_decl(m.method),
     }).try();
     Ok(());
 }
@@ -239,27 +239,15 @@ overrun_at_decl = (be :: CBackend, m: MethodRef) Res<(), AllocError> {
 // it — and a queue entry carries the instantiation precisely so the
 // symbol above the body is the symbol the call site wrote.
 lower_queued = (be :: CBackend, i: usize) Res<(), AllocError> {
-    be.enter_inst(be.queued_inst(i).match({
-        Ok(x) => x,
-        None  => be.alloc.Inst(),
-    }));
-    be.fn_queue.get(i).match({
-        None  => Ok(()),
-        Ok(d) => be.lower_def(d),
-    }).try();
-    Ok(());
+    queued = be.fn_queue.get(i).ok_or(AllocError.OutOfMemory).try();
+    be.enter_inst(queued.inst);
+    be.lower_def(queued.definition)
 }
 
 lower_queued_method = (be :: CBackend, i: usize) Res<(), AllocError> {
-    be.enter_inst(be.queued_m_inst(i).match({
-        Ok(x) => x,
-        None  => be.alloc.Inst(),
-    }));
-    be.m_queue.get(i).match({
-        None  => Ok(()),
-        Ok(m) => be.lower_method_ref(m),
-    }).try();
-    Ok(());
+    queued = be.m_queue.get(i).ok_or(AllocError.OutOfMemory).try();
+    be.enter_inst(queued.inst);
+    be.lower_method_ref(queued.method)
 }
 
 lower_def = (be :: CBackend, d: Def) Res<(), AllocError> {

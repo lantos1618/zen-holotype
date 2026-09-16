@@ -134,6 +134,13 @@ array_elements = (c :: Checker, id: ExprId, a: TyArray) Res<(), AllocError> {
     c.tree.expr_at(id).kind.match({
         Array(lit) => c.elem_literals(lit, a.elem),
         Match(m)   => c.arm_arrays(m, a),
+        Paren(p)   => c.array_elements(p.inner, a),
+        Block(b)   => {
+            c.tree.block_at(b).value.when_ok((value) {
+                c.array_elements(value, a).try();
+            });
+            Ok(())
+        },
         _          => Ok(()),
     })
 }
@@ -157,6 +164,12 @@ literal_within = (c :: Checker, id: ExprId, want: TyId)
     node = c.tree.expr_at(id);
     node.kind.match({
         Match(m) => c.arm_literals(m, want),
+        Block(b) => {
+            c.tree.block_at(b).value.when_ok((value) {
+                c.literal_within(value, want).try();
+            });
+            Ok(())
+        },
         _        => c.folded_within(id, want),
     })
 }
