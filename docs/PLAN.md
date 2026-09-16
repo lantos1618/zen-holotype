@@ -342,7 +342,12 @@ regenerate `seed/zen.c`; otherwise the next clean build cannot compile `src/`.
 
 ## What not to build
 
-An optimizer (C is the backend; the C compiler optimizes). A second backend. A package manager beyond the hash-locked `Package` already in `DESIGN.md`. Incremental codegen. Each of these is a trap that consumes a stage and returns nothing until the language is real.
+Keep optimization passes, a package manager beyond the hash-locked `Package`,
+and semantic incremental code generation outside the current bootstrap work.
+C remains the full-language bootstrap backend. The implemented scalar JS,
+assembly, and experimental IR-to-C paths follow [BACKENDS.md](BACKENDS.md),
+which defines the staged shared-IR migration and the prerequisites for LLVM.
+Dependency-aware native build caching remains supported.
 
 ---
 

@@ -155,12 +155,27 @@ not a numerical ergonomics rating.
 
 ## Migration order and measurement
 
-Establish authoritative semantic call facts before migrating generic calls.
-Record the selected declaration, receiver, substitutions, argument bindings,
-and conversions only when checking succeeds. Recovery candidates and deferred
-generic obligations need distinct representations; a selected declaration ID
-alone does not prove a call is valid. Editor queries consume source-level
-semantic facts rather than execution IR.
+Call checking now publishes a `CheckedCall` containing the selected declaration
+or member provider, substitutions, result type, and optional function signature
+with its implicit receiver. These facts are published together after argument
+and callback checking succeeds. `Checking` and `Rejected` states expose no
+selection, including when a contextual recheck replaces an earlier success.
+Generic-instantiation edges are published at the same successful boundary.
+Editor queries use these source-level facts rather than execution IR.
+
+The scalar lowerer consumes the checked signature and result. C method
+specialization uses complete checked substitutions without repeating argument
+inference; missing or open substitutions still use the existing completion
+path. Literal ranges are checked again when generic substitution supplies a
+concrete numeric width, including literal receivers. An unresolved literal
+family does not impose a concrete width.
+
+This is not yet a complete call execution plan. Named/default argument
+bindings, conversions, member implementation identity, captures, and cleanup
+still need explicit shared representations. Checked generic facts can mention
+enclosing type parameters; successful checking does not mean specialization is
+finished. Calls in deferred contexts still require completion. A declaration
+ID alone remains insufficient evidence that a call is valid.
 
 Keep instance discovery separate from building an individual function. Extend
 the IR one feature family at a time, with explicit places, aggregate values,

@@ -38,7 +38,6 @@ construct* = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
 
 valid_construct = (c :: Checker, id: ExprId, call: Call, d: Def, ctx: Ctx)
                   Res<TyId, AllocError> {
-    c.resolve_call(id, d.id).try();
     args    = c.ctor_args(call, d, ctx).try();
     applied = c.types.named(d.id, d.qname, d.name, args).try();
     ty      = c.settled_ctor_type(call, d, ctx, args, applied).try();
@@ -447,6 +446,8 @@ denote_targs = (
     Ok(());
 }
 
+Instantiation* = { result*: TyId, inst*: Inst }
+
 instantiate* = (
     c       :: Checker,
     id      : ExprId,
@@ -454,7 +455,7 @@ instantiate* = (
     k       : Cand,
     actuals : Vec<Actual>,
     ctx     : Ctx
-) Res<Res<TyId>, AllocError> {
+) Res<Res<Instantiation>, AllocError> {
     c.type_arg_arity_fits(call, k).match({
         false => c.invalid_instantiation(id, k.name),
         true  => k.generic.match({
@@ -465,7 +466,10 @@ instantiate* = (
                 ctx,
                 c.alloc.Inst()
             ).try().match({
-                true  => Ok(Ok(k.ret)),
+                true  => Ok(Ok(Instantiation(
+                    result: k.ret,
+                    inst: c.alloc.Inst()
+                ))),
                 false => c.invalid_instantiation(id, k.name),
             }),
             true  => c.instantiated_ret(id, call, k, actuals, ctx),
@@ -485,7 +489,7 @@ instantiated_ret = (
     actuals : Vec<Actual>,
     ctx     : Ctx
 )
-                   Res<Res<TyId>, AllocError> {
+                   Res<Res<Instantiation>, AllocError> {
     inst = c.call_inst(call, k, actuals, ctx).try();
     c.check_inst_bounds(k, inst, c.tree.expr_at(id).span).try().match({
         false => Ok(None),
@@ -502,9 +506,10 @@ instantiated_ret = (
                 ).try()).match({
                 false => c.invalid_instantiation(id, k.name),
                 true  => {
-                    c.resolve_inst(id, inst).try();
-                    c.note_call_edge(id, k, inst).try();
-                    Ok(Ok(c.subst(k.ret, inst).try()))
+                    Ok(Ok(Instantiation(
+                        result: c.subst(k.ret, inst).try(),
+                        inst: inst
+                    )))
                 },
             })
         },
@@ -512,7 +517,7 @@ instantiated_ret = (
 }
 
 invalid_instantiation = (c :: Checker, id: ExprId, name: str)
-                        Res<Res<TyId>, AllocError> {
+                        Res<Res<Instantiation>, AllocError> {
     at = c.tree.expr_at(id).span;
     c.report(
         at.file,
@@ -522,11 +527,11 @@ invalid_instantiation = (c :: Checker, id: ExprId, name: str)
     Ok(None)
 }
 
-note_call_edge = (c :: Checker, id: ExprId, k: Cand, inst: Inst)
-                 Res<(), AllocError> {
+call_edge* = (c :: Checker, id: ExprId, k: Cand, inst: Inst)
+             Res<InstEdge, AllocError> {
     args ::= c.alloc.Vec<TyId>();
     k.tvars.loop((h, v) { args.add(inst.arg_for(v)).try() });
-    c.note_edge(InstEdge(
+    Ok(InstEdge(
         from_owner: c.owner_of_body(),
         to_owner: k.owner,
         to_name: k.name,

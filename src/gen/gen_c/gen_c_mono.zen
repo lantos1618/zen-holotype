@@ -139,8 +139,8 @@ recv_inst* = (be :: CBackend, rty: TyId) Res<Inst, AllocError> {
 }
 
 // A method's instantiation is the receiver's parameters plus the parameters
-// the method declares. The latter are inferred structurally from written call
-// arguments, using the same unifier as generic free calls.
+// the method declares. Complete checked substitutions are authoritative;
+// only missing or open bindings require structural inference.
 method_inst* = (
     be   :: CBackend,
     id   : ExprId,
@@ -153,57 +153,72 @@ method_inst* = (
               Res<Inst, AllocError> {
     inst ::= be.recv_inst(rty).try();
     owner = owner_of(be.check, decl.module.to_usize(), f.name.text).try();
+    complete ::= f.tparams.len == 0;
     // Callback annotations may settle a parameter before an untyped literal.
     // Preserve checked choices in the caller's current instantiation; only
     // missing or still-open bindings need inference below.
     be.check.resolved_inst(id).match({
         None        => (),
-        Ok(checked) => f.tparams.loop((parameter) {
-            variable = intern_var(be.check, parameter.name.text, owner).try();
-            checked.lookup(variable).match({
-                None    => (),
-                Ok(raw) => {
-                    actual = be.sub(raw).try();
-                    (!be.unsettled(actual)).then(() {
-                        inst.bind(variable, actual).try();
-                    });
-                },
+        Ok(checked) => {
+            complete = true;
+            f.tparams.loop((parameter) {
+                variable = intern_var(
+                    be.check,
+                    parameter.name.text,
+                    owner
+                ).try();
+                checked.lookup(variable).match({
+                    None    => { complete = false; },
+                    Ok(raw) => {
+                        actual = be.sub(raw).try();
+                        be.unsettled(actual).match({
+                            true  => { complete = false; },
+                            false => { inst.bind(variable, actual).try(); },
+                        });
+                    },
+                });
             });
-        }),
+        },
     });
-    // Written arguments belong to the caller's scope. Resolve them before
-    // introducing the callee's equally named parameters, then let structural
-    // inference fill only variables the explicit list did not bind.
-    call.targs.loop((h, i, written) {
-        f.tparams.get(i).match({
-            None       => (),
-            Ok(tparam) => {
-                v   = intern_var(be.check, tparam.name.text, owner).try();
-                got = be.check.type_from_ast(written, ctx).try();
-                inst.bind(v, sub(be, got).try()).try();
-            },
-        });
-    });
-    mark = be.enter_struct_tparams(decl).try();
-    be.enter_tparams(f.tparams, owner).try();
-    sctx = be.check.self_ctx(decl.module.to_usize(), rty).try();
-    f.params.loop((h, i, p) {
-        (i > 0).then(() {
-            call.args.get(i - 1).match({
+    (!complete).then(() {
+        // Written arguments belong to the caller's scope. Resolve them before
+        // introducing the callee's equally named parameters, then let structural
+        // inference fill only variables the explicit list did not bind.
+        call.targs.loop((h, i, written) {
+            f.tparams.get(i).match({
                 None       => (),
-                Ok(actual) => {
-                    declared = be.check.param_type(p, sctx).try();
-                    got      = be.arg_type(actual.value, ctx, declared).try();
-                    be.unify(declared, sub(be, got).try(), inst).try();
+                Ok(tparam) => {
+                    v   = intern_var(be.check, tparam.name.text, owner).try();
+                    got = be.check.type_from_ast(written, ctx).try();
+                    inst.bind(v, sub(be, got).try()).try();
                 },
             });
         });
+        mark = be.enter_struct_tparams(decl).try();
+        be.enter_tparams(f.tparams, owner).try();
+        sctx = be.check.self_ctx(decl.module.to_usize(), rty).try();
+        f.params.loop((h, i, p) {
+            (i > 0).then(() {
+                call.args.get(i - 1).match({
+                    None       => (),
+                    Ok(actual) => {
+                        declared = be.check.param_type(p, sctx).try();
+                        got      = be.arg_type(
+                            actual.value,
+                            ctx,
+                            declared
+                        ).try();
+                        be.unify(declared, sub(be, got).try(), inst).try();
+                    },
+                });
+            });
+        });
+        f.tparams.loop((h, tp) {
+            v = intern_var(be.check, tp.name.text, owner).try();
+            (!inst.bound(v)).then(() { inst.bind(v, v).try() });
+        });
+        be.leave_tparams(mark).try();
     });
-    f.tparams.loop((h, tp) {
-        v = intern_var(be.check, tp.name.text, owner).try();
-        (!inst.bound(v)).then(() { inst.bind(v, v).try() });
-    });
-    be.leave_tparams(mark).try();
     // Method literals need the same concrete defaults as free-call literals
     // before their type selects an impl or becomes part of a C symbol.
     settled ::= be.recv_inst(rty).try();
@@ -332,10 +347,8 @@ materialize_literal* = (be :: CBackend, t: TyId) Res<TyId, AllocError> {
 }
 
 // what the arguments say a parameter became
-// Sema records an instantiation at a call and a generic receiver, but
-// only inside a body it checked — top-level declarations only. Calls
-// inside a member body arrive with nothing recorded (`Map<K, V>.set` is
-// made of them), so the arguments are asked instead.
+// Calls in deferred defaults or context-dependent bodies can lack complete
+// checked substitutions. Their arguments supply the remaining bindings.
 // Structural and total: a declared type mentioning no parameter binds
 // nothing, and a shape that doesn't line up binds nothing rather than
 // guessing — the caller checks afterwards that every parameter came out

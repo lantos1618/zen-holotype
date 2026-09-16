@@ -138,6 +138,7 @@ fixpoint: build
 differential: build
 	$(PY) tests/differential/run.py --zen ./zen
 	$(PY) tests/differential/randomized.py --zen ./zen --cc "$(CC)"
+	$(PY) tests/differential/generic_literals.py --zen ./zen --cc "$(CC)"
 
 runtimecheck: build
 	$(PY) tests/bench/runtime/run.py --zen ./zen --cc "$(CC)" \

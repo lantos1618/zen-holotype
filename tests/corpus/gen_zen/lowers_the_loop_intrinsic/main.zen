@@ -11,6 +11,7 @@ Parser = std.parse.parser
 module = std.parse.parse_decl
 Ast = std.ast.ast_arena
 Checker = sema.sema_check
+check_all = sema.sema_decl
 Emit = gen.gen_emit
 CBackend, emit_program = gen.gen_c
 
@@ -18,7 +19,7 @@ CBackend, emit_program = gen.gen_c
 // shows in the C: a non-zero-based range, a condition whose variable
 // the body stores through, a `break` that carries a value, and a
 // `next` that skips the rest of a pass.
-PROGRAM : str = "LoopHandle = {}\nRange<T> = { start: usize, end: usize }\nloop = <R, T>(range: R, body: (h: LoopHandle, value: T) ()) Res<T>\nwhile_ = <T>(cond: () bool, body: (h: LoopHandle) ()) Res<T>\nmain = (env: i32) Res<i32> {\n    Range<usize>(start: 10, end: 13).loop((h, v) { });\n    i ::= 0;\n    while_(() { i < 3 }, (h) { i = i + 1; });\n    got = Range<usize>(start: 0, end: 10).loop((h, v) { (v == 3).match({ true => h.break(v), false => () }) });\n    Range<usize>(start: 0, end: 4).loop((h, v) { (v == 1).match({ true => h.next(), false => () }) });\n    Ok(0)\n}\n"
+PROGRAM : str = "LoopHandle = { next = (self: @Self) ()\n break = <T>(self: @Self, value: T) () }\nRange<T> = { start: usize, end: usize }\nloop = <R, T>(range: R, body: (h: LoopHandle, value: T) ()) Res<T>\nwhile_ = <T>(cond: () bool, body: (h: LoopHandle) ()) Res<T>\nmain = (env: i32) Res<i32> {\n    Range<usize>(start: 10, end: 13).loop((h, v) { });\n    i ::= 0;\n    while_(() { i < 3 }, (h) { i = i + 1; });\n    got = Range<usize>(start: 0, end: 10).loop((h, v) { (v == 3).match({ true => h.break(v), false => () }) });\n    Range<usize>(start: 0, end: 4).loop((h, v) { (v == 1).match({ true => h.next(), false => () }) });\n    Ok(0)\n}\n"
 
 emit = (a: Alloc, text: str, faults :: String) Res<String, AllocError> {
     lexed = scan(a, Source(file: "main.zen", text: text)).try();
@@ -26,6 +27,8 @@ emit = (a: Alloc, text: str, faults :: String) Res<String, AllocError> {
     m = p.module("main").try();
     p.tree.add_module(m).try();
     chk ::= a.Checker(p.tree).try();
+    chk.check_all().try();
+    chk.render_diags(faults).try();
     be  ::= a.CBackend(p.tree, chk).try();
     out ::= a.Emit().try();
     be.emit_program(0, out).try();

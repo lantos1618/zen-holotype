@@ -1,0 +1,60 @@
+Source, scan = std.lex
+Parser, module = std.parse
+Checker, Ctx = sema.sema_check
+check_all = sema.sema_decl
+call_type = sema.sema_call
+ExprId, Call = std.ast
+
+recheck = (c :: Checker, id: ExprId, call: Call, ty: str)
+          Res<(), AllocError> {
+    mark = c.mark();
+    c.bind("value", c.types.prim(ty).try(), false, false).try();
+    c.enter_recheck();
+    unit = c.types.unit().try();
+    c.call_type(id, c.tree.expr_at(id), call, Ctx(0, unit)).try();
+    c.leave_recheck();
+    c.release(mark).try();
+    facts     = c.checked_call(id);
+    signature = facts.match({
+        None     => false,
+        Ok(fact) => fact.signature.match({
+            None    => false,
+            Ok(sig) => c.prim_name(fact.result).eq("u8")
+                && sig.params.len == 1
+                && sig.params.get(0).match({ Ok(param) => c.prim_name(param).eq("u8"), None => false }),
+        }),
+    });
+    println(
+        "{} checked {} declaration {} inst {} signature {}",
+        ty,
+        facts.match({ Ok(_) => true, None => false }),
+        c.resolved_call(id).match({ Ok(_) => true, None => false }),
+        c.resolved_inst(id).match({ Ok(_) => true, None => false }),
+        signature
+    );
+    Ok(())
+}
+
+main = (env: Env) Res<(), AllocError> {
+    a      = env.mem.alloc();
+    source = "take = <T>(v: T) T { v }\nmain = () { value: u8 = 7; take<u8>(value); }\n";
+    lexed  = scan(a, Source(file: "calls.zen", text: source)).try();
+    parser ::= a.Parser(lexed);
+    parsed = parser.module("calls").try();
+    parser.tree.add_module(parsed).try();
+    checker ::= a.Checker(parser.tree).try();
+    checker.check_all().try();
+    println("initial valid {}", checker.diag_count() == 0);
+    println("initial edges {}", checker.edge_count());
+    parser.tree.exprs_each((id, expr) {
+        expr.kind.match({
+            Call(call) => {
+                checker.recheck(id, call, "u8").try();
+                checker.recheck(id, call, "bool").try();
+                checker.recheck(id, call, "u8").try();
+            },
+            _          => (),
+        });
+    });
+    Ok(())
+}

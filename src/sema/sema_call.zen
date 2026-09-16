@@ -6,19 +6,19 @@ Vec = std.collections
 str = std.text
 Range = std.core
 DeclId = sema.sema_id
-TyId, TyFn, TyNamed, literal_default = sema.sema_ty
+TyId, TyFn, TyNamed, literal_default, is_integer = sema.sema_ty
 Def = sema.sema_def
 SemaFault, NameFault, TypeFault, PairFault = sema.sema_diag
-Checker, Ctx = sema.sema_check
+Checker, Ctx, CheckedCall, CallSignature, CallResolution = sema.sema_check
 refuse_handle_argument = sema.sema_handle
 meta_refused = sema.sema_meta
 meta_member_call, MetaCall = sema.sema_meta
 discriminant_member_call, DiscriminantAnswer = sema.sema_discriminant
 variant_name_member_call, VariantNameAnswer = sema.sema_variant_name
-construct, instantiate, variant_call_type = sema.sema_apply
+construct, instantiate, variant_call_type, call_edge = sema.sema_apply
 refuse_variant_surplus, call_inst, callback_types_fit, annotated_callback = sema.sema_apply
 infer_callback_targs = sema.sema_apply
-Inst, subst, subst_list, unify_list, tparam_vars, zip, owner_of = sema.sema_inst
+Inst, InstEdge, subst, subst_list, unify_list, tparam_vars, zip, owner_of = sema.sema_inst
 is_case = sema.sema_case
 Found, Base, base_of, members_of, actor_spawn_ret, ref_of_actor = sema.sema_member
 materialize_receiver = sema.sema_member
@@ -87,9 +87,13 @@ CallCheck = {
     call: Call,
     ctx: Ctx,
     actuals :: Vec<Actual>,
+    declaration :: Res<DeclId>,
+    provider :: Res<TyId>,
+    inst :: Inst,
+    checked_signature :: Res<CallSignature>,
+    edge :: Res<InstEdge>,
 
     run = (self :: @Self, c :: Checker) Res<TyId, AllocError> {
-        c.clear_member_provider(self.id).try();
         callee = c.tree.call_callee(self.call);
         callee.kind.match({
             Access(a) => self.member(c, a),
@@ -158,7 +162,7 @@ CallCheck = {
                 c.call_name(self.call)
             ),
             false => {
-                settled = c.instantiate_sig(self.id, ty, self.actuals).try();
+                settled = self.instantiate_sig(c, ty).try();
                 self.fitted_signature(c, settled, 0)
             },
         })
@@ -214,26 +218,77 @@ CallCheck = {
     construct_def = (self :: @Self, c :: Checker, d: Def)
                     Res<TyId, AllocError> {
         c.alias_module(d.id).match({
-            None   => c.construct(self.id, self.call, d, self.ctx),
+            None   => {
+                ty               = c.construct(
+                    self.id,
+                    self.call,
+                    d,
+                    self.ctx
+                ).try();
+                self.declaration = Ok(d.id);
+                Ok(ty)
+            },
             Ok(mi) => c.module_not_a_value(self.node.span, d.name, mi),
         })
     }
 
     chosen = (self :: @Self, c :: Checker, k: Cand, actuals: Vec<Actual>)
              Res<TyId, AllocError> {
-        off = self.call.recv_off(actuals);
+        mark = c.diag_count();
+        off  = self.call.recv_off(actuals);
         c.arg_literals(self.call.args, k.params, off, self.ctx).try();
         c.instantiate(self.id, self.call, k, actuals, self.ctx).try().match({
-            None    => c.types.unknown(),
-            Ok(ret) => {
-                c.resolve_call(self.id, k.id).try();
+            None        => c.types.unknown(),
+            Ok(applied) => {
+                self.inst = applied.inst;
                 params ::= c.alloc.Vec<TyId>();
-                c.settled_params(self.id, k, params).try();
+                c.subst_list(k.params, self.inst, params).try();
+                (c.diag_count() == mark).then(() {
+                    self.instantiated_literals(c, k.params, params, off).try();
+                });
                 c.arg_lambdas(self.call.args, params, off, self.ctx).try();
                 c.args_handle_check(self.call.args, params, off, self.ctx)
                     .try();
-                Ok(ret)
+                k.generic.then(() {
+                    self.edge = Ok(c.call_edge(self.id, k, self.inst).try());
+                });
+                self.declaration       = Ok(k.id);
+                self.checked_signature = Ok(CallSignature(
+                    params: params,
+                    receiver: self.receiver_expr(c, off)
+                ));
+                Ok(applied.result)
             },
+        })
+    }
+
+    // Literal families still awaiting context are not concrete numeric widths.
+    // Check newly settled widths without replaying diagnostics for parameters
+    // whose declared type was already checked.
+    instantiated_literals = (self: @Self, c :: Checker, declared: Vec<TyId>,
+                             settled: Vec<TyId>, off: usize)
+                             Res<(), AllocError> {
+        self.receiver_expr(c, off).when_ok((receiver) {
+            ty   = c.type_of(receiver, self.ctx).try();
+            want = settled.ty_at(0);
+            (c.is_literal_ty(ty) && c.numeric_literal_context(want)).then(() {
+                c.check_literal(receiver, want).try();
+            });
+        });
+        self.call.args.loop((h, i, arg) {
+            want = settled.ty_at(i + off);
+            (!want.eq(declared.ty_at(i + off)) && c.numeric_literal_context(want)).then(() {
+                c.check_literal(arg.value, want).try();
+            });
+        });
+        Ok(())
+    }
+
+    receiver_expr = (self: @Self, c: Checker, off: usize) Res<ExprId> {
+        (off == 1).ensure().try();
+        c.tree.call_callee(self.call).kind.match({
+            Access(access) => Ok(access.base),
+            _              => None,
         })
     }
 
@@ -465,10 +520,12 @@ CallCheck = {
                         Unknown => f.decl_owner,
                         _       => f.bound,
                     });
-                    c.resolve_member_provider(self.id, provider)
+                    (!c.is_unknown(provider)).then(() {
+                        self.provider = Ok(provider);
+                    });
                 },
-                _     => Ok(()),
-            }).try();
+                _     => (),
+            });
         });
         Ok(got)
     }
@@ -476,7 +533,7 @@ CallCheck = {
     // A member's own type parameters are settled before the signature is
     // fitted. Written arguments handle return-only doors such as
     // `env.args<Cli>()`; ordinary arguments infer nested uses too.
-    written_found = (self: @Self, c :: Checker, ac: Access, f: Found,
+    written_found = (self :: @Self, c :: Checker, ac: Access, f: Found,
                      off: usize) Res<TyId, AllocError> {
         c.member_fn(f.decl_owner, ac.name.text, f.decl_span).match({
             None   => (self.call.targs.len > 0).match({
@@ -490,7 +547,7 @@ CallCheck = {
         })
     }
 
-    instantiate_member = (self: @Self, c :: Checker, ac: Access, f: Found,
+    instantiate_member = (self :: @Self, c :: Checker, ac: Access, f: Found,
                           fn: Function, off: usize) Res<TyId, AllocError> {
         owner = c.owner_of(f.module, fn.name.text).try();
         vars ::= c.alloc.Vec<TyId>();
@@ -518,7 +575,7 @@ CallCheck = {
         })
     }
 
-    settled_member = (self: @Self, c :: Checker, name: str, ty: TyId,
+    settled_member = (self :: @Self, c :: Checker, name: str, ty: TyId,
                       vars: Vec<TyId>, bounds: Vec<TBound>, owner: str,
                       off: usize)
                       Res<TyId, AllocError> {
@@ -554,9 +611,7 @@ CallCheck = {
             ).try().match({
                 false => c.types.unknown(),
                 true  => {
-                    (inst.len() > 0).then(() {
-                        c.resolve_inst(self.id, inst).try();
-                    });
+                    self.inst = inst;
                     Ok(settled)
                 },
             }),
@@ -707,7 +762,30 @@ CallCheck = {
             off: off,
             fit: fit
         );
-        use.finish(c)
+        got = use.finish(c).try();
+        fit.match({
+            Exact       => {
+                self.checked_signature = Ok(CallSignature(
+                    params: params,
+                    receiver: self.receiver_expr(c, off)
+                ));
+            },
+            Recovery(_) => (),
+        });
+        Ok(got)
+    }
+
+    instantiate_sig = (self :: @Self, c :: Checker, ty: TyId)
+                      Res<TyId, AllocError> {
+        c.types.at(ty).match({
+            Fn(f) => {
+                got ::= c.alloc.Vec<TyId>();
+                self.actuals.loop((a) { got.add(a.ty).try(); });
+                c.unify_list(f.params, got, self.inst).try();
+                c.subst(ty, self.inst)
+            },
+            _     => Ok(ty),
+        })
     }
 }
 
@@ -718,7 +796,12 @@ CallCheck = (a: Alloc, id: ExprId, node: Expr, call: Call, ctx: Ctx)
         node: node,
         call: call,
         ctx: ctx,
-        actuals: a.Vec<Actual>()
+        actuals: a.Vec<Actual>(),
+        declaration: None,
+        provider: None,
+        inst: a.Inst(),
+        checked_signature: None,
+        edge: None
     )
 }
 
@@ -746,8 +829,27 @@ call_name = (c: Checker, call: Call) str {
 // Check one call and record its chosen declaration and instantiation.
 call_type* = (c :: Checker, id: ExprId, node: Expr, call: Call, ctx: Ctx)
              Res<TyId, AllocError> {
+    c.record_call(id, CallResolution.Checking).try();
+    mark = c.diag_count();
     check ::= c.alloc.CallCheck(id, node, call, ctx);
-    check.run(c)
+    got = check.run(c).try();
+    (c.diag_count() == mark).match({
+        true  => {
+            check.edge.when_ok((edge) { c.note_edge(edge).try(); });
+            c.record_call(
+                id,
+                CallResolution.Checked(CheckedCall(
+                    declaration: check.declaration,
+                    member_provider: check.provider,
+                    inst: check.inst,
+                    result: got,
+                    signature: check.checked_signature
+                ))
+            )
+        },
+        false => c.record_call(id, CallResolution.Rejected),
+    }).try();
+    Ok(got)
 }
 
 actuals_of = (c :: Checker, args: Vec<Arg>, ctx: Ctx, out :: Vec<Actual>)
@@ -841,30 +943,6 @@ first_ty = (c :: Checker, actuals: Vec<Actual>) Res<TyId, AllocError> {
         None  => c.types.prim("()"),
         Ok(a) => Ok(a.ty),
     })
-}
-
-// Record how a call instantiates a generic closure parameter for lowering.
-instantiate_sig = (c :: Checker, id: ExprId, ty: TyId, actuals: Vec<Actual>)
-                  Res<TyId, AllocError> {
-    c.types.at(ty).match({
-        Fn(f) => c.instantiate_fn_sig(id, ty, f, actuals),
-        _     => Ok(ty),
-    })
-}
-
-instantiate_fn_sig = (
-    c       :: Checker,
-    id      : ExprId,
-    ty      : TyId,
-    f       : TyFn,
-    actuals : Vec<Actual>
-) Res<TyId, AllocError> {
-    got ::= c.alloc.Vec<TyId>();
-    actuals.loop((h, a) { got.add(a.ty).try() });
-    inst ::= c.alloc.Inst();
-    c.unify_list(f.params, got, inst).try();
-    (inst.len() > 0).then(() { c.resolve_inst(id, inst).try(); });
-    c.subst(ty, inst)
 }
 
 infer_member_inst = (
@@ -1144,14 +1222,6 @@ args_handle_check = (
     Ok(());
 }
 
-settled_params = (c :: Checker, id: ExprId, k: Cand, out :: Vec<TyId>)
-                 Res<(), AllocError> {
-    c.resolved_inst(id).match({
-        None    => k.params.copy_tys(out),
-        Ok(ins) => c.subst_list(k.params, ins, out),
-    })
-}
-
 // Type each lambda body once, after resolution supplies its parameter types.
 arg_lambdas = (
     c      :: Checker,
@@ -1211,7 +1281,7 @@ resolve_lambda_inst = (
         }),
         _     => Ok(()),
     }).try();
-    (inst.len() > 0).then(() { c.resolve_inst(id, inst).try(); });
+    (inst.len() > 0).then(() { c.record_lambda_inst(id, inst).try(); });
     Ok(())
 }
 
@@ -1275,6 +1345,14 @@ param_wants = (c :: Checker, id: ExprId, want: TyId, ctx: Ctx)
     c.settled_param(want).match({
         true  => c.check_arms(id, want),
         false => c.check_arms_agree(id),
+    })
+}
+
+numeric_literal_context = (c: Checker, ty: TyId) bool {
+    c.types.at(ty).match({
+        Prim(p)  => is_integer(p.name),
+        Array(a) => c.numeric_literal_context(a.elem),
+        _        => false,
     })
 }
 

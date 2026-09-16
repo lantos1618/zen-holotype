@@ -614,6 +614,15 @@ claimed by this change.
 
 ## Generated-program runtime checks
 
+Call selection, member providers, substitutions, and checked signatures now
+publish as one successful semantic result. Rejected contextual rechecks erase
+the previous selection. C consumes complete checked method substitutions, and
+the scalar lowerer consumes checked signatures and result types. Generic
+literal arguments and receivers receive range checks after substitution;
+`identity<u8>(300)` is rejected instead of compiling to a truncated value.
+Argument binding plans, conversions, captures, cleanup, and full-language IR
+migration remain open work in [Code generation](BACKENDS.md).
+
 `make verify` includes `runtimecheck`: scalar loops, growing Vec/Map, String
 construction, stable sorting, and a capturing generic callback are checked
 against independent expected results and C references. Map allocation budgets

@@ -547,17 +547,22 @@ Lowering = {
 
     invoke = (self :: @Self, id: ExprId, call: Call, span: Span)
              Res<Value, LowerError> {
-        did  = self.check.resolved_call(id)
-            .ok_or(unsupported(
-                span,
-                "a call without a concrete function selection"
-            )).try();
-        decl = decl_at(self.tree, did).ok_or(unsupported(span, "a missing callee")).try();
-        f    = decl.kind.match({ Function(f) => Ok(f), _ => None })
+        checked = self.check.checked_call(id).ok_or(unsupported(span, "a call without successful semantic checking")).try();
+        did     = checked.declaration.ok_or(unsupported(
+            span,
+            "a call without a concrete function selection"
+        )).try();
+        decl    = decl_at(self.tree, did).ok_or(unsupported(span, "a missing callee")).try();
+        f       = decl.kind.match({ Function(f) => Ok(f), _ => None })
             .ok_or(unsupported(span, "a non-function callee")).try();
         (f.tparams.len == 0 && call.targs.len == 0)
             .ensure(unsupported(span, "generic function calls")).try();
-        (f.params.len == call.args.len)
+        signature = checked.signature.ok_or(unsupported(
+            span,
+            "a call without a checked signature"
+        )).try();
+        (signature.params.len == call.args.len
+            && signature.receiver.match({ None => true, Ok(_) => false }))
             .ensure(unsupported(
                 span,
                 "implicit receiver or default arguments"
@@ -570,7 +575,7 @@ Lowering = {
             args.add(value.slot).try(LowerError.OutOfMemory);
         });
         function = self.enqueue(did).try();
-        out      = self.slot(self.expr_type(id).try()).try();
+        out      = self.slot(self.scalar(checked.result, span).try()).try();
         self.add(Instruction.Invoke(Invocation(
             out: out.slot,
             function: function,

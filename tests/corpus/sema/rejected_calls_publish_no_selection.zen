@@ -1,0 +1,58 @@
+Source, scan = std.lex
+Parser, module = std.parse
+Checker = sema.sema_check
+check_all = sema.sema_decl
+
+inspect = (a: Alloc, name: str, source: str) Res<(), AllocError> {
+    lexed = scan(a, Source(file: "calls.zen", text: source)).try();
+    parser ::= a.Parser(lexed);
+    parsed = parser.module("calls").try();
+    parser.tree.add_module(parsed).try();
+    checker ::= a.Checker(parser.tree).try();
+    checker.check_all().try();
+    declarations: usize ::= 0;
+    instances: usize    ::= 0;
+    parser.tree.exprs_each((id, expr) {
+        expr.kind.match({
+            Call(_) => {
+                checker.resolved_call(id).when_ok((_) { declarations = declarations + 1; });
+                checker.resolved_inst(id).when_ok((_) { instances = instances + 1; });
+            },
+            _       => (),
+        });
+    });
+    println(
+        "{} rejected {} declarations {} instances {} edges {}",
+        name,
+        checker.diag_count() > 0,
+        declarations,
+        instances,
+        checker.edge_count()
+    );
+    Ok(())
+}
+
+main = (env: Env) Res<(), AllocError> {
+    a = env.mem.alloc();
+    inspect(
+        a,
+        "literal",
+        "take = (v: u8) () {}\nmain = () { take(300); }\n"
+    ).try();
+    inspect(
+        a,
+        "generic literal",
+        "take = <T>(v: T) () {}\nmain = () { take<u8>(300); }\n"
+    ).try();
+    inspect(
+        a,
+        "callback",
+        "take = (body: () i32) () {}\nmain = () { take(() { missing }); }\n"
+    ).try();
+    inspect(
+        a,
+        "constructor",
+        "Box = { value: i32 }\nmain = () { Box(value: true); }\n"
+    ).try();
+    Ok(())
+}

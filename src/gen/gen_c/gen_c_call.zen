@@ -57,6 +57,22 @@ CallSite = {
 
     resolve = (self: @Self, be :: CBackend, name: str, want: TyId,
                out :: String) Res<(), AllocError> {
+        be.check.call_resolution(self.id).match({
+            Ok(resolution) => resolution.match({
+                Rejected   => be.unsupported(
+                    self.id,
+                    "a rejected semantic call",
+                    out
+                ),
+                Checking   => be.unresolved(self.id, name, out),
+                Checked(_) => self.selected(be, name, want, out),
+            }),
+            None           => self.unselected(be, name, want, out),
+        })
+    }
+
+    selected = (self: @Self, be :: CBackend, name: str, want: TyId,
+                out :: String) Res<(), AllocError> {
         be.check.resolved_call(self.id).match({
             Ok(_) => be.selected_def(self.id).match({
                 Ok(d) => self.lower(be, d, want, out),

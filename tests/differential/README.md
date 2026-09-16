@@ -52,3 +52,14 @@ results are kept only under ignored `build/source_health/randomized/`. The model
 deliberately avoids overflow and does not cover pointers, lifetimes, floating
 point, concurrency, or the whole language. It complements maintained minimized
 regressions rather than replacing them.
+
+## Generic literal boundaries
+
+`generic_literals.py` uses an independent integer range model for signed and
+unsigned 8/16-bit boundaries across explicit, receiver, inferred, callback, and
+method calls. Eighty fitting values must survive GCC/Clang compilation and
+execution unchanged. Forty out-of-range inputs must be rejected by both
+`zen check` and C emission, with no output artifact published. A widened-type
+control proves that the rejection oracle detects changed classification.
+`make verify` runs this through `differential`; generated sources and reports
+remain under `build/source_health/generic-literals/`.

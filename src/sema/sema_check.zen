@@ -47,6 +47,27 @@ Ctx* = {
     has_self*: bool,
 }
 
+// Parameter order includes the implicit receiver when one is present.
+CallSignature* = {
+    params*: Vec<TyId>,
+    receiver*: Res<ExprId>,
+}
+
+// One successful call check. Types can still mention the enclosing generic
+// parameters; specialization substitutes them without changing these facts.
+// All vectors borrow the checker's caller-chosen allocation lifetime.
+CheckedCall* = {
+    declaration*: Res<DeclId>,
+    member_provider*: Res<TyId>,
+    inst*: Inst,
+    result*: TyId,
+    signature*: Res<CallSignature>,
+}
+
+// An absent entry has no recorded call check. In-progress and
+// rejected calls expose no selection, including after a contextual recheck.
+CallResolution* = Checking | Rejected | Checked(CheckedCall)
+
 Checker* = {
     tree*: Ast,
     world* :: World,
@@ -88,11 +109,7 @@ Checker* = {
     // Bound or declaration that supplied a field read.
     supply_memo* :: Map<ExprId, TyId>,
 
-    // Declaration selected for each successfully resolved call.
-    call_memo* :: Map<ExprId, DeclId>,
-
-    // Supplying bound or inherent owner of the selected checked member.
-    member_call_providers :: Map<ExprId, TyId>,
+    calls :: Map<ExprId, CallResolution>,
 
     // Validated standard numeric operations, keyed by declaration identity.
     numeric_conversions* :: Map<DeclId, NumericConversion>,
@@ -109,8 +126,8 @@ Checker* = {
     // Access expressions used as a call's callee rather than as values.
     callee_access* :: Map<ExprId, bool>,
 
-    // Type-argument substitution selected at each generic call site.
-    inst_memo* :: Map<ExprId, Inst>,
+    // Contextual substitutions for lambda expressions, separate from calls.
+    lambda_insts :: Map<ExprId, Inst>,
 
     // Instantiation edges in resolution order.
     edges :: Vec<InstEdge>,
@@ -160,37 +177,28 @@ Checker* = {
         Ok(())
     }
 
-    // The declaration this call resolved to, if resolution reached one.
-    resolved_call* = (self: @Self, id: ExprId) Res<DeclId> {
-        self.call_memo.get(id)
+    call_resolution* = (self: @Self, id: ExprId) Res<CallResolution> {
+        self.calls.get(id)
     }
 
-    resolve_call* = (self :: @Self, id: ExprId, d: DeclId)
-                    Res<(), AllocError> {
-        self.call_memo.set(id, d)
+    checked_call* = (self: @Self, id: ExprId) Res<CheckedCall> {
+        self.calls.get(id).try().match({
+            Checked(call) => Ok(call),
+            _             => None,
+        })
+    }
+
+    record_call* = (self :: @Self, id: ExprId, resolution: CallResolution)
+                   Res<(), AllocError> {
+        self.calls.set(id, resolution)
+    }
+
+    resolved_call* = (self: @Self, id: ExprId) Res<DeclId> {
+        self.checked_call(id).try().declaration
     }
 
     resolved_member_provider* = (self: @Self, id: ExprId) Res<TyId> {
-        bound = self.member_call_providers.get(id).try();
-        self.types.at(bound).match({
-            Unknown => None,
-            _       => Ok(bound),
-        })
-    }
-
-    resolve_member_provider* = (self :: @Self, id: ExprId, bound: TyId)
-                            Res<(), AllocError> {
-        self.member_call_providers.set(id, bound)
-    }
-
-    clear_member_provider* = (self :: @Self, id: ExprId) Res<(), AllocError> {
-        self.member_call_providers.get(id).match({
-            Ok(_) => self.member_call_providers.set(
-                id,
-                self.types.unknown().try()
-            ),
-            None  => Ok(()),
-        })
+        self.checked_call(id).try().member_provider
     }
 
     mark_discriminant_call* = (
@@ -301,16 +309,19 @@ Checker* = {
         self.types.prim("usize")
     }
 
-    // What this call instantiated its callee's type parameters with. A
-    // miss means the callee is not generic, or resolution could not
-    // settle it.
     resolved_inst* = (self: @Self, id: ExprId) Res<Inst> {
-        self.inst_memo.get(id)
+        self.checked_call(id).match({
+            Ok(call) => {
+                (call.inst.len() > 0).ensure().try();
+                Ok(call.inst)
+            },
+            None     => self.lambda_insts.get(id),
+        })
     }
 
-    resolve_inst* = (self :: @Self, id: ExprId, inst: Inst)
-                    Res<(), AllocError> {
-        self.inst_memo.set(id, inst)
+    record_lambda_inst* = (self :: @Self, id: ExprId, inst: Inst)
+                          Res<(), AllocError> {
+        self.lambda_insts.set(id, inst)
     }
 
     // The instantiation graph, as a listing. `sema_depth.zen` is the
@@ -757,14 +768,13 @@ Checker* = (a: Alloc, tree: Ast) Res<Checker, AllocError> {
         walk_now: a.Vec<str>(),
         meta_recheck: 0,
         supply_memo: a.Map<ExprId, TyId>(),
-        call_memo: a.Map<ExprId, DeclId>(),
-        member_call_providers: a.Map<ExprId, TyId>(),
+        calls: a.Map<ExprId, CallResolution>(),
         numeric_conversions: a.Map<DeclId, NumericConversion>(),
         discriminant_calls: a.Map<ExprId, DiscriminantCall>(),
         variant_name_calls: a.Map<ExprId, VariantNameCall>(),
         param_memo: a.Map<ExprId, bool>(),
         callee_access: a.Map<ExprId, bool>(),
-        inst_memo: a.Map<ExprId, Inst>(),
+        lambda_insts: a.Map<ExprId, Inst>(),
         edges: a.Vec<InstEdge>(),
         set_memo: a.Map<TyId, TyId>(),
         raised: a.Vec<TyId>(),

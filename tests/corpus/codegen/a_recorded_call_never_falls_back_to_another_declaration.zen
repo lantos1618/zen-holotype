@@ -1,7 +1,8 @@
 scan, Source = std.lex
 Parser, module = std.parse
 ExprId = std.ast
-Checker, Ctx = sema.sema_check
+Checker, Ctx, CheckedCall, CallResolution = sema.sema_check
+Inst = sema.sema_inst
 DeclId = sema.sema_id
 CBackend = gen.gen_c.gen_c_state
 selected_def, lower_plain_call = gen.gen_c.gen_c_call
@@ -40,7 +41,7 @@ main = (env: Env) Res<(), AllocError> {
     Range(0, parser.tree.expr_ids()).loop((index) {
         parser.tree.expr_at(id).kind.match({
             Call(call) => {
-                backend.check.resolve_call(
+                backend.check.record_selection(
                     id,
                     DeclId(module: 0, decl: 1)
                 ).try();
@@ -57,7 +58,7 @@ main = (env: Env) Res<(), AllocError> {
                     ),
                     None           => false,
                 }));
-                backend.check.resolve_call(
+                backend.check.record_selection(
                     id,
                     DeclId(module: 0, decl: 100000)
                 ).try();
@@ -83,10 +84,44 @@ main = (env: Env) Res<(), AllocError> {
                     "stale selection refused {}",
                     backend.diag_count() == 1 && out.view().eq("0")
                 );
+                [CallResolution.Rejected, CallResolution.Checking].loop((state) {
+                    backend.check.record_call(id, state).try();
+                    before = backend.diag_count();
+                    refused ::= a.String().try();
+                    backend.lower_plain_call(
+                        id,
+                        call,
+                        "Box",
+                        None,
+                        ctx,
+                        want,
+                        refused
+                    ).try();
+                    println(
+                        "unfinished selection refused {}",
+                        backend.diag_count() == before + 1 && refused.view().eq(
+                            "0"
+                        )
+                    );
+                });
             },
             _          => (),
         });
         id = ExprId(index: id.index + 1);
     });
     Ok(())
+}
+
+record_selection = (check :: Checker, id: ExprId, declaration: DeclId)
+                   Res<(), AllocError> {
+    check.record_call(
+        id,
+        CallResolution.Checked(CheckedCall(
+            declaration: Ok(declaration),
+            member_provider: None,
+            inst: check.alloc.Inst(),
+            result: check.types.unknown().try(),
+            signature: None
+        ))
+    )
 }
