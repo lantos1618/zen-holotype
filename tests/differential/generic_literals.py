@@ -24,6 +24,10 @@ def expressions(ty: str, value: int) -> dict[str, str]:
     return {
         "explicit": f"identity<{ty}>({value})",
         "receiver": f"({value}).identity<{ty}>()",
+        "paren_match_argument": f"identity<{ty}>((true.match({{ true => {value}, false => 0 }})))",
+        "paren_match_receiver": f"(true.match({{ true => {value}, false => 0 }})).identity<{ty}>()",
+        "nested_match_receiver": f"((true.match({{ true => {value}, false => 0 }}))).identity<{ty}>()",
+        "unselected_match_arm": f"(false.match({{ true => 0, false => {value} }})).identity<{ty}>()",
         "inferred": f"inferred(witness, {value})",
         "callback": f"apply({value}, (v: {ty}) {{ v }})",
         "method": f"take.run<{ty}>({value})",

@@ -1,0 +1,118 @@
+Ast = std.ast
+Checker = sema.sema_check
+CBackend = gen.gen_c
+TyId = sema.sema_ty
+
+Refusal = {
+    base: Alloc,
+    state: Ptr<usize>,
+    accepts = (self: @Self) bool {
+        count = self.state.read(0);
+        self.state.write(0, count + 1);
+        count != self.state.read(1)
+    }
+}
+Refusal.impl(Alloc, {
+    raw = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        self.accepts().ensure(AllocError.OutOfMemory).try();
+        self.base.raw(size, align)
+    }
+    realloc = <T>(self: @Self, ptr: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        self.accepts().ensure(AllocError.OutOfMemory).try();
+        self.base.realloc(ptr, count)
+    }
+})
+
+Operation = Function | Foreign | Type
+Observation = { allocations: usize, refused: bool, intact: bool }
+
+publish = (
+    be        :: CBackend,
+    operation : Operation,
+    name      : String,
+    proto     : String,
+    body      : String
+)
+          Res<(), AllocError> {
+    operation.match({
+        Function => be.add_function(name, proto, body),
+        Foreign  => { be.need_extern(name.view(), proto).try(); Ok(()) },
+        Type     => be.queue_type(name, TyId(index: 7)),
+    })
+}
+
+empty = (be: CBackend, operation: Operation) bool {
+    operation.match({
+        Function => be.functions.len == 0,
+        Foreign  => be.foreign_functions.len == 0,
+        Type     => be.type_queue.len == 0 && be.type_index(
+            "symbol"
+        ).match({ None => true, Ok(_) => false }),
+    })
+}
+
+complete = (be: CBackend, operation: Operation) bool {
+    operation.match({
+        Function => be.functions.len == 1 && be.functions.get(0).match({
+            None      => false,
+            Ok(entry) => entry.name.view().eq("symbol") && entry.proto.view().eq("void symbol(void)") && entry.body.view().eq("return;"),
+        }),
+        Foreign  => be.foreign_functions.len == 1 && be.foreign_functions.get(
+            0
+        ).match({
+            None      => false,
+            Ok(entry) => entry.name.view().eq("symbol") && entry.proto.view().eq("void symbol(void)"),
+        }),
+        Type     => be.type_queue.len == 1 && be.type_queue.get(0).match({
+            None      => false,
+            Ok(entry) => entry.name.view().eq("symbol") && entry.id.index == 7 && !entry.done && be.type_index("symbol").match({ None => false, Ok(index) => index == 0 }),
+        }),
+    })
+}
+
+trial = (
+    a         : Alloc,
+    operation : Operation,
+    fail      : usize
+) Res<Observation, AllocError> {
+    state ::= a.Vec<usize>();
+    state.add(0).try();
+    state.add(usize.MAX).try();
+    storage = Refusal(base: a, state: state.ptr());
+    tree    = a.Ast();
+    checker = a.Checker(tree).try();
+    be ::= storage.CBackend(tree, checker).try();
+    name  = a.String("symbol").try();
+    proto = a.String("void symbol(void)").try();
+    body  = a.String("return;").try();
+    state.ptr().write(0, 0);
+    state.ptr().write(1, fail);
+    refused     = be.publish(
+        operation,
+        name,
+        proto,
+        body
+    ).match({ Err(_) => true, Ok(_) => false });
+    allocations = state.ptr().read(0);
+    intact ::= refused.match({ true => be.empty(operation), false => be.complete(operation) });
+    refused.then(() {
+        state.ptr().write(1, usize.MAX);
+        be.publish(operation, name, proto, body).try();
+        intact = intact && be.complete(operation);
+    });
+    Ok(Observation(allocations: allocations, refused: refused, intact: intact))
+}
+
+main = (env: Env) Res<(), AllocError> {
+    a = env.mem.alloc();
+    [Operation.Function, Operation.Foreign, Operation.Type].loop((operation) {
+        baseline = trial(a, operation, usize.MAX).try();
+        intact ::= baseline.allocations > 0 && !baseline.refused && baseline.intact;
+        Range(0, baseline.allocations).loop((fail) {
+            result = trial(a, operation, fail).try();
+            intact = intact && result.refused && result.intact;
+        });
+        println("publication and retry {}", intact);
+    });
+    Ok(())
+}

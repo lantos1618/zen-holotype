@@ -58,8 +58,9 @@ regressions rather than replacing them.
 `generic_literals.py` uses an independent integer range model for signed and
 unsigned 8/16-bit boundaries across explicit, receiver, inferred, callback, and
 method calls, including array, nested-array, parenthesized, and match-produced
-receivers. One hundred sixty fitting values must survive GCC/Clang compilation and
-execution unchanged. Eighty out-of-range inputs must be rejected by both
+receivers. Nested parentheses around scalar matches retain every arm's checks.
+224 fitting values must survive GCC/Clang compilation and execution unchanged.
+112 out-of-range inputs must be rejected by both
 `zen check` and C emission, with no output artifact published. A widened-type
 control proves that the rejection oracle detects changed classification.
 `make verify` runs this through `differential`; generated sources and reports

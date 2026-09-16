@@ -180,6 +180,17 @@ ID alone remains insufficient evidence that a call is valid.
 Function and method worklists keep each target and its substitutions in one
 queue record. Queue storage is reserved before publishing the seen symbol,
 and lowering no longer substitutes an empty instantiation for a missing row.
+Emitted functions keep their symbol, prototype, body, source origin, and module
+in one record; foreign declarations and queued types likewise publish complete
+records. Type storage is reserved before its lookup entry is published.
+Allocation-refusal regressions check that failed publication leaves no visible
+entry and that retry succeeds. Ordering extracts borrowed keys from records and
+uses the existing stable sort without rebuilding parallel metadata vectors.
+
+A checked free declaration selected for dot syntax takes precedence over
+receiver-member lookup during C lowering. An incompatible same-named member
+cannot replace that choice. Deferred calls and member specialization still
+retain the compatibility paths described above.
 
 Keep instance discovery separate from building an individual function. Extend
 the IR one feature family at a time, with explicit places, aggregate values,

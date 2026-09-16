@@ -14,7 +14,7 @@ check_receiver, check_write_place = sema.sema_recv
 check_scope_returned, check_scope_stored = sema.sema_scope
 check_scope_captured, is_scope_value, call_escapes = sema.sema_scope
 check_arena_returned, is_arena_backed = sema.sema_scope
-scope_alias, remember_block_origin, check_arena_stored = sema.sema_scope
+scope_alias, remember_block_origin, check_arena_stored, is_construction = sema.sema_scope
 arena_source, release_stored_arena, stored_arena_backed = sema.sema_scope
 Pin, pin_captured, refuse_pinned, refuse_pinned_at = sema.sema_pin
 check_drop_copy, is_drop_type = sema.sema_drop
@@ -525,28 +525,95 @@ check_own_body* = (c :: Checker, f: Function, body: BlockId, ctx: Ctx)
     Ok(());
 }
 
-store_origin* = (c :: Checker, o :: Own, target: ExprId, value: ExprId)
-                Res<(), AllocError> {
-    c.check_arena_stored(o, target, value).try();
-    c.transfer_store_origin(o, target, value)
+// A projected source selects a field's recorded provenance instead of
+// attributing every field to every allocation carried by the aggregate.
+StoredView = { scoped: bool, arena: bool, source: Res<ExprId> }
+
+stored_view = (
+    c     :: Checker,
+    o     :: Own,
+    value : ExprId,
+    field : Res<str>
+) StoredView {
+    text = c.spelled_name(value);
+    field.match({
+        Ok(name) => (text.len > 0).match({
+            true  => StoredView(
+                scoped: o.scoped_field(text, name),
+                arena: o.arena_field(text, name),
+                source: o.field_source(text, name)
+            ),
+            false => c.tree.expr_at(value).kind.match({
+                Paren(p)   => c.stored_view(o, p.inner, field),
+                Try(t)     => c.stored_view(o, t.operand, field),
+                Call(call) => c.is_construction(value).match({
+                    false => c.stored_view(o, value, None),
+                    true  => call.args.find((arg) {
+                        arg.name.match({ None => false, Ok(label) => label.text.eq(
+                            name
+                        ) })
+                    }).match({
+                        None    => c.stored_view(o, value, None),
+                        Ok(arg) => c.stored_view(o, arg.value, None),
+                    }),
+                }),
+                _          => c.stored_view(o, value, None),
+            }),
+        }),
+        None     => StoredView(
+            scoped: c.scope_alias(o, value),
+            arena: c.is_arena_backed(o, value),
+            source: c.arena_source(o, value)
+        ),
+    })
 }
 
-transfer_store_origin* = (c :: Checker, o :: Own, target: ExprId, value: ExprId)
-                         Res<(), AllocError> {
+store_origin* = (
+    c      :: Checker,
+    o      :: Own,
+    target : ExprId,
+    value  : ExprId,
+    field  : Res<str>
+)
+                Res<(), AllocError> {
+    view = c.stored_view(o, value, field);
     c.path_root(o, target).when_ok((root) {
-        source     = c.arena_source(o, value);
+        (!o.owned_at(root) && view.arena).then(() {
+            c.refuse(
+                c.tree.expr_at(target).span,
+                SemaFault.ArenaStored(NameFault(name: c.spelled_name(value)))
+            ).try();
+        });
+    });
+    c.transfer_view(o, target, view)
+}
+
+transfer_store_origin* = (
+    c      :: Checker,
+    o      :: Own,
+    target : ExprId,
+    value  : ExprId,
+    field  : Res<str>
+)
+                         Res<(), AllocError> {
+    c.transfer_view(o, target, c.stored_view(o, value, field))
+}
+
+transfer_view = (c :: Checker, o :: Own, target: ExprId, view: StoredView)
+                Res<(), AllocError> {
+    c.path_root(o, target).when_ok((root) {
         existing   = c.arena_source(o, target);
-        same_owner = source.match({
+        same_owner = view.source.match({
             None     => false,
             Ok(from) => existing.match({ None => false, Ok(to) => from.index == to.index }),
         });
-        (c.is_arena_backed(o, value) && !same_owner).then(() {
+        (view.arena && !same_owner).then(() {
             o.taint_root(
                 root,
                 Provenance(
-                    scoped: c.scope_alias(o, value),
+                    scoped: view.scoped,
                     arena: true,
-                    source: c.arena_source(o, value),
+                    source: view.source,
                     fields: o.alloc.Vec<FieldOrigin>()
                 )
             );
@@ -657,7 +724,7 @@ bind_name = (
                 scoped: c.is_scope_value(b.value) || c.scope_alias(o, b.value),
                 arena: c.stored_arena_backed(o, b.target, b.value),
                 source: c.arena_source(o, b.value),
-                fields: o.alloc.Vec<FieldOrigin>()
+                fields: c.value_fields(o, b.value).try()
             );
             o.revive(i, "").try();
             o.assign_provenance(i, value);
@@ -683,7 +750,7 @@ declare_var = (
         scoped: c.is_scope_value(b.value) || c.scope_alias(o, b.value),
         arena: c.stored_arena_backed(o, b.target, b.value),
         source: c.arena_source(o, b.value),
-        fields: o.alloc.Vec<FieldOrigin>(),
+        fields: c.value_fields(o, b.value).try(),
         span: span
     ))
 }
@@ -1363,4 +1430,29 @@ may_share_source = (left: Res<ExprId>, right: Res<ExprId>) bool {
         None  => true,
         Ok(l) => right.match({ None => true, Ok(r) => l.index == r.index }),
     })
+}
+
+// Named construction fields have independent origins even when another
+// field in the same record borrows temporary storage.
+value_fields = (c :: Checker, o :: Own, value: ExprId)
+               Res<Vec<FieldOrigin>, AllocError> {
+    fields ::= o.alloc.Vec<FieldOrigin>();
+    c.tree.expr_at(value).kind.match({
+        Paren(p)   => { fields = c.value_fields(o, p.inner).try(); },
+        Call(call) => c.is_construction(value).then(() {
+            call.args.loop((arg) {
+                arg.name.when_ok((name) {
+                    view = c.stored_view(o, arg.value, None);
+                    fields.add(FieldOrigin(
+                        name: name.text,
+                        scoped: view.scoped,
+                        arena: view.arena,
+                        source: view.source
+                    )).try();
+                });
+            });
+        }),
+        _          => (),
+    });
+    Ok(fields)
 }

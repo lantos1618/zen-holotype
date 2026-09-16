@@ -32,7 +32,7 @@ write_array_def = gen.gen_c.gen_c_array
 // and a definition may mention any tag or typedef.
 emit_types* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
     be.close_types().try();
-    seq = order(be.alloc, be.type_names).try();
+    seq = order(be.alloc, be.type_queue, (entry) { entry.name.view() }).try();
     seq.loop((h, i) { be.emit_typedef(out, i).try() });
     out.line().try();
     be.emit_tags(out, seq).try();
@@ -41,7 +41,7 @@ emit_types* = (be :: CBackend, out :: Emit) Res<(), AllocError> {
 }
 
 emit_typedef = (be :: CBackend, out :: Emit, i: usize) Res<(), AllocError> {
-    name = be.type_name_at(i);
+    name = be.type_queue.get(i).ok_or(AllocError.OutOfMemory).try().name.view();
     out.bytes("typedef struct ").try();
     out.bytes(name).try();
     out.bytes(" ").try();
@@ -334,7 +334,7 @@ write_dotted = (out :: String, name: str) Res<(), AllocError> {
 // is a sema error and is reported there, and this only has to not hang.
 
 define_type = (be :: CBackend, out :: Emit, i: usize) Res<(), AllocError> {
-    be.is_done(i).match({
+    be.type_queue.get(i).ok_or(AllocError.OutOfMemory).try().done.match({
         false => be.define_fresh(out, i),
         true  => Ok(()),
     })
@@ -343,10 +343,8 @@ define_type = (be :: CBackend, out :: Emit, i: usize) Res<(), AllocError> {
 define_fresh = (be :: CBackend, out :: Emit, i: usize) Res<(), AllocError> {
     be.mark_done(i).try();
     be.define_deps(out, i).try();
-    be.type_id_at(i).match({
-        None   => Ok(()),
-        Ok(id) => be.write_definition(out, be.type_name_at(i), id),
-    }).try();
+    entry = be.type_queue.get(i).ok_or(AllocError.OutOfMemory).try();
+    be.write_definition(out, entry.name.view(), entry.id).try();
     Ok(());
 }
 

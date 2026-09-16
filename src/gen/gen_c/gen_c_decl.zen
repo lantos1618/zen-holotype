@@ -780,19 +780,17 @@ keep = (be :: CBackend, qname: str, sig: Vec<TyId>, proto: String, span: Span)
 render_symbol_map* = (be :: CBackend, out :: String) Res<(), AllocError> {
     out.add("zen-symbol-map-v1\n").try();
     out.add("symbol\tfile\tline\tcolumn\n").try();
-    seq = order(be.alloc, be.fn_names).try();
+    seq = order(be.alloc, be.functions, (entry) { entry.name.view() }).try();
     seq.loop((h, i) { be.write_symbol_at(i, out).try() });
     Ok(());
 }
 
 write_symbol_at = (be :: CBackend, i: usize, out :: String)
                   Res<(), AllocError> {
-    be.origin_of(i).match({
+    entry = be.functions.get(i).ok_or(AllocError.OutOfMemory).try();
+    entry.origin.match({
         Generated    => Ok(()),
-        Source(span) => be.fn_names.get(i).match({
-            None       => Ok(()),
-            Ok(symbol) => write_symbol_row(symbol.view(), span, out),
-        }),
+        Source(span) => write_symbol_row(entry.name.view(), span, out),
     })
 }
 
@@ -822,19 +820,19 @@ write_map_field = (text: str, out :: String) Res<(), AllocError> {
 }
 
 emit_protos = (be :: CBackend, out :: Emit) Res<(), AllocError> {
-    externs = order(be.alloc, be.extern_names).try();
+    externs = order(
+        be.alloc,
+        be.foreign_functions,
+        (entry) { entry.name.view() }
+    ).try();
     externs.loop((h, i) {
-        be.extern_protos.get(i).match({
-            None  => Ok(()),
-            Ok(p) => write_proto_line(out, p),
-        }).try();
+        entry = be.foreign_functions.get(i).ok_or(AllocError.OutOfMemory).try();
+        write_proto_line(out, entry.proto).try();
     });
-    seq = order(be.alloc, be.fn_names).try();
+    seq = order(be.alloc, be.functions, (entry) { entry.name.view() }).try();
     seq.loop((h, i) {
-        be.fn_protos.get(i).match({
-            None  => Ok(()),
-            Ok(p) => write_proto_line(out, p),
-        }).try();
+        entry = be.functions.get(i).ok_or(AllocError.OutOfMemory).try();
+        write_proto_line(out, entry.proto).try();
     });
     out.line().try();
     Ok(());
@@ -847,7 +845,7 @@ write_proto_line = (out :: Emit, proto: String) Res<(), AllocError> {
 }
 
 emit_bodies = (be :: CBackend, out :: Emit) Res<(), AllocError> {
-    seq = order(be.alloc, be.fn_names).try();
+    seq = order(be.alloc, be.functions, (entry) { entry.name.view() }).try();
     seq.loop((h, i) {
         be.write_body_at(out, i).try();
     });
@@ -856,15 +854,10 @@ emit_bodies = (be :: CBackend, out :: Emit) Res<(), AllocError> {
 
 write_body_at = (be :: CBackend, out :: Emit, i: usize)
                 Res<(), AllocError> {
-    be.fn_protos.get(i).match({
-        None  => Ok(()),
-        Ok(p) => out.bytes(p.view()),
-    }).try();
+    entry = be.functions.get(i).ok_or(AllocError.OutOfMemory).try();
+    out.bytes(entry.proto.view()).try();
     out.say(" {").try();
-    be.fn_bodies.get(i).match({
-        None  => Ok(()),
-        Ok(b) => out.bytes(b.view()),
-    }).try();
+    out.bytes(entry.body.view()).try();
     out.say("}").try();
     out.line().try();
     Ok(());
@@ -906,9 +899,9 @@ group_bodies* = (be: CBackend) Res<Vec<ModuleBodies>, AllocError> {
             functions: be.alloc.Vec<usize>()
         )).try();
     });
-    seq = order(be.alloc, be.fn_names).try();
+    seq = order(be.alloc, be.functions, (entry) { entry.name.view() }).try();
     seq.loop((h, index) {
-        unit = be.unit_of(index);
+        unit = be.functions.get(index).ok_or(AllocError.OutOfMemory).try().unit;
         groups.get(unit).match({
             None      => (),
             Ok(group) => {

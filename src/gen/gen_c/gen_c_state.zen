@@ -41,6 +41,16 @@ Cleanup* = {
     return_to*: Res<usize>,
 }
 
+EmittedFunction* = {
+    name*: String,
+    proto*: String,
+    body*: String,
+    origin*: FnOrigin,
+    unit*: usize,
+}
+ForeignFunction* = { name*: String, proto*: String }
+QueuedType* = { name*: String, id*: TyId, done* :: bool }
+
 QueuedFunction* = { definition*: Def, inst*: Inst }
 QueuedMethod* = { method*: MethodRef, inst*: Inst }
 
@@ -58,10 +68,8 @@ CBackend* = {
     diags :: Vec<GenDiag>,
 
     // Types requiring a C definition, keyed by mangled name.
-    type_names* :: Vec<String>,
+    type_queue* :: Vec<QueuedType>,
     type_lookup :: Map<str, usize>,
-    type_ids* :: Vec<TyId>,
-    type_done* :: Vec<bool>,
 
     // Integer types requiring checked-arithmetic helpers.
     helper_types* :: Vec<String>,
@@ -94,12 +102,7 @@ CBackend* = {
     inst* :: Inst,
     fn_seen :: Vec<String>,
     fn_lookup :: Map<str, bool>,
-    fn_names* :: Vec<String>,
-    fn_protos* :: Vec<String>,
-    fn_bodies* :: Vec<String>,
-    fn_origins :: Vec<FnOrigin>,
-    // Module index of each lowered body; unused in single-file emission.
-    fn_units* :: Vec<usize>,
+    functions* :: Vec<EmittedFunction>,
     // the unit the lowering is writing into right now
     unit :: usize,
     // Multi-unit output makes lowered functions externally visible.
@@ -108,8 +111,7 @@ CBackend* = {
     // Parsed for compatibility; bodyless free functions are always foreign.
     ffi* :: bool,
     // Foreign symbols and prototypes, deduplicated by symbol.
-    extern_names* :: Vec<String>,
-    extern_protos* :: Vec<String>,
+    foreign_functions* :: Vec<ForeignFunction>,
 
     // Headers required by reachable C bindings.
     c_headers* :: Vec<String>,
@@ -178,7 +180,7 @@ CBackend* = {
 
     world* = (self: @Self) World { self.check.world }
 
-    // Lookup keys borrow the immutable buffers owned by type_names/fn_seen.
+    // Lookup keys borrow the immutable buffers owned by type_queue/fn_seen.
     // Growing either outer Vec moves String records, not their byte buffers.
     // The vectors retain insertion order; hashes never choose emission order.
     // Mangled type names are injective and serve as worklist keys.
@@ -188,32 +190,27 @@ CBackend* = {
 
     queue_type* = (self :: @Self, name: String, id: TyId)
                   Res<(), AllocError> {
-        index = self.type_names.len;
+        index = self.type_queue.len;
         key   = name.view();
-        self.type_names.add(name).try();
-        self.type_ids.add(id).try();
-        self.type_done.add(false).try();
         self.type_lookup.get(key).match({
             Ok(_) => Ok(()),
-            None  => self.type_lookup.set(key, index),
-        });
+            None  => {
+                self.type_queue.reserve(1).try();
+                self.type_lookup.set(key, index).try();
+                self.type_queue.add(QueuedType(name: name, id: id, done: false))
+            },
+        })
     }
 
-    type_name_at* = (self: @Self, i: usize) str {
-        self.type_names.get(i).match({ Ok(s) => s.view(), None => "" })
-    }
-
-    type_id_at* = (self: @Self, i: usize) Res<TyId> { self.type_ids.get(i) }
-
-    is_done* = (self: @Self, i: usize) bool {
-        self.type_done.get(i).match({ Ok(d) => d, None => true })
+    type_id_at* = (self: @Self, i: usize) Res<TyId> {
+        Ok(self.type_queue.get(i).try().id)
     }
 
     mark_done* = (self :: @Self, i: usize) Res<(), AllocError> {
-        self.type_done.set(i, true).match({
-            None  => Err(AllocError.OutOfMemory),
-            Ok(_) => Ok(()),
-        })
+        row ::= self.type_queue.get(i).ok_or(AllocError.OutOfMemory).try();
+        row.done = true;
+        self.type_queue.set(i, row).ok_or(AllocError.OutOfMemory).try();
+        Ok(())
     }
 
     // Emit the complete checked-arithmetic family for each used primitive.
@@ -448,21 +445,17 @@ CBackend* = {
 
     need_extern* = (self :: @Self, name: str, proto: String)
                    Res<bool, AllocError> {
-        Range(0, self.extern_names.len).find((i) {
-            self.extern_names.get(i).match({
-                Ok(s) => s.view().eq(name),
-                None  => false,
-            })
-        }).match({
-            Ok(i) => self.extern_protos.get(i).match({
-                Ok(p) => Ok(p.view().eq(proto.view())),
-                None  => Ok(false),
-            }),
-            None  => {
+        self.foreign_functions.find(
+            (entry) { entry.name.view().eq(name) }
+        ).match({
+            Ok(entry) => Ok(entry.proto.view().eq(proto.view())),
+            None      => {
                 owned ::= self.alloc.String().try();
                 owned.add(name).try();
-                self.extern_names.add(owned).try();
-                self.extern_protos.add(proto).try();
+                self.foreign_functions.add(ForeignFunction(
+                    name: owned,
+                    proto: proto
+                )).try();
                 Ok(true)
             },
         })
@@ -561,29 +554,19 @@ CBackend* = {
 
     keep_function = (self :: @Self, name: String, proto: String,
                      body: String, origin: FnOrigin) Res<(), AllocError> {
-        self.fn_names.add(name).try();
-        self.fn_protos.add(proto).try();
-        self.fn_bodies.add(body).try();
-        self.fn_origins.add(origin).try();
-        self.fn_units.add(self.unit).try();
-        Ok(());
-    }
-
-    origin_of* = (self: @Self, i: usize) FnOrigin {
-        self.fn_origins.get(i).match({
-            Ok(origin) => origin,
-            None       => FnOrigin.Generated,
-        })
+        self.functions.add(EmittedFunction(
+            name: name,
+            proto: proto,
+            body: body,
+            origin: origin,
+            unit: self.unit
+        ))
     }
 
     // The unit every function kept from here on belongs to. Set once
     // per body, by the one place that knows which module the body was
     // declared in.
     enter_unit* = (self :: @Self, mi: usize) () { self.unit = mi; }
-
-    unit_of* = (self: @Self, i: usize) usize {
-        self.fn_units.get(i).match({ Ok(u) => u, None => 0 })
-    }
 
     // Splitting the program across files means a call can cross one, so
     // nothing but `main` may keep internal linkage.
@@ -917,10 +900,8 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         call_effects: a.CallEffects(tree).try(),
         buf: a.Emit().try(),
         diags: a.Vec<GenDiag>(),
-        type_names: a.Vec<String>(),
+        type_queue: a.Vec<QueuedType>(),
         type_lookup: a.Map<str, usize>(),
-        type_ids: a.Vec<TyId>(),
-        type_done: a.Vec<bool>(),
         helper_types: a.Vec<String>(),
         print_used: false,
         stderr_used: false,
@@ -945,16 +926,11 @@ CBackend* = (a: Alloc, tree: Ast, check: Checker) Res<CBackend, AllocError> {
         inst: a.Inst(),
         fn_seen: a.Vec<String>(),
         fn_lookup: a.Map<str, bool>(),
-        fn_names: a.Vec<String>(),
-        fn_protos: a.Vec<String>(),
-        fn_bodies: a.Vec<String>(),
-        fn_origins: a.Vec<FnOrigin>(),
-        fn_units: a.Vec<usize>(),
+        functions: a.Vec<EmittedFunction>(),
         unit: 0,
         externs: false,
         ffi: false,
-        extern_names: a.Vec<String>(),
-        extern_protos: a.Vec<String>(),
+        foreign_functions: a.Vec<ForeignFunction>(),
         c_headers: a.Vec<String>(),
         locals: a.Vec<LocalSlot>(),
         declared: a.Vec<String>(),

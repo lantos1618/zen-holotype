@@ -9,6 +9,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[2]
 CASES = (
     "helpers_preserve_caller_owned_storage",
+    "helpers_preserve_independent_field_origins",
     "transferred_arena_view_stored_through_parameter",
 )
 

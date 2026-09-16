@@ -104,18 +104,23 @@ separate requirements and should not be added to a function that only orders.
 
 Checked helper calls now carry the selected function body. After type checking,
 whole-parameter store relations are solved to a fixed point across direct free,
-generic, and inherent method calls. Ownership then rejects passing local-arena
+generic, and inherent method calls. Direct `str` fields read from parameters
+also retain their field identity through these helper relations. Ownership then rejects passing local-arena
 views to helpers that store through borrowed destinations and carries those
 stores into local-record and loop provenance. Caller-owned allocation and
-explicit arena transfer remain supported. Field-projected parameter origins,
-raw pointer operations, indirect-call effects, and general return-region
-relations still require richer contracts; this is not whole-language lifetime
-safety.
+explicit arena transfer remain supported. Named construction fields keep
+independent origins: a helper may store a caller-owned field even when another
+field carries temporary data. General aggregate field paths, projected fields
+of returned aggregates, raw pointer operations, indirect-call effects, and
+return-region relations still require richer contracts; this is not
+whole-language lifetime safety.
 
 `make verify` includes generated-program AddressSanitizer checks for safe
-helper storage and arena transfer, with a deliberate use-after-free control.
-The generic literal matrix covers arrays, nested arrays, parentheses, and
-match-produced receivers as well as scalar calls. Byte and chunk JSON feeds
+helper storage, independent record fields, and arena transfer, with a deliberate
+use-after-free control. The generic literal matrix covers arrays, nested arrays,
+parentheses, and match-produced receivers as well as scalar calls. Parentheses
+around scalar matches preserve every arm's range checks after substitution;
+foldable scalar expressions retain their existing diagnostic location. Byte and chunk JSON feeds
 both refuse input after completion, including a truncated finish.
 
 Patched member completion checks the complete open-document overlay. Changes
@@ -629,8 +634,9 @@ The next implementation priorities are:
    workspaces. Give document storage a lifetime separate from each edit before
    replacing snapshots; gate allocations and verify cache reuse, unsaved
    dependencies, close/reopen behavior, and recovery after failed checks.
-4. Migrate remaining related backend vectors to complete records, and shrink
-   generated-C warning baselines by fixing emission. Preserve fallible
+4. Continue consolidating remaining related backend state, and shrink
+   generated-C warning baselines by fixing emission. Function bodies, foreign
+   declarations, and queued types now use complete records. Preserve fallible
    publication and deterministic output through each migration.
 5. Reassess the representative applications above after these changes. A clean
    verification run proves its covered behaviors; the review must separately

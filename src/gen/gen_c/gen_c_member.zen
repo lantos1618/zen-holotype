@@ -136,6 +136,38 @@ lower_resolved_dot = (
     out  :: String
 )
                      Res<(), AllocError> {
+    be.check.checked_call(d.id).match({
+        Ok(checked) => checked.declaration.match({
+            Ok(_) => {
+                receiver = checked.signature.match({
+                    None => Ok(d.a.base), Ok(signature) => signature.receiver,
+                });
+                be.lower_plain_call(
+                    d.id,
+                    d.c,
+                    d.a.name.text,
+                    receiver,
+                    ctx,
+                    want,
+                    out
+                )
+            },
+            None  => be.lower_unselected_dot(d, ctx, want, out),
+        }),
+        None        => be.lower_unselected_dot(d, ctx, want, out),
+    })
+}
+
+// Receiver lookup is needed for member calls and deferred contexts. A checked
+// free declaration above must never be replaced by a same-named member.
+lower_unselected_dot = (
+    be   :: CBackend,
+    d    : Dot,
+    ctx  : Ctx,
+    want : TyId,
+    out  :: String
+)
+                       Res<(), AllocError> {
     b = be.check.base_of(d.a.base, ctx).try();
     b.is_type.match({
         true  => be.lower_static_call(d, b.ty, ctx, want, out),
