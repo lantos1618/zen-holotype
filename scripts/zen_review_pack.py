@@ -21,7 +21,7 @@ def source_path(relative: str) -> Path:
 
 def line_count(path: Path) -> int:
     data = path.read_bytes()
-    return data.count(b"\n") + (0 if data.endswith(b"\n") else 1)
+    return data.count(b"\n") + int(bool(data) and not data.endswith(b"\n"))
 
 
 def area_of(relative: str) -> str:

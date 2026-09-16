@@ -384,6 +384,7 @@ def main() -> int:
             return 1
     else:
         snapshots_dir.mkdir(parents=True, exist_ok=True)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
         snapshot_path.write_text(encoded)
         report_path.write_text(document)
     print(f"{snapshot['totals']['files']} files -> {snapshot_path}")

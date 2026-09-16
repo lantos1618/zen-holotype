@@ -36,7 +36,7 @@ def validate(review: str) -> None:
 def previous_review(label: str) -> Path | None:
     reviews = sorted(SNAPSHOTS.glob(f"*-{MODEL}.md"))
     current = SNAPSHOTS / f"{label}-{MODEL}.md"
-    earlier = [path for path in reviews if path != current]
+    earlier = [path for path in reviews if path < current]
     return earlier[-1] if earlier else None
 
 
