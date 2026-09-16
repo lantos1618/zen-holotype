@@ -11,7 +11,7 @@ decl_at = sema.sema_def
 Checker, UNRESOLVED = sema.sema_check
 tail_expr = sema.sema_hoist
 SemaFault, NameFault = sema.sema_diag
-Own, place_type, path_root, joined_source = sema.sema_own
+Own, place_type, path_root, joined_source, access_view, returned_view = sema.sema_own
 TyId = sema.sema_ty
 own_member = sema.sema_recv
 call_callee = sema.sema_call
@@ -92,7 +92,7 @@ scope_escape_of = (c :: Checker, o :: Own, id: ExprId) Res<ExprId> {
         Name(n)       => o.scoped_var(n.text).match({ true => Ok(id), false => None }),
         Paren(p)      => c.scope_escape(o, p.inner),
         Try(t)        => c.scope_escape(o, t.operand),
-        Access(a)     => c.scope_field_escape(o, id, a),
+        Access(_)     => c.scope_field_escape(o, id),
         Index(x)      => c.scope_escape(o, x.base),
         Array(a)      => c.scope_escape_in_values(o, a.elems),
         FixedArray(a) => c.scope_escape_in_values(o, a.elems),
@@ -102,7 +102,10 @@ scope_escape_of = (c :: Checker, o :: Own, id: ExprId) Res<ExprId> {
             None => None, Ok(arm) => c.scope_escape(o, arm.body),
         }),
         Block(b)      => o.block_scoped(b).match({ true => Ok(id), false => None }),
-        Call(k)       => c.scope_escape_in_args(o, k),
+        Call(k)       => c.returned_view(o, id, k, "").match({
+            None     => c.scope_escape_in_args(o, k),
+            Ok(view) => view.scoped.match({ true => Ok(id), false => None }),
+        }),
         _             => None,
     })
 }
@@ -110,14 +113,9 @@ scope_escape_of = (c :: Checker, o :: Own, id: ExprId) Res<ExprId> {
 scope_field_escape = (
     c  :: Checker,
     o  :: Own,
-    id : ExprId,
-    a  : Access
+    id : ExprId
 ) Res<ExprId> {
-    text = c.spelled_name(a.base);
-    (text.len > 0).match({
-        true  => o.scoped_field(text, a.name.text).match({ true => Ok(id), false => None }),
-        false => c.scope_escape(o, a.base),
-    })
+    c.access_view(o, id).scoped.match({ true => Ok(id), false => None })
 }
 
 scope_escape_in_values = (
@@ -248,7 +246,7 @@ is_arena_backed* = (c :: Checker, o :: Own, id: ExprId) bool {
         (c.is_arena_ty(c.place_type(o, id)) || c.draws_on_arena(o, id))
 }
 
-is_arena_ty = (c :: Checker, ty: TyId) bool {
+is_arena_ty* = (c :: Checker, ty: TyId) bool {
     c.types.at(ty).match({
         Named(n) => n.name.eq("Arena") && c.world.module_name(n.decl).eq("std.mem.mem_arena"),
         _        => false,
@@ -272,7 +270,7 @@ arena_name_of = (c :: Checker, o :: Own, id: ExprId) Res<str> {
         Name(n)       => o.arena_var(n.text).match({ true => Ok(n.text), false => None }),
         Paren(p)      => c.arena_name(o, p.inner),
         Try(t)        => c.arena_name(o, t.operand),
-        Access(a)     => c.arena_field_name(o, a),
+        Access(_)     => c.arena_field_name(o, id),
         Index(x)      => c.arena_name(o, x.base),
         Array(a)      => c.arena_name_in_values(o, a.elems),
         FixedArray(a) => c.arena_name_in_values(o, a.elems),
@@ -282,17 +280,17 @@ arena_name_of = (c :: Checker, o :: Own, id: ExprId) Res<str> {
             None => None, Ok(arm) => c.arena_name(o, arm.body),
         }),
         Block(b)      => o.block_arena(b),
-        Call(k)       => c.arena_name_in_call(o, k),
+        Call(k)       => c.returned_view(o, id, k, "").match({
+            None     => c.arena_name_in_call(o, k),
+            Ok(view) => view.arena.match({ true => Ok(""), false => None }),
+        }),
         _             => None,
     })
 }
 
-arena_field_name = (c :: Checker, o :: Own, a: Access) Res<str> {
-    text = c.spelled_name(a.base);
-    (text.len > 0).match({
-        true  => o.arena_field(text, a.name.text).match({ true => Ok(text), false => None }),
-        false => c.arena_name(o, a.base),
-    })
+arena_field_name = (c :: Checker, o :: Own, id: ExprId) Res<str> {
+    c.access_view(o, id).arena.ensure().try();
+    Ok(c.field_root_name(id))
 }
 
 arena_name_in_values = (c :: Checker, o :: Own, values: Vec<ExprId>) Res<str> {
@@ -389,10 +387,7 @@ arena_source* = (c :: Checker, o :: Own, id: ExprId) Res<ExprId> {
             Consume(x)    => c.arena_source(o, x.operand),
             Paren(p)      => c.arena_source(o, p.inner),
             Try(t)        => c.arena_source(o, t.operand),
-            Access(a)     => (c.spelled_name(a.base).len > 0).match({
-                true  => o.field_source(c.spelled_name(a.base), a.name.text),
-                false => c.arena_source(o, a.base),
-            }),
+            Access(_)     => c.access_view(o, id).source,
             Index(x)      => c.arena_source(o, x.base),
             Array(a)      => c.array_source(o, a.elems),
             FixedArray(a) => c.array_source(o, a.elems),
@@ -404,7 +399,9 @@ arena_source* = (c :: Checker, o :: Own, id: ExprId) Res<ExprId> {
             },
             Call(k)       => c.is_arena_ty(c.place_type(o, id)).match({
                 true  => Ok(id),
-                false => {
+                false => c.returned_view(o, id, k, "").match({
+                    Ok(view) => view.source,
+                    None     => {
                     found ::= Sources(local: false, source: None);
                     c.tree.call_callee(k).kind.match({
                         Access(a) => found.add(c, o, a.base),
@@ -412,7 +409,8 @@ arena_source* = (c :: Checker, o :: Own, id: ExprId) Res<ExprId> {
                     });
                     k.args.loop((arg) { found.add(c, o, arg.value); });
                     found.source
-                },
+                    },
+                })
             }),
             _             => None,
         }),
@@ -456,5 +454,15 @@ release_stored_arena* = (c :: Checker, o :: Own, target: ExprId, value: ExprId)
                 _          => Ok(()),
             }),
         }),
+    })
+}
+
+field_root_name = (c: Checker, id: ExprId) str {
+    c.tree.expr_at(id).kind.match({
+        Name(name)     => name.text,
+        Paren(paren)   => c.field_root_name(paren.inner),
+        Access(access) => c.field_root_name(access.base),
+        Index(index)   => c.field_root_name(index.base),
+        _              => "",
     })
 }

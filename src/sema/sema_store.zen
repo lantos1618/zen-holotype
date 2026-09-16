@@ -1,13 +1,19 @@
 // Borrowed parameter storage effects, solved after call checking. Summaries
 // form a finite monotone relation, including mutually recursive helpers.
-// Direct str fields of parameters retain their projection. Derived aggregate
-// results need return-region contracts before their fields can be summarized.
+// Field paths are bounded by widening to the containing value. Return origins
+// and stores share the same domain, including recursive helper calls.
 
 Alloc, AllocError = std.mem
 Vec, Map = std.collections
-str = std.text
+str, String = std.text
 Range = std.core
 Function, BlockId, ExprId, Call, Bind = std.ast
+tail_expr = sema.sema_hoist
+is_construction = sema.sema_scope
+decl_at = sema.sema_def
+TyId = sema.sema_ty
+member_type = sema.sema_member
+type_from_ast = sema.sema_denote
 WalkVisitor, WalkEvent, WalkNode, walk = std.ast
 Checker, Ctx, Binding, UNRESOLVED = sema.sema_check
 Own, check_own_body, store_origin, transfer_store_origin = sema.sema_own
@@ -20,12 +26,13 @@ OwnCheck* = {
     bindings*: Vec<Binding>,
 }
 
-Source = {
-    parameter: usize,
-    field: Res<str>,
+Source* = {
+    parameter*: usize,
+    field*: Res<str>,
+    projectable*: bool,
 
     eq = (self: @Self, other: @Self) bool {
-        self.parameter == other.parameter && self.field.match({
+        self.parameter == other.parameter && self.projectable == other.projectable && self.field.match({
             None     => other.field.match({ None => true, Ok(_) => false }),
             Ok(name) => other.field.match({ None => false, Ok(other_name) => name.eq(
                 other_name
@@ -33,17 +40,44 @@ Source = {
         })
     }
 
-    project = (self: @Self, name: str) Source {
-        Source(parameter: self.parameter, field: self.field.match({
-            None => Ok(name), Ok(existing) => Ok(existing),
-        }))
+    project = (self: @Self, a: Alloc, name: str) Res<Source, AllocError> {
+        (!self.projectable).match({
+            true  => Ok(self),
+            false => {
+                path = self.field.match({ None => name, Ok(prefix) => append_path(
+                    a,
+                    prefix,
+                    name
+                ).try() });
+                bounded_path(path).match({
+                    true  => Ok(Source(
+                        parameter: self.parameter,
+                        field: Ok(path),
+                        projectable: true
+                    )),
+                    false => Ok(Source(
+                        parameter: self.parameter,
+                        field: self.field,
+                        projectable: false
+                    )),
+                })
+            },
+        })
     }
 }
-Store = { target: usize, source: Source }
-Summary = { function: Function, stores :: Vec<Store> }
-StoreEffects* = { rows :: Map<BlockId, Summary>, alloc: Alloc }
+
+// An empty path denotes the complete returned value. Deeper paths refine it.
+Returned* = { field*: str, sources* :: Vec<Source> }
+
+Store = { target: usize, field: str, source: Source }
+Summary* = { function*: Function, stores :: Vec<Store>, returns* :: Vec<Returned> }
+StoreEffects* = { rows :: Map<BlockId, Summary>, plain :: Map<TyId, bool>, alloc: Alloc }
 StoreEffects* = (a: Alloc) StoreEffects {
-    StoreEffects(rows: a.Map<BlockId, Summary>(), alloc: a)
+    StoreEffects(
+        rows: a.Map<BlockId, Summary>(),
+        plain: a.Map<TyId, bool>(),
+        alloc: a
+    )
 }
 
 finish_ownership* = (c :: Checker) Res<(), AllocError> {
@@ -58,30 +92,67 @@ finish_ownership* = (c :: Checker) Res<(), AllocError> {
 }
 
 solve = (effects :: StoreEffects, c: Checker) Res<(), AllocError> {
-    bodies ::= effects.alloc.Vec<BlockId>();
+    work       ::= effects.alloc.Vec<BlockId>();
+    pending    ::= effects.alloc.Map<BlockId, bool>();
+    dependents ::= effects.alloc.Map<BlockId, Vec<BlockId>>();
     c.own_checks.loop((job) {
-        job.function.params.find((parameter) { parameter.mutable }).match({
-            None => false, Ok(_) => true,
-        }).then(() {
-            bodies.add(job.body).try();
-            effects.rows.set(
-                job.body,
-                Summary(
-                    function: job.function,
-                    stores: effects.alloc.Vec<Store>()
-                )
-            ).try();
+        effects.rows.get(job.body).match({
+            Ok(_) => (),
+            None  => {
+                work.add(job.body).try();
+                pending.set(job.body, true).try();
+                effects.rows.set(
+                    job.body,
+                    Summary(
+                        function: job.function,
+                        stores: effects.alloc.Vec<Store>(),
+                        returns: effects.alloc.Vec<Returned>()
+                    )
+                ).try();
+            },
         });
     });
-    changed ::= true;
-    loop(() { changed }, (h) {
-        changed = false;
-        bodies.loop((body) {
-            summary = effects.rows.get(body).ok_or(AllocError.OutOfMemory).try();
-            scan ::= effects.alloc.StoreScan(c, effects, summary).try();
-            c.tree.walk(effects.alloc, WalkNode.Block(body), scan).try();
-            changed = changed || scan.summary.stores.len > summary.stores.len;
-            effects.rows.set(body, scan.summary).try();
+    cursor: usize ::= 0;
+    loop(() { cursor < work.len }, (h) {
+        body   = work.get(cursor).ok_or(AllocError.OutOfMemory).try();
+        cursor = cursor + 1;
+        pending.set(body, false).try();
+        summary = effects.rows.get(body).ok_or(AllocError.OutOfMemory).try();
+        before  = return_count(summary.returns);
+        scan ::= effects.alloc.StoreScan(c, effects, summary).try();
+        c.tree.walk(effects.alloc, WalkNode.Block(body), scan).try();
+        c.tail_expr(c.tree.block_at(body)).when_ok((value) {
+            scan.summary.returns.include_return(
+                "",
+                scan.origins(value),
+                effects.alloc
+            ).try();
+            scan.field_values(value).loop((field) {
+                scan.summary.returns.include_return(
+                    field.field,
+                    field.sources,
+                    effects.alloc
+                ).try();
+            });
+        });
+        scan.dependencies.loop((callee) {
+            callers ::= dependents.get(callee).value_or(effects.alloc.Vec<BlockId>());
+            (!body.is_in(callers)).then(() { callers.add(body).try(); });
+            dependents.set(callee, callers).try();
+        });
+        changed = scan.summary.stores.len > summary.stores.len || return_count(
+            scan.summary.returns
+        ) > before;
+        effects.rows.set(body, scan.summary).try();
+        changed.then(() {
+            dependents.get(body).when_ok((callers) {
+                callers.loop((caller) {
+                    (!pending.get(caller).value_or(false)).then(() {
+                        work.add(caller).try();
+                        pending.set(caller, true).try();
+                    });
+                });
+            });
         });
     });
     Ok(())
@@ -89,7 +160,7 @@ solve = (effects :: StoreEffects, c: Checker) Res<(), AllocError> {
 
 // Written arguments are matched by parameter identity, including named
 // arguments and an implicit receiver. Missing defaults carry no caller view.
-actual = (c: Checker, id: ExprId, call: Call, f: Function, index: usize)
+actual* = (c: Checker, id: ExprId, call: Call, f: Function, index: usize)
          Res<ExprId> {
     signature  = c.checked_call(id).try().signature.try();
     receiver   = signature.receiver;
@@ -116,7 +187,7 @@ actual = (c: Checker, id: ExprId, call: Call, f: Function, index: usize)
     })
 }
 
-selected_summary = (
+selected_summary* = (
     effects : StoreEffects,
     c       : Checker,
     id      : ExprId
@@ -162,15 +233,18 @@ transfer_call_stores* = (c :: Checker, own :: Own, id: ExprId, call: Call)
     Ok(())
 }
 
-OriginBinding = { name: str, origins :: Vec<Source>, target: Res<usize> }
+OriginBinding = { name: str, origins :: Vec<Source>, fields :: Vec<Returned>, target: Res<usize> }
 StoreScan = {
-    check: Checker,
-    effects: StoreEffects,
+    check :: Checker,
+    effects :: StoreEffects,
     summary :: Summary,
     vars :: Vec<OriginBinding>,
     scopes :: Vec<usize>,
+    dependencies :: Vec<BlockId>,
     values :: Map<ExprId, Vec<Source>>,
     blocks :: Map<BlockId, Vec<Source>>,
+    fields :: Map<ExprId, Vec<Returned>>,
+    block_fields :: Map<BlockId, Vec<Returned>>,
     alloc: Alloc,
 
     binding = (self: @Self, name: str) Res<usize> {
@@ -186,6 +260,94 @@ StoreScan = {
         self.values.get(id).value_or(self.alloc.Vec<Source>())
     }
 
+    field_values = (self: @Self, id: ExprId) Vec<Returned> {
+        self.fields.get(id).value_or(self.alloc.Vec<Returned>())
+    }
+
+    projected = (self: @Self, id: ExprId, path: str) Res<Vec<Source>, AllocError> {
+        self.project_values(self.origins(id), self.field_values(id), path)
+    }
+
+    project_values = (self: @Self, roots: Vec<Source>, fields: Vec<Returned>, path: str) Res<Vec<Source>, AllocError> {
+        ancestor ::= fields.find((field) { field.field.eq(path) });
+        fields.loop((field) {
+            strip_path(path, field.field).match({ None => false, Ok(_) => true }).then(() {
+                ancestor.match({ None => true, Ok(prior) => field.field.len > prior.field.len }).then(() {
+                    ancestor = Ok(field);
+                });
+            });
+        });
+        ancestor.match({
+            Ok(field) => field.field.eq(path).match({
+                true  => Ok(field.sources),
+                false => {
+                    suffix = strip_path(path, field.field).ok_or(AllocError.OutOfMemory).try();
+                    sources ::= self.alloc.Vec<Source>();
+                    field.sources.loop(
+                        (source) { sources.include(
+                            source.project(self.alloc, suffix).try()
+                        ).try(); }
+                    );
+                    Ok(sources)
+                },
+            }),
+            None      => {
+                sources ::= self.alloc.Vec<Source>();
+                roots.loop(
+                    (source) { sources.include(
+                        source.project(self.alloc, path).try()
+                    ).try(); }
+                );
+                Ok(sources)
+            },
+        })
+    }
+
+    bound_sources = (self: @Self, id: ExprId, call: Call, function: Function, sources: Vec<Source>)
+                    Res<Vec<Source>, AllocError> {
+        bound ::= self.alloc.Vec<Source>();
+        sources.loop((source) {
+            actual(self.check, id, call, function, source.parameter).when_ok((argument) {
+                values = source.field.match({
+                    None     => self.origins(argument),
+                    Ok(path) => self.projected(argument, path).try(),
+                });
+                values.loop((value) {
+                    bound.include(Source(
+                        parameter: value.parameter,
+                        field: value.field,
+                        projectable: value.projectable && source.projectable
+                    )).try();
+                });
+            });
+        });
+        Ok(bound)
+    }
+
+    inherit_fields = (self: @Self, id: ExprId, call: Call, function: Function,
+                      returned: Returned, fields :: Vec<Returned>) Res<(), AllocError> {
+returned.sources.loop((source) {
+                            source.projectable.then(() {
+                                actual(self.check, id, call, function, source.parameter).when_ok((argument) {
+                                    self.field_values(argument).loop((field) {
+                                        suffix = source.field.match({
+                                            None => Ok(field.field), Ok(path) => strip_path(field.field, path),
+                                        });
+                                        suffix.when_ok((tail) {
+                                            path = append_path(
+                                                self.alloc,
+                                                returned.field,
+                                                tail
+                                            ).try();
+                                            bounded_path(path).then(() { fields.include_return(path, field.sources, self.alloc).try(); });
+                                        });
+                                    });
+                                });
+                            });
+                        });
+        Ok(())
+    }
+
     root = (self: @Self, id: ExprId) Res<usize> {
         self.check.tree.expr_at(id).kind.match({
             Name(n)   => self.vars.get(self.binding(n.text).try()).try().target,
@@ -196,16 +358,108 @@ StoreScan = {
         })
     }
 
-    add_store = (self :: @Self, target: usize, sources: Vec<Source>)
+    local_root = (self: @Self, id: ExprId) Res<usize> {
+        self.check.tree.expr_at(id).kind.match({
+            Name(n)   => self.binding(n.text),
+            Access(a) => self.local_root(a.base),
+            Index(x)  => self.local_root(x.base),
+            Paren(p)  => self.local_root(p.inner),
+            _         => None,
+        })
+    }
+
+    local_path = (self: @Self, id: ExprId) Res<str, AllocError> {
+        self.check.tree.expr_at(id).kind.match({
+            Access(a) => append_path(
+                self.alloc,
+                self.local_path(a.base).try(),
+                a.name.text
+            ),
+            Paren(p)  => self.local_path(p.inner),
+            _         => Ok(""),
+        })
+    }
+
+    // Mutations join possible paths because the visitor also scans conditional
+    // branches. Copies keep their previous field snapshots.
+    mutate = (self :: @Self, target: ExprId, field: str, sources: Vec<Source>) Res<(), AllocError> {
+        self.local_root(target).when_ok((i) {
+            row ::= self.vars.get(i).ok_or(AllocError.OutOfMemory).try();
+            row.target.match({
+                Ok(_) => (),
+                None  => {
+                    path        = append_path(
+                        self.alloc,
+                        self.local_path(target).try(),
+                        field
+                    ).try();
+                    prior       = self.project_values(
+                        row.origins,
+                        row.fields,
+                        path
+                    ).try();
+                    row.origins = row.origins.map(
+                        self.alloc,
+                        (source) { source }
+                    ).try();
+                    opaque      = sources.map(self.alloc, (source) {
+                        Source(
+                            parameter: source.parameter,
+                            field: source.field,
+                            projectable: false
+                        )
+                    }).try();
+                    row.origins.merge(opaque).try();
+                    row.fields = row.fields.map(
+                        self.alloc,
+                        (field) { field }
+                    ).try();
+                    existing   = row.fields;
+                    existing.loop((field) {
+                        (path.is_empty() || field.field.eq(path) || strip_path(field.field, path).match({None => false, Ok(_) => true}) || strip_path(path, field.field).match({None => false, Ok(_) => true})).then(() {
+                            row.fields.include_return(
+                                field.field,
+                                opaque,
+                                self.alloc
+                            ).try();
+                        });
+                    });
+                    (!path.is_empty()).then(
+                        () {
+                            row.fields.include_return(
+                                path,
+                                prior,
+                                self.alloc
+                            ).try();
+                            row.fields.include_return(
+                                path,
+                                sources,
+                                self.alloc
+                            ).try(); }
+                    );
+                    self.vars.set(i, row);
+                },
+            });
+        });
+        Ok(())
+    }
+
+    add_store = (self :: @Self, target: usize, field: str, sources: Vec<Source>)
                 Res<(), AllocError> {
-        sources.loop((source) {
+        sources.loop((value) {
+            source = Source(
+                parameter: value.parameter,
+                field: value.field,
+                projectable: false
+            );
             self.summary.stores.find(
-                (e) { e.target == target && e.source.eq(source) }
+                (e) { e.target == target && e.field.eq(field) && e.source.eq(source) }
             )
                 .match({
                     Ok(_) => (),
                     None  => self.summary.stores.add(Store(
                         target: target,
+                        field: field,
                         source: source
                     )).try(),
                 });
@@ -215,50 +469,85 @@ StoreScan = {
 
     bind = (self :: @Self, bind: Bind) Res<(), AllocError> {
         sources = self.origins(bind.value);
-        self.root(bind.target).when_ok((target) { self.add_store(target, sources).try(); });
+        self.root(bind.target).when_ok((target) { self.add_store(target, self.local_path(bind.target).try(), sources).try(); });
         self.check.tree.expr_at(bind.target).kind.match({
             Name(n) => self.binding(n.text).match({
                 None  => self.vars.add(OriginBinding(
                     name: n.text,
                     origins: sources,
+                    fields: self.field_values(bind.value),
                     target: None
                 )),
                 Ok(i) => {
-                    row ::= self.vars.get(i).ok_or(AllocError.OutOfMemory).try();
+                    row    ::= self.vars.get(i).ok_or(AllocError.OutOfMemory).try();
+                    joined ::= row.fields.map(
+                        self.alloc,
+                        (field) { field }
+                    ).try();
+                    self.field_values(bind.value).loop((field) {
+                        joined.include_return(
+                            field.field,
+                            field.sources,
+                            self.alloc
+                        ).try();
+                    });
+                    paths  = joined;
+                    joined = self.alloc.Vec<Returned>();
+                    paths.loop((field) {
+                        prior ::= self.project_values(
+                            row.origins,
+                            row.fields,
+                            field.field
+                        ).try();
+                        prior = prior.map(
+                            self.alloc,
+                            (source) { source }
+                        ).try();
+                        prior.merge(
+                            self.projected(bind.value, field.field).try()
+                        ).try();
+                        joined.add(Returned(
+                            field: field.field,
+                            sources: prior
+                        )).try();
+                    });
+                    row.fields  = joined;
+                    row.origins = row.origins.map(
+                        self.alloc,
+                        (source) { source }
+                    ).try();
                     row.origins.merge(sources).try();
                     self.vars.set(i, row);
                     Ok(())
                 },
             }),
-            _       => Ok(()),
+            _       => self.mutate(bind.target, "", sources),
         })
     }
 
     expression = (self :: @Self, id: ExprId) Res<(), AllocError> {
         node = self.check.tree.expr_at(id);
         origins ::= self.alloc.Vec<Source>();
+        fields  ::= self.alloc.Vec<Returned>();
         node.kind.match({
             Name(n)       => self.binding(n.text).when_ok((i) {
                 origins.merge(
                     self.vars.get(i).ok_or(AllocError.OutOfMemory).try().origins
                 ).try();
+                fields = self.vars.get(i).ok_or(AllocError.OutOfMemory).try().fields;
             }),
             Access(a)     => {
                 self.check.callee_access.get(id).value_or(false).match({
                     true  => origins.merge(self.origins(a.base)),
                     false => {
-                        direct = self.check.tree.expr_at(a.base).kind.match({
-                            Name(n) => self.binding(n.text).match({
-                                None => false, Ok(index) => index < self.summary.function.params.len,
-                            }),
-                            _       => false,
-                        });
-                        ty     = self.check.expr_memo.get(id).value_or(UNRESOLVED);
-                        (direct && self.check.prim_name(ty).eq("str")).then(() {
-                            self.origins(a.base).loop((source) {
-                                origins.include(source.project(
-                                    a.name.text
-                                )).try();
+                        origins = self.projected(a.base, a.name.text).try();
+                        self.field_values(a.base).loop((field) {
+                            strip_path(field.field, a.name.text).when_ok((suffix) {
+                                fields.include_return(
+                                    suffix,
+                                    field.sources,
+                                    self.alloc
+                                ).try();
                             });
                         });
                         Ok(())
@@ -266,40 +555,154 @@ StoreScan = {
                 }).try();
             },
             Index(x)      => { origins.merge(self.origins(x.base)).try(); },
-            Paren(p)      => { origins.merge(self.origins(p.inner)).try(); },
-            Try(t)        => { origins.merge(self.origins(t.operand)).try(); },
-            Consume(x)    => { origins.merge(self.origins(x.operand)).try(); },
+            Paren(p)      => { origins.merge(self.origins(p.inner)).try(); fields = self.field_values(p.inner); },
+            Try(t)        => { origins.merge(self.origins(t.operand)).try(); fields = self.field_values(t.operand); },
+            Consume(x)    => { origins.merge(self.origins(x.operand)).try(); fields = self.field_values(x.operand); },
             Array(a)      => a.elems.loop(
                 (e) { origins.merge(self.origins(e)).try(); }
             ),
             FixedArray(a) => a.elems.loop(
                 (e) { origins.merge(self.origins(e)).try(); }
             ),
-            Block(b)      => { origins.merge(self.blocks.get(b).value_or(self.alloc.Vec<Source>())).try(); },
-            Match(m)      => m.arms.loop(
-                (arm) { origins.merge(self.origins(arm.body)).try(); }
-            ),
+            Block(b)      => {
+                origins.merge(self.blocks.get(b).value_or(self.alloc.Vec<Source>())).try();
+                fields = self.block_fields.get(b).value_or(self.alloc.Vec<Returned>());
+            },
+            Match(m)      => { m.arms.loop(
+                (arm) {
+                    origins.merge(self.origins(arm.body)).try();
+                    self.field_values(arm.body).loop((field) {
+                        fields.include_return(
+                            field.field,
+                            field.sources,
+                            self.alloc
+                        ).try();
+                    });
+                }
+            );
+                paths = fields;
+                m.arms.loop((arm) {
+                    paths.loop((field) {
+                        fields.include_return(
+                            field.field,
+                            self.projected(arm.body, field.field).try(),
+                            self.alloc
+                        ).try();
+                    });
+                });
+            },
             Call(call)    => {
-                origins.merge(self.origins(call.callee)).try();
-                call.args.loop(
-                    (arg) { origins.merge(self.origins(arg.value)).try(); }
-                );
+                self.check.checked_call(id).when_ok((checked) {
+                    checked.body.when_ok((body) {
+                        (!body.is_in(self.dependencies)).then(() { self.dependencies.add(body).try(); });
+                    });
+                });
+                self.effects.selected_summary(self.check, id).match({
+                    Ok(summary) => summary.returns.loop((returned) {
+                        sources = self.bound_sources(
+                            id,
+                            call,
+                            summary.function,
+                            returned.sources
+                        ).try();
+                        returned.field.is_empty().match({
+                            true  => origins.merge(sources),
+                            false => fields.include_return(
+                                returned.field,
+                                sources,
+                                self.alloc
+                            ),
+                        }).try();
+                        self.inherit_fields(
+                            id,
+                            call,
+                            summary.function,
+                            returned,
+                            fields
+                        ).try();
+                    }),
+                    None        => {
+                        copy_allocation(self.check, id, call).match({
+                            Ok(allocation) => origins.merge(self.origins(
+                                allocation
+                            )).try(),
+                            None           => {
+                                origins.merge(self.origins(call.callee)).try();
+                                call.args.loop(
+                                    (arg) { origins.merge(self.origins(
+                                        arg.value
+                                    )).try(); }
+                                );
+                            },
+                        });
+                        self.check.is_construction(id).match({
+                            true  => call.args.loop((arg) {
+                                arg.name.when_ok((name) {
+                                    fields.include_return(
+                                        name.text,
+                                        self.origins(arg.value),
+                                        self.alloc
+                                    ).try();
+                                    self.field_values(arg.value).loop((field) {
+                                        path = append_path(
+                                            self.alloc,
+                                            name.text,
+                                            field.field
+                                        ).try();
+                                        bounded_path(path).then(() { fields.include_return(path, field.sources, self.alloc).try(); });
+                                    });
+                                });
+                            }),
+                            false => {
+                                self.check.tree.expr_at(
+                                    call.callee
+                                ).kind.match({
+                                    Name(n) => (n.text.eq("Ok") || n.text.eq("Err")).then(() {
+                                        call.args.get(0).when_ok((arg) { fields = self.field_values(arg.value); });
+                                    }),
+                                    _       => (),
+                                });
+                            },
+                        });
+                        // A derived result is not a place within each input.
+                        origins = origins.map(self.alloc, (source) {
+                            Source(
+                                parameter: source.parameter,
+                                field: source.field,
+                                projectable: false
+                            )
+                        }).try();
+                    },
+                });
                 self.effects.selected_summary(self.check, id).when_ok((summary) {
                     summary.stores.loop((effect) {
                         actual(self.check, id, call, summary.function, effect.target).when_ok((target) {
                             actual(self.check, id, call, summary.function, effect.source.parameter).when_ok((source) {
-                                self.root(target).when_ok((parameter) {
-                                    sources ::= self.alloc.Vec<Source>();
-                                    self.origins(source).loop((origin) {
-                                        projected = effect.source.field.match({
-                                            None => origin, Ok(name) => origin.project(
-                                                name
-                                            ),
-                                        });
-                                        sources.include(projected).try();
-                                    });
-                                    self.add_store(parameter, sources).try();
+                                sources = effect.source.field.match({
+                                    None     => self.origins(source),
+                                    Ok(path) => self.projected(
+                                        source,
+                                        path
+                                    ).try(),
                                 });
+                                self.root(target).when_ok((parameter) { path = append_path(self.alloc, self.local_path(target).try(), effect.field).try();
+                                    bounded_path(path).match({
+                                        true  => self.add_store(
+                                            parameter,
+                                            path,
+                                            sources
+                                        ),
+                                        false => self.add_store(
+                                            parameter,
+                                            self.local_path(target).try(),
+                                            sources
+                                        ),
+                                    }).try(); });
+                                self.mutate(
+                                    target,
+                                    effect.field,
+                                    sources
+                                ).try();
                             });
                         });
                     });
@@ -307,8 +710,11 @@ StoreScan = {
             },
             _             => (),
         });
-        primitive = self.check.prim_name(self.check.expr_memo.get(id).value_or(UNRESOLVED));
-        (!primitive.is_empty() && !primitive.eq("str")).then(() { origins = self.alloc.Vec<Source>(); });
+        self.effects.without_borrows(self.check, self.check.expr_memo.get(id).value_or(UNRESOLVED)).try().then(() {
+            origins = self.alloc.Vec<Source>();
+            fields  = self.alloc.Vec<Returned>();
+        });
+        self.fields.set(id, fields).try();
         self.values.set(id, origins)
     }
 }
@@ -325,6 +731,7 @@ StoreScan.impl(WalkVisitor, {
                             self.vars.add(OriginBinding(
                                 name: p.name.text,
                                 origins: self.alloc.Vec<Source>(),
+                                fields: self.alloc.Vec<Returned>(),
                                 target: None
                             )).try();
                         });
@@ -355,6 +762,11 @@ StoreScan.impl(WalkVisitor, {
                             value
                         ) })
                     ).try();
+                    self.block_fields.set(id, block.value.match({
+                        None => self.alloc.Vec<Returned>(), Ok(value) => self.field_values(
+                            value
+                        ),
+                    })).try();
                     truncate(
                         self.vars,
                         self.scopes.take(self.scopes.len - 1).ok_or(AllocError.OutOfMemory).try()
@@ -372,10 +784,11 @@ StoreScan = (a: Alloc, c: Checker, effects: StoreEffects, summary: Summary)
     vars ::= a.Vec<OriginBinding>();
     summary.function.params.loop((h, i, p) {
         origins ::= a.Vec<Source>();
-        origins.add(Source(parameter: i, field: None)).try();
+        origins.add(Source(parameter: i, field: None, projectable: true)).try();
         vars.add(OriginBinding(
             name: p.name.text,
             origins: origins,
+            fields: a.Vec<Returned>(),
             target: p.mutable.match({ true => Ok(i), false => None })
         )).try();
     });
@@ -385,8 +798,11 @@ StoreScan = (a: Alloc, c: Checker, effects: StoreEffects, summary: Summary)
         summary: summary,
         vars: vars,
         scopes: a.Vec<usize>(),
+        dependencies: a.Vec<BlockId>(),
         values: a.Map<ExprId, Vec<Source>>(),
         blocks: a.Map<BlockId, Vec<Source>>(),
+        fields: a.Map<ExprId, Vec<Returned>>(),
+        block_fields: a.Map<BlockId, Vec<Returned>>(),
         alloc: a
     ))
 }
@@ -399,5 +815,149 @@ merge = (into :: Vec<Source>, values: Vec<Source>) Res<(), AllocError> {
 include = (into :: Vec<Source>, value: Source) Res<(), AllocError> {
     into.find((source) { source.eq(value) }).match({
         Ok(_) => Ok(()), None => into.add(value),
+    })
+}
+
+append_path* = (a: Alloc, prefix: str, name: str) Res<str, AllocError> {
+    path ::= a.String(prefix).try();
+    (!prefix.is_empty() && !name.is_empty()).then(() { path.add('.').try(); });
+    path.add(name).try();
+    Ok(path.view())
+}
+
+strip_path* = (path: str, prefix: str) Res<str> {
+    (path.len > prefix.len && path.slice(0, prefix.len).eq(prefix) && path.index(prefix.len) == '.').ensure().try();
+    Ok(path.slice(prefix.len + 1, path.len))
+}
+
+// Widening retains the containing value's origin; it never drops a dependency.
+bounded_path = (path: str) bool {
+    depth ::= 1;
+    path.loop((byte) { (byte == '.').then(() { depth = depth + 1; }); });
+    depth <= 4
+}
+
+include_return = (
+    into    :: Vec<Returned>,
+    path    : str,
+    sources : Vec<Source>,
+    a       : Alloc
+)
+                 Res<(), AllocError> {
+    index = Range(0, into.len).find((i) {
+        into.get(i).match({ None => false, Ok(field) => field.field.eq(path) })
+    });
+    index.match({
+        None  => into.add(Returned(field: path, sources: sources)),
+        Ok(i) => {
+            prior = into.get(i).ok_or(AllocError.OutOfMemory).try();
+            values ::= prior.sources.map(a, (source) { source }).try();
+            values.merge(sources).try();
+            into.set(i, Returned(field: path, sources: values));
+            Ok(())
+        },
+    })
+}
+
+return_count = (values: Vec<Returned>) usize {
+    count ::= values.len;
+    values.loop((value) { count = count + value.sources.len; });
+    count
+}
+
+// The standard allocating format primitive copies bytes into its allocator;
+// formatting inputs do not become borrowed fields of the returned String.
+copy_allocation* = (c: Checker, id: ExprId, call: Call) Res<ExprId> {
+    declaration = c.checked_call(id).try().declaration.try();
+    c.world.module_name(declaration).eq("std.text.text_string").ensure().try();
+    function = c.tree.decl_at(declaration).try().kind.match({
+        Function(function) => Ok(function), _ => None,
+    }).try();
+    (function.name.text.eq(
+        "String"
+    ) && function.body.match({ None => true, Ok(_) => false })).ensure().try();
+    actual(c, id, call, function, 0)
+}
+
+// Copied scalar aggregates do not borrow their containing storage. Unknown,
+// generic, recursive, and capability shapes retain conservative provenance.
+without_borrows = (
+    effects :: StoreEffects,
+    c       :: Checker,
+    ty      : TyId
+) Res<bool, AllocError> {
+    effects.plain.get(ty).match({
+        Ok(plain) => Ok(plain),
+        None      => {
+            effects.plain.set(ty, false).try();
+            plain = c.types.at(ty).match({
+                Prim(p)      => !p.name.eq("str"),
+                Array(array) => effects.without_borrows(c, array.elem).try(),
+                Res(result)  => effects.without_borrows(
+                    c,
+                    result.value
+                ).try() && result.form.match({
+                    Absence => true, _ => effects.without_borrows(
+                        c,
+                        result.error
+                    ).try(),
+                }),
+                Named(named) => c.tree.decl_at(named.decl).match({
+                    None            => false,
+                    Ok(declaration) => declaration.kind.match({
+                        Struct(record)    => {
+                            plain  ::= record.tparams.len == 0;
+                            fields ::= false;
+                            record.members.loop((member) {
+                                member.kind.match({
+                                    Field(_)           => {
+                                        fields = true;
+                                        plain.then(() {
+                                            member_ty = c.member_type(
+                                                member,
+                                                named.decl.module.to_usize(),
+                                                ty
+                                            ).try();
+                                            plain     = effects.without_borrows(
+                                                c,
+                                                member_ty
+                                            ).try();
+                                        });
+                                    },
+                                    Function(function) => function.body.match({None => { plain = false; }, Ok(_) => ()}),
+                                    _                  => (),
+                                });
+                            });
+                            plain && fields
+                        },
+                        Enum(enumeration) => {
+                            plain ::= enumeration.tparams.len == 0;
+                            enumeration.variants.loop((variant) {
+                                plain.then(() {
+                                    variant.payload.when_ok((id) {
+                                        payload = c.type_from_ast(
+                                            id,
+                                            Ctx(
+                                                named.decl.module.to_usize(),
+                                                UNRESOLVED
+                                            )
+                                        ).try();
+                                        plain   = effects.without_borrows(
+                                            c,
+                                            payload
+                                        ).try();
+                                    });
+                                });
+                            });
+                            plain
+                        },
+                        _                 => false,
+                    }),
+                }),
+                _            => false,
+            });
+            effects.plain.set(ty, plain).try();
+            Ok(plain)
+        },
     })
 }

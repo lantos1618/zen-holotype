@@ -102,22 +102,38 @@ separate requirements and should not be added to a function that only orders.
 
 ## Further ownership and compiler improvements
 
-Checked helper calls now carry the selected function body. After type checking,
-whole-parameter store relations are solved to a fixed point across direct free,
-generic, and inherent method calls. Direct `str` fields read from parameters
-also retain their field identity through these helper relations. Ownership then rejects passing local-arena
-views to helpers that store through borrowed destinations and carries those
-stores into local-record and loop provenance. Caller-owned allocation and
-explicit arena transfer remain supported. Named construction fields keep
-independent origins: a helper may store a caller-owned field even when another
-field carries temporary data. General aggregate field paths, projected fields
-of returned aggregates, raw pointer operations, indirect-call effects, and
-return-region relations still require richer contracts; this is not
+Checked helper calls carry the selected function body. After type checking,
+parameter store and return-origin relations are solved across direct free,
+generic, and inherent method calls, including mutually recursive helpers.
+Summaries preserve aliases, nested named record fields, and projected fields
+of returned records. Caller dependencies drive rechecking when a summary
+changes. Field paths use conservative widening after four components, retaining
+the containing value's origin rather than discarding a dependency.
+
+Ownership rejects local-arena views stored through borrowed destinations and
+carries those stores into local-record and loop provenance. Named construction
+fields keep independent origins, copied records retain provenance snapshots,
+and nested field replacement preserves sibling origins. Symbolic mutation
+summaries join possible sources in local records conservatively, including
+helper writes before return. Conditional returns and whole-record reassignment
+join every possible field origin, including branches without explicit field
+metadata. Store summaries preserve destination paths so
+unrelated fields keep independent origins. Scalar-only records copy their
+contents without borrowing the containing allocation. Caller-owned allocation
+and explicit arena transfer remain supported.
+The standard allocating text formatter and `str.dup` use the chosen allocator's
+lifetime; an empty duplicate is a static empty view.
+
+Raw pointer operations, indirect-call effects, repeated mutation through
+borrowed aliases, and general callback/aggregate region contracts remain
+incomplete. Conservative joins can reject safe code; these checks are not
 whole-language lifetime safety.
 
 `make verify` includes generated-program AddressSanitizer checks for safe
-helper storage, independent record fields, and arena transfer, with a deliberate
-use-after-free control. The generic literal matrix covers arrays, nested arrays,
+helper storage, returned and independent record fields, provenance snapshots,
+nested replacement, caller-allocated copies, and arena transfer, with a
+deliberate use-after-free control. The generic literal matrix covers arrays,
+nested arrays,
 parentheses, and match-produced receivers as well as scalar calls. Parentheses
 around scalar matches preserve every arm's range checks after substitution;
 foldable scalar expressions retain their existing diagnostic location. Byte and chunk JSON feeds
@@ -619,12 +635,11 @@ must hold through helpers and modules, not only in one attractive snippet.
 
 The next implementation priorities are:
 
-1. Extend ownership summaries with field paths and return-region relations,
-   then define effects for indirect calls. Each supported relation needs both
-   an escaping-view rejection and a caller-owned/explicit-transfer acceptance
-   across modules, generics, and recursive calls. Run the accepted generated
-   programs under ASan. Keep unsupported relations explicit until these
-   contracts are enforced.
+1. Define indirect-call and callback ownership effects, and improve precision
+   for conditional aggregate results and mutations. Keep paired escape and
+   caller-owned acceptance tests across modules, generics, and recursive calls;
+   run accepted programs under ASan. Keep unsupported relations explicit until
+   their contracts are enforced.
 2. Complete semantic call records for field defaults and generic trait bodies,
    including argument binding and conversions. Remove backend compatibility
    lookup only when every accepted call has authoritative per-instantiation

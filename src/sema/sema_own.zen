@@ -13,14 +13,15 @@ SemaFault, NameFault = sema.sema_diag
 check_receiver, check_write_place = sema.sema_recv
 check_scope_returned, check_scope_stored = sema.sema_scope
 check_scope_captured, is_scope_value, call_escapes = sema.sema_scope
-check_arena_returned, is_arena_backed = sema.sema_scope
+check_arena_returned, is_arena_backed, is_arena_ty = sema.sema_scope
 scope_alias, remember_block_origin, check_arena_stored, is_construction = sema.sema_scope
 arena_source, release_stored_arena, stored_arena_backed = sema.sema_scope
 Pin, pin_captured, refuse_pinned, refuse_pinned_at = sema.sema_pin
 check_drop_copy, is_drop_type = sema.sema_drop
 is_handle_ty, refuse_handle_at, spelled_name = sema.sema_handle
 spelled_lambda, call_callee = sema.sema_call
-OwnCheck, call_stores, transfer_call_stores = sema.sema_store
+OwnCheck, call_stores, transfer_call_stores, actual, selected_summary = sema.sema_store
+append_path, strip_path, copy_allocation, Returned = sema.sema_store
 
 OwnVar* = {
     name*: str,
@@ -51,7 +52,21 @@ Provenance = {
     fields: Vec<FieldOrigin>,
 
     field = (self: @Self, name: str) FieldOrigin {
-        self.fields.find((field) { field.name.eq(name) }).value_or(FieldOrigin(name: name, scoped: self.scoped, arena: self.arena, source: self.source))
+        found       ::= FieldOrigin(
+            name: name,
+            scoped: self.scoped,
+            arena: self.arena,
+            source: self.source
+        );
+        best: usize ::= 0;
+        self.fields.loop((field) {
+            matches = field.name.eq(name) || strip_path(name, field.name).match({ None => false, Ok(_) => true });
+            (matches && field.name.len >= best).then(() {
+                found = field;
+                best  = field.name.len;
+            });
+        });
+        found
     }
 
     eq = (self: @Self, other: Provenance) bool {
@@ -224,12 +239,22 @@ Own* = {
         self.var_at(text).match({ None => false, Ok(v) => v.arena || v.fields.find((f) { f.arena }).match({ Ok(_) => true, None => false }) })
     }
 
-    arena_field* = (self: @Self, text: str, name: str) bool {
-        self.var_at(text).match({ None => false, Ok(v) =>
-            v.fields.find((f) { f.name.eq(name) }).match({
-                None => v.arena, Ok(f) => f.arena,
-            }),
+    field_view = (self: @Self, text: str, name: str) StoredView {
+        self.var_at(text).match({
+            None      => StoredView(scoped: false, arena: false, source: None),
+            Ok(value) => {
+                field = Provenance(scoped: value.scoped, arena: value.arena, source: value.source, fields: value.fields).field(name);
+                StoredView(
+                    scoped: field.scoped,
+                    arena: field.arena,
+                    source: field.source
+                )
+            },
         })
+    }
+
+    arena_field* = (self: @Self, text: str, name: str) bool {
+        self.field_view(text, name).arena
     }
 
     arena_source* = (self: @Self, text: str) Res<ExprId> {
@@ -248,12 +273,7 @@ Own* = {
     }
 
     field_source* = (self: @Self, text: str, name: str) Res<ExprId> {
-        self.var_at(text).match({
-            None  => None,
-            Ok(v) => v.fields.find((f) { f.name.eq(name) }).match({
-                None => v.source, Ok(f) => f.source,
-            }),
-        })
+        self.field_view(text, name).source
     }
 
     release_arena* = (self :: @Self, source: ExprId) Res<(), AllocError> {
@@ -282,11 +302,7 @@ Own* = {
     }
 
     scoped_field* = (self: @Self, text: str, name: str) bool {
-        self.var_at(text).match({ None => false, Ok(v) =>
-            v.fields.find((f) { f.name.eq(name) }).match({
-                None => v.scoped, Ok(f) => f.scoped,
-            }),
-        })
+        self.field_view(text, name).scoped
     }
 
     taint_root = (self :: @Self, root: usize, value: Provenance) () {
@@ -316,7 +332,7 @@ Own* = {
                 row    ::= old;
                 fields ::= old.fields.filter(
                     self.alloc,
-                    (f) { !f.name.eq(name) }
+                    (f) { !f.name.eq(name) && strip_path(f.name, name).match({ None => true, Ok(_) => false }) }
                 ).try();
                 fields.add(FieldOrigin(
                     name: name,
@@ -324,6 +340,14 @@ Own* = {
                     arena: value.arena,
                     source: value.source
                 )).try();
+                value.fields.loop((field) {
+                    fields.add(FieldOrigin(
+                        name: append_path(self.alloc, name, field.name).try(),
+                        scoped: field.scoped,
+                        arena: field.arena,
+                        source: field.source
+                    )).try();
+                });
                 row.fields = fields;
                 self.vars.set(root, row);
                 Ok(())
@@ -527,9 +551,26 @@ check_own_body* = (c :: Checker, f: Function, body: BlockId, ctx: Ctx)
 
 // A projected source selects a field's recorded provenance instead of
 // attributing every field to every allocation carried by the aggregate.
-StoredView = { scoped: bool, arena: bool, source: Res<ExprId> }
+StoredView* = {
+    scoped*: bool,
+    arena*: bool,
+    source*: Res<ExprId>,
 
-stored_view = (
+    join = (self: @Self, other: @Self) StoredView {
+        StoredView(
+            scoped: self.scoped || other.scoped,
+            arena: self.arena || other.arena,
+            source: joined_source(
+                self.arena,
+                self.source,
+                other.arena,
+                other.source
+            )
+        )
+    }
+}
+
+stored_view* = (
     c     :: Checker,
     o     :: Own,
     value : ExprId,
@@ -547,24 +588,47 @@ stored_view = (
                 Paren(p)   => c.stored_view(o, p.inner, field),
                 Try(t)     => c.stored_view(o, t.operand, field),
                 Call(call) => c.is_construction(value).match({
-                    false => c.stored_view(o, value, None),
-                    true  => call.args.find((arg) {
-                        arg.name.match({ None => false, Ok(label) => label.text.eq(
-                            name
-                        ) })
-                    }).match({
-                        None    => c.stored_view(o, value, None),
-                        Ok(arg) => c.stored_view(o, arg.value, None),
-                    }),
+                    false => c.returned_view(o, value, call, name).match({ Ok(view) => view, None => c.stored_view(o, value, None) }),
+                    true  => {
+                        part = name.split_once('.');
+                        head = part.match({ None => name, Ok(parts) => parts.before });
+                        tail = part.match({ None => None, Ok(parts) => Ok(
+                            parts.after
+                        ) });
+                        call.args.find((arg) {
+                            arg.name.match({ None => false, Ok(label) => label.text.eq(
+                                head
+                            ) })
+                        }).match({
+                            None    => c.stored_view(o, value, None),
+                            Ok(arg) => c.stored_view(o, arg.value, tail),
+                        })
+                    },
                 }),
                 _          => c.stored_view(o, value, None),
             }),
         }),
-        None     => StoredView(
-            scoped: c.scope_alias(o, value),
-            arena: c.is_arena_backed(o, value),
-            source: c.arena_source(o, value)
-        ),
+        None     => c.tree.expr_at(value).kind.match({
+            Name(name)     => StoredView(
+                scoped: o.scoped_var(name.text),
+                arena: o.arena_var(name.text),
+                source: o.arena_source(name.text)
+            ),
+            Paren(paren)   => c.stored_view(o, paren.inner, None),
+            Consume(moved) => c.is_arena_ty(c.place_type(
+                o,
+                moved.operand
+            )).match({
+                true  => StoredView(scoped: false, arena: false, source: None),
+                false => c.stored_view(o, moved.operand, None),
+            }),
+            Access(_)      => c.access_view(o, value),
+            _              => StoredView(
+                scoped: c.scope_alias(o, value),
+                arena: c.is_arena_backed(o, value),
+                source: c.arena_source(o, value)
+            ),
+        }),
     })
 }
 
@@ -764,12 +828,9 @@ revive_field = (c :: Checker, o :: Own, a: Access, value: ExprId, ctx: Ctx)
                 scoped: c.is_scope_value(value) || c.scope_alias(o, value),
                 arena: c.stored_arena_backed(o, a.base, value),
                 source: c.arena_source(o, value),
-                fields: o.alloc.Vec<FieldOrigin>()
+                fields: c.value_fields(o, value).try()
             );
-            (c.spelled_name(a.base).len > 0).match({
-                true  => o.assign_field(i, a.name.text, origin).try(),
-                false => o.taint_root(i, origin),
-            });
+            c.assign_access(o, i, a, origin).try();
             o.revive(i, a.name.text)
         },
     }).try();
@@ -1197,7 +1258,7 @@ flow_bind = (c :: Checker, o :: Own, b: Bind, ctx: Ctx)
         scoped: c.is_scope_value(b.value) || c.scope_alias(o, b.value),
         arena: c.stored_arena_backed(o, b.target, b.value),
         source: c.arena_source(o, b.value),
-        fields: o.alloc.Vec<FieldOrigin>()
+        fields: c.value_fields(o, b.value).try()
     );
     node.kind.match({
         Name(n)   => o.find_var(n.text).match({
@@ -1206,10 +1267,7 @@ flow_bind = (c :: Checker, o :: Own, b: Bind, ctx: Ctx)
         }),
         Access(a) => c.path_root(o, a.base).match({
             None  => (),
-            Ok(i) => (c.spelled_name(a.base).len > 0).match({
-                true  => o.assign_field(i, a.name.text, value).try(),
-                false => o.taint_root(i, value),
-            }),
+            Ok(i) => c.assign_access(o, i, a, value).try(),
         }),
         Index(x)  => c.path_root(o, x.base).match({
             None => (), Ok(i) => o.taint_root(i, value),
@@ -1438,9 +1496,23 @@ value_fields = (c :: Checker, o :: Own, value: ExprId)
                Res<Vec<FieldOrigin>, AllocError> {
     fields ::= o.alloc.Vec<FieldOrigin>();
     c.tree.expr_at(value).kind.match({
-        Paren(p)   => { fields = c.value_fields(o, p.inner).try(); },
-        Call(call) => c.is_construction(value).then(() {
-            call.args.loop((arg) {
+        Name(n)        => o.var_at(n.text).when_ok((row) { fields = row.fields; }),
+        Paren(p)       => { fields = c.value_fields(o, p.inner).try(); },
+        Try(t)         => { fields = c.value_fields(o, t.operand).try(); },
+        Access(access) => {
+            c.value_fields(o, access.base).try().loop((field) {
+                strip_path(field.name, access.name.text).when_ok((suffix) {
+                    fields.add(FieldOrigin(
+                        name: suffix,
+                        scoped: field.scoped,
+                        arena: field.arena,
+                        source: field.source
+                    )).try();
+                });
+            });
+        },
+        Call(call)     => c.is_construction(value).match({
+            true  => call.args.loop((arg) {
                 arg.name.when_ok((name) {
                     view = c.stored_view(o, arg.value, None);
                     fields.add(FieldOrigin(
@@ -1449,10 +1521,222 @@ value_fields = (c :: Checker, o :: Own, value: ExprId)
                         arena: view.arena,
                         source: view.source
                     )).try();
+                    c.value_fields(o, arg.value).try().loop((field) {
+                        fields.add(FieldOrigin(
+                            name: append_path(
+                                o.alloc,
+                                name.text,
+                                field.name
+                            ).try(),
+                            scoped: field.scoped,
+                            arena: field.arena,
+                            source: field.source
+                        )).try();
+                    });
                 });
-            });
+            }),
+            false => c.store_effects.selected_summary(c, value).when_ok((summary) {
+                summary.returns.loop((returned) {
+                    view = c.returned_view(o, value, call, returned.field).ok_or(AllocError.OutOfMemory).try();
+                    (!returned.field.is_empty()).then(() {
+                        fields.include_field(FieldOrigin(
+                            name: returned.field,
+                            scoped: view.scoped,
+                            arena: view.arena,
+                            source: view.source
+                        )).try();
+                    });
+                    c.inherit_fields(
+                        o,
+                        value,
+                        call,
+                        summary.function,
+                        returned,
+                        fields
+                    ).try();
+                });
+            }),
         }),
-        _          => (),
+        _              => (),
     });
     Ok(fields)
+}
+
+// Return paths are interpreted in the caller, using the chosen declaration's
+// parameter identities. A missing summary retains conservative call behavior.
+returned_view* = (
+    c    :: Checker,
+    o    :: Own,
+    id   : ExprId,
+    call : Call,
+    path : str
+) Res<StoredView> {
+    copy_allocation(c, id, call).match({
+        Ok(allocation) => Ok(c.stored_view(o, allocation, None)),
+        None           => c.summarized_view(o, id, call, path),
+    })
+}
+
+summarized_view = (
+    c    :: Checker,
+    o    :: Own,
+    id   : ExprId,
+    call : Call,
+    path : str
+) Res<StoredView> {
+    summary  = c.store_effects.selected_summary(c, id).try();
+    returned = summary.returns.find((value) { value.field.eq(path) }).try();
+    view ::= StoredView(scoped: false, arena: false, source: None);
+    returned.sources.loop((source) {
+        actual(c, id, call, summary.function, source.parameter).when_ok((argument) {
+            view = view.join(c.stored_view(o, argument, source.field));
+        });
+    });
+    Ok(view)
+}
+
+// Match a flat field path against syntax without allocating during queries.
+path_matches = (c: Checker, id: ExprId, path: str) bool {
+    c.tree.expr_at(id).kind.match({
+        Name(_)        => path.is_empty(),
+        Paren(p)       => c.path_matches(p.inner, path),
+        Access(access) => {
+            name = access.name.text;
+            (path.len >= name.len).match({
+                false => false,
+                true  => {
+                    offset = path.len - name.len;
+                    path.slice(offset, path.len).eq(name) && (offset == 0).match({
+                        true  => c.path_matches(access.base, ""),
+                        false => path.index(offset - 1) == '.' && c.path_matches(access.base, path.slice(0, offset - 1)),
+                    })
+                },
+            })
+        },
+        _              => false,
+    })
+}
+
+access_view* = (c :: Checker, o :: Own, id: ExprId) StoredView {
+    found: Res<FieldOrigin> = c.path_root(o, id).match({
+        None     => None,
+        Ok(root) => o.vars.get(root).match({
+            None    => None,
+            Ok(row) => row.fields.find(
+                (field) { c.path_matches(id, field.name) }
+            ),
+        }),
+    });
+    found.match({
+        Ok(field) => StoredView(
+            scoped: field.scoped,
+            arena: field.arena,
+            source: field.source
+        ),
+        None      => c.tree.expr_at(id).kind.match({
+            Access(access) => c.stored_view(o, access.base, None),
+            _              => StoredView(
+                scoped: false,
+                arena: false,
+                source: None
+            ),
+        }),
+    })
+}
+
+include_field = (
+    fields :: Vec<FieldOrigin>,
+    field  : FieldOrigin
+) Res<(), AllocError> {
+    index = Range(0, fields.len).find((i) {
+        fields.get(i).match({ None => false, Ok(prior) => prior.name.eq(field.name) })
+    });
+    index.match({
+        None  => fields.add(field),
+        Ok(i) => {
+            prior = fields.get(i).ok_or(AllocError.OutOfMemory).try();
+            fields.set(
+                i,
+                FieldOrigin(
+                    name: field.name,
+                    scoped: prior.scoped || field.scoped,
+                    arena: prior.arena || field.arena,
+                    source: joined_source(
+                        prior.arena,
+                        prior.source,
+                        field.arena,
+                        field.source
+                    )
+                )
+            );
+            Ok(())
+        },
+    })
+}
+
+projection_path = (c: Checker, id: ExprId) Res<Res<str>, AllocError> {
+    c.tree.expr_at(id).kind.match({
+        Name(_)        => Ok(Ok("")),
+        Paren(paren)   => c.projection_path(paren.inner),
+        Access(access) => c.projection_path(access.base).try().match({
+            None       => Ok(None),
+            Ok(prefix) => Ok(Ok(
+                append_path(c.alloc, prefix, access.name.text).try()
+            )),
+        }),
+        _              => Ok(None),
+    })
+}
+
+assign_access = (
+    c      : Checker,
+    o      :: Own,
+    root   : usize,
+    access : Access,
+    value  : Provenance
+)
+                Res<(), AllocError> {
+    c.projection_path(access.base).try().match({
+        None       => { o.taint_root(root, value); Ok(()) },
+        Ok(prefix) => o.assign_field(
+            root,
+            append_path(o.alloc, prefix, access.name.text).try(),
+            value
+        ),
+    })
+}
+
+inherit_fields = (
+    c        :: Checker,
+    o        :: Own,
+    value    : ExprId,
+    call     : Call,
+    function : Function,
+    returned : Returned,
+    fields   :: Vec<FieldOrigin>
+) Res<(), AllocError> {
+returned.sources.loop((source) {
+                        source.projectable.then(() {
+                            actual(c, value, call, function, source.parameter).when_ok((argument) {
+                                c.value_fields(o, argument).try().loop((field) {
+                                    suffix = source.field.match({
+                                        None => Ok(field.name), Ok(path) => strip_path(field.name, path),
+                                    });
+                                    suffix.when_ok((tail) {
+                                        fields.include_field(FieldOrigin(
+                                            name: append_path(
+                                                o.alloc,
+                                                returned.field,
+                                                tail
+                                            ).try(),
+                                            scoped: field.scoped,
+                                            arena: field.arena,
+                                            source: field.source
+                                        )).try();
+                                    });
+                                });
+                            });
+                        });
+                    });
+    Ok(())
 }

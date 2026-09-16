@@ -11,6 +11,13 @@ CASES = (
     "helpers_preserve_caller_owned_storage",
     "helpers_preserve_independent_field_origins",
     "transferred_arena_view_stored_through_parameter",
+    "returned_records_keep_independent_origins",
+    "copied_record_fields_are_snapshots",
+    "nested_field_overwrite_preserves_siblings",
+    "duplicated_text_uses_the_chosen_allocator",
+    "copied_scalar_records_do_not_borrow_container",
+    "nested_helper_arguments_keep_independent_origins",
+    "conditional_record_return_keeps_independent_origins",
 )
 
 
