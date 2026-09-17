@@ -41,7 +41,7 @@ J       ?= $(shell nproc 2>/dev/null || echo 4)
 CACHE   ?= $(shell command -v ccache 2>/dev/null)
 ZCC      = $(CACHE) $(CC)
 
-.PHONY: all build dev-build dev-check dev-run bootstrap buildcheck runnercheck editorcheck seed test verify differential runtimecheck warnings lint parse cap dupcomments faults lextile determinism fixpoint grammar fmt asan ubsan leak profile clean help
+.PHONY: lspcheck all build dev-build dev-check dev-run bootstrap buildcheck runnercheck editorcheck seed test verify differential runtimecheck warnings lint parse cap dupcomments faults lextile determinism fixpoint grammar fmt asan ubsan leak profile clean help
 
 # These gates share ./zen, build/, and grammar/zen.so. Keep their dependency
 # graphs serial even when an operator invokes `make -j verify`.
@@ -119,12 +119,16 @@ seed: build
 test: build lint parse cap dupcomments faults lextile
 	$(PY) tests/run.py --zen ./zen --cc "$(CC)" --cc-cache "$(CACHE)" --jobs "$(TEST_J)"
 
+## lspcheck: real-process protocol, document, and lifecycle regressions.
+lspcheck: build
+	$(PY) tests/quality/lsp_protocol.py --zen ./zen
+
 ## verify: the authoritative repository-green door used by CI and releases.
 ##
 ## Keep this target as the single list of required gates. Shared prerequisites
 ## are built once per invocation, then formatting and determinism inspect the
 ## same compiler that ran the test suite.
-verify: test fmt determinism fixpoint differential runtimecheck ownershipcheck warnings ubsan buildcheck runnercheck editorcheck
+verify: test fmt determinism fixpoint differential runtimecheck ownershipcheck warnings ubsan buildcheck runnercheck editorcheck lspcheck
 
 .PHONY: ownershipcheck
 ownershipcheck: build

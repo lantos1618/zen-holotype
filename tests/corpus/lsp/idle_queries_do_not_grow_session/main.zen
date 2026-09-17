@@ -1,0 +1,52 @@
+// Read-only requests with visible diagnostics must allocate only in the turn.
+Server = lsp.lsp_serve
+Alloc, AllocError, Ptr = std.mem
+str = std.text
+Range = std.core
+
+Counting = { backing: Alloc, calls: Ptr<usize> }
+Counting.impl(Alloc, {
+    raw = (self: @Self, size: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        self.calls.write(0, self.calls.read(0) + 1);
+        self.backing.raw(size, align)
+    }
+    realloc = <T>(self: @Self, source: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        self.calls.write(0, self.calls.read(0) + 1);
+        self.backing.realloc(source, count)
+    }
+})
+
+turn = (env: Env, server :: Server, message: str) Res<(), AllocError> {
+    temporary ::= env.mem.alloc();
+    output    ::= temporary.String().try();
+    server.one(temporary, message, output).try();
+    server.settled(temporary, output)
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    arena ::= env.mem.alloc();
+    calls = arena.raw(8, 8).try().to<usize>();
+    calls.write(0, 0);
+    counted = Counting(backing: arena, calls: calls);
+    server ::= counted.Server(env);
+    turn(
+        env,
+        server,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":\"file://.\"}}"
+    ).try();
+    turn(
+        env,
+        server,
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"file://src/app/app.zen\",\"text\":\"value* = () i32 { missing }\",\"version\":1}}}"
+    ).try();
+    before = calls.read(0);
+    Range(0, 100).loop((i) {
+        turn(
+            env,
+            server,
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/documentSymbol\",\"params\":{\"textDocument\":{\"uri\":\"file://src/app/app.zen\"}}}"
+        ).try();
+    });
+    println("session allocations {}", calls.read(0) - before);
+    Ok(0)
+}

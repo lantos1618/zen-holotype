@@ -47,51 +47,24 @@ WorkspaceTurn = {
 }
 
 Diagnostics* = {
-    a: Alloc,
     roots :: Res<Vec<SourceRoot>> = None,
 
     set_roots* = (self :: @Self, roots: Vec<SourceRoot>) () {
         self.roots = Ok(roots);
-        self.fresh = false;
-        self.built.invalidate();
+        self.invalidate();
     }
 
 
-    owed :: str = "",
-
-    showing :: Vec<str>,
-
-    closing :: Vec<str>,
-
+    dirty :: bool = false,
     built :: Built,
-
     fresh :: bool = false,
-
     said_arena :: Arena,
-
     said :: Map<str, str>,
 
-    owes* = (self :: @Self, uri: str) () {
+    invalidate* = (self :: @Self) () {
         self.built.invalidate();
-        self.owed  = uri;
+        self.dirty = true;
         self.fresh = false;
-    }
-
-    stales* = (self :: @Self, uri: str) () {
-        self.built.invalidate();
-        self.fresh = false;
-        self.owed.is_empty().then(() { self.owed = uri; });
-    }
-
-    closed* = (self :: @Self, uri: str, next: str)
-              Res<(), AllocError> {
-        self.built.invalidate();
-        self.fresh = false;
-        self.owed  = next;
-        self.closing.find((u) { u.eq(uri) }).match({
-            Ok(_) => written(),
-            None  => self.closing.add(uri),
-        })
     }
 
     classes_for* = (self :: @Self, t: Alloc, uri: str)
@@ -121,6 +94,7 @@ Diagnostics* = {
             turn.uris,
             turn.docs
         ).try();
+        self.fresh = true;
         Ok(Shared(
             c: self.built.checker(),
             root: self.built.root(),
@@ -139,128 +113,92 @@ Diagnostics* = {
             temp: t,
             roots: self.roots
         );
-        self.clear_closed(turn, out).try();
-        self.owed.is_empty().match({
-            true  => written(),
-            false => self.build_owed(turn, out),
+        self.dirty.match({
+            false => written(),
+            true  => self.publish_snapshot(turn, out),
         })
     }
 
-    clear_closed = (self :: @Self, turn: WorkspaceTurn, out :: String)
-                   Res<(), AllocError> {
-        empty ::= turn.temp.Vec<Spot>();
-        self.closing.loop((h, uri) {
-            self.say_one(turn, uri, empty, out).try();
-        });
-        kept ::= self.a.Vec<str>();
-        self.showing.loop((h, uri) {
-            self.closing.find((u) { u.eq(uri) }).match({
-                Ok(_) => written(),
-                None  => kept.add(uri),
+    // Check every open entry, including independent import graphs. All borrowed
+    // diagnostic text is copied before the next build can retire its arena.
+    publish_snapshot = (self :: @Self, turn: WorkspaceTurn, out :: String)
+                       Res<(), AllocError> {
+        spots ::= turn.temp.Vec<Spot>();
+        now   ::= turn.temp.Vec<str>();
+        count ::= turn.uris.len;
+        loop(() { count > 0 }, (h) {
+            count = count - 1;
+            turn.uris.get(count).match({
+                None    => written(),
+                Ok(uri) => self.collect(turn, uri, spots, now),
             }).try();
         });
-        self.showing = kept;
-        self.closing = self.a.Vec<str>();
-        Ok(())
-    }
-
-    build_owed = (self :: @Self, turn: WorkspaceTurn, out :: String)
-                 Res<(), AllocError> {
-        uri       = self.owed;
-        self.owed = "";
-        path      = path_of(uri);
-        root      = turn.root(path);
-        (turn.workspace.is_empty() || root.is_empty()).match({
-            true  => written(),
-            false => self.told(turn, root, relative_to(root, path), uri, out),
-        })
-    }
-
-    told = (self :: @Self, turn: WorkspaceTurn, root: str, entry: str,
-            uri: str, out :: String)
-           Res<(), AllocError> {
-        self.built.ensure(turn.env, root, entry, turn.uris, turn.docs).try();
-        self.fresh = true;
-        self.built.spots().match({
-            None      => written(),
-            Ok(spots) => self.say_all(turn, uri, spots, out),
-        })
-    }
-
-    say_all = (self :: @Self, turn: WorkspaceTurn, uri: str,
-               spots: Vec<Spot>, out :: String)
-              Res<(), AllocError> {
-        now ::= turn.temp.Vec<str>();
         spots.uris_of(now).try();
-        self.say_one(turn, uri, spots, out).try();
-        now.loop((h, u) {
-            u.eq(uri).match({
-                true  => written(),
-                false => self.say_one(turn, u, spots, out),
-            }).try();
-        });
-        self.take_back(turn, uri, now, spots, out).try();
-        self.remember_showing(now).try();
-        Ok(());
-    }
-
-    remember_showing = (self :: @Self, now: Vec<str>) Res<(), AllocError> {
-        self.showing = self.a.Vec<str>();
-        now.loop((h, u) {
-            kept = u.dup(self.a).try();
-            self.showing.add(kept).try();
-        });
-        Ok(());
-    }
-
-    say_one = (self :: @Self, turn: WorkspaceTurn, uri: str,
-               spots: Vec<Spot>, out :: String)
-              Res<(), AllocError> {
-        body ::= turn.temp.String().try();
-        write_notification(turn.temp, uri, turn.text(uri), spots, body).try();
-        self.said.get(uri).match({
-            None     => self.send(turn.env, uri, body, out),
-            Ok(prev) => prev.eq(body.view()).match({
-                true  => written(),
-                false => self.send(turn.env, uri, body, out),
-            }),
-        })
-    }
-
-    send = (self :: @Self, env: Env, uri: str, body: String, out :: String)
-           Res<(), AllocError> {
-        fresh_arena ::= env.mem.alloc();
+        fresh_arena ::= turn.env.mem.alloc();
         fresh       ::= fresh_arena.Map<str, str>();
-        self.said.pairs((h, key, value) {
-            (!key.eq(uri)).then(() {
-                fresh.set(
-                    key.dup(fresh_arena).try(),
-                    value.dup(fresh_arena).try()
+        now.loop((uri) {
+            body ::= turn.temp.String().try();
+            write_notification(
+                turn.temp,
+                uri,
+                turn.text(uri),
+                spots,
+                body
+            ).try();
+            self.say_changed(uri, body.view(), out).try();
+            fresh.set(
+                uri.dup(fresh_arena).try(),
+                body.view().dup(fresh_arena).try()
+            ).try();
+        });
+        self.said.pairs((h, uri, previous) {
+            now.find((current) { current.eq(uri) }).match({ None => true, Ok(_) => false }).then(() {
+                empty ::= turn.temp.String().try();
+                write_notification(
+                    turn.temp,
+                    uri,
+                    "",
+                    turn.temp.Vec<Spot>(),
+                    empty
                 ).try();
+                (!previous.eq(empty.view())).then(() { write_frame(empty.view(), out).try(); });
             });
         });
-        fresh.set(
-            uri.dup(fresh_arena).try(),
-            body.view().dup(fresh_arena).try()
-        ).try();
-        write_frame(body.view(), out).try();
         self.said_arena.drop();
         self.said_arena = consume fresh_arena;
         self.said       = fresh;
-        Ok(())
+        self.dirty      = false;
+        self.fresh      = true;
+        written()
     }
 
-    take_back = (self :: @Self, turn: WorkspaceTurn, uri: str,
-                 now: Vec<str>, spots: Vec<Spot>, out :: String)
-                Res<(), AllocError> {
-        self.showing.loop((h, u) {
-            u.gone(uri, now).match({
-                false => written(),
-                true  => self.say_one(turn, u, spots, out),
-            }).try();
+    collect = (self :: @Self, turn: WorkspaceTurn, uri: str,
+               spots :: Vec<Spot>, uris :: Vec<str>) Res<(), AllocError> {
+        path = path_of(turn.temp, uri).try();
+        root = turn.root(path);
+        (!turn.workspace.is_empty() && !root.is_empty()).then(() {
+            (!self.built.covers(turn.temp, path).try()).then(() {
+                self.built.ensure(
+                    turn.env,
+                    root,
+                    relative_to(root, path),
+                    turn.uris,
+                    turn.docs
+                ).try();
+            });
+            self.built.append_spots(turn.temp, spots).try();
+            uris.add(uri).try();
         });
-        Ok(());
+        written()
     }
+
+    say_changed = (self: @Self, uri: str, body: str, out :: String)
+                  Res<(), AllocError> {
+        same = self.said.get(uri).match({ None => false, Ok(previous) => previous.eq(body) });
+        (!same).then(() { write_frame(body, out).try(); });
+        written()
+    }
+
 }
 
 Diagnostics.impl(Drop, {
@@ -270,31 +208,15 @@ Diagnostics.impl(Drop, {
     }
 })
 
-Diagnostics* = (a: Alloc, env: Env) Diagnostics {
+Diagnostics* = (env: Env) Diagnostics {
     said_arena ::= env.mem.alloc();
-    diagnostics_with_said(a, env, consume said_arena)
+    diagnostics_with_said(env, consume said_arena)
 }
 
-diagnostics_with_said = (a: Alloc, env: Env, said_arena :: Arena)
+diagnostics_with_said = (env: Env, said_arena :: Arena)
                         Diagnostics {
     said = said_arena.Map<str, str>();
-    Diagnostics(
-        a: a,
-        showing: a.Vec<str>(),
-        closing: a.Vec<str>(),
-        built: env.Built(),
-        said_arena: consume said_arena,
-        said: said
-    )
-}
-
-gone = (u: str, uri: str, now: Vec<str>) bool {
-    u.eq(uri).match({
-        true  => false,
-        false => now.find(
-            (n) { n.eq(u) }
-        ).match({ Ok(_) => false, None => true }),
-    })
+    Diagnostics(built: env.Built(), said_arena: consume said_arena, said: said)
 }
 
 uris_of = (spots: Vec<Spot>, into :: Vec<str>) Res<(), AllocError> {

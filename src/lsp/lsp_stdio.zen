@@ -5,7 +5,7 @@ str, String, str_at = std.text
 Vec = std.collections
 Alloc, AllocError = std.mem
 Server = lsp.lsp_serve
-FrameFault, frame_at, short_by, write_fault = lsp.lsp_frame
+frame_at, short_by = lsp.lsp_frame
 
 Drain = {
     at: usize,
@@ -20,13 +20,19 @@ serve_stdio* = (env: Env, a: Alloc) Res<i32, AllocError> {
     open        ::= true;
     framed      ::= true;
     loop(() { open && framed && !server.stopped() }, (h) {
-        seen  = str_at(held.ptr(), held.len);
-        open  = arrived(env, held, short_by(seen, at)).try();
+        seen    = str_at(held.ptr(), held.len);
+        missing = short_by(seen, at);
+        ((missing == 0 && seen.len > MAX_HEADER) || missing > MAX_BODY
+            || seen.len > MAX_BODY + MAX_HEADER).then(() {
+            framed = false;
+            h.break();
+        });
+        open  = arrived(env, held, missing).try();
         bytes = str_at(held.ptr(), held.len);
         frame_at(bytes, at).match({
             Err(f) => {
                 framed = f.partial();
-                f.fault_line(framed, input_arena).try();
+
             },
             Ok(_)  => {
                 batch ::= env.mem.alloc();
@@ -41,7 +47,9 @@ serve_stdio* = (env: Env, a: Alloc) Res<i32, AllocError> {
             },
         });
     });
-    Ok(exit_code(server.stopped(), framed));
+    Ok(
+        (server.stopped() && framed).match({ true => server.exit_status(), false => 1 })
+    );
 }
 
 print_settled = (server :: Server, t: Alloc) Res<(), AllocError> {
@@ -65,7 +73,7 @@ drain = (server :: Server, t: Alloc, held: str, at: usize)
     from   ::= at;
     more   ::= true;
     framed ::= true;
-    loop(() { more && from < held.len }, (h) {
+    loop(() { more && !server.stopped() && from < held.len }, (h) {
         frame_at(held, from).match({
             Ok(fr) => { from = fr.next; server.print_answer(
                 t,
@@ -74,7 +82,7 @@ drain = (server :: Server, t: Alloc, held: str, at: usize)
             Err(f) => {
                 more   = false;
                 framed = f.partial();
-                f.fault_line(framed, t).try();
+
             },
         });
     });
@@ -88,18 +96,6 @@ print_answer = (server :: Server, t: Alloc, body: str) Res<(), AllocError> {
     Ok(());
 }
 
-fault_line = (f: FrameFault, framed: bool, t: Alloc) Res<(), AllocError> {
-    framed.match({
-        true  => Ok(()),
-        false => {
-            line ::= t.String().try();
-            f.write_fault(line).try();
-            println("{}", line.view());
-            Ok(())
-        },
-    })
-}
-
-exit_code = (stopped: bool, framed: bool) i32 {
-    (stopped && framed).match({ true => 0, false => 1 })
-}
+// Resource bounds apply to the transport, not the pure envelope parser.
+MAX_HEADER: usize = 8192
+MAX_BODY: usize = 16777216

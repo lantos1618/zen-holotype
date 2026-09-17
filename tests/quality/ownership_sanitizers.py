@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 CASES = (
@@ -63,6 +64,16 @@ def main():
         (work / f"{name}.log").write_text(result.stdout + result.stderr)
         if result.stdout != source.with_suffix(".expected").read_text():
             raise RuntimeError(f"{name}: generated ownership behavior changed")
+    lsp_source = ROOT / "tests/quality/fixtures/lsp_stdio.zen"
+    lsp_c = work / "lsp-stdio.c"
+    require([str(args.zen.resolve()), "build", "src", "--entry",
+             "../" + str(lsp_source.relative_to(ROOT)), "--std", "src", "--emit-c", "-o", str(lsp_c)])
+    lsp_binary = work / "lsp-stdio"
+    require([*compiler, str(lsp_c), "-lm", "-o", str(lsp_binary)])
+    result = require([sys.executable, str(ROOT / "tests/quality/lsp_protocol.py"),
+                      "--zen", str(lsp_binary)])
+    (work / "lsp-stdio.log").write_text(result.stdout + result.stderr)
+    print("ownership-sanitizers: real LSP protocol suite passed under ASan")
     print(f"ownership-sanitizers: {len(CASES)} generated programs passed; UAF control detected")
 
 

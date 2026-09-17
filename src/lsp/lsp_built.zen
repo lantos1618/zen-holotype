@@ -23,6 +23,34 @@ Spot* = {
     note*: Res<Note>,
 }
 
+same_spot = (left: Spot, right: Spot) bool {
+    left.uri.eq(right.uri) && left.message.eq(right.message)
+        && left.span.start.line == right.span.start.line
+        && left.span.start.col == right.span.start.col
+        && left.span.end.line == right.span.end.line
+        && left.span.end.col == right.span.end.col
+}
+
+copy_into = (spot: Spot, a: Alloc) Res<Spot, AllocError> {
+    note = spot.note.match({
+        None      => None,
+        Ok(value) => Ok(Note(
+            message: value.message.dup(a).try(),
+            span: value.span.copy_into(a).try()
+        )),
+    });
+    Ok(Spot(
+        uri: spot.uri.dup(a).try(),
+        message: spot.message.dup(a).try(),
+        span: spot.span.copy_into(a).try(),
+        note: note
+    ))
+}
+
+copy_into = (span: Span, a: Alloc) Res<Span, AllocError> {
+    Ok(Span(file: span.file.dup(a).try(), start: span.start, end: span.end))
+}
+
 Inner = {
     root: str,          // the compilation root, copied into the arena
     entry: str,         // the open document, relative to the root
@@ -77,7 +105,7 @@ Built* = {
             docs.get(u).match({
                 None     => written(),
                 Ok(text) => {
-                    over.set(path_of(u), text).try();
+                    over.set(path_of(self.arena, u).try(), text).try();
                     Ok(())
                 },
             }).try();
@@ -118,6 +146,25 @@ Built* = {
         Ok(());
     }
 
+    covers* = (self: @Self, a: Alloc, path: str) Res<bool, AllocError> {
+        self.stale.match({
+            true  => Ok(false),
+            false => self.cur.match({
+                None      => Ok(false),
+                Ok(inner) => {
+                    file = inner.source_file(a, path).try();
+                    Ok(Range(0, inner.b.tree.module_count()).find((index) {
+                        inner.b.tree.module_at(index).match({
+                            None => false, Ok(module) => module.span.file.eq(
+                                file
+                            ),
+                        })
+                    }).match({ Ok(_) => true, None => false }))
+                },
+            }),
+        })
+    }
+
     checker* = (self: @Self) Res<Checker> {
         self.cur.match({ None => None, Ok(i) => Ok(i.c) })
     }
@@ -138,6 +185,23 @@ Built* = {
         self.cur.match({ None => None, Ok(i) => Ok(i.spots) })
     }
 
+    // Snapshot text before another build retires this arena. Shared import
+    // graphs may contribute the same diagnostic more than once.
+    append_spots* = (self: @Self, a: Alloc, into :: Vec<Spot>) Res<(), AllocError> {
+        self.spots().match({
+            None      => written(),
+            Ok(found) => {
+                found.loop((spot) {
+                    into.find((old) { old.same_spot(spot) }).match({
+                        Ok(_) => written(),
+                        None  => into.add(spot.copy_into(a).try()),
+                    }).try();
+                });
+                written()
+            },
+        })
+    }
+
     classed_for* = (self :: @Self, a: Alloc, uri: str)
                    Res<Vec<Classed>, AllocError> {
         self.cur.match({
@@ -145,7 +209,7 @@ Built* = {
             Ok(i) => (i.b.diag_count() == 0 && i.c.diag_count() == 0).match({
                 false => Ok(a.Vec<Classed>()),
                 true  => {
-                    file = i.source_file(a, path_of(uri)).try();
+                    file = i.source_file(a, path_of(a, uri).try()).try();
                     i.classed.get(file).match({
                         Ok(rows) => Ok(rows),
                         None     => {
@@ -176,10 +240,13 @@ restore_uris = (spots :: Vec<Spot>, a: Alloc, directory: str, uris: Vec<str>)
                Res<(), AllocError> {
     paths ::= a.Map<str, str>();
     uris.loop((uri) {
-        paths.set(anchored_path(a, directory, path_of(uri)).try(), uri).try();
+        paths.set(
+            anchored_path(a, directory, path_of(a, uri).try()).try(),
+            uri
+        ).try();
     });
     spots.loop((h, index, spot) {
-        path = anchored_path(a, directory, path_of(spot.uri)).try();
+        path = anchored_path(a, directory, path_of(a, spot.uri).try()).try();
         paths.get(path).match({
             None    => (),
             Ok(uri) => {

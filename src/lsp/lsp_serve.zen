@@ -1,7 +1,7 @@
 // Owns LSP session state and routes one decoded JSON-RPC message at a time.
 // Full-sync document contents are retained as an in-memory build overlay.
 
-str, String, dup = std.text
+str, String = std.text
 Vec, Map = std.collections
 Range = std.core
 Alloc, AllocError, Arena = std.mem
@@ -22,6 +22,7 @@ Position = lsp.lsp_pos
 Decoded, RequestTurn, write_capabilities = lsp.lsp_reply
 RpcFault, request_of, notice_of = lsp.lsp_reply
 path_of = lsp.lsp_uri
+Document = lsp.lsp_document
 
 Server* = {
     a: Alloc,
@@ -34,6 +35,7 @@ Server* = {
     workspace :: str,
 
     docs :: Map<str, str>,
+    buffers :: Vec<Document>,
 
     open :: Vec<str>,
 
@@ -43,8 +45,11 @@ Server* = {
 
     ready :: bool,
     stopping :: bool,
+    exiting :: bool,
 
-    stopped* = (self: @Self) bool { self.stopping }
+    stopped* = (self: @Self) bool { self.exiting }
+
+    exit_status* = (self: @Self) i32 { self.stopping.match({ true => 0, false => 1 }) }
 
     completion_builds* = (self: @Self) usize { self.members.builds }
 
@@ -65,30 +70,58 @@ Server* = {
     route = (self :: @Self, tree: Jsons, req: JsonId, turn :: RequestTurn)
             Res<(), AllocError> {
         request = Decoded(tree, req);
-        request.id.match({
-            None  => self.notified(request),
-            Ok(_) => self.requested(request, turn),
+        request.valid().match({
+            false => turn.invalid_request(),
+            true  => request.id.match({
+                None  => self.notified(request),
+                Ok(_) => self.requested(request, turn),
+            }),
         })
     }
 
     requested = (self :: @Self, request: Decoded, turn :: RequestTurn)
                 Res<(), AllocError> {
         method = request.method();
-        (self.ready || method.eq("initialize")).match({
+        self.stopping.match({
+            true  => turn.failed(
+                request,
+                RpcFault.InvalidRequest,
+                "the server has shut down"
+            ),
+            false => (self.ready || method.eq("initialize")).match({
             false => turn.failed(
                 request,
                 RpcFault.NotInitialized,
                 "the server has not been initialized"
             ),
             true  => self.answered(request, turn),
+        }),
         })
     }
 
     answered = (self :: @Self, request: Decoded, turn :: RequestTurn)
                Res<(), AllocError> {
-        method = request.method();
-        request_of(method).match({
-            Initialize => self.initialized(request, turn),
+        request.valid_params().match({
+            false => turn.failed(
+                request,
+                RpcFault.InvalidParams,
+                "invalid document query parameters"
+            ),
+            true  => self.dispatched(request, turn),
+        })
+    }
+
+    dispatched = (self :: @Self, request: Decoded, turn :: RequestTurn)
+                 Res<(), AllocError> {
+        request_of(request.method()).match({
+            Initialize => self.ready.match({
+                true  => turn.failed(
+                    request,
+                    RpcFault.InvalidRequest,
+                    "already initialized"
+                ),
+                false => self.initialized(request, turn),
+            }),
             Shutdown   => {
                 self.stopping = true;
                 turn.result(request, "null")
@@ -167,7 +200,10 @@ Server* = {
     initialized = (self :: @Self, request: Decoded,
                    turn :: RequestTurn) Res<(), AllocError> {
         self.members.invalidate();
-        self.workspace = path_of(request.string_at(request.params(), "rootUri")).dup(self.a).try();
+        self.workspace = path_of(
+            self.a,
+            request.string_at(request.params(), "rootUri")
+        ).try();
         loop(() { self.workspace.len > 1 && self.workspace.ends_with(
             "/"
         ) }, (h) {
@@ -197,12 +233,18 @@ Server* = {
     }
 
     notified = (self :: @Self, request: Decoded) Res<(), AllocError> {
-        notice_of(request.method()).match({
-            DidOpen          => self.opened(request),
-            DidChange        => self.changed(request),
-            DidClose         => self.closed(request),
-            DidChangeWatched => self.watched(request),
-            Ignored          => written(),
+        request.method().eq("exit").match({
+            true  => { self.exiting = true; written() },
+            false => (self.ready && !self.stopping).match({
+                false => written(),
+                true  => notice_of(request.method()).match({
+                    DidOpen          => self.opened(request),
+                    DidChange        => self.changed(request),
+                    DidClose         => self.closed(request),
+                    DidChangeWatched => self.watched(request),
+                    Ignored          => written(),
+                }),
+            }),
         })
     }
 
@@ -225,124 +267,115 @@ Server* = {
                 },
             });
         });
-        (stale && self.open.len > 0).match({
-            false => written(),
-            true  => self.open.get(self.open.len - 1).match({
-                None      => written(),
-                Ok(entry) => {
-                    self.members.invalidate();
-                    self.notes.stales(entry);
-                    Ok(())
-                },
-            }),
-        })
+        (stale && self.open.len > 0).then(() {
+            self.members.invalidate();
+            self.notes.invalidate();
+        });
+        written()
     }
 
     opened = (self :: @Self, request: Decoded) Res<(), AllocError> {
-        doc = request.param("textDocument");
-        self.remember(
-            request.string_at(doc, "uri"),
-            request.string_at(doc, "text")
-        )
+        request.opened().match({
+            None       => written(),
+            Ok(change) => self.stored(change.uri, change.text, change.version),
+        })
     }
 
     changed = (self :: @Self, request: Decoded) Res<(), AllocError> {
-        uri   = request.string_at(request.param("textDocument"), "uri");
-        edits = request.param("contentChanges");
-        text  = request.item_at(edits, 0).match({
-            None    => "",
-            Ok(one) => request.string_at(one, "text"),
-        });
-        self.remember(uri, text)
+        uri = request.string_at(request.param("textDocument"), "uri");
+        self.buffers.find((buffer) { buffer.uri.eq(uri) }).match({
+            None     => written(),
+            Ok(held) => request.changed(held.text, held.version).match({
+                None       => written(),
+                Ok(change) => self.stored(
+                    change.uri,
+                    change.text,
+                    change.version
+                ),
+            }),
+        })
     }
 
     closed = (self :: @Self, request: Decoded) Res<(), AllocError> {
         uri = request.string_at(request.param("textDocument"), "uri");
-        self.docs.get(uri).match({
-            None  => written(),
-            Ok(_) => self.forget(uri),
-        })
-    }
-
-    forget = (self :: @Self, uri: str) Res<(), AllocError> {
-        stable = uri.dup(self.a).try();
-        self.members.invalidate();
-        self.replace_docs(uri, None).try();
-        Range(0, self.open.len).find((i) {
-            self.open.get(i).match({ None => false, Ok(u) => u.eq(uri) })
-        }).match({
-            None   => (),
-            Ok(at) => { self.open.take(at); },
-        });
-        next = (self.open.len == 0).match({
-            true  => "",
-            false => self.open.get(self.open.len - 1).match({
-                None => "", Ok(u) => u
-            }),
-        });
-        self.notes.closed(stable, next)
-    }
-
-    remember = (self :: @Self, uri: str, text: str) Res<(), AllocError> {
-        uri.is_empty().match({
-            true  => written(),
-            false => self.stored(uri, text),
-        })
-    }
-
-    stored = (self :: @Self, uri: str, text: str) Res<(), AllocError> {
-        self.docs.get(uri).match({
-            None     => self.changed_to(uri, text),
-            Ok(held) => held.eq(text).match({
-                true  => written(),
-                false => self.changed_to(uri, text),
-            }),
-        })
-    }
-
-    changed_to = (self :: @Self, uri: str, text: str) Res<(), AllocError> {
-        stable = self.listed(uri).try();
-        self.replace_docs(uri, Ok(text)).try();
-        self.members.changed(path_of(uri));
-        self.notes.owes(stable);
-        Ok(());
-    }
-
-    listed = (self :: @Self, uri: str) Res<str, AllocError> {
-        self.open.find((u) { u.eq(uri) }).match({
-            Ok(found) => Ok(found),
-            None      => {
-                kept = uri.dup(self.a).try();
-                self.open.add(kept).try();
-                Ok(kept)
+        self.buffer_index(uri).match({
+            None   => written(),
+            Ok(at) => {
+                self.refresh_docs(Ok(at)).try();
+                self.members.invalidate();
+                self.notes.invalidate();
+                self.retire(at);
+                written()
             },
         })
     }
 
-    replace_docs = (self :: @Self, uri: str, text: Res<str>)
-                   Res<(), AllocError> {
-        fresh_arena ::= self.env.mem.alloc();
-        fresh       ::= fresh_arena.Map<str, str>();
-        self.docs.pairs((h, key, value) {
-            key.eq(uri).match({
-                true  => written(),
-                false => fresh.set(
-                    key.dup(fresh_arena).try(),
-                    value.dup(fresh_arena).try()
-                ),
-            }).try();
+    buffer_index = (self: @Self, uri: str) Res<usize> {
+        Range(0, self.buffers.len).find((at) {
+            self.buffers.get(at).match({ None => false, Ok(doc) => doc.uri.eq(uri) })
+        })
+    }
+
+    stored = (self :: @Self, uri: str, text: str, version: Res<i64>)
+             Res<(), AllocError> {
+        previous = self.buffer_index(uri);
+        changed  = self.docs.get(uri).match({ None => true, Ok(old) => !old.eq(text) });
+        changed.match({
+            false => previous.match({
+                None   => written(),
+                Ok(at) => self.buffers.take(at).match({
+                    None     => written(),
+                    Ok(held) => {
+                        held.revise(version);
+                        self.buffers.add(consume held)
+                    },
+                }),
+            }),
+            true  => {
+                self.buffers.reserve(1).try();
+                fresh ::= self.env.Document(uri, text, version).try();
+                self.members.changed(fresh.path);
+                self.notes.invalidate();
+                self.buffers.add(consume fresh).try();
+                self.refresh_docs(previous).match({
+                    Err(error) => {
+                        self.retire(self.buffers.len - 1);
+                        Err(error)
+                    },
+                    Ok(_)      => {
+                        previous.match({ None => (), Ok(at) => self.retire(
+                            at
+                        ) });
+                        written()
+                    },
+                })
+            },
+        })
+    }
+
+    retire = (self :: @Self, at: usize) () {
+        self.buffers.take(at).match({
+            None         => (),
+            Ok(document) => { retired = consume document; },
         });
-        text.match({
-            None        => written(),
-            Ok(replace) => fresh.set(
-                uri.dup(fresh_arena).try(),
-                replace.dup(fresh_arena).try()
-            ),
-        }).try();
+    }
+
+    // Only descriptors are rebuilt. Other documents keep their own text arenas.
+    refresh_docs = (self :: @Self, excluded: Res<usize>) Res<(), AllocError> {
+        fresh_arena ::= self.env.mem.alloc();
+        docs        ::= fresh_arena.Map<str, str>();
+        uris        ::= fresh_arena.Vec<str>();
+        self.buffers.loop((h, index, buffer) {
+            excluded.match({ None => true, Ok(at) => index != at }).then(() {
+                docs.set(buffer.uri, buffer.text).try();
+                uris.add(buffer.uri).try();
+            });
+        });
         self.docs_arena.drop();
         self.docs_arena = consume fresh_arena;
-        self.docs       = fresh;
-        Ok(())
+        self.docs       = docs;
+        self.open       = uris;
+        written()
     }
 
     settled* = (self :: @Self, t: Alloc, out :: String) Res<(), AllocError> {
@@ -407,6 +440,9 @@ Server* = {
             None     => self.unopened(request, turn),
             Ok(text) => {
                 body ::= t.String().try();
+                (!self.workspace.is_empty()).then(() {
+                    self.build_for(path_of(t, uri).try(), t).try();
+                });
                 names = self.notes.classes_for(t, uri).try();
                 write_tokens(t, uri, text, names, body).try();
                 turn.result(request, body.view())
@@ -428,7 +464,7 @@ Server* = {
     shared_hover = (self :: @Self, t: Alloc, uri: str, text: str,
                     line: usize, character: usize, body :: String)
                    Res<(), AllocError> {
-        path = path_of(uri);
+        path = path_of(t, uri).try();
         sh   = self.build_for(path, t).try();
         sh.c.match({
             None  => {
@@ -486,7 +522,7 @@ Server* = {
     write_definition = (self :: @Self, t: Alloc, uri: str, text: str,
                         line: usize, character: usize, body :: String)
                        Res<(), AllocError> {
-        path = path_of(uri);
+        path = path_of(t, uri).try();
         sh   = self.build_for(path, t).try();
         sh.c.match({
             None  => {
@@ -562,7 +598,7 @@ Server* = {
     shared_actions = (self :: @Self, t: Alloc, uri: str, text: str,
                       from: Position, upto: Position, body :: String)
                      Res<(), AllocError> {
-        path = path_of(uri);
+        path = path_of(t, uri).try();
         sh   = self.build_for(path, t).try();
         sh.c.match({
             None  => body.add("[]"),
@@ -589,7 +625,7 @@ Server* = {
                             self.env,
                             qa,
                             self.workspace,
-                            path_of(uri),
+                            path_of(t, uri).try(),
                             text,
                             self.docs,
                             line,
@@ -619,7 +655,7 @@ Server* = {
     write_completion = (self :: @Self, t: Alloc, uri: str, text: str,
                         line: usize, character: usize, body :: String)
                        Res<(), AllocError> {
-        path = path_of(uri);
+        path = path_of(t, uri).try();
         sh   = self.build_for(path, t).try();
         done = sh.c.match({
             None  => false,
@@ -686,6 +722,7 @@ Server.impl(Drop, {
         self.members.drop();
         self.notes.drop();
         self.docs_arena.drop();
+        self.buffers.clear();
     }
 })
 
@@ -702,18 +739,20 @@ server_with_docs = (a: Alloc, env: Env, docs_arena :: Arena) Server {
         docs_arena: consume docs_arena,
         workspace: "",
         docs: docs,
+        buffers: a.Vec<Document>(),
         open: a.Vec<str>(),
-        notes: a.Diagnostics(env),
+        notes: env.Diagnostics(),
         members: env.MemberCache(),
         ready: false,
-        stopping: false
+        stopping: false,
+        exiting: false
     )
 }
 
 serve* = (s :: Server, input: str, out :: String) Res<(), AllocError> {
     at    ::= 0;
     going ::= true;
-    loop(() { going && at < input.len }, (h) {
+    loop(() { going && !s.stopped() && at < input.len }, (h) {
         frame_at(input, at).match({
             Err(f) => {
                 going = false;

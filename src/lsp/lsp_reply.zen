@@ -15,6 +15,49 @@ Decoded* = {
     request: JsonId,
     id*: Res<JsonId>,
 
+    valid* = (self: @Self) bool {
+        self.string_at(self.request, "jsonrpc").eq("2.0")
+            && self.text_at(
+                self.request,
+                "method"
+            ).match({ Ok(name) => !name.is_empty(), None => false })
+            && self.id.match({
+                None   => true,
+                Ok(id) => self.tree.at(id).match({
+                    Null => true, Text(_) => true,
+                    Num(value) => value.parse_i64().match({ Ok(_) => true, None => false }),
+                    _          => false,
+                }),
+            })
+    }
+
+    valid_params* = (self: @Self) bool {
+        request_of(self.method()).match({
+            Initialize => true, Shutdown => true, Unknown => true,
+            _ => self.query_params().match({ Ok(_) => true, None => false }),
+        })
+    }
+
+    query_params = (self: @Self) Res<()> {
+        uri = self.text_at(self.param("textDocument"), "uri").try();
+        (!uri.is_empty()).ensure().try();
+        self.method().is_in(["textDocument/hover", "textDocument/definition", "textDocument/completion"]).then(() {
+            self.valid_position(self.param("position")).try();
+        });
+        self.method().eq("textDocument/codeAction").then(() {
+            range = self.param("range");
+            self.valid_position(self.field(range, "start").try()).try();
+            self.valid_position(self.field(range, "end").try()).try();
+        });
+        Ok(())
+    }
+
+    valid_position = (self: @Self, value: JsonId) Res<()> {
+        self.tree.whole(self.field(value, "line").try()).try();
+        self.tree.whole(self.field(value, "character").try()).try();
+        Ok(())
+    }
+
     method* = (self: @Self) str { self.string_at(self.request, "method") }
 
     params* = (self: @Self) JsonId { self.field_at(self.request, "params") }
@@ -42,6 +85,59 @@ Decoded* = {
         })
     }
 
+    text_at* = (self: @Self, value: JsonId, name: str) Res<str> {
+        self.tree.text(self.field(value, name).try())
+    }
+
+    version_at* = (self: @Self, value: JsonId) Res<i64> {
+        self.tree.at(self.field(value, "version").try()).match({
+            Num(number) => number.parse_i64(), _ => None,
+        })
+    }
+
+    opened* = (self: @Self) Res<BufferChange> {
+        doc = self.param("textDocument");
+        uri = self.text_at(doc, "uri").try();
+        (!uri.is_empty()).ensure().try();
+        text = self.text_at(doc, "text").try();
+        self.valid_version(doc).ensure().try();
+        Ok(BufferChange(uri: uri, text: text, version: self.version_at(doc)))
+    }
+
+    changed* = (self: @Self, text: str, version: Res<i64>) Res<BufferChange> {
+        doc = self.param("textDocument");
+        uri = self.text_at(doc, "uri").try();
+        self.valid_version(doc).ensure().try();
+        next = self.version_at(doc);
+        version.match({
+            None         => true,
+            Ok(previous) => next.match({ Ok(v) => v > previous, None => false }),
+        }).ensure().try();
+        edits = self.param("contentChanges");
+        count = self.array_size(edits).try();
+        result   ::= text;
+        i: usize ::= 0;
+        loop(() { i < count }, (h) {
+            edit = self.item_at(edits, i).try();
+            self.field(
+                edit,
+                "range"
+            ).match({ None => true, Ok(_) => false }).ensure().try();
+            result = self.text_at(edit, "text").try();
+            i      = i + 1;
+        });
+        Ok(BufferChange(uri: uri, text: result, version: next))
+    }
+
+    valid_version = (self: @Self, doc: JsonId) bool {
+        self.field(doc, "version").match({
+            None  => true,
+            Ok(_) => self.version_at(
+                doc
+            ).match({ Ok(_) => true, None => false }),
+        })
+    }
+
     number_at* = (self: @Self, value: JsonId, name: str) usize {
         self.tree.field(value, name).match({
             None  => 0,
@@ -52,6 +148,12 @@ Decoded* = {
     item_at* = (self: @Self, value: JsonId, i: usize) Res<JsonId> {
         self.tree.item(value, i)
     }
+}
+
+BufferChange* = {
+    uri*: str,
+    text*: str,
+    version*: Res<i64>,
 }
 
 Decoded* = (tree: Jsons, request: JsonId) Decoded {
@@ -90,6 +192,16 @@ RequestTurn* = {
                 self.finish_error(reply, code, why)
             },
         })
+    }
+
+    invalid_request* = (self :: @Self) Res<(), AllocError> {
+        reply ::= self.envelope().try();
+        self.response.add("null").try();
+        self.finish_error(
+            reply,
+            RpcFault.InvalidRequest,
+            "invalid JSON-RPC request"
+        )
     }
 
     parse_error* = (self :: @Self, f: JsonFault) Res<(), AllocError> {
@@ -279,10 +391,15 @@ notice_of* = (method: str) Notice {
     });
 }
 
-RpcFault* = ParseError | MethodNotFound | InvalidParams | NotInitialized
+RpcFault* = InvalidRequest
+    | ParseError
+    | MethodNotFound
+    | InvalidParams
+    | NotInitialized
 
 rpc_code = (f: RpcFault) i32 {
     f.match({
+        InvalidRequest => -32600,
         ParseError     => -32700,
         MethodNotFound => -32601,
         InvalidParams  => -32602,

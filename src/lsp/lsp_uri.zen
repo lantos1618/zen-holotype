@@ -1,77 +1,96 @@
-// Converts document URIs to filesystem paths and compiler paths back to local
-// file URIs, and reads a document's text from the overlay or the disk.
-
-str, String = std.text
+// Converts editor URIs and filesystem paths with caller-owned decoded text.
+str, String, dup = std.text
 Map = std.collections
 Alloc, AllocError = std.mem
+hex_value, hex_digit = std.core.byte
+Range = std.core
 
 FILE_SCHEME*: str = "file://"
 REMOTE_SCHEME: str = "vscode-remote://"
 
-// Classification is closed even though unrecognized URI spellings pass
-// through unchanged. The prefix constants above remain the wire spelling.
-Scheme = File | Remote | Other
-
-Uri = {
-    raw: str,
-    scheme: Scheme,
-
-    path = (self: @Self) str {
-        self.scheme.match({
-            File   => self.raw.slice(FILE_SCHEME.len, self.raw.len),
-            Remote => {
-                tail = self.raw.slice(REMOTE_SCHEME.len, self.raw.len);
-                tail.find('/').match({
-                    Ok(at) => tail.slice(at, tail.len),
-                    None   => self.raw,
-                })
+// Relative file:// spellings are retained for embedded compiler clients.
+// VS Code remote authorities identify the connection, not the local path.
+path_of* = (a: Alloc, uri: str) Res<str, AllocError> {
+    raw   = uri.starts_with(FILE_SCHEME).match({
+        true  => uri.slice(FILE_SCHEME.len, uri.len),
+        false => uri.starts_with(REMOTE_SCHEME).match({
+            true  => {
+                tail = uri.slice(REMOTE_SCHEME.len, uri.len);
+                tail.find('/').match({ Ok(at) => tail.slice(at, tail.len), None => uri })
             },
-            Other  => self.raw,
-        })
-    }
-
-    // Overlays are keyed by the client's exact spelling, not the local path.
-    text = (self: @Self, env: Env, a: Alloc, docs: Map<str, str>) str {
-        docs.get(self.raw).match({
-            Ok(text) => text,
-            None     => disk_text(env, a, self.path()),
-        })
-    }
-}
-
-parsed_uri = (raw: str) Uri {
-    scheme = raw.starts_with(FILE_SCHEME).match({
-        true  => Scheme.File,
-        false => raw.starts_with(REMOTE_SCHEME).match({
-            true  => Scheme.Remote,
-            false => Scheme.Other,
+            false => uri,
         }),
     });
-    Uri(raw: raw, scheme: scheme)
+    local = raw.starts_with("localhost/").match({
+        true => raw.slice("localhost".len, raw.len), false => raw,
+    });
+    (uri.starts_with(FILE_SCHEME) || uri.starts_with(REMOTE_SCHEME)).match({
+        false => uri.dup(a),
+        true  => decoded_path(a, local),
+    })
 }
 
-path_of* = (uri: str) str { parsed_uri(uri).path() }
+decoded_path = (a: Alloc, raw: str) Res<str, AllocError> {
+    out       ::= a.String().try();
+    at: usize ::= 0;
+    loop(() { at < raw.len }, (h) {
+        byte    = raw[at];
+        decoded = escaped_at(raw, at);
+        decoded.match({
+            Ok(value) => { out.add(value).try(); at = at + 3; },
+            None      => { out.add(byte).try(); at = at + 1; },
+        });
+    });
+    Ok(out.view())
+}
+
+escaped_at = (raw: str, at: usize) Res<u8> {
+    (raw[at] == '%' && at + 2 < raw.len).ensure().try();
+    high  = raw[at + 1].hex_value().try();
+    low   = raw[at + 2].hex_value().try();
+    value = high * 16 + low;
+    (value != 0).ensure().try();
+    Ok(value)
+}
 
 uri_at* = (a: Alloc, root: str, rel: str) Res<str, AllocError> {
-    out = rel.starts_with("/").match({
-        true  => a.String("{}{}", FILE_SCHEME, rel).try(),
-        false => root.ends_with("/").match({
-            true  => a.String("{}{}{}", FILE_SCHEME, root, rel).try(),
-            false => a.String("{}{}/{}", FILE_SCHEME, root, rel).try(),
-        }),
+    out ::= a.String().try();
+    out.add(FILE_SCHEME).try();
+    (!rel.starts_with("/")).then(() {
+        root.write_path(out).try();
+        (!root.ends_with("/")).then(() { out.add('/').try(); });
     });
-    Ok(out.view());
+    rel.write_path(out).try();
+    Ok(out.view())
 }
 
-// The open buffer for `uri` when the client holds one, else the file on
-// disk; an unreadable file reads as empty.
+write_path = (path: str, out :: String) Res<(), AllocError> {
+    Range(0, path.len).loop((at) {
+        byte = path[at];
+        (byte.is_alpha() || byte.is_digit() || byte.is_in([
+            '/', '-', '.', '_', '~', ':'
+        ])).match({
+            true  => out.add(byte),
+            false => {
+                out.add('%').try();
+                out.add((byte / 16).hex_digit().to_upper()).try();
+                out.add((byte % 16).hex_digit().to_upper())
+            },
+        }).try();
+    });
+    Ok(())
+}
+
 doc_text* = (env: Env, a: Alloc, docs: Map<str, str>, uri: str) str {
-    parsed_uri(uri).text(env, a, docs)
+    docs.get(uri).match({
+        Ok(text) => text,
+        None     => path_of(a, uri).match({
+            Ok(path) => disk_text(env, a, path),
+            Err(_)   => "",
+        }),
+    })
 }
 
 disk_text* = (env: Env, a: Alloc, path: str) str {
-    env.fs.read(a, path).match({
-        Ok(text) => text.view(),
-        Err(_)   => "",
-    })
+    env.fs.read(a, path).match({ Ok(text) => text.view(), Err(_) => "" })
 }

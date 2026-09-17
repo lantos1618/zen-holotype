@@ -1,0 +1,38 @@
+// One independently retired editor buffer. Views expire when this owner drops.
+str, dup = std.text
+Arena, AllocError = std.mem
+path_of = lsp.lsp_uri
+
+Document* = {
+    arena :: Arena,
+    uri*: str,
+    path*: str,
+    text*: str,
+    version* :: Res<i64>,
+
+    revise* = (self :: @Self, version: Res<i64>) () { self.version = version; }
+}
+
+Document.impl(Drop, {
+    drop = (self :: @Self) () { self.arena.drop(); }
+})
+
+Document* = (env: Env, uri: str, text: str, version: Res<i64>)
+            Res<Document, AllocError> {
+    arena ::= env.mem.alloc();
+    document_in(consume arena, uri, text, version)
+}
+
+document_in = (arena :: Arena, uri: str, text: str, version: Res<i64>)
+              Res<Document, AllocError> {
+    kept_uri  = uri.dup(arena).try();
+    kept_text = text.dup(arena).try();
+    path      = path_of(arena, uri).try();
+    Ok(Document(
+        arena: consume arena,
+        uri: kept_uri,
+        path: path,
+        text: kept_text,
+        version: version
+    ))
+}
