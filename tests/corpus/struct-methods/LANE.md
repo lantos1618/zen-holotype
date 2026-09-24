@@ -18,7 +18,7 @@ path -- the one-line compiler change that breaks it.
 - free_fn_extends_the_method_at_another_arity.zen -- key the candidate
   table by NAME without arity: second `mix` overwrites the first, one line
   answers the other's body (5003/512 collapse).
-- free_fn_first_param_bound/ -- match first parameters by DECLARED type
+- ../sema/ufcs_travels_to_an_impl_of_the_bound/ -- match first parameters by DECLARED type
   only, so an impl of the bound (`Arena` impls `Alloc`) is not "the type":
   `alloc.boxed(7)` rejects with "no `boxed` on `Arena`".
 - free_fn_is_a_dot_candidate_like_a_method.zen -- restrict dot candidates

@@ -14,8 +14,11 @@ claim unsupported ownership guarantees.
 Preserve existing work. Give parallel agents disjoint file ownership. Batch
 related source edits, finish formatting before freezing the tree for an
 integration test run, and regenerate the seed at integration rather than after
-every helper change. Use `make verify` for aggregate verification; report any
-checks that remain incomplete. Do not claim a numerical ergonomics target is
+every helper change. Use `make check` for cached development checks, with
+`FILTER` for a focused selection. Use `make verify` for fresh aggregate
+verification; when regenerating the seed, use one `make -j1 seed verify`
+invocation to share the build. Report any checks that remain incomplete.
+Do not claim a numerical ergonomics target is
 achieved merely because automated checks pass.
 
 Generate source-health reports, signature inventories, round snapshots,

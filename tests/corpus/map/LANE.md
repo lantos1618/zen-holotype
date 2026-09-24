@@ -10,7 +10,7 @@ One line per test: path -- the one-line compiler change that breaks it.
   (address the dense row by the slot/probe index instead of the stored
   one-based position): keys inserted out of order then read back swapped,
   and the empty-string key pins a hash-of-nothing row.
-- a_missing_key_answers_none_not_another_row/ -- stop the probe at the
+- ../std/map_collision_consults_eq.zen -- stop the probe at the
   first `hash == h` without consulting eq (or return the row's value on a
   hash match): absent-but-colliding key answers Ok with another row's
   value instead of None. Constant hash makes the collision certain, not

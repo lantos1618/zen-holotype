@@ -358,11 +358,17 @@ Initialisers = {
         Ok(1)
     }
 
-    // A default is emitted at every construction site, so it may not read a
-    // frame or call an impure function.
+    // Defaults use the constructed type's substitutions, not the caller's.
+    // Restore the caller on either success or allocation failure so supplied
+    // arguments and subsequent expressions keep their own generic context.
     default_value = (self: @Self, be :: CBackend, v: ExprId, name: str,
                      out :: String) Res<(), AllocError> {
-        be.is_pure_value(v, self.fields.ctx).match({
+        caller = be.inst;
+        locals = be.hold_locals();
+        floor  = be.floor;
+        be.enter_frame(0);
+        be.enter_inst(self.fields.inst);
+        emitted = be.is_pure_value(v, self.fields.ctx).match({
             false => be.unsupported(
                 v,
                 "a field default that names a function or reads a frame",
@@ -375,7 +381,11 @@ Initialisers = {
                 self.fields.ty_of(be, name),
                 out
             ),
-        })
+        });
+        be.enter_inst(caller);
+        be.restore_locals(locals);
+        be.enter_frame(floor);
+        emitted
     }
 
     supplies = (self: @Self, be :: CBackend, name: str) bool {

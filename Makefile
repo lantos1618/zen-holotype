@@ -24,6 +24,8 @@ DEV_ZEN ?= $(DEV_DIR)/zen
 FILTER ?=
 TEST_J ?= $(J)
 TEST_ARGS ?=
+TEST_RESULTS ?= build/test-results
+TEST_CACHE_ARGS ?= --result-cache "$(TEST_RESULTS)"
 
 # HOW MANY C COMPILERS AT ONCE. `cc -O2` is superlinear in a translation
 # unit's size, and the backend's own output is the extreme case: the
@@ -41,13 +43,13 @@ J       ?= $(shell nproc 2>/dev/null || echo 4)
 CACHE   ?= $(shell command -v ccache 2>/dev/null)
 ZCC      = $(CACHE) $(CC)
 
-.PHONY: lspcheck all build dev-build dev-check dev-run bootstrap buildcheck runnercheck editorcheck seed test verify differential runtimecheck warnings lint parse cap dupcomments faults lextile determinism fixpoint grammar fmt asan ubsan leak profile clean help
+.PHONY: lspcheck all check build dev-build dev-check dev-run bootstrap buildcheck runnercheck editorcheck seed test verify differential runtimecheck warnings lint parse cap dupcomments faults lextile determinism fixpoint grammar fmt asan ubsan leak profile clean help
 
 # These gates share ./zen, build/, and grammar/zen.so. Keep their dependency
 # graphs serial even when an operator invokes `make -j verify`.
 .NOTPARALLEL: verify test fmt determinism fixpoint differential warnings ubsan
 
-all: test
+all: check
 
 ## build: bootstrap from the committed C seed, rebuilding only changed inputs.
 ## Content hashes cover Zen sources, native dependencies, toolchain and flags.
@@ -56,6 +58,12 @@ all: test
 build: seed/zen.c
 	$(PY) scripts/build.py --root "$(ROOT)" --cc "$(CC)" --cache "$(CACHE)" \
 	  --cflags="$(CFLAGS)" --jobs "$(J)" $(if $(strip $(SYMBOL_MAP)),--symbol-map "$(SYMBOL_MAP)")
+
+## check: incremental build and cached tests; the default development command.
+## FILTER selects test IDs; TEST_ARGS='--no-result-cache' forces execution.
+check: build
+	$(PY) tests/run.py --zen ./zen --cc "$(CC)" --cc-cache "$(CACHE)" --jobs "$(TEST_J)" \
+	  $(TEST_CACHE_ARGS) $(if $(strip $(FILTER)),--filter "$(FILTER)") $(TEST_ARGS)
 
 ## dev-build: build an isolated compiler; choose one DEV_DIR per worker.
 dev-build: seed/zen.c
@@ -70,7 +78,7 @@ dev-check: dev-build
 ## An empty FILTER runs the corpus; make verify remains the complete required gate.
 dev-check dev-run:
 	$(PY) tests/run.py --zen "$(DEV_ZEN)" --cc "$(CC)" --cc-cache "$(CACHE)" --jobs "$(TEST_J)" \
-	  $(if $(strip $(FILTER)),--filter "$(FILTER)") $(TEST_ARGS)
+	  $(TEST_CACHE_ARGS) $(if $(strip $(FILTER)),--filter "$(FILTER)") $(TEST_ARGS)
 
 ## buildcheck: real-C cache invalidation and atomic publication regressions.
 buildcheck:
@@ -117,7 +125,7 @@ seed: build
 ## docs/GENC_REFERENCE_MAP.md pointing into bootstrap/gen_c.py.
 ##
 test: build lint parse cap dupcomments faults lextile
-	$(PY) tests/run.py --zen ./zen --cc "$(CC)" --cc-cache "$(CACHE)" --jobs "$(TEST_J)"
+	$(PY) tests/run.py --zen ./zen --cc "$(CC)" --cc-cache "$(CACHE)" --jobs "$(TEST_J)" $(TEST_CACHE_ARGS)
 
 ## lspcheck: real-process protocol, document, and lifecycle regressions.
 lspcheck: build
@@ -128,6 +136,7 @@ lspcheck: build
 ## Keep this target as the single list of required gates. Shared prerequisites
 ## are built once per invocation, then formatting and determinism inspect the
 ## same compiler that ran the test suite.
+verify: override TEST_CACHE_ARGS := --result-cache "$(TEST_RESULTS)" --refresh-result-cache
 verify: test fmt determinism fixpoint differential runtimecheck ownershipcheck warnings ubsan buildcheck runnercheck editorcheck lspcheck
 
 .PHONY: ownershipcheck

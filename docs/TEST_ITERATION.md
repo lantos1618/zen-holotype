@@ -1,9 +1,60 @@
 # Test iteration
 
-`tests/run.py` prepares the compiler source import graph once per invocation,
-then shares it across workers. Every test still receives its own copied source
-tree and runs the Zen compiler, links, and executes the program. Test results
-are never cached; optional C object caching is described below.
+`make` and `make check` incrementally build the compiler and reuse eligible
+passing test results. `FILTER` selects a smaller batch when needed. `make test`
+also runs the source gates; `make verify` always executes the full suite fresh
+and runs every integration gate. Use the fast check during editing and the
+aggregate gate once the batch is ready.
+
+```sh
+make check J=8 TEST_J=8
+make check FILTER='corpus/std/*'
+make check TEST_ARGS='--no-result-cache'
+make -j1 seed verify J=8 TEST_J=8
+```
+
+`tests/run.py --result-cache build/test-results` opts into the same result
+cache for direct invocations. `--no-result-cache` overrides it. Make uses
+`TEST_RESULTS` to choose its cache directory. Clearing that directory discards
+results without touching source or native object caches. Direct runner calls
+without `--result-cache` retain fresh execution.
+
+Cache keys cover the compiler, harness, exact staged source manifest, fixture
+expectations and sidecars, execution settings, environment, and native
+toolchain dependencies. A changed compiler invalidates all its test results;
+a fixture-only edit invalidates its own result. Library changes invalidate
+tests whose staged source includes that library. A hit skips copying source,
+Zen emission, native compilation, linking, and execution; discovery and fixture
+validation still run. Output distinguishes cached passes from executed tests.
+
+Only successful, non-deferred tests are eligible for verdict reuse. Tests using
+external process, network, clock, filesystem, threading, or unknown native
+operations execute fresh. Eligible compiled executables can still be reused,
+with fresh fixture staging and runtime assertions. Unsupported toolchain and
+path-sensitive configurations rebuild and execute normally. Failed and deferred
+results are never cached.
+
+`--refresh-result-cache` executes tests fresh and updates the cache after
+validation. `make verify` uses this mode: prior cached results and executables
+cannot satisfy verification, but its successful work speeds subsequent
+development runs. `--no-result-cache` disables both reading and writing the
+cache. Cached results are not evidence of a fresh runtime check.
+
+The runner prepares the source import graph once per invocation and shares it
+across workers. Tests that execute receive independent copied source trees.
+Shared source fingerprints and frontend import votes are also computed once;
+the complete source snapshot is checked again before a run is accepted or
+new cache entries are published. Fixture and expectation checks stay local to
+each test.
+
+Measured on this Linux development machine on 2026-09-21 with eight workers
+and warm native object caches, the full 1,341-case selection took 163.8 seconds
+with forced fresh execution. Two subsequent `make check J=8 TEST_J=8` runs
+took 17.8 and 17.6 seconds including incremental build and cache validation.
+Each reused 1,211 passing verdicts and 126 compiled executables; three runtime
+cases rebuilt and one existing case remained deferred. These are local
+observations, not a timing budget. The complete `make verify` includes other
+gates and took 338.6 seconds; it is not interchangeable with the fast check.
 
 Every compiler invocation explicitly selects `--std` with the staged source
 root. This keeps the test's copied library authoritative even when the selected
@@ -84,11 +135,11 @@ the original uncached compile-and-link command. Direct runner calls opt in;
 `TEST_J` workers (defaulting to `J`). Set `CACHE=` to disable caching. The
 aggregate gate always runs the full suite; development filters do not apply. Compilation
 is split into `ccache cc ... -c` and a fresh link so ccache receives a cacheable
-operation. Every invocation still emits Zen-generated C, links native support,
+operation. Each uncached test still emits Zen-generated C, links native support,
 runs the program, and compares stdout, stderr, and exit status. Failed emission,
 compilation, linking, and execution retain their existing failure behavior.
 Headers, compiler flags, generated C, and tool identity remain ccache inputs;
-no test verdict or final executable is reused.
+this native-object cache is independent of the optional passing-result cache.
 
 Each test ID has a locked stable directory under `build/test-native`, configurable
 with `--cc-work-dir`. This preserves debug-path cache hits without disabling

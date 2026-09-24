@@ -4,8 +4,10 @@ Alloc, AllocError = std.mem
 FsError = std.env
 ProcError, ProcOutput = std.proc
 Span, Pos = std.ast
-Program, Func, Instruction, BasicBlock, Terminator, Const, Binary, Op, Invocation, Print, Scalar, Branch = gen.gen_ir
-emit_asm = gen.gen_asm
+Program, Func, Instruction, BasicBlock, Terminator, Const, Binary, Op, Invocation, Print, Scalar, Branch, Move = gen.gen_ir
+Target = gen.gen_asm
+X86_64LinuxGnu = gen.gen_asm_x86
+verify, VerifyError = gen.gen_verify
 
 BuildFault = | Compile
 
@@ -153,6 +155,12 @@ stack_calls = (a: Alloc, parameters: usize) Res<Program, AllocError> {
         code.add(Instruction.Constant(Const(out: i, value: value))).try();
         args.add(i).try();
     });
+    // The last argument starts in eax; sign extension while pushing must
+    // preserve its cached scalar value.
+    code.add(Instruction.Copy(Move(
+        out: parameters - 1,
+        source: parameters - 1
+    ))).try();
     code.add(Instruction.Invoke(Invocation(
         out: parameters,
         function: 1,
@@ -201,16 +209,64 @@ trapping = (a: Alloc, left: i32, op: Op, right: i32) Res<Program, AllocError> {
     Ok(Program(functions: functions, entry: 0))
 }
 
+reloads = (a: Alloc) Res<Program, AllocError> {
+    entry ::= a.Vec<Instruction>();
+    entry.add(Instruction.Constant(Const(out: 0, value: 10))).try();
+    entry.add(Instruction.Copy(Move(out: 1, source: 0))).try();
+    entry.add(Instruction.Constant(Const(out: 1, value: 20))).try();
+    entry.add(Instruction.Copy(Move(out: 2, source: 1))).try();
+    entry.add(Instruction.PrintValue(Print(value: 2, ty: Scalar.I32))).try();
+    entry.add(Instruction.Text(" ")).try();
+    entry.add(Instruction.Constant(Const(out: 1, value: 7))).try();
+    entry.add(Instruction.Copy(Move(out: 2, source: 1))).try();
+    joined ::= a.Vec<Instruction>();
+    joined.add(Instruction.Copy(Move(out: 3, source: 2))).try();
+    joined.add(Instruction.PrintValue(Print(value: 3, ty: Scalar.I32))).try();
+    joined.add(Instruction.Copy(Move(out: 4, source: 3))).try();
+    joined.add(Instruction.Text("#")).try();
+    joined.add(Instruction.Copy(Move(out: 5, source: 4))).try();
+    joined.add(Instruction.PrintValue(Print(value: 5, ty: Scalar.I32))).try();
+    joined.add(Instruction.Text("/")).try();
+    joined.add(Instruction.Constant(Const(out: 0, value: -13))).try();
+    joined.add(Instruction.Constant(Const(out: 1, value: 5))).try();
+    joined.add(binary(2, 0, Op.Rem, 1)).try();
+    joined.add(Instruction.Copy(Move(out: 3, source: 2))).try();
+    joined.add(Instruction.PrintValue(Print(value: 3, ty: Scalar.I32))).try();
+    joined.add(Instruction.Constant(Const(out: 0, value: 0))).try();
+    detour ::= a.Vec<Instruction>();
+    detour.add(Instruction.Constant(Const(out: 2, value: 41))).try();
+    detour.add(Instruction.Constant(Const(out: 6, value: 9))).try();
+    detour.add(Instruction.Copy(Move(out: 7, source: 6))).try();
+    blocks ::= a.Vec<BasicBlock>();
+    blocks.add(BasicBlock(code: entry, exit: Terminator.Jump(2))).try();
+    blocks.add(BasicBlock(code: joined, exit: Terminator.Return(0))).try();
+    blocks.add(BasicBlock(code: detour, exit: Terminator.Jump(1))).try();
+    functions ::= a.Vec<Func>();
+    functions.add(Func(
+        name: "reloads",
+        parameters: 0,
+        slots: i32_slots(a, 8).try(),
+        blocks: blocks,
+        result: Scalar.I32
+    )).try();
+    Ok(Program(functions: functions, entry: 0))
+}
+
 i32_slots = (a: Alloc, count: usize) Res<Vec<Scalar>, AllocError> {
     slots ::= a.Vec<Scalar>();
     Range(0, count).loop((_) { slots.add(Scalar.I32).try(); });
     Ok(slots)
 }
 
-run = (env: Env, a: Alloc, name: str, program: Program)
-      Res<ProcOutput, AllocError | FsError | ProcError | BuildFault> {
+run = <T: Target>(target: T, env: Env, a: Alloc, name: str, program: Program)
+      Res<ProcOutput, AllocError
+          | FsError
+          | ProcError
+          | BuildFault
+          | VerifyError> {
+    program.verify(a).try();
     source = a.String("{}.s", name).try();
-    assembly ::= emit_asm(a, program).try();
+    assembly ::= target.emit(program).try();
     // The wrapper observes the real ABI at a libc call without changing its
     // arguments. Even an integer-only printf must receive an aligned stack.
     assembly.add(
@@ -232,25 +288,63 @@ check_trap = (output: ProcOutput, reason: str) bool {
         && output.err.view().eq(reason)
 }
 
-main = (env: Env) Res<i32, AllocError | FsError | ProcError | BuildFault> {
-    a      = env.mem.alloc();
-    normal = run(env, a, "calls", calls(a).try()).try();
+main = (env: Env) Res<i32, AllocError
+    | FsError
+    | ProcError
+    | BuildFault
+    | VerifyError> {
+    a        = env.mem.alloc();
+    reloaded = run(
+        X86_64LinuxGnu(alloc: a),
+        env,
+        a,
+        "reloads",
+        reloads(a).try()
+    ).try();
+    println("reloads after writes calls and branches {}", reloaded.code == 0
+        && reloaded.out.view().eq("20 41#41/-3") && reloaded.err.is_empty());
+    normal = run(
+        X86_64LinuxGnu(alloc: a),
+        env,
+        a,
+        "calls",
+        calls(a).try()
+    ).try();
     println("calls and exact bytes {}", normal.code == 0
         && normal.out.view().eq(
             "654321 1=120\nraw \"\\\0😀\n"
         ) && normal.err.is_empty());
-    seven = run(env, a, "seven", stack_calls(a, 7).try()).try();
+    seven = run(
+        X86_64LinuxGnu(alloc: a),
+        env,
+        a,
+        "seven",
+        stack_calls(a, 7).try()
+    ).try();
     println("seven arguments {}", seven.code == 0
         && seven.out.view().eq("7654321=7654321\n") && seven.err.is_empty());
-    eight = run(env, a, "eight", stack_calls(a, 8).try()).try();
+    eight = run(
+        X86_64LinuxGnu(alloc: a),
+        env,
+        a,
+        "eight",
+        stack_calls(a, 8).try()
+    ).try();
     println("eight arguments {}", eight.code == 0
         && eight.out.view().eq("87654321=87654321\n") && eight.err.is_empty());
-    added = run(env, a, "add", trapping(a, i32.MAX, Op.Add, 1).try()).try();
+    added = run(
+        X86_64LinuxGnu(alloc: a),
+        env,
+        a,
+        "add",
+        trapping(a, i32.MAX, Op.Add, 1).try()
+    ).try();
     println(
         "addition overflow {}",
         check_trap(added, "a\"b\\c.zen:7:11: trap: integer overflow\n")
     );
     divided = run(
+        X86_64LinuxGnu(alloc: a),
         env,
         a,
         "divide",
@@ -260,7 +354,13 @@ main = (env: Env) Res<i32, AllocError | FsError | ProcError | BuildFault> {
         "division overflow {}",
         check_trap(divided, "a\"b\\c.zen:7:11: trap: integer overflow\n")
     );
-    zero = run(env, a, "zero", trapping(a, 7, Op.Div, 0).try()).try();
+    zero = run(
+        X86_64LinuxGnu(alloc: a),
+        env,
+        a,
+        "zero",
+        trapping(a, 7, Op.Div, 0).try()
+    ).try();
     println(
         "divide by zero {}",
         check_trap(zero, "a\"b\\c.zen:7:11: trap: divide by zero\n")

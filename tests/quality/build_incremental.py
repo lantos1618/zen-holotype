@@ -18,6 +18,10 @@ SEED = r'''
 int main(int argc, char **argv) {
     char source[4096], output[4096];
     if (argc < 5) return 2;
+    FILE *log = fopen("emissions.log", "ab");
+    if (!log) return 8;
+    fputs("emit\n", log);
+    fclose(log);
     snprintf(source, sizeof source, "%s/main.zen", argv[2]);
     snprintf(output, sizeof output, "%s/main.c", argv[4]);
     FILE *in = fopen(source, "rb"), *out = fopen(output, "wb");
@@ -225,8 +229,10 @@ def main():
         assert subprocess.run([str(output)]).returncode == 1
         # Native headers are not in the Zen source list: compiler dependencies
         # must invalidate the result even when the top-level inputs are equal.
+        emissions = (root / "emissions.log").read_bytes()
         header.write_text('#define VALUE 2\n')
         build("compiled 1 C units")
+        assert (root / "emissions.log").read_bytes() == emissions + b"emit\n"
         assert subprocess.run([str(output)]).returncode == 3
         original_header = root / "original-value.h"
         header.rename(original_header)
@@ -267,12 +273,19 @@ def main():
         assert output.read_bytes() == published
         seed.write_text(SEED)
         build("compiled 1 C units")
+        # Native artifact repair must reuse intact emission rather than run
+        # the bootstrap compiler's whole-source generation again.
+        emissions = (root / "emissions.log").read_bytes()
         (root / "build/c/main.c.o").unlink()
         build("compiled 1 C units")
+        assert (root / "emissions.log").read_bytes() == emissions
         (root / "build/c/main.c.o").write_bytes(b"corrupt")
         build("compiled 1 C units")
+        assert (root / "emissions.log").read_bytes() == emissions
         (root / "build/c/zen.h").write_text("corrupt header")
         build("compiled 0 C units")
+        assert (root / "emissions.log").read_bytes() == emissions + b"emit\n"
+        emissions = (root / "emissions.log").read_bytes()
         output.write_bytes(b"corrupt executable")
         build("compiled 0 C units")
         output.unlink()
@@ -280,6 +293,14 @@ def main():
         output.chmod(0o600)
         build("compiled 0 C units")
         assert os.access(output, os.X_OK)
+        assert (root / "emissions.log").read_bytes() == emissions
+        # An extra generated translation unit cannot enter a repaired link.
+        rogue = root / "build/c/rogue.c"
+        rogue.write_text("this must never compile\n")
+        output.unlink()
+        build("compiled 0 C units")
+        assert not rogue.exists()
+        assert (root / "emissions.log").read_bytes() == emissions + b"emit\n"
         # A newly added source and removal must both invalidate emission.
         extra = root / "src/added.zen"
         extra.write_text("// extra source\n")
@@ -314,6 +335,15 @@ def main():
         build("compiled 0 C units", "--symbol-map", str(symbol_map))
         assert symbol_map.read_text() == "mock symbols\n"
         build("up to date", "--symbol-map", str(symbol_map))
+        emissions = (root / "emissions.log").read_bytes()
+        output.unlink()
+        build("compiled 0 C units", "--symbol-map", str(symbol_map))
+        assert (root / "emissions.log").read_bytes() == emissions
+        assert symbol_map.read_text() == "mock symbols\n"
+        symbol_map.write_text("corrupt symbols\n")
+        build("compiled 0 C units", "--symbol-map", str(symbol_map))
+        assert (root / "emissions.log").read_bytes() == emissions + b"emit\n"
+        assert symbol_map.read_text() == "mock symbols\n"
         published = output.read_bytes()
         blocked = root / "blocked"
         blocked.write_text("not a directory")

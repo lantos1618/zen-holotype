@@ -76,7 +76,8 @@ implementation without making compilation incremental.
 One `WorkspaceTurn` owns the environment, workspace, URIs, open documents, and
 temporary request storage for a publication turn. A checked build can serve
 both diagnostic publication and semantic queries. The cache retains one entry;
-queries for different independent graphs may rebuild.
+queries for imported modules reuse it when the compilation root matches and
+the snapshot is current. Queries for different independent graphs may rebuild.
 
 A build has its own arena. Replacing the build explicitly releases that arena,
 so whole-program AST and sema memos do not accumulate for the life of the

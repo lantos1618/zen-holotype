@@ -1,0 +1,48 @@
+Source, scan = std.lex
+Parser, module = std.parse
+Checker = sema.sema_check
+check_all = sema.sema_decl
+
+main = (env: Env) Res<(), AllocError> {
+    a      = env.mem.alloc();
+    source = "make = <T>() T\nSlot<T> = { value :: T = make<T>() }\n";
+    lexed  = scan(a, Source(file: "defaults.zen", text: source)).try();
+    parser ::= a.Parser(lexed);
+    parsed = parser.module("defaults").try();
+    parser.tree.add_module(parsed).try();
+    checker ::= a.Checker(parser.tree).try();
+    checker.check_all().try();
+    println("valid {}", checker.diag_count() == 0);
+    calls: usize ::= 0;
+    parser.tree.exprs_each((id, expr) {
+        expr.kind.match({
+            Call(_) => {
+                calls = calls + 1;
+                checker.checked_call(id).match({
+                    None     => println("missing checked default"),
+                    Ok(fact) => {
+                        println(
+                            "declaration {}",
+                            fact.declaration.match({ Ok(_) => true, None => false })
+                        );
+                        println(
+                            "generic result {}",
+                            checker.types.at(fact.result).match({ Var(v) => v.name.eq("T") && v.owner.eq("defaults.Slot"), _ => false })
+                        );
+                        println(
+                            "substitution {}",
+                            fact.inst.len() == 1 && fact.inst.arg_at(0).match({ Ok(ty) => ty.eq(fact.result), None => false })
+                        );
+                        println(
+                            "signature {}",
+                            fact.signature.match({ Ok(sig) => sig.params.len == 0, None => false })
+                        );
+                    },
+                });
+            },
+            _       => (),
+        });
+    });
+    println("calls {}", calls);
+    Ok(())
+}

@@ -10,6 +10,12 @@ emitting C, or linking. Source edits trigger emission, while unchanged C
 modules and their dependencies keep their objects. A shared generated header
 change can still require every module to compile.
 
+Repairing a missing native object or executable can reuse the previously
+emitted C when the source inputs, toolchain settings, newly linked bootstrap
+bytes, requested outputs, and every generated artifact still match. Native
+compilation and linking retain their existing dependency checks. Changed Zen
+source still requires fresh emission.
+
 Invalidation covers:
 
 - Zen, C, and header files under the selected source root, including symlinked
@@ -56,9 +62,11 @@ shell tools only. It bypasses incremental state and uses `build/bootstrap/`.
 remain useful when changing the host toolchain installation or investigating
 bootstrap failures.
 
-Batch related edits before rebuilding. Run focused corpus cases with the
-already built compiler, then use `make verify` for the complete repository
-checks. The build driver does not cache correctness gates or replace the full
+Batch related edits before rebuilding. `make` or `make check` combines an
+incremental build with cached development test results. Use `make verify` for
+the complete repository checks. When regenerating the seed, run
+`make -j1 seed verify` in one invocation so both targets share their build
+prerequisite. The build driver does not cache correctness gates or replace the full
 successive-compiler and seed-freshness checks.
 
 For an isolated build, run from the repository root:

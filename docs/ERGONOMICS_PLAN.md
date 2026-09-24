@@ -640,8 +640,10 @@ The next implementation priorities are:
    caller-owned acceptance tests across modules, generics, and recursive calls;
    run accepted programs under ASan. Keep unsupported relations explicit until
    their contracts are enforced.
-2. Complete semantic call records for field defaults and generic trait bodies,
-   including argument binding and conversions. Remove backend compatibility
+2. Complete semantic call records for deferred member constants and generic
+   trait bodies, including argument binding and conversions. Stored field
+   defaults now receive declaration-time checks and symbolic call records.
+   Remove backend compatibility
    lookup only when every accepted call has authoritative per-instantiation
    facts. Exercise receiver evaluation order, named arguments, and defaults
    across bootstrap and generated-C checks.

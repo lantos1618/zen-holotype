@@ -19,7 +19,8 @@ type_of, block_type = sema.sema_type
 bound_member_type = sema.sema
 type_from_ast, param_type, ret_type, type_decl = sema.sema_denote
 decl_as_type = sema.sema_type
-enter_struct_tvars, member_type = sema.sema_member
+enter_struct_tvars, member_type, self_ctx = sema.sema_member
+settle_variant_at = sema.sema_apply
 variant_payload = sema.sema_case
 owner_of, push_tparams = sema.sema_inst
 settle_raised = sema.sema_raise
@@ -216,9 +217,41 @@ struct_bodies = (c :: Checker, s: Struct, m: Module, mi: usize)
     tmark   = c.tvar_mark();
     c.enter_struct_tvars(s, mi).try();
     c.check_member_overloads(s, self_ty, mi).try();
-    s.members.loop((h, mem) { c.member_body(mem, self_ty, m, mi).try() });
+    s.members.loop((mem) {
+        c.member_body(mem, self_ty, m, mi).try();
+        mem.kind.match({
+            Field(field) => c.field_default(field, self_ty, mi),
+            _            => Ok(()),
+        }).try();
+    });
     c.release_tvars(tmark).try();
     Ok(());
+}
+
+// Defaults belong to the declaration's module and type-parameter scope.
+// Check even unused defaults so lowering receives the same call facts as it
+// does for function bodies; no construction-site locals are in scope here.
+field_default = (c :: Checker, field: Field, self_ty: TyId, mi: usize)
+                Res<(), AllocError> {
+    field.value.when_ok((value) {
+        ctx = c.self_ctx(mi, self_ty).try();
+        got = c.type_of(value, ctx).try();
+        field.type.when_ok((written) {
+            want    = c.type_from_ast(written, ctx).try();
+            settled = c.settle_variant_at(value, got, want, ctx).try();
+            node    = c.tree.expr_at(value);
+            c.coerce(
+                node.span.file,
+                node.span,
+                settled,
+                want,
+                field.name.text
+            ).try();
+            c.check_literal(value, want).try();
+            c.check_arms(value, want).try();
+        });
+    });
+    Ok(())
 }
 
 check_member_overloads = (c :: Checker, s: Struct, self_ty: TyId, mi: usize)

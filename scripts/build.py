@@ -291,13 +291,24 @@ class Build:
 
         generated = self.directory / "c"
         generated.mkdir(exist_ok=True)
+        # Native artifact repair does not change compiler emission. Reuse it
+        # only after rebuilding the bootstrap and checking both its bytes and
+        # every emitted file; source/toolchain/request changes still emit fresh.
+        emission = digest(bootstrap)
+        artifacts = self.previous.get("artifacts", {})
+        emitted_files = {str(path) for path in generated.iterdir()
+                         if path.suffix in (".c", ".h")}
+        expected_files = {path for path in artifacts if Path(path).parent == generated}
+        reuse_emission = (reusable and emission == self.previous.get("emitter")
+                          and emitted_files == expected_files and self.unchanged(artifacts))
         with tempfile.TemporaryDirectory(prefix="emit-", dir=self.directory) as temporary:
-            emitted = Path(temporary)
-            command = [str(bootstrap), "build", str(self.args.root), "--emit-c-dir", str(emitted)]
-            symbol_map = emitted / "symbols.tsv"
-            if self.args.symbol_map:
-                command += ["--symbol-map", str(symbol_map)]
-            self.run(command)
+            emitted = generated if reuse_emission else Path(temporary)
+            symbol_map = self.args.symbol_map if reuse_emission else emitted / "symbols.tsv"
+            if not reuse_emission:
+                command = [str(bootstrap), "build", str(self.args.root), "--emit-c-dir", str(emitted)]
+                if self.args.symbol_map:
+                    command += ["--symbol-map", str(symbol_map)]
+                self.run(command)
             sources = sorted(emitted.glob("*.c"))
             if not sources or not (emitted / "zen.h").is_file():
                 raise RuntimeError("bootstrap emitted no C sources or header")
@@ -339,6 +350,7 @@ class Build:
                     artifacts[str(self.args.symbol_map.absolute())] = digest(map_publication)
                 state = {"settings": self.settings, "inputs": inputs, "request": request,
                          "objects": self.objects, "artifacts": artifacts, "output": digest(publication),
+                         "emitter": emission,
                          "include_search": include_search}
                 pending.write_text(json.dumps(state, sort_keys=True))
                 if map_publication:

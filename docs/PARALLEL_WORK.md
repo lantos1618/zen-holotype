@@ -27,9 +27,11 @@ make dev-check DEV_DIR=build/lanes/parser FILTER='corpus/parse/*' J=4 TEST_J=4
 make dev-run DEV_DIR=build/lanes/parser FILTER='corpus/parse/parser_precedence'
 ```
 
-The second command reruns one case without rebuilding. Development runs use
-ccache for native objects when available through `CACHE`; `CACHE=` disables it.
-Zen emission, linking, program execution, and assertions still run each time. An empty selection
+The second command checks one case without rebuilding. Development runs reuse
+eligible passing results; `TEST_ARGS='--no-result-cache'` forces execution.
+They also use ccache for native objects when available through `CACHE`;
+`CACHE=` disables object caching. See [test iteration](TEST_ITERATION.md) for
+result-cache invalidation and eligibility. An empty selection
 returns an error. Use `python3 tests/run.py --list --filter 'corpus/parse/*'` to
 inspect a selection before running it. `dev-check` runs the corpus selection;
 formatting, grammar, determinism, warning, sanitizer, and other required gates

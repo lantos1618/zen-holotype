@@ -16,6 +16,7 @@ base_decl, type_const, TypeConst = gen.gen_c.gen_c_read
 intern_named, write_variant_value = gen.gen_c.gen_c_read
 plain_ctx = gen.gen_c.gen_c_decl
 is_null_ptr = gen.gen_c.gen_c_ptr
+selected_def = gen.gen_c.gen_c_call
 
 // Module constants are inlined at each use and therefore admit only C constant
 // Expressions. Calls are rejected because they would run once per use rather
@@ -169,7 +170,7 @@ is_pure_value* = (be :: CBackend, id: ExprId, ctx: Ctx) bool {
         Unit          => true,
         Unary(u)      => be.is_pure_value(u.operand, ctx),
         Binary(b)     => be.is_pure_pair(b, ctx),
-        Call(c)       => be.is_pure_call(c, ctx),
+        Call(c)       => be.is_pure_call(id, c, ctx),
         Access(a)     => be.is_pure_access(a, ctx),
         Name(n)       => be.is_pure_name(n.text, ctx),
         Array(a)      => be.pure_elems(a.elems, ctx),
@@ -255,8 +256,15 @@ is_pure_pair = (be :: CBackend, b: Binary, ctx: Ctx) bool {
 // Same resolved declaration `gen_c_call.call_or_floor` asks it of: one
 // spelling of "this call is a null pointer literal", so the gate and the
 // lowering cannot drift into disagreeing about which calls are constants.
-is_pure_call = (be :: CBackend, c: Call, ctx: Ctx) bool {
-    be.callee_def(c.callee, ctx).match({
+is_pure_call = (be :: CBackend, id: ExprId, c: Call, ctx: Ctx) bool {
+    selected = be.check.call_resolution(id).match({
+        None           => be.callee_def(c.callee, ctx),
+        Ok(resolution) => resolution.match({
+            Checked(_) => be.selected_def(id),
+            _          => None,
+        }),
+    });
+    selected.match({
         None  => false,
         Ok(d) => be.pure_callee(c, d, ctx),
     })

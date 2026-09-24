@@ -64,11 +64,17 @@ owned chunk directly to its decoder without copying it through a `String`.
 ## Building
 
 ```sh
+make             # incremental build and cached test results
+make check       # same fast development check; FILTER selects tests
 make build       # incremental build; C compiler and Python 3
 make bootstrap   # fresh bootstrap; needs only a C compiler
-make test        # the corpus and must-fail suites
-make verify      # all required gates, including the full compiler fixpoint
+make test        # source gates and the corpus, with cached passing results
+make verify      # all required gates; fresh test execution and full fixpoint
 ```
+
+Use `make check TEST_ARGS='--no-result-cache'` to force fresh development
+tests. After a compiler source batch, `make -j1 seed verify` regenerates the
+seed and verifies it without repeating the shared build prerequisite.
 
 Local `make test` and `make verify` require Node.js 20 or newer for the
 JavaScript backend execution tests. Verification also uses Node for the grammar

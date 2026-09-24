@@ -1,0 +1,55 @@
+// Querying an imported module retains its entry's checked graph. Overlay
+// changes invalidate that graph, and independent entries still get checked.
+Diagnostics, Shared = lsp.lsp_diag
+
+entry_is = (shared: Shared, file: str) bool {
+    shared.c.match({
+        None      => false,
+        Ok(check) => check.tree.module_at(0).match({
+            None       => false,
+            Ok(module) => module.span.file.eq(file),
+        }),
+    })
+}
+
+main = (env: Env) Res<(), AllocError> {
+    a     ::= env.mem.alloc();
+    notes ::= env.Diagnostics();
+    uris  ::= a.Vec<str>();
+    docs  ::= a.Map<str, str>();
+    uri = "file://src/app/value.zen";
+    uris.add(uri).try();
+    docs.set(uri, "value* = () i32 { 7 }\n").try();
+    first = notes.shared(env, ".", uris, docs, "src/app/app.zen", a).try();
+    println("entry {}", first.entry_is("app/app.zen"));
+    imported = notes.shared(env, ".", uris, docs, "src/app/value.zen", a).try();
+    println("import reuses entry {}", imported.entry_is("app/app.zen"));
+    println("import file {}", imported.file.eq("app/value.zen"));
+    docs.set(uri, "value* = () i32 { missing_value }\n").try();
+    notes.invalidate();
+    edited = notes.shared(env, ".", uris, docs, "src/app/value.zen", a).try();
+    println("edit rebuilds {}", edited.entry_is("app/value.zen"));
+    println("edit checked {}", edited.c.match({
+        None => false, Ok(check) => check.diag_count() > 0,
+    }));
+    notes.invalidate();
+    closed = notes.shared(
+        env,
+        ".",
+        a.Vec<str>(),
+        a.Map<str, str>(),
+        "src/app/app.zen",
+        a
+    ).try();
+    println("close restores disk {}", closed.c.match({
+        None => false, Ok(check) => check.diag_count() == 0,
+    }));
+    notes.invalidate();
+    reopened = notes.shared(env, ".", uris, docs, "src/app/app.zen", a).try();
+    println("reopen checks overlay {}", reopened.c.match({
+        None => false, Ok(check) => check.diag_count() > 0,
+    }));
+    other = notes.shared(env, ".", uris, docs, "src/app/other.zen", a).try();
+    println("independent rebuilds {}", other.entry_is("app/other.zen"));
+    Ok(())
+}

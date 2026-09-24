@@ -50,6 +50,37 @@ class ParallelRunnerTests(unittest.TestCase):
             code = runner.main(["--jobs", "2", "--stage", "4", *arguments])
         return code, output.getvalue(), run.call_count
 
+    def test_result_cache_hits_skip_execution_and_no_cache_runs_again(self):
+        for test in self.tests:
+            test.source.write_text("main = () () {}\n")
+            test.expected_path.write_bytes(test.expected)
+        cache = self.root / "verdicts"
+        report = self.root / "cached.json"
+        arguments = ["--result-cache", str(cache), "--timings-json", str(report)]
+        with patch.object(runner.ResultCache, "context", return_value="stable-test-toolchain"):
+            first = self.invoke(*arguments)
+            second = self.invoke(*arguments)
+            self.assertEqual(first[0], 0, first[1])
+            self.assertEqual(first[2], len(self.tests))
+            self.assertEqual(second[0], 0, second[1])
+            self.assertEqual(second[2], 0)
+            data = json.loads(report.read_text())
+            self.assertEqual(data["cached"], len(self.tests))
+            self.assertTrue(all(row["cached"] for row in data["tests"]))
+            third = self.invoke(*arguments, "--no-result-cache")
+            self.assertEqual(third[0], 0, third[1])
+            self.assertEqual(third[2], len(self.tests))
+            refresh = self.invoke(*arguments, "--refresh-result-cache")
+            self.assertEqual(refresh[2], len(self.tests))
+            self.tests[0].source.write_text("main = () () { changed() }\n")
+            changed = self.invoke(*arguments)
+            self.assertEqual(changed[2], 1)
+            # A cached pass must never hide collection errors outside selection.
+            self.collection.problems = ["broken expectation elsewhere"]
+            blocked = self.invoke(*arguments, "--filter", "corpus/*")
+            self.assertEqual(blocked[0], 2)
+            self.assertEqual(blocked[2], 0)
+
     def test_shards_partition_filtered_tests_independent_of_discovery_order(self):
         patterns = ["corpus/*", "must-fail/a/*", "corpus/a/*"]
         selected = runner.select(self.tests, patterns)
@@ -341,6 +372,286 @@ class NativeCacheTests(unittest.TestCase):
             self.assertNotEqual(result.code, 0)
             self.assertIn(b"missing", result.stderr)
             self.assertFalse(binary.exists())
+
+
+class ResultCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="zen-verdict-check-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.source = self.root / "case.zen"
+        self.source.write_text("main = () () {}\n")
+        self.expected = self.source.with_suffix(".expected")
+        self.expected.write_text("")
+        self.test = runner.Test("corpus/fixture/case", runner.CORPUS, "fixture",
+                                self.source, self.source, self.expected, b"")
+        self.sources = self.root / "sources"
+        for name, content in {
+            "std/core/core.zen": "Core = {}\n",
+            "std/parse/parse.zen": "Parser = {}\n",
+            "api/api.zen": "Worker = worker\n",
+            "worker/worker.zen": "Worker = {}\n",
+            "unrelated/unrelated.zen": "Other = {}\n",
+        }.items():
+            path = self.sources / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        self.args = runner.parse_args(["--result-cache", str(self.root / "results"), "--stage", "4"])
+        self.context = patch.object(runner.ResultCache, "context", return_value="fixture-toolchain")
+        self.context.start()
+        self.addCleanup(self.context.stop)
+
+    def cache(self):
+        tool = runner.Toolchain("fixture", ["unused"], src_root=self.sources)
+        return runner.ResultCache(self.args.result_cache, tool, self.args)
+
+    def test_reuses_only_passes_and_corrupt_records_miss(self):
+        cache = self.cache()
+        key = cache.key(self.test)
+        self.assertIsNone(cache.lookup(self.test, key))
+        cache.remember(runner.Result(self.test, False, ["deliberately broken"]), key)
+        cache.publish()
+        self.assertFalse(self.args.result_cache.exists())
+        cache.remember(runner.Result(self.test, True, cacheable=False), key)
+        cache.publish()
+        self.assertFalse(self.args.result_cache.exists())
+        cache.remember(runner.Result(self.test, True, detail="compiler note"), key)
+        cache.publish()
+        hit = self.cache().lookup(self.test, key)
+        self.assertTrue(hit.cached)
+        self.assertEqual(hit.detail, "compiler note")
+        path = self.args.result_cache / (key + ".json")
+        path.write_text("interrupted write")
+        self.assertIsNone(cache.lookup(self.test, key))
+        path.write_text(json.dumps({"version": 1, "key": key, "passed": False, "detail": ""}))
+        self.assertIsNone(cache.lookup(self.test, key))
+        self.test.stage_at = 5
+        self.assertIsNone(cache.key(self.test))
+
+    def test_source_sidecar_additions_deletions_and_modes_invalidate(self):
+        baseline = self.cache().key(self.test)
+        original = self.source.read_bytes()
+        before = self.source.stat()
+        self.source.write_bytes(original.replace(b"main", b"fail"))
+        os.utime(self.source, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertNotEqual(self.cache().key(self.test), baseline)
+        self.source.write_bytes(original)
+        self.assertEqual(self.cache().key(self.test), baseline)
+        for suffix in ("expected", "stdin", "args", "env", "stderr", "count", "exit", "stage"):
+            with self.subTest(sidecar=suffix):
+                sidecar = self.source.with_suffix("." + suffix)
+                prior = sidecar.read_bytes() if sidecar.exists() else None
+                sidecar.write_text("changed\n")
+                self.assertNotEqual(self.cache().key(self.test), baseline)
+                if prior is None:
+                    sidecar.unlink()
+                else:
+                    sidecar.write_bytes(prior)
+                self.assertEqual(self.cache().key(self.test), baseline)
+        self.source.chmod(0o700)
+        self.assertNotEqual(self.cache().key(self.test), baseline)
+
+    def test_exact_staged_closure_includes_transitive_dependencies_not_pruned_modules(self):
+        baseline = self.cache().key(self.test)
+        for name in ("unrelated/unrelated.zen", "std/parse/parse.zen"):
+            path = self.sources / name
+            path.write_text(path.read_text() + "New = {}\n")
+            self.assertEqual(self.cache().key(self.test), baseline)
+        self.source.write_text("Api = api\nmain = () () {}\n")
+        imported = self.cache().key(self.test)
+        worker = self.sources / "worker/worker.zen"
+        worker.write_text(worker.read_text() + "New = {}\n")
+        self.assertNotEqual(self.cache().key(self.test), imported)
+        prelude = self.sources / "std/core/core.zen"
+        previous = self.cache().key(self.test)
+        prelude.write_text(prelude.read_text() + "New = {}\n")
+        self.assertNotEqual(self.cache().key(self.test), previous)
+        extra = self.sources / "worker/new.zen"
+        previous = self.cache().key(self.test)
+        extra.write_text("Added = {}\n")
+        self.assertNotEqual(self.cache().key(self.test), previous)
+
+    def test_directory_resources_and_local_module_overrides_enter_keys(self):
+        case = self.root / "directory"
+        (case / "worker").mkdir(parents=True)
+        (case / "main.zen").write_text("Api = api\n")
+        (case / "worker/worker.zen").write_text("Mine = {}\n")
+        (case / "main.expected").write_text("")
+        test = runner.Test("corpus/fixture/directory", runner.CORPUS, "fixture", case,
+                           case / "main.zen", case / "main.expected", b"", is_dir=True)
+        baseline = self.cache().key(test)
+        (self.sources / "worker/worker.zen").write_text("Ignored = {}\n")
+        self.assertEqual(self.cache().key(test), baseline)
+        (case / "resource.bin").write_bytes(b"resource")
+        self.assertNotEqual(self.cache().key(test), baseline)
+
+    def test_input_edits_during_run_never_publish_and_cached_hits_are_rechecked(self):
+        cache = self.cache()
+        key = cache.key(self.test)
+        cache.lookup(self.test, key)
+        cache.remember(runner.Result(self.test, True), key)
+        self.expected.write_text("changed during execution")
+        with self.assertRaisesRegex(runner.HarnessError, "inputs changed"):
+            cache.publish()
+        self.assertFalse(self.args.result_cache.exists())
+        self.expected.write_text("")
+        cache = self.cache()
+        key = cache.key(self.test)
+        cache.lookup(self.test, key)
+        cache.remember(runner.Result(self.test, True), key)
+        cache.publish()
+        warm = self.cache()
+        self.assertTrue(warm.lookup(self.test, warm.key(self.test)).cached)
+        self.source.write_text("changed during warm lookup")
+        with self.assertRaisesRegex(runner.HarnessError, "inputs changed"):
+            warm.publish()
+
+    def test_artifacts_reuse_compilation_but_execute_and_assert_again(self):
+        from types import SimpleNamespace
+        tool = runner.Toolchain("fixture", ["unused"], src_root=self.sources)
+        compiled, executed = [], []
+        stdout = [b""]
+        def process(argv, *args, **kwargs):
+            if argv[0] == "unused":
+                compiled.append("zen")
+                Path(argv[-1]).write_text("int main(void) { return 0; }\n")
+            else:
+                executed.append(argv)
+            return runner.Run(argv, 0, b"" if argv[0] == "unused" else stdout[0], b"", False, False)
+        def build(tid, source, binary, native):
+            compiled.append("cc")
+            binary.write_bytes(b"fixture executable")
+            binary.chmod(0o755)
+            return runner.Run([], 0, b"", b"", False, False)
+        tool.c_compiler = SimpleNamespace(build=build)
+        for index in range(3):
+            cache = runner.ResultCache(self.args.result_cache, tool, self.args)
+            self.args.verdict_cache = cache
+            key = cache.key(self.test)
+            self.assertIsNone(cache.lookup(self.test, key))
+            work = self.root / f"work-{index}"
+            work.mkdir()
+            if index == 2:
+                stdout[0] = b"changed external state"
+            with patch.object(runner, "run_process", side_effect=process), \
+                 patch.object(runner, "deterministic_binary", return_value=False):
+                result = runner.run_corpus(self.test, tool, work, self.args)
+            self.assertEqual(result.artifact_cached, index > 0)
+            self.assertEqual(result.ok, index < 2)
+            cache.remember(result, key)
+            cache.publish()
+        self.assertEqual(compiled, ["zen", "cc"])
+        self.assertEqual(len(executed), 3)
+        self.assertIn("stdout does not match", result.reasons[0])
+        self.assertFalse((self.args.result_cache / (key + ".json")).exists())
+
+    def test_artifact_corruption_modes_refresh_and_path_sensitive_c(self):
+        cache = self.cache()
+        key = cache.key(self.test)
+        cache.lookup(self.test, key)
+        work = self.root / "work"
+        work.mkdir()
+        (work / "out.c").write_text("int main(void) { return 0; }\n")
+        (work / "prog").write_bytes(b"executable bytes")
+        (work / "prog").chmod(0o755)
+        cache.remember_binary(self.test, work)
+        cache.publish()
+        destination = self.root / "restored"
+        destination.mkdir()
+        self.assertTrue(cache.restore_binary(self.test, destination))
+        artifact = self.args.result_cache / (key + ".artifact")
+        for corrupt in (lambda: (artifact / "prog").chmod(0o644),
+                        lambda: (artifact / "prog").write_bytes(b"wrong")):
+            corrupt()
+            self.assertFalse(cache.restore_binary(self.test, destination))
+            repaired = self.cache()
+            repaired.lookup(self.test, key)
+            repaired.remember_binary(self.test, work)
+            repaired.publish()
+            self.assertTrue(repaired.restore_binary(self.test, destination))
+        self.args.refresh_result_cache = True
+        self.assertFalse(cache.restore_binary(self.test, destination))
+        self.args.refresh_result_cache = False
+        for marker in ('__FILE__', '__DATE__', str(work), '#include "relative.h"'):
+            (work / "out.c").write_text(marker)
+            fresh = self.cache()
+            fresh.lookup(self.test, key)
+            fresh.remember_binary(self.test, work)
+            self.assertEqual(fresh.artifacts, [])
+
+    def test_shared_source_snapshots_avoid_repeated_reads_and_reject_midrun_edits(self):
+        self.source.write_text("Api = api\nmain = () () {}\n")
+        cache = self.cache()
+        with patch.object(cache, "file_digest", wraps=cache.file_digest) as digest, \
+             patch.object(runner, "sublayers_named_in", wraps=runner.sublayers_named_in) as votes:
+            key = cache.key(self.test)
+            cache.key(self.test)
+        self.assertTrue(all(not call.args[0].is_relative_to(self.sources)
+                            for call in digest.call_args_list))
+        self.assertTrue(all(not call.args[0].is_relative_to(self.sources)
+                            for call in votes.call_args_list))
+        cache.lookup(self.test, key)
+        cache.remember(runner.Result(self.test, True), key)
+        (self.sources / "worker/worker.zen").write_text("changed during invocation")
+        with self.assertRaisesRegex(runner.HarnessError, "sources changed"):
+            cache.publish()
+        self.assertFalse(self.args.result_cache.exists())
+
+    def test_non_zen_source_inventory_edits_are_detected(self):
+        tool = runner.Toolchain("fixture", ["unused"], src_root=self.sources)
+        (self.sources / "worker/new.h").write_text("new native header")
+        with self.assertRaisesRegex(runner.HarnessError, "sources changed"):
+            tool.check_source_state()
+
+    @unittest.skipUnless(shutil.which("cc") and sys.platform.startswith("linux"),
+                         "requires Linux native toolchain")
+    def test_native_context_tracks_compiler_harness_environment_flags_stage_and_floor(self):
+        self.context.stop()
+        compiler = self.root / "compiler"
+        shutil.copy2("/bin/true", compiler)
+        harness = self.root / "runner.py"
+        harness.write_text("harness version one")
+        floor = self.root / "native.c"
+        floor.write_text("native floor one")
+        tool = runner.Toolchain("fixture", [str(compiler)])
+        with patch.object(runner, "__file__", str(harness)), \
+             patch.object(runner, "NATIVE_FLOORS", ((b"probe", (floor,), ()),)):
+            cache = runner.ResultCache(self.args.result_cache, tool, self.args)
+            baseline = cache.identity
+            self.assertIsNotNone(baseline)
+            changes = (
+                (lambda: compiler.write_bytes(compiler.read_bytes() + b"changed"),
+                 lambda: shutil.copy2("/bin/true", compiler)),
+                (lambda: harness.write_text("harness version two"),
+                 lambda: harness.write_text("harness version one")),
+                (lambda: floor.write_text("native floor two"),
+                 lambda: floor.write_text("native floor one")),
+                (lambda: setattr(self.args, "cc_flags", "-std=c11 -O2"),
+                 lambda: setattr(self.args, "cc_flags", "-std=c11 -O0 -g -Werror=return-type")),
+                (lambda: setattr(self.args, "stage", 5),
+                 lambda: setattr(self.args, "stage", 4)),
+            )
+            for change, restore in changes:
+                change()
+                self.assertNotEqual(cache.context(), baseline)
+                restore()
+            with patch.dict(os.environ, {"ZEN_CACHE_SENTINEL": "private-value"}):
+                self.assertNotEqual(cache.context(), baseline)
+            # Executable scripts can have arbitrary undeclared dependencies.
+            compiler.write_text("#!/bin/sh\nexec /bin/true\n")
+            self.assertIsNone(cache.context())
+
+    @unittest.skipUnless(shutil.which("cc") and shutil.which("nm"), "requires native toolchain")
+    def test_unknown_clock_and_process_symbols_bypass_verdict_cache(self):
+        source, binary = self.root / "native.c", self.root / "native"
+        for body, allowed in (
+            ('#include <stdio.h>\nint main(void) { puts("hello"); }', True),
+            ('#include <time.h>\nint main(void) { return time(0) == 0; }', False),
+            ('#include <stdlib.h>\nint main(void) { return system("true"); }', False),
+        ):
+            source.write_text(body)
+            subprocess.run(["cc", str(source), "-o", str(binary)], check=True)
+            self.assertEqual(runner.deterministic_binary(binary, 10), allowed)
 
 
 if __name__ == "__main__":

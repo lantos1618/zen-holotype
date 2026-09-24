@@ -38,7 +38,9 @@ import fcntl
 import hashlib
 import json
 import os
+import platform
 import re
+import resource
 import shlex
 import shutil
 import socket
@@ -233,6 +235,9 @@ class Result:
     reasons: list[str] = field(default_factory=list)
     detail: str = ""
     seconds: float = 0.0
+    cached: bool = False
+    cacheable: bool = True
+    artifact_cached: bool = False
 
 
 @dataclass
@@ -578,6 +583,8 @@ class Toolchain:
     imports: dict[str, frozenset[str]] = field(default_factory=dict, init=False)
     source_state: dict[Path, tuple[int, ...]] = field(default_factory=dict, init=False)
     c_compiler: CCompiler | None = None
+    module_files: dict[str, dict[str, Path]] = field(default_factory=dict, init=False)
+    sublayer_imports: dict[Path, frozenset[str]] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         # One import manifest per invocation, prepared before worker threads.
@@ -589,17 +596,17 @@ class Toolchain:
                 name: frozenset(_modules_named_in(entry))
                 for name, entry in self.modules.items() if entry.is_dir()
             }
+            self.module_files = {name: tree_files(entry) for name, entry in self.modules.items()}
+            self.sublayer_imports = {path: frozenset(sublayers_named_in(path))
+                                    for path, state in self.source_state.items()
+                                    if path.suffix == ".zen" and stat.S_ISREG(state[-1])}
             self.check_source_state()
 
     def current_source_state(self) -> dict[Path, tuple[int, ...]]:
         if self.src_root is None:
             return {}
         try:
-            entries = list(self.src_root.iterdir())
-            paths = [self.src_root, *entries]
-            for entry in entries:
-                if entry.is_dir():
-                    paths.extend(entry.rglob("*.zen"))
+            paths = [self.src_root, *tree_files(self.src_root).values()]
             state = {}
             for path in paths:
                 info = path.stat()
@@ -746,6 +753,320 @@ class CCompiler:
         linked.stdout = compiled.stdout + linked.stdout
         linked.stderr = compiled.stderr + linked.stderr
         return linked
+
+
+class ResultCache:
+    """Reuse passed verdicts only with the same observable compiler inputs.
+
+    Environment values enter only a digest. Native search trees use inode,
+    size, nanosecond change-time and modification-time snapshots, so replacing
+    a header/library or restoring its mtime still invalidates the cache.
+    Unsupported native configurations run fresh rather than guessing their
+    dependency closure. Verification can always disable this cache entirely.
+    """
+    VERSION = 1
+    REWRITTEN = {"corpus/env/clock_reads_are_two_authorities",
+                 "corpus/net/tcp_connect", "corpus/net/tls_connect"}
+
+    def __init__(self, directory: Path, tool: Toolchain, args: argparse.Namespace):
+        self.directory, self.tool, self.args = directory, tool, args
+        self.hashes: dict[tuple, str] = {}
+        self.lock = threading.Lock()
+        self.pending: list[tuple[str, str]] = []
+        self.checked: list[tuple[Test, str]] = []
+        self.keys: dict[str, str] = {}
+        self.artifacts: list[tuple[str, Path]] = []
+        self.identity = self.context()
+        # Source rows are shared across tests, and the complete source snapshot
+        # is validated again before publishing or accepting a warm run.
+        self.source_rows = {
+            path: (stat.S_IMODE(state[-1]), "directory" if stat.S_ISDIR(state[-1])
+                   else self.file_digest(path))
+            for path, state in tool.source_state.items()
+        } if self.identity is not None else {}
+        tool.check_source_state()
+
+    @staticmethod
+    def digest(value) -> str:
+        return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
+
+    @staticmethod
+    def state(path: Path) -> tuple:
+        info = path.stat()
+        return (str(path.resolve()), info.st_dev, info.st_ino, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns, info.st_mode)
+
+    def file_digest(self, path: Path) -> str:
+        before = self.state(path)
+        with self.lock:
+            known = self.hashes.get(before)
+        if known is not None:
+            return known
+        value = hashlib.sha256(path.read_bytes()).hexdigest()
+        if self.state(path) != before:
+            raise HarnessError(f"cache input changed while reading: {path}")
+        with self.lock:
+            self.hashes[before] = value
+        return value
+
+    def context(self) -> str | None:
+        if platform.system() != "Linux" or len(self.tool.emit_argv) != 1:
+            return None
+        # Arbitrary wrappers, response files and compiler plugins can read
+        # inputs outside the declared search trees. Keep their verdicts fresh.
+        flags = shlex.split(self.args.cc_flags)
+        if any(not re.fullmatch(r"-(?:std=[\w+]+|O[0-3sgz]|g\d*|W[\w=+-]+|pipe)", flag)
+               for flag in flags):
+            return None
+        if any(os.environ.get(name) for name in
+               ("LD_PRELOAD", "LD_LIBRARY_PATH", "GCC_EXEC_PREFIX", "COMPILER_PATH",
+                "CCACHE_PREFIX", "CPATH", "C_INCLUDE_PATH", "LIBRARY_PATH")):
+            return None
+        try:
+            cc = shutil.which(self.args.cc)
+            if cc is None:
+                return None
+            executables = [Path(self.tool.emit_argv[0]), Path(cc)]
+            if self.args.cc_cache:
+                cache = shutil.which(self.args.cc_cache)
+                if cache is None:
+                    return None
+                executables.append(Path(cache))
+            for executable in executables:
+                with executable.open("rb") as stream:
+                    if stream.read(4) != b"\x7fELF":
+                        return None
+            def probe(*options: str) -> str:
+                output = subprocess.run([cc, *options], input=b"", capture_output=True,
+                                        timeout=self.args.timeout,
+                                        env={**os.environ, "LC_ALL": "C"})
+                if output.returncode:
+                    raise ValueError("native toolchain probe failed")
+                return (output.stdout + output.stderr).decode(errors="replace")
+            for program in ("cc1", "as", "ld"):
+                found = shutil.which(probe("-print-prog-name=" + program).strip())
+                if found:
+                    executables.append(Path(found))
+            roots = {Path("/usr/include"), Path("/usr/lib"), Path("/lib")}
+            search = probe("-print-search-dirs")
+            for line in search.splitlines():
+                if line.startswith(("programs: =", "libraries: =")):
+                    roots.update(Path(value) for value in line.split("=", 1)[1].split(os.pathsep)
+                                 if value)
+            include = probe(*flags, "-E", "-x", "c", "-v", "-o", os.devnull, "-")
+            collecting = False
+            for line in include.splitlines():
+                if line.startswith("#include") and line.endswith("search starts here:"):
+                    collecting = True
+                elif line.strip() == "End of search list.":
+                    collecting = False
+                elif collecting:
+                    roots.add(Path(line.strip()))
+            roots = {root.resolve() for root in roots if root.is_dir()}
+            roots = {root for root in roots if not any(parent in roots for parent in root.parents)}
+            native = []
+            seen = set()
+            for root in sorted(roots):
+                pending = [str(root)]
+                while pending:
+                    directory = pending.pop()
+                    info = os.stat(directory)
+                    identity = (info.st_dev, info.st_ino)
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    try:
+                        with os.scandir(directory) as scan:
+                            entries = sorted(scan, key=lambda entry: entry.name)
+                    except PermissionError:
+                        native.append((directory, info.st_mode, info.st_ctime_ns, "unreadable"))
+                        continue
+                    for entry in entries:
+                        try:
+                            info = entry.stat()
+                            native.append((entry.path, info.st_dev, info.st_ino, info.st_size,
+                                           info.st_mtime_ns, info.st_ctime_ns, info.st_mode,
+                                           os.readlink(entry.path) if entry.is_symlink() else None))
+                            if entry.is_dir():
+                                pending.append(entry.path)
+                        except FileNotFoundError:
+                            native.append((entry.path, "missing"))
+            native_files = [path for _, paths, _ in NATIVE_FLOORS for path in paths]
+            return self.digest({
+                "version": self.VERSION,
+                "compiler": [(str(path), self.file_digest(path)) for path in executables],
+                "harness": self.file_digest(Path(__file__)),
+                "native": native,
+                "native_floors": [(str(path), self.file_digest(path)) for path in native_files],
+                "environment": self.digest(dict(os.environ)),
+                "platform": platform.uname(), "cwd": str(Path.cwd()),
+                "user": [os.getuid(), os.getgid(), os.getgroups()],
+                "umask": next((line for line in Path("/proc/self/status").read_text().splitlines()
+                               if line.startswith("Umask:")), None),
+                "limits": {name: resource.getrlimit(getattr(resource, name))
+                           for name in dir(resource) if name.startswith("RLIMIT_")},
+                "loader": [(str(path), self.file_digest(path) if path.is_file() else None)
+                           for path in (Path("/etc/ld.so.cache"), Path("/etc/ld.so.preload"))],
+                "arguments": [flags, self.args.cc_cache, str(self.args.cc_work_dir),
+                              self.args.stage, self.args.timeout, self.args.run_timeout],
+            })
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
+
+    def key(self, test: Test) -> str | None:
+        if self.identity is None or test.stage_at is not None:
+            return None
+        files = staged_files(test, self.tool)
+        fixture = tree_files(test.source) if test.is_dir else {
+            path.name: path for path in test.source.parent.glob(test.source.stem + ".*")}
+        def snapshot(entries, shared=False):
+            rows = []
+            for name, path in sorted(entries.items()):
+                row = self.source_rows.get(path) if shared else None
+                if row is None:
+                    mode = path.stat().st_mode
+                    row = (stat.S_IMODE(mode), "directory" if stat.S_ISDIR(mode)
+                           else self.file_digest(path))
+                rows.append((name, *row))
+            return rows
+        # Parsed expectations are also included: collection happens before keys
+        # are computed, and a simultaneous sidecar edit must not bless old data.
+        expectation = [test.expected.hex(), test.exit_code, test.stderr_lines,
+                       test.count_max, test.stdin_bytes.hex() if test.stdin_bytes is not None else None,
+                       test.args_words, test.env_pairs]
+        return self.digest([self.identity, test.tid, test.kind, staged_entry(test),
+                            stat.S_IMODE(test.source.stat().st_mode),
+                            snapshot(files, shared=True), snapshot(fixture), expectation])
+
+    def lookup(self, test: Test, key: str | None) -> Result | None:
+        if key is None:
+            return None
+        with self.lock:
+            self.checked.append((test, key))
+            self.keys[test.tid] = key
+        if self.args.refresh_result_cache:
+            return None
+        try:
+            record = json.loads((self.directory / (key + ".json")).read_text())
+            if record.get("version") == self.VERSION and record.get("key") == key \
+                    and record.get("passed") is True and isinstance(record.get("detail"), str):
+                return Result(test, True, detail=record["detail"], cached=True)
+        except (OSError, ValueError, AttributeError):
+            pass
+        return None
+
+    def remember(self, result: Result, key: str | None) -> None:
+        if key is not None and result.ok and result.cacheable and not result.cached \
+                and result.test.stage_at is None and self.key(result.test) == key:
+            with self.lock:
+                self.pending.append((key, result.detail))
+
+    def restore_binary(self, test: Test, work: Path) -> bool:
+        key = self.keys.get(test.tid)
+        if key is None or self.args.refresh_result_cache or test.tid in self.REWRITTEN:
+            return False
+        directory = self.directory / (key + ".artifact")
+        try:
+            if not directory.is_dir():
+                return False
+            with (self.directory / (key + ".lock")).open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_SH)
+                record = json.loads((directory / "manifest.json").read_text())
+                if record.get("key") != key or record.get("version") != self.VERSION:
+                    return False
+                if not os.access(directory / "prog", os.X_OK):
+                    return False
+                for name in ("out.c", "prog"):
+                    if self.file_digest(directory / name) != record["files"][name]:
+                        return False
+                for name in ("out.c", "prog"):
+                    shutil.copy2(directory / name, work / name)
+                return True
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+
+    def remember_binary(self, test: Test, work: Path) -> None:
+        key = self.keys.get(test.tid)
+        if key is None or test.tid in self.REWRITTEN:
+            return
+        generated = (work / "out.c").read_bytes()
+        if any(marker in generated for marker in
+               (b"__FILE__", b"__BASE_FILE__", b"__DATE__", b"__TIME__", os.fsencode(work))):
+            return
+        if re.search(rb'(?m)^\s*#\s*include\s*"', generated):
+            return
+        self.directory.mkdir(parents=True, exist_ok=True)
+        directory = Path(tempfile.mkdtemp(prefix=".pending-artifact-", dir=self.directory))
+        try:
+            files = {}
+            for name in ("out.c", "prog"):
+                shutil.copy2(work / name, directory / name)
+                files[name] = self.file_digest(directory / name)
+            (directory / "manifest.json").write_text(json.dumps({
+                "version": self.VERSION, "key": key, "files": files}))
+            with self.lock:
+                self.artifacts.append((key, directory))
+        except BaseException:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
+
+    def discard_pending(self) -> None:
+        for _, directory in self.artifacts:
+            shutil.rmtree(directory, ignore_errors=True)
+
+    def publish(self) -> None:
+        # No entries survive a source/toolchain/environment edit during a run.
+        if self.identity is None:
+            return
+        self.tool.check_source_state()
+        if self.context() != self.identity or any(self.key(test) != key for test, key in self.checked):
+            raise HarnessError("test cache inputs changed during this run; rerun after edits finish")
+        if not self.pending and not self.artifacts:
+            return
+        self.directory.mkdir(parents=True, exist_ok=True)
+        for key, detail in self.pending:
+            fd, temporary = tempfile.mkstemp(prefix=".pending-", dir=self.directory)
+            try:
+                with os.fdopen(fd, "w") as stream:
+                    json.dump({"version": self.VERSION, "key": key,
+                               "passed": True, "detail": detail}, stream)
+                os.replace(temporary, self.directory / (key + ".json"))
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+        for key, directory in self.artifacts:
+            destination = self.directory / (key + ".artifact")
+            # Readers hold the same lock. Replace even an existing entry so a
+            # fresh successful run repairs corruption instead of missing forever.
+            with (self.directory / (key + ".lock")).open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                shutil.rmtree(destination, ignore_errors=True)
+                os.rename(directory, destination)
+
+
+def deterministic_binary(binary: Path, timeout: float) -> bool:
+    """Unknown foreign/runtime dependencies must execute on every invocation."""
+    allowed = {
+        "__libc_start_main", "__cxa_finalize", "__stack_chk_fail", "abort", "exit",
+        "malloc", "calloc", "realloc", "free", "aligned_alloc", "posix_memalign",
+        "memcpy", "memmove", "memset", "memcmp", "memchr", "strlen", "strcmp",
+        "strncmp", "strchr", "strrchr", "strstr", "strtol", "strtoul", "strtoll",
+        "strtoull", "strtod", "printf", "fprintf", "sprintf", "snprintf", "puts",
+        "putchar", "fputs", "fputc", "fwrite", "fflush", "stdout", "stderr",
+        "__errno_location", "sqrt", "sqrtf", "floor", "floorf", "ceil", "ceilf",
+        "fmod", "fmodf", "pow", "powf", "sin", "cos", "tan", "fabs", "fabsf",
+        "_ITM_deregisterTMCloneTable", "_ITM_registerTMCloneTable", "__gmon_start__",
+    }
+    try:
+        symbols = subprocess.run(["nm", "-D", "--undefined-only", str(binary)],
+                                 capture_output=True, text=True, timeout=timeout)
+        if symbols.returncode:
+            return False
+        names = {line.split()[-1].split("@", 1)[0]
+                 for line in symbols.stdout.splitlines() if line.split()}
+        # Static binaries have no dynamic dependency list to prove their closure.
+        return bool(names) and names <= allowed
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 class LoopbackPeer:
@@ -980,120 +1301,99 @@ def clip(text: str, lines: int = 30) -> str:
     return "\n".join(parts[:lines] + [f"... {len(parts) - lines} more line(s)"])
 
 
+def tree_files(root: Path) -> dict[str, Path]:
+    """Files and empty directories copied by staging; follow source symlinks."""
+    if not root.is_dir():
+        return {root.name: root}
+    files = {}
+    def visit(directory: Path, ancestors: frozenset[Path]) -> None:
+        real = directory.resolve()
+        if real in ancestors:
+            raise HarnessError(f"cyclic source directory: {directory}")
+        for path in sorted(directory.iterdir()):
+            files[path.relative_to(root).as_posix()] = path
+            if path.is_dir():
+                visit(path, ancestors | {real})
+    visit(root, frozenset())
+    return files
+
+
+def sublayers_named_in(path: Path) -> set[str]:
+    named = set()
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        named.update(SUBLAYER_RHS.findall(line.split("//", 1)[0]))
+    return named
+
+
+def staged_files(test: Test, tool: Toolchain) -> dict[str, Path]:
+    """The same manifest drives cache keys and private staging copies."""
+    files = tree_files(test.source)
+    if not tool.src_root or not tool.src_root.is_dir():
+        return files
+    mine = {name.split("/", 1)[0] for name in files}
+    available = set(tool.modules) - mine
+    wanted = ({"std"} | _modules_named_in(test.source)) & available
+    frontier = sorted(wanted)
+    while frontier:
+        name = frontier.pop()
+        for dep in sorted(tool.imports.get(name, frozenset()) & available):
+            if dep not in wanted:
+                wanted.add(dep)
+                frontier.append(dep)
+    for name in sorted(wanted):
+        module = tool.modules[name]
+        if module.is_dir():
+            files[name] = module
+            files.update({name + "/" + relative: path
+                          for relative, path in tool.module_files[name].items()})
+        else:
+            files[name] = module
+
+    # Plain std cannot vote to retain compiler frontend sublayers. Only the
+    # test, other modules, and already retained sublayers supply those imports.
+    def votes(paths: Iterable[Path]) -> set[str]:
+        named = set()
+        for path in paths:
+            if path.suffix != ".zen":
+                continue
+            cached = tool.sublayer_imports.get(path)
+            if cached is not None:
+                named.update(cached)
+            elif path.is_file():
+                named.update(sublayers_named_in(path))
+        return named
+    kept = votes(path for name, path in files.items() if not name.startswith("std/"))
+    frontier = sorted(kept)
+    while frontier:
+        name = frontier.pop()
+        for dep in sorted(votes(path for relative, path in files.items()
+                                if relative.startswith("std/" + name + "/")) - kept):
+            kept.add(dep)
+            frontier.append(dep)
+    removed = {"std/" + name for name in SUBLAYER - kept}
+    return {name: path for name, path in files.items()
+            if not any(name == prefix or name.startswith(prefix + "/") for prefix in removed)}
+
+
 def stage(test: Test, tool: Toolchain, work: Path) -> Path:
-    """Build a self-contained source tree for one test, and return its root.
-
-    A test is a program, and a program stands on std — `Res`, `Ok`, `Env` and
-    `println` are prelude names. So the prelude is staged beside the test and
-    the pair is compiled as one tree.
-
-    Staging rather than passing two paths is not a convenience: the compilation
-    root defaults to the inputs' common ancestor, so a test under /tmp plus a
-    std under /home/... roots at `/` and the compiler walks the filesystem.
-    """
+    """Copy exactly the test's resolved staging manifest into a private tree."""
     root = work / "src"
     if root.exists():
         shutil.rmtree(root)
     root.mkdir(parents=True)
-
+    manifest = staged_files(test, tool)
+    for name, path in manifest.items():
+        target = root / name
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+    for name, path in reversed(list(manifest.items())):
+        if path.is_dir():
+            shutil.copystat(path, root / name)
     if test.source.is_dir():
-        shutil.copytree(test.source, root, dirs_exist_ok=True)
-    else:
-        shutil.copy2(test.source, root / test.source.name)
-
-    # `std` always -- it is the prelude, and every program stands on it.
-    # Any OTHER top-level module under src/ (`sema`, `gen`, `fmt`, ..) only
-    # if this test's own sources name it.
-    #
-    # Staging the whole of src/ was the first attempt, and it is wrong for a
-    # reason worth writing down: the compiler compiles the whole staged tree,
-    # so ONE half-written module reddens every test in the suite -- not by
-    # failing them, but by adding its diagnostics to their counts, which is
-    # how a `.count` assertion starts failing because of a file it has never
-    # heard of. That couples every test to every module's health and makes
-    # working on two modules at once impossible.
-    #
-    # The name test is deliberately crude and deliberately UNDER-inclusive:
-    # a module that is wanted but not matched gives a plain "module not
-    # found", which names the problem, while an unwanted module that IS
-    # staged gives diagnostics from a file the author never mentioned.
-    if tool.src_root and tool.src_root.is_dir():
-        # A test OWNS its own namespace. `corpus/modules/folder_root` declares
-        # its own `gen/`, and staging src/gen on top of it merged the two
-        # trees: the test's three-line gen.zen got a diagnostic reported at
-        # line 51, which is a line only src/gen/gen.zen has. Whatever the test
-        # defines wins, and the src module of that name is simply not staged.
-        mine = {e.name for e in root.iterdir()}
-        available = {name: entry for name, entry in tool.modules.items()
-                     if name not in mine}
-        wanted = ({"std"} | _modules_named_in(root)) & set(available)
-        # TRANSITIVE. `lsp` imports `sema`, so a test naming only `lsp`
-        # needs `sema` staged too or it gets "module sema.sema not found". The
-        # first version scanned only the test's own sources and stopped there;
-        # that was fine while every stage-1 module stood alone and stopped
-        # being fine the moment two of them were wired together.
-        frontier = sorted(wanted)
-        while frontier:
-            name = frontier.pop()
-            entry = available[name]
-            if not entry.is_dir():
-                continue
-            for dep in sorted(tool.imports[name] & set(available)):
-                if dep not in wanted:
-                    wanted.add(dep)
-                    frontier.append(dep)
-        for name in sorted(wanted):
-            entry = available[name]
-            if entry.is_dir():
-                shutil.copytree(entry, root / entry.name, dirs_exist_ok=True)
-            else:
-                shutil.copy2(entry, root / entry.name)
-        # PRUNE THE COMPILER SUBLAYER. `std` now also carries the compiler's
-        # own frontend -- `std/lex`, `std/parse`, `std/ast` -- and std is
-        # staged whole, so without pruning every test would compile the
-        # frontend and one half-written parser file would redden the suite:
-        # the exact coupling the staging comment above exists to prevent.
-        # `_modules_named_in` only sees the first dotted segment (`std` for
-        # `= std.parse`), so the second segment is scanned for directly. A
-        # kept sublayer may name another (`std.parse` imports `std.lex`), so
-        # the scan runs to a fixpoint; a pruned sublayer's own sources never
-        # vote. Plain std may not import the sublayer, so nothing else can
-        # smuggle it in.
-        sublayer = root / "std"
-        if sublayer.is_dir():
-            def votes_in(path: Path) -> set[str]:
-                try:
-                    text = path.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    return set()
-                named: set[str] = set()
-                for line in text.splitlines():
-                    code = line.split("//", 1)[0]
-                    named |= set(SUBLAYER_RHS.findall(code))
-                return named
-
-            # Seed from everything OUTSIDE the sublayer: the test's own
-            # sources and any src module staged beside them (`sema`, ..).
-            kept: set[str] = set()
-            for path in root.rglob("*.zen"):
-                if sublayer in path.parents:
-                    continue
-                kept |= votes_in(path)
-            # Close over the sublayer: a kept member's own imports vote.
-            changed = True
-            while changed:
-                changed = False
-                for name in sorted(kept):
-                    member = sublayer / name
-                    if not member.is_dir():
-                        continue
-                    for path in member.rglob("*.zen"):
-                        for dep in sorted(votes_in(path)):
-                            if dep not in kept:
-                                kept.add(dep)
-                                changed = True
-            for name in sorted(SUBLAYER - kept):
-                shutil.rmtree(sublayer / name, ignore_errors=True)
+        shutil.copystat(test.source, root)
     return root
 
 
@@ -1124,7 +1424,7 @@ def _modules_named_in(root: Path) -> set[str]:
     matching costs a directory copy; under-matching costs a clear diagnostic.
     """
     names: set[str] = set()
-    for path in root.rglob("*.zen"):
+    for path in ([root] if root.is_file() else root.rglob("*.zen")):
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -1206,37 +1506,40 @@ def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace
                 loopback.close()
             return Result(test, False, [f"the harness could not stage loopback TLS: {e}"])
 
-    emit = run_process(tool.command(root, out_c, root, entry), args.timeout)
-    if emit.timed_out:
-        if loopback is not None:
-            loopback.close()
-        return Result(test, False, [f"the compiler timed out after {args.timeout}s"])
-    if emit.code != 0 or not out_c.is_file():
-        if loopback is not None:
-            loopback.close()
-        return Result(
-            test,
-            False,
-            [f"the compiler rejected a corpus program (exit {emit.code})"],
-            clip(diagnostics(emit)),
-        )
-
     binary = work / "prog"
-    try:
-        native = native_link_args(out_c)
-    except HarnessError:
-        if loopback is not None:
-            loopback.close()
-        raise
-    cc = tool.c_compiler.build(test.tid, out_c, binary, native)
-    if cc.timed_out or cc.code != 0:
-        if loopback is not None:
-            loopback.close()
-        # A rejected translation unit is a codegen bug, not harness noise.
-        note = clip(diagnostics(cc))
-        if args.keep:
-            note += f"\ngenerated C kept at: {out_c}"
-        return Result(test, False, [f"the C compiler rejected the generated C (exit {cc.code})"], note)
+    cache = getattr(args, "verdict_cache", None)
+    restored = cache.restore_binary(test, work) if cache else False
+    if not restored:
+        emit = run_process(tool.command(root, out_c, root, entry), args.timeout)
+        if emit.timed_out:
+            if loopback is not None:
+                loopback.close()
+            return Result(test, False, [f"the compiler timed out after {args.timeout}s"])
+        if emit.code != 0 or not out_c.is_file():
+            if loopback is not None:
+                loopback.close()
+            return Result(
+                test,
+                False,
+                [f"the compiler rejected a corpus program (exit {emit.code})"],
+                clip(diagnostics(emit)),
+            )
+
+        try:
+            native = native_link_args(out_c)
+        except HarnessError:
+            if loopback is not None:
+                loopback.close()
+            raise
+        cc = tool.c_compiler.build(test.tid, out_c, binary, native)
+        if cc.timed_out or cc.code != 0:
+            if loopback is not None:
+                loopback.close()
+            # A rejected translation unit is a codegen bug, not harness noise.
+            note = clip(diagnostics(cc))
+            if args.keep:
+                note += f"\ngenerated C kept at: {out_c}"
+            return Result(test, False, [f"the C compiler rejected the generated C (exit {cc.code})"], note)
 
     # Run in the work directory: a program that writes a file must not write it
     # into the test tree.
@@ -1294,7 +1597,13 @@ def run_corpus(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace
     if test.stderr_lines and reasons:
         detail.append("actual stderr:\n" + clip(prog.stderr.decode("utf-8", "replace")))
 
-    return Result(test, not reasons, reasons, "\n".join(d for d in detail if d))
+    result = Result(test, not reasons, reasons, "\n".join(d for d in detail if d),
+                    cacheable=(not cache or deterministic_binary(binary, args.timeout)),
+                    artifact_cached=restored)
+    if cache and result.ok and not result.cacheable and not restored:
+        cache.remember_binary(test, work)
+    return result
+
 
 
 def run_must_fail(test: Test, tool: Toolchain, work: Path, args: argparse.Namespace) -> Result:
@@ -1586,6 +1895,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
                    help="optional ccache executable; caches C objects, never test verdicts")
     p.add_argument("--cc-work-dir", type=Path, default=REPO_ROOT / "build/test-native",
                    help="locked stable C paths used with --cc-cache")
+    p.add_argument("--result-cache", type=Path, metavar="DIR",
+                   help="reuse passed test verdicts with unchanged inputs (development only)")
+    p.add_argument("--refresh-result-cache", action="store_true",
+                   help="execute and compile fresh, then update successful cache entries")
+    p.add_argument("--no-result-cache", action="store_true",
+                   help="execute every selected test; do not read or write verdicts")
     p.add_argument("--tests", default=str(TESTS_DIR), help="the tests/ directory")
     p.add_argument("--filter", action="append", default=[], metavar="GLOB",
                    help="select tests whose id matches (repeatable)")
@@ -1689,6 +2004,11 @@ def main(argv: Sequence[str]) -> int:
         print(f"run.py: {exc}", file=sys.stderr)
         return 2
 
+    verdict_cache = (ResultCache(args.result_cache, tool, args)
+                     if args.result_cache and not args.no_result_cache else None)
+    args.verdict_cache = verdict_cache
+    if verdict_cache and verdict_cache.identity is None:
+        print("run.py: result cache disabled: unsupported native toolchain/platform configuration")
     workroot = Path(tempfile.mkdtemp(prefix="zen-tests."))
     results: list[Result] = []
     deferred: list[Result] = []
@@ -1698,7 +2018,12 @@ def main(argv: Sequence[str]) -> int:
     def task(test: Test) -> Result:
         test_started = time.perf_counter()
         try:
-            result = run_one(test, tool, workroot, args)
+            key = verdict_cache.key(test) if verdict_cache else None
+            result = verdict_cache.lookup(test, key) if verdict_cache else None
+            if result is None:
+                result = run_one(test, tool, workroot, args)
+                if verdict_cache:
+                    verdict_cache.remember(result, key)
         except HarnessError as exc:
             harness_errors.append(f"{test.tid}: {exc}")
             result = Result(test, False, [f"harness error: {exc}"])
@@ -1724,7 +2049,7 @@ def main(argv: Sequence[str]) -> int:
                               f"(stage {result.test.stage_at})")
                 elif result.ok:
                     if args.verbose:
-                        print(f"ok   {result.test.tid}")
+                        print(f"{'cached' if result.cached else 'ok  '} {result.test.tid}")
                         # What the compiler said beside the pass: the same
                         # bytes a failure would carry, so a green tick is
                         # never the whole story (#746).
@@ -1740,8 +2065,13 @@ def main(argv: Sequence[str]) -> int:
 
     try:
         tool.check_source_state()
-    except HarnessError as exc:
+        if verdict_cache and not harness_errors:
+            verdict_cache.publish()
+    except (HarnessError, OSError) as exc:
         harness_errors.append(str(exc))
+    finally:
+        if verdict_cache:
+            verdict_cache.discard_pending()
 
     failures = [r for r in results if not r.ok and r not in deferred]
     if failures:
@@ -1767,10 +2097,13 @@ def main(argv: Sequence[str]) -> int:
         for result in deferred:
             print(f"    stage {result.test.stage_at}  {result.test.tid}")
 
+    cached = sum(result.cached for result in results)
+    artifact_cached = sum(result.artifact_cached for result in results)
     passed = len(results) - len(failures) - len(deferred)
     print(f"\nrun.py: {passed} passed, {len(failures)} failed, "
           f"{len(deferred)} deferred, "
-          f"{len(found.uncollected)} uncollected, {len(found.tests) - len(selected)} deselected")
+          f"{len(found.uncollected)} uncollected, {len(found.tests) - len(selected)} deselected"
+          + (f", {cached} cached, {artifact_cached} executable(s) reused" if verdict_cache else ""))
 
     elapsed = time.perf_counter() - started
     deferred_ids = {result.test.tid for result in deferred}
@@ -1784,13 +2117,17 @@ def main(argv: Sequence[str]) -> int:
             "elapsed_seconds": elapsed,
             "jobs": args.jobs,
             "cc_cache": args.cc_cache or None,
+            "result_cache": str(args.result_cache) if verdict_cache else None,
+            "cached": cached,
+            "artifact_cached": artifact_cached,
             "filter": args.filter,
             "harness_errors": list(harness_errors),
             "uncollected": found.uncollected,
             "shard": ({"index": args.shard[0], "count": args.shard[1]}
                       if args.shard else None),
             "tests": [
-                {"id": result.test.tid, "seconds": result.seconds,
+                {"id": result.test.tid, "seconds": result.seconds, "cached": result.cached,
+                 "artifact_cached": result.artifact_cached,
                  "status": ("deferred" if result.test.tid in deferred_ids
                             else "passed" if result.ok else "failed")}
                 for result in results

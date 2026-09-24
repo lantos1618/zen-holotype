@@ -87,13 +87,19 @@ Diagnostics* = {
             roots: self.roots
         );
         root = turn.root(path);
-        self.built.ensure(
-            turn.env,
-            root,
-            relative_to(root, path),
-            turn.uris,
-            turn.docs
-        ).try();
+        // Imported modules share the same checked facts until an overlay or
+        // watched file changes. A different root has a different namespace.
+        covered = self.built.root().eq(root)
+            && self.built.covers(t, path).try();
+        (!covered).then(() {
+            self.built.ensure(
+                turn.env,
+                root,
+                relative_to(root, path),
+                turn.uris,
+                turn.docs
+            ).try();
+        });
         self.fresh = true;
         Ok(Shared(
             c: self.built.checker(),
@@ -177,7 +183,9 @@ Diagnostics* = {
         path = path_of(turn.temp, uri).try();
         root = turn.root(path);
         (!turn.workspace.is_empty() && !root.is_empty()).then(() {
-            (!self.built.covers(turn.temp, path).try()).then(() {
+            covered = self.built.root().eq(root)
+                && self.built.covers(turn.temp, path).try();
+            (!covered).then(() {
                 self.built.ensure(
                     turn.env,
                     root,

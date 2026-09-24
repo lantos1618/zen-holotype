@@ -209,11 +209,47 @@ CallCheck = {
                 Ok(sig) => self.recovery_signature(c, sig.ty, sig.off),
                 None    => recv.match({
                     Ok(ty) => c.no_such_method(self.call, name, ty),
-                    None   => c.no_overload(self.node, name, cands),
+                    None   => self.no_overload(c, name, cands),
                 }),
             }),
             Ok(d) => self.construct_def(c, d),
         })
+    }
+
+    no_overload = (self: @Self, c :: Checker, name: str, cands: Vec<Cand>)
+                  Res<TyId, AllocError> {
+        (cands.len > 0).match({
+            true  => c.report(
+                self.node.span.file,
+                self.node.span,
+                SemaFault.NoOverload(NameFault(name: name))
+            ),
+            false => {
+                // Bare payload constructors receive their enum from context.
+                // A missing function with no such variant must still be rejected.
+                variants ::= c.alloc.Vec<Def>();
+                c.world.variant_defs(
+                    c.tree,
+                    self.ctx.module,
+                    name,
+                    variants
+                ).try();
+                // Import failures already have a diagnostic at the binding.
+                imported = c.world.table_at(self.ctx.module).match({
+                    Ok(table) => table.imports_name(name),
+                    None      => false,
+                });
+                (variants.len == 0 && !imported).then(() {
+                    c.report(
+                        self.node.span.file,
+                        self.node.span,
+                        SemaFault.UndefinedName(NameFault(name: name))
+                    ).try();
+                });
+                Ok(())
+            },
+        }).try();
+        c.types.unknown()
     }
 
     construct_def = (self :: @Self, c :: Checker, d: Def)
@@ -403,7 +439,7 @@ CallCheck = {
         c.exported_cands(module, ac.name.text, cands).try();
         self.first_matching(c, cands, self.actuals).try().match({
             Ok(cand) => self.chosen(c, cand, self.actuals),
-            None     => c.no_overload(self.node, ac.name.text, cands),
+            None     => self.no_overload(c, ac.name.text, cands),
         })
     }
 
@@ -1203,18 +1239,6 @@ callee_name_span = (c: Checker, call: Call) Span {
         Access(a) => a.name.span,
         _         => nowhere(),
     })
-}
-
-no_overload = (c :: Checker, node: Expr, name: str, cands: Vec<Cand>)
-              Res<TyId, AllocError> {
-    (cands.len > 0).then(() {
-        c.report(
-            node.span.file,
-            node.span,
-            SemaFault.NoOverload(NameFault(name: name))
-        ).try();
-    });
-    c.types.unknown()
 }
 
 // Lambda arguments are the only legal inward path for a loop handle. Other
