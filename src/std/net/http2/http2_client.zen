@@ -9,7 +9,7 @@ parse_url = std.net.url
 Stream, dial, write, close = std.net.tls
 Actor, ActorError, Receive, Ref = std.actor
 H2Error, h2_error, H2StreamError, H2Response, H2Head, H2Chunk, h2_chunk, FrameType, FrameFlag, SettingId, mask, MAX_SEND, WINDOW, DEFAULT_WINDOW, MAX_WINDOW, PREFACE = std.net.http2.http2_types
-Frame, read_frame, write_frame, settings_add, setting_at, u32_add, u31_of, be_of = std.net.http2.http2_frame
+Frame, FrameReader, write_frame, settings_add, setting_at, u32_add, u31_of, be_of = std.net.http2.http2_frame
 hpack_response_headers, hpack_trailer_headers, block_add_header, block_add_user_header = std.net.http2.http2_hpack
 
 H2ReadState = {
@@ -19,7 +19,8 @@ H2ReadState = {
 }
 
 H2Data = {
-    bytes:       H2Chunk,
+    // Borrows the frame reader until the next response event.
+    bytes:       str,
     credit:      usize,
     stream_open: bool,
 }
@@ -28,6 +29,7 @@ H2Event = Headers(H2Head) | Data(H2Data)
 
 H2Client* = {
     stream   :: Stream,
+    reader   :: FrameReader,
     sid      :: usize,   // next stream id: 1, 3, 5...
     open     :: bool,    // false once the peer's GOAWAY lands
     secure   :  bool,
@@ -58,7 +60,7 @@ H2Client* = {
         path.add(parsed.path).try(H2Error.ConnectFailed);
 
         c ::= H2Client(
-            stream: stream, sid: 1, open: true, secure: secure,
+            stream: stream, reader: a.FrameReader(), sid: 1, open: true, secure: secure,
             host: host, path: path,
             init_win: DEFAULT_WINDOW, send_win: DEFAULT_WINDOW, send_debt: 0,
             conn_win: DEFAULT_WINDOW, active: 0,
@@ -82,12 +84,15 @@ H2Client* = {
         // Complete the peer SETTINGS handshake before opening a stream.
         loop((h) {
             c.got_peer_settings.then(() { h.break(); });
-            f = c.stream.read_frame(a).try();
+            f = c.reader.read(c.stream).try();
             c.control(a, f).try()
                 .ensure(H2Error.ProtocolFailed).try();
             c.open.ensure(H2Error.Closed).try();
         });
 
+        // The local stream owns cleanup while the handshake can still fail.
+        // Transfer that ownership only after the client is ready to return.
+        c.stream = consume stream;
         Ok(c);
     }
 
@@ -137,7 +142,7 @@ H2Client* = {
                 avail = self.send_win;
                 (self.conn_win < avail).then(() { avail = self.conn_win; });
                 (avail > 0).then(() { h2.break(); });
-                f = self.stream.read_frame(a).try();
+                f = self.reader.read(self.stream).try();
                 self.control(a, f).try()
                     .ensure(H2Error.ProtocolFailed).try();
             });
@@ -194,7 +199,9 @@ H2Client* = {
                 Err(error) => self.stream_failed(error).try(),
                 Ok(event)  => event.match({
                     Headers(_) => (),
-                    Data(data) => receiver.receive(data.bytes).match({
+                    Data(data) => receiver.receive(
+                        h2_chunk(data.bytes).try((error) { H2StreamError.Http(error) })
+                    ).match({
                         Err(error) => self.receiver_refused(
                             !state.done,
                             error
@@ -250,7 +257,7 @@ H2Client* = {
             self.next_response_event(a, sid, state).try().match({
                 Headers(_) => (),
                 Data(data) => {
-                    data.bytes.write_to(out).try(H2Error.RecvFailed);
+                    out.write(data.bytes).try(H2Error.RecvFailed);
                     self.restore_recv_window(
                         a,
                         sid,
@@ -274,7 +281,7 @@ H2Client* = {
     ) Res<H2Event, H2Error> {
         event: Res<H2Event> ::= None;
         loop((h) {
-            f = self.stream.read_frame(a).try();
+            f = self.reader.read(self.stream).try();
 
             self.control(a, f).try().then(() {
                 f.ftype.match({
@@ -358,10 +365,8 @@ H2Client* = {
     ) Res<H2Event, H2Error> {
         state.got_final.ensure(H2Error.ProtocolFailed).try();
         range = f.content_range().try();
-        bytes = h2_chunk(str_at(
-            f.payload.ptr().offset(range.from),
-            range.len
-        )).try();
+        (range.len <= MAX_SEND).ensure(H2Error.ProtocolFailed).try();
+        bytes = str_at(f.payload.ptr().offset(range.from), range.len);
         ended = f.has_flag(FrameFlag.EndStream);
         ended.then(() { state.done = true; });
         Ok(H2Event.Data(H2Data(

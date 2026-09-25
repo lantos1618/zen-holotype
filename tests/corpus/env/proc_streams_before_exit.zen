@@ -1,0 +1,39 @@
+Sink, WriteError = std.core
+ProcStreamError, Process = std.proc
+
+Observe = {
+    env: Env,
+    marker: str,
+    text :: String,
+}
+
+Observe.impl(Sink, {
+    write = (self :: @Self, bytes: str) Res<(), WriteError> {
+        self.text.add(bytes).try();
+        self.env.fs.write(self.marker, "seen").try(IoError.Invalid);
+        Ok(())
+    }
+    write_byte = (self :: @Self, byte: u8) Res<(), WriteError> {
+        self.text.add(byte)
+    }
+})
+
+main = (env: Env) Res<i32, ProcStreamError> {
+    a ::= env.mem.alloc();
+    marker = a.String("/tmp/zen-stream-{}", env.clock.unix().ns).try();
+    @scope.defer(() { env.fs.remove(marker.view()).ignore(); });
+    script = a.String(
+        "printf early; i=0; while [ ! -f '{}' ] && [ $i -lt 200 ]; do sleep 0.01; i=$((i+1)); done; [ -f '{}' ] || exit 99; printf late; printf error >&2; exit 7",
+        marker.view(),
+        marker.view()
+    ).try();
+    argv ::= a.Vec<str>();
+    argv.add("/bin/sh").try();
+    argv.add("-c").try();
+    argv.add(script.view()).try();
+    out ::= Observe(env: env, marker: marker.view(), text: a.String().try());
+    err ::= a.String().try();
+    code = env.proc.run_argv_into(a, "", argv, out, err).try();
+    env.out.println("{} {} {}", code, out.text.view(), err.view()).try();
+    Ok(0)
+}

@@ -74,21 +74,25 @@ tls_dial = (a: Alloc, host: str, port: u16, h2: bool)
 
 wrap_socket = (a: Alloc, socket :: Socket, host: str, h2: bool)
               Res<TlsStream, TlsError> {
-    host_c ::= host.c_text(a).try(TlsError.TlsFailed);
+    host_c    ::= host.c_text(a).try(TlsError.TlsFailed);
+    io_counts ::= a.Vec<usize>();
+    io_counts.add(0).try(TlsError.TlsFailed);
+    io_counts.add(0).try(TlsError.TlsFailed);
     method = TLS_client_method();
     ctx    = SSL_CTX_new(method);
     ctx.is_null().match({
         true  => Err(TlsError.TlsFailed),
-        false => wrap_ctx(a, consume socket, host_c, h2, ctx),
+        false => wrap_ctx(a, consume socket, host_c, h2, ctx, io_counts),
     })
 }
 
 wrap_ctx = (
-    a      : Alloc,
-    socket :: Socket,
-    host_c : Vec<u8>,
-    h2     : bool,
-    ctx    : Ptr<u8>
+    a         : Alloc,
+    socket    :: Socket,
+    host_c    : Vec<u8>,
+    h2        : bool,
+    ctx       : Ptr<u8>,
+    io_counts : Vec<usize>
 ) Res<TlsStream, TlsError> {
     configured ::= SSL_CTX_set_default_verify_paths(ctx) == 1;
     SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, null_ptr<()>());
@@ -103,11 +107,17 @@ wrap_ctx = (
             SSL_CTX_free(ctx);
             Err(TlsError.TlsFailed)
         },
-        true  => wrap_ssl(a, consume socket, host_c, ctx),
+        true  => wrap_ssl(a, consume socket, host_c, ctx, io_counts),
     })
 }
 
-wrap_ssl = (a: Alloc, socket :: Socket, host_c: Vec<u8>, ctx: Ptr<u8>)
+wrap_ssl = (
+    a         : Alloc,
+    socket    :: Socket,
+    host_c    : Vec<u8>,
+    ctx       : Ptr<u8>,
+    io_counts : Vec<usize>
+)
            Res<TlsStream, TlsError> {
     ssl = SSL_new(ctx);
     ssl.is_null().match({
@@ -133,7 +143,8 @@ wrap_ssl = (a: Alloc, socket :: Socket, host_c: Vec<u8>, ctx: Ptr<u8>)
                     socket: consume socket,
                     alloc: a,
                     ssl: ssl,
-                    ctx: ctx
+                    ctx: ctx,
+                    io_counts: io_counts
                 )),
                 false => {
                     SSL_free(ssl);
@@ -150,6 +161,8 @@ TlsStream* = {
     alloc: Alloc,
     ssl: Ptr<u8>,
     ctx: Ptr<u8>,
+    // OpenSSL output counters are connection-owned, reused on every I/O.
+    io_counts: Vec<usize>,
     open :: bool = true,
 
     connect* = (a: Alloc, host: str, port: u16) Res<TlsStream, TlsError> {
@@ -173,22 +186,21 @@ TlsStream* = {
 
     write* = (self: @Self, bytes: str) Res<(), TlsError> {
         self.open.ensure(TlsError.Closed).try();
-        sent    ::= 0;
-        written ::= self.alloc.Vec<usize>();
-        written.add(0).try(TlsError.WriteFailed);
+        sent ::= 0;
+        written = self.io_counts.ptr();
         failed ::= false;
         loop(() { sent < bytes.len && !failed }, (h) {
-            written.ptr().write(0, 0);
+            written.write(0, 0);
             rc = SSL_write_ex(
                 self.ssl,
                 bytes.ptr().offset(sent),
                 bytes.len - sent,
-                written.ptr()
+                written
             );
             (rc == 1).match({
-                true  => (written.ptr().read(0) == 0).match({
+                true  => (written.read(0) == 0).match({
                     true  => { failed = true; },
-                    false => { sent = sent + written.ptr().read(0); },
+                    false => { sent = sent + written.read(0); },
                 }),
                 false => {
                     error = SSL_get_error(self.ssl, rc);
@@ -216,15 +228,15 @@ TlsStream* = {
     read_nonempty = (self: @Self, buf :: Vec<u8>, n: usize)
                     Res<usize, TlsError> {
         buf.reserve(n).try(TlsError.ReadFailed);
-        got ::= self.alloc.Vec<usize>();
-        got.add(0).try(TlsError.ReadFailed);
+        got = self.io_counts.ptr().offset(1);
+        got.write(0, 0);
         answer: Res<usize, TlsError> = Err(TlsError.ReadFailed);
         waiting ::= true;
         waiting.loop((h) {
-            rc = SSL_read_ex(self.ssl, buf.ptr(), n, got.ptr());
+            rc = SSL_read_ex(self.ssl, buf.ptr(), n, got);
             (rc == 1).match({
                 true  => {
-                    answer  = Ok(got.ptr().read(0));
+                    answer  = Ok(got.read(0));
                     waiting = false;
                 },
                 false => {

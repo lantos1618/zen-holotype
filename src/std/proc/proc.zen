@@ -7,7 +7,7 @@
 Alloc, AllocError, Ptr, null_ptr = std.mem
 str, String, str_at = std.text
 Vec = std.collections
-Res, ok_or = std.core
+Res, ok_or, Sink, WriteError = std.core
 
 zg_proc_run = (
     cwd      : str,
@@ -37,9 +37,20 @@ zg_proc_run_argv_inherit = (
     code_out : Ptr<i32>
 ) i32
 
+zg_proc_stream_start = (cwd: str, argv: Ptr<str>, argc: usize) Ptr<()>
+zg_proc_stream_next = (
+    handle : Ptr<()>,
+    buf    : Ptr<u8>,
+    cap    : usize,
+    count  : Ptr<usize>
+) i32
+zg_proc_stream_wait = (handle: Ptr<()>, code: Ptr<i32>) i32
+zg_proc_stream_close = (handle: Ptr<()>) ()
+
 free = (p: Ptr<()>) ()
 
 ProcError* = SpawnFailed | WaitFailed | ReadFailed
+ProcStreamError* = ProcError | AllocError | IoError
 
 ProcOutput* = {
     code*: i32,
@@ -136,6 +147,34 @@ Process* = {
             slots.err_n
         );
         slots.result(a, rc)
+    }
+
+    // Stream both pipes to borrowed sinks as bytes arrive. Sink failure stops
+    // and reaps the child. Returned status preserves the child's exit code.
+    run_argv_into* = <O: Sink, E: Sink>(self: @Self, a: Alloc, cwd: str,
+                                      argv: Vec<str>, out :: O, err :: E)
+                      Res<i32, ProcStreamError> {
+        bytes ::= a.Vec<u8>();
+        bytes.reserve(4096).try();
+        count  = a.create<usize>().try();
+        code   = a.create<i32>().try();
+        handle = zg_proc_stream_start(cwd, argv.ptr(), argv.len);
+        (!handle.is_null()).ensure(ProcError.SpawnFailed).try();
+        @scope.defer(() { zg_proc_stream_close(handle); });
+        done ::= false;
+        loop(!done, (h) {
+            channel = zg_proc_stream_next(handle, bytes.ptr(), 4096, count);
+            (channel >= 0).ensure(ProcError.ReadFailed).try();
+            chunk = str_at(bytes.ptr(), count.read(0));
+            channel.match({
+                0 => { done = true; },
+                1 => out.write(chunk).try(),
+                _ => err.write(chunk).try(),
+            });
+        });
+        rc = zg_proc_stream_wait(handle, code);
+        (rc == 0).ensure(rc.proc_error()).try();
+        Ok(code.read(0))
     }
 
     run_argv_inherit* = (self: @Self, a: Alloc, cwd: str, argv: Vec<str>)

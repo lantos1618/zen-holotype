@@ -1,0 +1,51 @@
+Sink, WriteError = std.core
+ProcStreamError, Process = std.proc
+
+Reject = {}
+Reject.impl(Sink, {
+    write = (self :: @Self, bytes: str) Res<(), WriteError> { Err(
+        IoError.Full
+    ) }
+    write_byte = (self :: @Self, byte: u8) Res<(), WriteError> { Err(
+        IoError.Full
+    ) }
+})
+
+main = (env: Env) Res<i32, ProcStreamError> {
+    a    ::= env.mem.alloc();
+    argv ::= a.Vec<str>();
+    argv.add("/bin/sh").try();
+    argv.add("-c").try();
+    argv.add(
+        "(head -c 100000 /dev/zero >&2) & head -c 100000 /dev/zero; wait"
+    ).try();
+    out ::= a.String().try();
+    err ::= a.String().try();
+    code = env.proc.run_argv_into(a, "", argv, out, err).try();
+    env.out.println("{} {} {}", code, out.len(), err.len()).try();
+
+    stopped ::= a.Vec<str>();
+    stopped.add("/bin/sh").try();
+    stopped.add("-c").try();
+    stopped.add("printf first; exec sleep 5").try();
+    reject ::= Reject();
+    start  = env.clock.since_start().ns;
+    result = env.proc.run_argv_into(a, "", stopped, reject, err);
+    failed = result.match({
+        Ok(_)  => false,
+        Err(e) => e.match({ IoError(Full) => true, _ => false }),
+    });
+    env.out.println(
+        "sink error {} prompt cleanup {}",
+        failed,
+        env.clock.since_start().ns - start < 2000000000
+    ).try();
+    empty ::= a.Vec<str>();
+    invalid    = env.proc.run_argv_into(a, "", empty, out, err);
+    invalid_ok = invalid.match({
+        Ok(_)  => false,
+        Err(e) => e.match({ ProcError(SpawnFailed) => true, _ => false }),
+    });
+    env.out.println("invalid argv {}", invalid_ok).try();
+    Ok(0)
+}

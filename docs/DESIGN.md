@@ -491,6 +491,24 @@ a sema refusal and focused regression before changing lowering.
 
 *A clock is authority and a duration is not.* `Duration`, `Instant`, `Timestamp` and a broken-down civil time are values — no `Env`, constructible in a test, no capability. A `Clock` that reads one, and the timers it schedules, need `Ref` and `Context` and therefore the actor runtime. They do not belong in the same module: `std.core` sits below everything, and a `Clock` declared there would make the prelude's core depend on stage 5. It is also what makes "comptime has no clock" true by construction rather than by convention — comptime has no `Env`, and now no import path to one.
 
+**Live process output and periodic work are capability operations.**
+`env.proc.run_argv_into(alloc, cwd, argv, out, err)` drains both child pipes
+into caller-chosen `Sink` implementations before the child exits. The method
+returns its exit code, propagates sink errors, and kills and reaps the direct
+child on failure. Sinks receive borrowed chunks valid during `write`; retain a
+copy if needed. The method blocks the calling thread, and child-side buffering
+still controls when bytes enter the pipes. Buffered `run` and `run_argv` use
+the same pipe-drainage implementation.
+
+`env.threads.every(alloc, milliseconds, target)` runs a `Tick` receiver on one
+worker thread. Returning false from `target.tick()` stops the worker; callers
+must `join<i32>()` before releasing captured resources. A target may send actor
+messages so that progress state remains mailbox-owned while another thread is
+blocked on model or process I/O. This is periodic work with an interval after
+each callback, not a real-time deadline guarantee. `env.out.error` writes and
+flushes stderr without adding a newline, allowing byte chunks to retain their
+original layout.
+
 **`zen build` takes an explicit entry, and `Fs` gets no directory listing.** The driver finds the entry by probing `main.zen` and the root's own name, which cannot find a single-file program named anything else — and the obvious fix, listing the directory, is the wrong one. `std.env.Fs` has five members and its header says why: "There is no open handle, no seek, no listing and no permission surface… Every member added here is a member the self-hosted compiler has to keep working forever." A listing is also authority to enumerate, which is a bigger capability than reading a path you were given.
 
 The information already exists at the call site: whoever invokes the compiler knows which file is the entry. So `zen build <root> --entry <file>` is the answer, and the capability surface does not grow. A build is still a root — the entry names where to start inside it, and everything else follows imports as it always did.

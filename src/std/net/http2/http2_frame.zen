@@ -43,38 +43,52 @@ Frame* = {
     }
 }
 
-read_n = (s: Stream, a: Alloc, buf :: Vec<u8>, n: usize) Res<(), H2Error> {
-    left ::= n;
-    (left > 0).loop((h) {
-        chunk ::= a.Vec<u8>();
-        got = s.read(chunk, left).try((e) { e.h2_error() });
-        (got > 0).ensure(H2Error.RecvFailed).try();
-        buf.add_all(chunk.ptr(), got).try(H2Error.RecvFailed);
-        left = left - got;
-    });
-    Ok(());
+// Reuse wire storage across frames. A returned payload borrows this reader
+// until its next read; consumers must finish processing it before then.
+FrameReader* = {
+    header :: Vec<u8>,
+    payload :: Vec<u8>,
+    chunk :: Vec<u8>,
+
+    read_n = (self :: @Self, s: Stream, buf :: Vec<u8>, n: usize)
+             Res<(), H2Error> {
+        buf.clear();
+        left ::= n;
+        (left > 0).loop((h) {
+            got = s.read(self.chunk, left).try((e) { e.h2_error() });
+            (got > 0).ensure(H2Error.RecvFailed).try();
+            buf.add_all(self.chunk.ptr(), got).try(H2Error.RecvFailed);
+            left = left - got;
+        });
+        Ok(())
+    }
+
+    read* = (self :: @Self, s: Stream) Res<Frame, H2Error> {
+        self.read_n(s, self.header, FRAME_HEADER_LEN).try();
+        len = self.header.be_of(0, 3).replace_err(H2Error.RecvFailed).try();
+        (len <= MAX_RECV).ensure(H2Error.ProtocolFailed).try();
+        sid = self.header.be_of(5, 4).replace_err(H2Error.RecvFailed).try()
+            % STREAM_ID_LIMIT;
+        self.read_n(s, self.payload, len).try();
+        Ok(Frame(
+            ftype: FrameType.from_discriminant(
+                self.header.get(3).ok_or(H2Error.RecvFailed).try()
+            ),
+            flags: self.header.get(4).ok_or(H2Error.RecvFailed).try(),
+            sid: sid,
+            payload: self.payload
+        ))
+    }
 }
 
+FrameReader* = (a: Alloc) FrameReader {
+    FrameReader(header: a.Vec<u8>(), payload: a.Vec<u8>(), chunk: a.Vec<u8>())
+}
+
+// Independent storage for callers retaining a frame past their next read.
 read_frame* = (s: Stream, a: Alloc) Res<Frame, H2Error> {
-    hdr ::= a.Vec<u8>();
-    s.read_n(a, hdr, FRAME_HEADER_LEN).try();
-
-    len = hdr.be_of(0, 3).replace_err(H2Error.RecvFailed).try();
-    (len <= MAX_RECV).ensure(H2Error.ProtocolFailed).try();
-    sid = hdr.be_of(5, 4).replace_err(H2Error.RecvFailed).try()
-        % STREAM_ID_LIMIT;
-
-    payload ::= a.Vec<u8>();
-    s.read_n(a, payload, len).try();
-
-    Ok(Frame(
-        ftype:   FrameType.from_discriminant(
-            hdr.get(3).ok_or(H2Error.RecvFailed).try()
-        ),
-        flags:   hdr.get(4).ok_or(H2Error.RecvFailed).try(),
-        sid:     sid,
-        payload: payload,
-    ));
+    reader ::= a.FrameReader();
+    reader.read(s)
 }
 
 add_wire_byte = (out :: String, value: usize) Res<(), H2Error> {
@@ -108,11 +122,8 @@ write_frame* = (
     hdr.add(ftype.discriminant()).try(H2Error.SendFailed);
     hdr.add(flags).try(H2Error.SendFailed);
     hdr.add_be(sid % STREAM_ID_LIMIT, 4).try();
-    s.write(hdr.view()).try((e) { e.h2_error() });
-    (len > 0).match({
-        true  => s.write(payload).map_err((e) { e.h2_error() }),
-        false => Ok(()),
-    });
+    hdr.add(payload).try(H2Error.SendFailed);
+    s.write(hdr.view()).map_err((e) { e.h2_error() })
 }
 
 settings_add* = (blk :: String, id: SettingId, val: usize) Res<(), H2Error> {

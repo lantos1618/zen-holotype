@@ -21,9 +21,9 @@ console_display, stderr_console = gen.gen_c.gen_c_display
 // `print` omits the trailing newline.
 is_print* = (name: str) bool { name.eq("println") || name.eq("print") }
 
-// Console exposes one newline-writing member per stream.
+// Console includes a raw stderr write for incremental diagnostics.
 is_console_print* = (name: str) bool {
-    name.eq("println") || name.eq("errorln")
+    name.eq("println") || name.eq("errorln") || name.eq("error")
 }
 
 // Keep stdout and stderr independently redirectable.
@@ -91,9 +91,10 @@ write_pieces = (
     stream.eq("stdout").then(() { be.need_print(); });
     stream.eq("stderr").then(() { be.need_stderr(); });
     write_args(be, c, stream, ctx).try();
-    is_console_print(name).then(() {
+    (name.eq("println") || name.eq("errorln")).then(() {
         be.writeln(pair(stream, "zg_print_nl();", "zg_eprint_nl();")).try()
     });
+    name.eq("error").then(() { be.writeln("fflush(stderr);").try(); });
     Ok(());
 }
 

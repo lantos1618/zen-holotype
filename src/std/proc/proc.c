@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <spawn.h>
@@ -108,56 +109,6 @@ capture_append(struct capture *c, const uint8_t *buf, size_t n)
     return 0;
 }
 
-static int
-capture_read_some(struct capture *c, int fd, int *open)
-{
-    uint8_t buf[4096];
-    ssize_t n = read(fd, buf, sizeof(buf));
-    if (n < 0) {
-        if (errno == EINTR) return 0;
-        return -1;
-    }
-    if (n == 0) {
-        *open = 0;
-        return 0;
-    }
-    return capture_append(c, buf, (size_t)n);
-}
-
-/* Drain both pipes concurrently. Reading one stream to EOF before starting
-   the other deadlocks once the child fills the unread pipe's buffer. */
-static int
-capture_read_both(struct capture *out, int out_fd,
-                  struct capture *err, int err_fd)
-{
-    struct pollfd pfds[2];
-    int out_open = 1;
-    int err_open = 1;
-
-    pfds[0].fd = out_fd;
-    pfds[0].events = POLLIN;
-    pfds[1].fd = err_fd;
-    pfds[1].events = POLLIN;
-
-    while (out_open || err_open) {
-        int nready;
-        pfds[0].revents = 0;
-        pfds[1].revents = 0;
-        do {
-            nready = poll(pfds, 2, -1);
-        } while (nready < 0 && errno == EINTR);
-        if (nready < 0) return -1;
-
-        if (out_open && (pfds[0].revents & (POLLIN | POLLHUP | POLLERR))) {
-            if (capture_read_some(out, out_fd, &out_open) != 0) return -1;
-        }
-        if (err_open && (pfds[1].revents & (POLLIN | POLLHUP | POLLERR))) {
-            if (capture_read_some(err, err_fd, &err_open) != 0) return -1;
-        }
-    }
-    return 0;
-}
-
 /* Reap the child, retrying when a signal interrupts the wait. */
 static int
 wait_for(pid_t pid, int *status)
@@ -177,80 +128,138 @@ exit_code(int status)
     return 127;
 }
 
-/* A NULL cwd inherits the current directory. */
+struct proc_stream {
+    pid_t pid;
+    int out_fd;
+    int err_fd;
+    int next;
+};
+
+static struct proc_stream *
+stream_start(const char *cwd, const char *file, char *const argv[])
+{
+    int pipes[2][2] = {{-1, -1}, {-1, -1}};
+    posix_spawn_file_actions_t fa;
+    int initialized = 0;
+    struct proc_stream *s = calloc(1, sizeof(*s));
+    if (!s) return NULL;
+    s->pid = -1; s->out_fd = -1; s->err_fd = -1;
+    if (pipe2(pipes[0], O_CLOEXEC) || pipe2(pipes[1], O_CLOEXEC)) goto fail;
+    if (posix_spawn_file_actions_init(&fa)) goto fail;
+    initialized = 1;
+    if (cwd && posix_spawn_file_actions_addchdir_np(&fa, cwd)) goto fail;
+    for (int i = 0; i < 2; i++) {
+        if (posix_spawn_file_actions_adddup2(&fa, pipes[i][1], i + 1) ||
+            posix_spawn_file_actions_addclose(&fa, pipes[i][0]) ||
+            posix_spawn_file_actions_addclose(&fa, pipes[i][1])) goto fail;
+    }
+    if (posix_spawnp(&s->pid, file, &fa, NULL, argv, environ)) goto fail;
+    posix_spawn_file_actions_destroy(&fa);
+    close(pipes[0][1]); close(pipes[1][1]);
+    s->out_fd = pipes[0][0]; s->err_fd = pipes[1][0];
+    return s;
+fail:
+    if (initialized) posix_spawn_file_actions_destroy(&fa);
+    for (int i = 0; i < 2; i++)
+        for (int j = 0; j < 2; j++) if (pipes[i][j] >= 0) close(pipes[i][j]);
+    free(s);
+    return NULL;
+}
+
+/* The caller owns this handle until close. Bytes are copied into caller storage. */
+void *
+zg_proc_stream_start(zg_str cwd, zg_str *args, size_t argc)
+{
+    char *cwd_c = NULL;
+    char **argv = NULL;
+    struct proc_stream *s = NULL;
+    if (invalid_string(cwd)) return NULL;
+    if (cwd.len) {
+        cwd_c = strndup_zg(cwd);
+        if (!cwd_c) return NULL;
+    }
+    argv = argv_copy(args, argc);
+    if (argv) s = stream_start(cwd_c, argv[0], argv);
+    free(cwd_c); argv_free(argv, argc);
+    return s;
+}
+
+/* 1=stdout, 2=stderr, 0=EOF, -1=read failure. Closed fds leave the poll set. */
+int32_t
+zg_proc_stream_next(void *handle, uint8_t *buf, size_t cap, size_t *count)
+{
+    struct proc_stream *s = handle;
+    *count = 0;
+    if (!s || !buf || cap == 0) return -1;
+    while (s->out_fd >= 0 || s->err_fd >= 0) {
+        struct pollfd fds[2] = {{s->out_fd, POLLIN, 0}, {s->err_fd, POLLIN, 0}};
+        int ready;
+        do { ready = poll(fds, 2, -1); } while (ready < 0 && errno == EINTR);
+        if (ready < 0) return -1;
+        for (int turn = 0; turn < 2; turn++) {
+            int i = (s->next + turn) % 2;
+            if (fds[i].fd < 0 || !fds[i].revents) continue;
+            if (fds[i].revents & POLLNVAL) return -1;
+            ssize_t n;
+            do { n = read(fds[i].fd, buf, cap); } while (n < 0 && errno == EINTR);
+            if (n < 0) return -1;
+            if (n > 0) { s->next = 1 - i; *count = (size_t)n; return i + 1; }
+            close(fds[i].fd);
+            if (i == 0) s->out_fd = -1; else s->err_fd = -1;
+        }
+    }
+    return 0;
+}
+
+int32_t
+zg_proc_stream_wait(void *handle, int32_t *code)
+{
+    struct proc_stream *s = handle;
+    int status;
+    if (!s || s->pid < 0 || wait_for(s->pid, &status)) return 2;
+    s->pid = -1;
+    *code = exit_code(status);
+    return 0;
+}
+
+void
+zg_proc_stream_close(void *handle)
+{
+    struct proc_stream *s = handle;
+    int status;
+    if (!s) return;
+    if (s->out_fd >= 0) close(s->out_fd);
+    if (s->err_fd >= 0) close(s->err_fd);
+    if (s->pid >= 0) { kill(s->pid, SIGKILL); wait_for(s->pid, &status); }
+    free(s);
+}
+
+/* Buffered callers use the same incremental drainage and cleanup path. */
 static int32_t
 run_captured(const char *cwd, const char *file, char *const argv[],
              int32_t *code_out,
              uint8_t **out_buf, size_t *out_len,
              uint8_t **err_buf, size_t *err_len)
 {
-    int out_pipe[2] = {-1, -1};
-    int err_pipe[2] = {-1, -1};
-    posix_spawn_file_actions_t fa;
-    int fa_init = 0;
-    pid_t pid = -1;
-    int status;
-    struct capture out = {0};
-    struct capture err = {0};
-    int32_t ret = 1; /* SpawnFailed */
-
-    if (pipe(out_pipe) != 0 || pipe(err_pipe) != 0) goto done;
-
-    if (posix_spawn_file_actions_init(&fa) != 0) goto done;
-    fa_init = 1;
-
-    if (cwd && posix_spawn_file_actions_addchdir_np(&fa, cwd) != 0) goto done;
-
-    if (posix_spawn_file_actions_adddup2(&fa, out_pipe[1], STDOUT_FILENO) != 0) goto done;
-    if (posix_spawn_file_actions_adddup2(&fa, err_pipe[1], STDERR_FILENO) != 0) goto done;
-    if (posix_spawn_file_actions_addclose(&fa, out_pipe[0]) != 0) goto done;
-    if (posix_spawn_file_actions_addclose(&fa, out_pipe[1]) != 0) goto done;
-    if (posix_spawn_file_actions_addclose(&fa, err_pipe[0]) != 0) goto done;
-    if (posix_spawn_file_actions_addclose(&fa, err_pipe[1]) != 0) goto done;
-
-    if (posix_spawnp(&pid, file, &fa, NULL, argv, environ) != 0) goto done;
-
-    close(out_pipe[1]); out_pipe[1] = -1;
-    close(err_pipe[1]); err_pipe[1] = -1;
-
-    if (capture_read_both(&out, out_pipe[0], &err, err_pipe[0]) != 0) {
-        ret = 3;
-        goto done;
+    struct proc_stream *s = stream_start(cwd, file, argv);
+    struct capture out = {0}, err = {0};
+    uint8_t buf[4096];
+    size_t n;
+    int32_t channel, rc = 3;
+    if (!s) return 1;
+    while ((channel = zg_proc_stream_next(s, buf, sizeof(buf), &n)) > 0) {
+        if (capture_append(channel == 1 ? &out : &err, buf, n)) goto done;
     }
-
-    close(out_pipe[0]); out_pipe[0] = -1;
-    close(err_pipe[0]); err_pipe[0] = -1;
-
-    if (wait_for(pid, &status) != 0) { ret = 2; goto done; }
-    pid = -1;
-
-    *code_out = exit_code(status);
-
-    *out_buf = out.data;
-    *out_len = out.len;
-    *err_buf = err.data;
-    *err_len = err.len;
-    out.data = NULL;
-    err.data = NULL;
-    ret = 0;
-
+    if (channel < 0) goto done;
+    rc = zg_proc_stream_wait(s, code_out);
+    if (rc) goto done;
+    *out_buf = out.data; *out_len = out.len;
+    *err_buf = err.data; *err_len = err.len;
+    out.data = NULL; err.data = NULL;
 done:
-    if (fa_init) posix_spawn_file_actions_destroy(&fa);
-    if (out_pipe[0] >= 0) close(out_pipe[0]);
-    if (out_pipe[1] >= 0) close(out_pipe[1]);
-    if (err_pipe[0] >= 0) close(err_pipe[0]);
-    if (err_pipe[1] >= 0) close(err_pipe[1]);
-    if (pid >= 0) {
-        /* A read failed after the spawn: the child may be blocked writing
-           to a pipe nobody drains. Kill it and reap so no zombie is left. */
-        kill(pid, SIGKILL);
-        wait_for(pid, &status);
-    }
-    if (ret != 0) {
-        capture_free(&out);
-        capture_free(&err);
-    }
-    return ret;
+    zg_proc_stream_close(s);
+    capture_free(&out); capture_free(&err);
+    return rc;
 }
 
 /* Return ordinals match ProcError in src/std/proc/proc.zen. */
