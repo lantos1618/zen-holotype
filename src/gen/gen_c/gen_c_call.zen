@@ -832,9 +832,13 @@ write_indirect = (
     out    :: String
 ) Res<(), AllocError> {
     unknown = be.check.types.unknown().try();
+    // Materialize the indirect callee before any argument. C otherwise leaves
+    // the callee and argument evaluation order unspecified.
+    be.holdable(c.callee).match({
+        true  => be.value_held(c.callee, ctx, unknown, true, out).try(),
+        false => be.expr(c.callee, ctx, unknown, out).try(),
+    });
     out.add("(").try();
-    be.expr(c.callee, ctx, unknown, out).try();
-    out.add(")(").try();
     c.args.loop((h, i, a) {
         (i > 0).then(() { out.add(", ").try() });
         hold = be.holds(c, i, 0);

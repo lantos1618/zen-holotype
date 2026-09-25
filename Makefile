@@ -43,7 +43,7 @@ J       ?= $(shell nproc 2>/dev/null || echo 4)
 CACHE   ?= $(shell command -v ccache 2>/dev/null)
 ZCC      = $(CACHE) $(CC)
 
-.PHONY: lspcheck all check build dev-build dev-check dev-run bootstrap buildcheck runnercheck editorcheck seed test verify differential runtimecheck warnings lint parse cap dupcomments faults lextile determinism fixpoint grammar fmt asan ubsan leak profile clean help
+.PHONY: projectcheck lspcheck all check build dev-build dev-check dev-run bootstrap buildcheck runnercheck editorcheck seed test verify differential runtimecheck warnings lint parse cap dupcomments faults lextile determinism fixpoint grammar fmt asan ubsan leak profile clean clean-obj clean-reports clean-all help
 
 # These gates share ./zen, build/, and grammar/zen.so. Keep their dependency
 # graphs serial even when an operator invokes `make -j verify`.
@@ -87,6 +87,10 @@ buildcheck:
 ## runnercheck: selection/report checks and optional real-C cache regressions.
 runnercheck:
 	$(PY) tests/quality/test_runner_parallel.py
+
+## projectcheck: real CLI execution, selection, and failure propagation for test targets.
+projectcheck: build
+	$(PY) tests/quality/project_tests.py --zen ./zen
 
 ## editorcheck: compile the extension and execute its nonempty lifecycle suites.
 editorcheck: editors/vscode/node_modules/.zen-dependencies
@@ -137,7 +141,7 @@ lspcheck: build
 ## are built once per invocation, then formatting and determinism inspect the
 ## same compiler that ran the test suite.
 verify: override TEST_CACHE_ARGS := --result-cache "$(TEST_RESULTS)" --refresh-result-cache
-verify: test fmt determinism fixpoint differential runtimecheck ownershipcheck warnings ubsan buildcheck runnercheck editorcheck lspcheck
+verify: test fmt determinism fixpoint differential runtimecheck ownershipcheck warnings ubsan buildcheck runnercheck editorcheck lspcheck projectcheck
 
 .PHONY: ownershipcheck
 ownershipcheck: build
@@ -156,6 +160,7 @@ differential: build
 	$(PY) tests/differential/run.py --zen ./zen
 	$(PY) tests/differential/randomized.py --zen ./zen --cc "$(CC)"
 	$(PY) tests/differential/generic_literals.py --zen ./zen --cc "$(CC)"
+	$(PY) -m unittest discover -s tests/quality -p 'test_differential_controls.py'
 
 runtimecheck: build
 	$(PY) tests/bench/runtime/run.py --zen ./zen --cc "$(CC)" \
@@ -389,9 +394,23 @@ profile: build
 	ls build/c/*.c | xargs -P $(J) -I{} $(ZCC) $(PROFILE_CFLAGS) -c {} -o {}.profile.o
 	$(CC) build/c/*.c.profile.o build/obj/proc.o -o zen-fp
 
+## clean: remove all build products, generated compiler outputs, and test outputs.
 clean:
 	rm -f zen zen-new zen-asan zen-ubsan zen-fp grammar/zen.so
 	rm -rf build/ tests/bench/out/
+
+## clean-obj: remove compiler objects while preserving reports and review data.
+clean-obj:
+	rm -rf build/obj build/dev/obj build/bootstrap/obj
+	rm -f grammar/zen.so
+
+## clean-reports: remove generated test, profile, review, and source-health reports.
+clean-reports:
+	rm -rf build/test-results build/profiles build/review build/reviews build/source_health
+	rm -rf build/*.log build/*.json build/*.tsv
+
+## clean-all: remove the complete local build workspace and generated executables.
+clean-all: clean
 
 help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/^## //'

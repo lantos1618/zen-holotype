@@ -142,8 +142,10 @@ rejects expanding instantiation chains.
 
 ## C, runtime and FFI
 
-`gen_c` consumes the same `Checker` that accepted the program. It must not
-re-resolve names or re-infer types. Lowering discovers reachable functions,
+`gen_c` consumes the same `Checker` that accepted the program. Recorded call
+selections are authoritative. Deferred member constants and contextual generic
+bodies still retain compatibility lookup; completing checked call plans is
+tracked in [Code generation](BACKENDS.md). Lowering discovers reachable functions,
 members, concrete types and runtime helpers to a fixed point, then emits in a
 stable order. Output may be one C file or a header plus one C unit per module.
 
@@ -162,8 +164,10 @@ and result types are C-spellable. The backend emits and deduplicates a raw
 same-name `extern` declaration; it does not link a library. Bodyless members
 remain compiler capabilities or errors, not generic FFI.
 
-`src/std/build/build.zen` defines the intended Zen build-file value API, but a
-Zen build driver does not yet execute it.
+`src/std/build/build.zen` defines the build-file value API. The checked-AST
+project planner executes target, C-import, library, external-source and
+executable and executable-test declarations. Function discovery, benchmark execution and the general
+execution-step graph remain unimplemented.
 
 ## Tooling
 
@@ -176,16 +180,22 @@ Definitions of globals, types, members and imported names work. Locals and
 pattern binders still lack a surviving declaration span, so definition for
 those names returns `null`.
 
-The CLI exposes `build`, `fmt` and `lsp`. `zen test` is named but not yet a
-driver; repository testing is still run by Make and the corpus runner.
+The CLI exposes `build`, `check`, `run`, `test`, `fmt` and `lsp`. `zen test` runs
+explicit executable targets registered in `build.zen`; function discovery is
+still owed. Repository testing uses Make and the corpus runner.
 
 ## Gates and known boundaries
 
-`make test` builds the self-hosted compiler, runs lint/tree-sitter parsing,
-line-cap, duplicate-comment, reachable-fault and lexer-position gates, then
-the corpus, must-fail and example suites. `make determinism` proves repeated
-emission is stable. The stage-2/stage-3 fixpoint gate remains owed.
+`make check` builds incrementally and reuses eligible passing test results.
+`make test` also runs source gates. `make verify` forces fresh test execution
+and runs the aggregate integration gates, including sanitizers, warnings,
+differential cases, editor checks and build-cache regressions.
+`make determinism` checks repeated emission; `make fixpoint` compares successive
+full compiler emissions and verifies the checked-in seed.
 
 Known boundaries include deep actor sendability and scheduler policy, a general
-comptime evaluator, nested `@meta` execution, generic methods, first-class
-escaping closures, the `zen test` driver, and the full compiler fixpoint gate.
+comptime evaluator, nested `@meta` execution, complete first-class callback
+support, reflection-based test discovery, and complete ownership effects for indirect
+calls and borrowed aliases. Generic methods and inline generic callback
+inference are implemented; their remaining limits are tracked in
+[the ergonomics plan](ERGONOMICS_PLAN.md).

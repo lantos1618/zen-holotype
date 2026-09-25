@@ -203,7 +203,10 @@ def main():
         header = root / "value.h"
         output = root / "zen"
         seed.write_text(SEED)
-        source.write_text('#include "zen.h"\nint main(void) { return native_value(); }\n')
+        source.write_text('#include "zen.h"\n#include <stdio.h>\n#include <stdlib.h>\n'
+                          'int main(void) { if (getenv("ZEN_TEST_HOLD")) { '
+                          'puts("ready"); fflush(stdout); getchar(); } '
+                          'return native_value(); }\n')
         native.write_text('#include "../../../value.h"\nint native_value(void) { return VALUE; }\n')
         header.write_text('#define VALUE 0\n')
         command = [sys.executable, str(DRIVER), "--jobs", "2", "--cc", os.environ.get("CC", "cc")]
@@ -227,11 +230,32 @@ def main():
         source.write_text(source.read_text().replace("return native_value()", "return native_value() + 1"))
         build("compiled 1 C units")
         assert subprocess.run([str(output)]).returncode == 1
+        # Repeated in-process compiler publications must remain complete while
+        # the previously published executable is busy running.
+        for expected in (2, 3, 4):
+            busy = subprocess.Popen([str(output)], stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, text=True,
+                                    env={**environment, "ZEN_TEST_HOLD": "1"})
+            try:
+                assert busy.stdout.readline() == "ready\n"
+                source.write_text(source.read_text().replace(f"return native_value() + {expected - 1}",
+                                                            f"return native_value() + {expected}"))
+                result = build("compiled")
+                assert result.returncode == 0
+                assert busy.poll() is None, "old executable exited before publication"
+                busy.communicate("\n", timeout=5)
+                assert busy.returncode == expected - 1
+                assert subprocess.run([str(output)], check=False).returncode == expected
+            finally:
+                if busy.poll() is None:
+                    busy.kill()
+                busy.wait(timeout=5)
+        source.write_text(source.read_text().replace("return native_value() + 4", "return native_value() + 1"))
         # Native headers are not in the Zen source list: compiler dependencies
         # must invalidate the result even when the top-level inputs are equal.
         emissions = (root / "emissions.log").read_bytes()
         header.write_text('#define VALUE 2\n')
-        build("compiled 1 C units")
+        build("compiled 2 C units")
         assert (root / "emissions.log").read_bytes() == emissions + b"emit\n"
         assert subprocess.run([str(output)]).returncode == 3
         original_header = root / "original-value.h"

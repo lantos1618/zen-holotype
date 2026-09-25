@@ -40,3 +40,42 @@ BenchStats* = {
     allocs_op*: u64,
     bytes_op*: u64,
 }
+
+// A suite runs explicitly registered callbacks with independent scratch arenas.
+// A failed assertion does not stop later callbacks; traps still end the process.
+Suite* = {
+    env*: Env,
+    passed :: usize = 0,
+    failed :: usize = 0,
+
+    run* = (self :: @Self, name: str, body: (test: Tester) Res<(), TestError>)
+           Res<(), IoError> {
+        arena ::= self.env.mem.alloc();
+        test = Tester(env: self.env, alloc: arena);
+        body(test).match({
+            Ok(_)      => {
+                self.passed = self.passed + 1;
+                self.env.out.println("ok {}", name)
+            },
+            Err(error) => {
+                self.failed = self.failed + 1;
+                error.match({ Failed(message) => self.env.out.println(
+                    "not ok {}: {}",
+                    name,
+                    message
+                ) })
+            },
+        })
+    }
+
+    finish* = (self: @Self) Res<i32, IoError> {
+        self.env.out.println(
+            "{} passed, {} failed",
+            self.passed,
+            self.failed
+        ).try();
+        Ok(
+            (self.passed > 0 && self.failed == 0).match({ true => 0, false => 1 })
+        )
+    }
+}

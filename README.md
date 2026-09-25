@@ -76,6 +76,11 @@ Use `make check TEST_ARGS='--no-result-cache'` to force fresh development
 tests. After a compiler source batch, `make -j1 seed verify` regenerates the
 seed and verifies it without repeating the shared build prerequisite.
 
+Project test executables can be registered with `Builder.exe_test` and run with
+`zen test [PROJECT] [TARGET]`. `std.test.Suite` runs named assertion callbacks
+with per-test arenas. See [project tests](docs/TESTING.md#project-test-targets)
+for a complete example and the current discovery boundary.
+
 Local `make test` and `make verify` require Node.js 20 or newer for the
 JavaScript backend execution tests. Verification also uses Node for the grammar
 and editor checks; CI installs Node 20 explicitly. A missing Node executable is

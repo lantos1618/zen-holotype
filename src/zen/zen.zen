@@ -10,7 +10,7 @@ Build* = zen.zen_build
 fs_message = std.env
 std_root_for = zen.zen_path
 build* = zen.zen_run
-project = zen.zen_project
+project, Action = zen.zen_project
 format = zen.zen_fmt
 Server, serve, serve_stdio = lsp
 arg_at = std.cli
@@ -19,10 +19,15 @@ main = (env: Env) Res<i32, AllocError> {
     alloc ::= env.mem.alloc();
     cli(env, alloc, env.argv).try().match({
         Build(job)               => build_cli(env, alloc, job),
-        Project(job)             => project_cli(env, alloc, job, false),
-        Run(job)                 => project_cli(env, alloc, job, true),
+        Project(job)             => project_cli(env, alloc, job, Action.Build),
+        Run(job)                 => project_cli(env, alloc, job, Action.Run),
+        Test(job)                => project_cli(env, alloc, job, Action.Test),
         Fmt(job)                 => format(env, alloc, job),
         Later(name)              => later(env, alloc, name),
+        Version(v)               => {
+            println("zen {}", v);
+            Ok(0)
+        },
         Usage(word)              => usage(alloc, word),
         Missing(flag)            => missing(alloc, flag),
         UnavailableBackend(name) => {
@@ -36,7 +41,7 @@ main = (env: Env) Res<i32, AllocError> {
 }
 
 // Project configuration and its resolved paths share the caller allocation.
-project_cli = (env: Env, a: Alloc, job: ProjectArgs, execute: bool)
+project_cli = (env: Env, a: Alloc, job: ProjectArgs, action: Action)
               Res<i32, AllocError> {
     std_root   = std_root_for(env, a);
     configured = ProjectArgs(
@@ -46,7 +51,7 @@ project_cli = (env: Env, a: Alloc, job: ProjectArgs, execute: bool)
         argv: job.argv,
         args_at: job.args_at
     );
-    project(env, a, configured, execute)
+    project(env, a, configured, action)
 }
 
 build_cli = (env: Env, a: Alloc, job: BuildArgs) Res<i32, AllocError> {

@@ -35,6 +35,10 @@ Parser* = {
 
     diags* :: Vec<Diag>,
 
+    // Cached results from parse_lookahead.group_end_at, indexed by start token;
+    // zero denotes a not-yet-scanned group.
+    group_ends* :: Vec<usize>,
+
     // End of the last consumed token.
     prev_end* :: Pos = Pos(line: 1, col: 1),
 
@@ -430,11 +434,20 @@ Parser* = (a: Alloc, lexed: Lexed, tree: Ast) Parser {
         start: Pos(line: 1, col: 1),
         end: Pos(line: 1, col: 1),
     );
+    ends ::= a.Vec<usize>();
+    // Cache allocation is optional: uncached tokens use the ordinary scan.
+    count: usize = lexed.tokens.len;
+    n: usize ::= 0;
+    loop(n < count, (h) {
+        ends.add(0).match({ Ok(_) => (), _ => h.break() });
+        n = n + 1;
+    });
     Parser(
         tokens: lexed.tokens,
         source: lexed.source,
         tree: tree,
         diags: a.Vec<Diag>(),
+        group_ends: ends,
         pending: no_trivia(),
         anchor: origin,
         alloc: a,

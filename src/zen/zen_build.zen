@@ -620,8 +620,19 @@ check_workspace_at = (
     absolute_root = anchored_path(a, directory, root).try();
     b ::= a.Build(env, absolute_root);
     std_root = std_root_for(env, a);
-    (!std_root.is_empty()).then(() {
-        b.set_std_root(anchored_path(a, directory, std_root).try());
+    std_marker ::= a.String("{}/std/std.zen", absolute_root).try();
+    local_std = env.fs.exists(std_marker.view());
+    std_base  = local_std.match({
+        true  => absolute_root,
+        false => std_root.is_empty().match({
+            true  => "",
+            false => anchored_path(a, directory, std_root).try(),
+        }),
+    });
+    // A workspace can be the selected stdlib root itself. Treating that as
+    // a separate root double-anchors std/* paths and duplicates diagnostics.
+    (!std_base.is_empty() && !std_base.eq(absolute_root)).then(() {
+        b.set_std_root(std_base);
     });
     over ::= a.Map<str, str>();
     docs.pairs((h, path, text) {

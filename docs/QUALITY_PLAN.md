@@ -213,9 +213,10 @@ ASan and UBSan are clean; the complete stage-2/stage-3 fixpoint is byte-identica
 
 ### D. Language-native tests
 
-`Tester.expect_eq` now executes ordinary generic `Eq` behavior. Finish
-`Module.functions`, test discovery, per-test
-allocation, failure reporting, and `zen test`. Every advertised `*_test.zen`
+`Tester.expect_eq` executes ordinary generic `Eq` behavior. `std.test.Suite`
+provides per-callback arenas and assertion reporting; `zen test` runs explicitly
+registered executable test targets. Finish `Module.functions`, function
+discovery, and execution of `Builder.test(Test)` registrations. Every advertised `*_test.zen`
 must be collected and type-checked. Preserve the Python corpus runner as an
 outer compatibility oracle until the native runner proves the same collection.
 

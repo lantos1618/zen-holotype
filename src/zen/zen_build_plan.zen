@@ -54,7 +54,10 @@ BuildPlan* = {
     libs* :: Vec<LibNode>,
     externs* :: Vec<ExternNode>,
     exes* :: Vec<ExeNode>,
+    tests* :: Vec<ExeNode>,
 }
+
+ExecutableRole = Program | Test
 
 Value = UnitValue
     | TextValue(str)
@@ -376,7 +379,8 @@ Executor = {
             "c_import" => self.add_import(c, at),
             "lib"      => self.add_lib(c, at),
             "extern"   => self.add_extern(c, at),
-            "exe"      => self.add_exe(c, at),
+            "exe"      => self.add_exe(c, at, ExecutableRole.Program),
+            "exe_test" => self.add_exe(c, at, ExecutableRole.Test),
             _          => Err(unsupported(at)),
         })
     }
@@ -440,7 +444,7 @@ Executor = {
         Ok(Value.DepValue(dep))
     }
 
-    add_exe = (self :: @Self, c: Call, at: Span) Res<Value, PlanError> {
+    add_exe = (self :: @Self, c: Call, at: Span, role: ExecutableRole) Res<Value, PlanError> {
         name = self.name_arg(c, at).try();
         self.unique(name).try();
         r    = self.record(self.arg(c, 1, at).try()).try();
@@ -452,10 +456,11 @@ Executor = {
             strip: self.optional_bool_field(r, "strip", false),
             out: self.optional_path_field(r, "out")
         );
-        self.plan.exes.add(ExeNode(
-            name: name,
-            spec: spec
-        )).try(PlanError.OutOfMemory);
+        node = ExeNode(name: name, spec: spec);
+        role.match({
+            Test    => self.plan.tests.add(node),
+            Program => self.plan.exes.add(node),
+        }).try(PlanError.OutOfMemory);
         Ok(Value.UnitValue)
     }
 
@@ -467,6 +472,9 @@ Executor = {
                 Ok(_) => true, None => false,
             })
             || self.plan.externs.find((n) { n.name.eq(name) }).match({
+                Ok(_) => true, None => false,
+            })
+            || self.plan.tests.find((n) { n.name.eq(name) }).match({
                 Ok(_) => true, None => false,
             })
             || self.plan.exes.find((n) { n.name.eq(name) }).match({
@@ -705,7 +713,8 @@ execute_function = (
             imports: a.Vec<CImportNode>(),
             libs: a.Vec<LibNode>(),
             externs: a.Vec<ExternNode>(),
-            exes: a.Vec<ExeNode>()
+            exes: a.Vec<ExeNode>(),
+            tests: a.Vec<ExeNode>()
         )
     );
     ex.block(body).try();

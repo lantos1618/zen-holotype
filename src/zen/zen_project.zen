@@ -12,15 +12,17 @@ run_once = zen.zen_run
 entry_of, holds_build_zen = zen.zen_path
 BuildPlan, ExeNode, plan = zen.zen_build_plan
 
-project* = (env: Env, a: Alloc, job: ProjectArgs, execute: bool)
+Action* = Build | Run | Test
+
+project* = (env: Env, a: Alloc, job: ProjectArgs, action: Action)
            Res<i32, AllocError> {
     holds_build_zen(env, a, job.root).match({
         false => { println("zen: no build.zen in `{}`", job.root); Ok(1) },
-        true  => project_present(env, a, job, execute),
+        true  => project_present(env, a, job, action),
     })
 }
 
-project_present = (env: Env, a: Alloc, job: ProjectArgs, execute: bool)
+project_present = (env: Env, a: Alloc, job: ProjectArgs, action: Action)
                   Res<i32, AllocError> {
     build ::= a.Build(env, job.root);
     build.set_std_root(job.std_root);
@@ -47,7 +49,7 @@ project_present = (env: Env, a: Alloc, job: ProjectArgs, execute: bool)
                 println("zen: build.zen uses an unsupported build expression");
                 Ok(1)
             },
-            Ok(planned)                   => Project(env: env, a: a, job: job, planned: planned).execute(execute),
+            Ok(planned)                   => Project(env: env, a: a, job: job, planned: planned).execute(action),
         }),
     })
 }
@@ -80,6 +82,8 @@ select_exe = (planned: BuildPlan, named: str, execute: bool)
     })
 }
 
+PreparedTest = { target: ExeNode, executable: String }
+
 // One planned project: what every compile, link, and run step shares.
 Project = {
     env: Env,
@@ -87,7 +91,15 @@ Project = {
     job: ProjectArgs,
     planned: BuildPlan,
 
-    execute = (self: @Self, run: bool) Res<i32, AllocError> {
+    execute = (self: @Self, action: Action) Res<i32, AllocError> {
+        action.match({
+            Test => self.run_tests(),
+            _    => self.execute_exes(action),
+        })
+    }
+
+    execute_exes = (self: @Self, action: Action) Res<i32, AllocError> {
+        run = action.match({ Run => true, _ => false });
         self.planned.select_exe(self.job.target, run).match({
             Err(message) => { println("zen: {}", message); Ok(1) },
             Ok(selected) => run.match({
@@ -95,6 +107,76 @@ Project = {
                 false => self.build_selected(selected),
             }),
         })
+    }
+
+    run_tests = (self: @Self) Res<i32, AllocError> {
+        selected = self.planned.tests.filter(self.a, (test) {
+            self.job.target.is_empty() || test.name.eq(self.job.target)
+        }).try();
+        (selected.len == 0).match({
+            true  => {
+                println("zen test: no matching executable test targets");
+                Ok(1)
+            },
+            false => self.prepare_tests(selected).try().match({
+                None         => Ok(1),
+                Ok(programs) => self.execute_tests(programs),
+            }),
+        })
+    }
+
+    // Complete compilation before any selected test executes. Each prepared
+    // executable retains its target so failure cannot misalign parallel lists.
+    prepare_tests = (self: @Self, selected: Vec<ExeNode>)
+                    Res<Res<Vec<PreparedTest>>, AllocError> {
+        programs ::= self.a.Vec<PreparedTest>();
+        ready    ::= true;
+        selected.loop((test) {
+            output = self.output_path(test).try();
+            programs.find(
+                (previous) { previous.executable.view().eq(output.view()) }
+            ).match({
+                Ok(_) => {
+                    println(
+                        "zen test: selected targets share output `{}`",
+                        output.view()
+                    );
+                    ready = false;
+                },
+                None  => self.build_exe(test).try().match({
+                    None        => { ready = false; },
+                    Ok(program) => programs.add(PreparedTest(
+                        target: test,
+                        executable: program
+                    )).try(),
+                }),
+            });
+        });
+        Ok(ready.match({ true => Ok(programs), false => None }))
+    }
+
+    execute_tests = (self: @Self, programs: Vec<PreparedTest>)
+                    Res<i32, AllocError> {
+        failed: usize ::= 0;
+        programs.loop((test) {
+            code = self.run_program(
+                test.executable.view(),
+                test.target.spec.backend
+            ).try();
+            (code == 0).match({
+                true  => println("ok {}", test.target.name),
+                false => {
+                    failed = failed + 1;
+                    println("not ok {} (exit {})", test.target.name, code);
+                },
+            });
+        });
+        println(
+            "zen test: {} passed, {} failed",
+            programs.len - failed,
+            failed
+        );
+        Ok((failed == 0).match({ true => 0, false => 1 }))
     }
 
     build_selected = (self: @Self, selected: Res<ExeNode>)

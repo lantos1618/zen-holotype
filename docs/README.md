@@ -19,6 +19,8 @@ the language, implementation stages, source style, and verification rules.
 - `PROFILE_REVIEW.md` records flame/profile evidence and the resulting optimizations.
 - `ERGONOMICS_PLAN.md` outlines value-returning APIs, allocator lifetimes, and the path to simpler everyday Zen.
 - `TEST_ITERATION.md` explains test timing reports and shared import discovery.
+- `ARCHITECTURE.md` maps source ownership, compiler flow, capability boundaries, and tests.
+- `GENERATED_FILES.md` identifies generated artifacts and disposable build cleanup.
 - `REFACTOR_REVIEW.md` records the current structural review and measured changes.
 - `TEST_REVIEW.md` maps consolidated smoke tests to their retained coverage.
 - [USAGE_REPORT.md](USAGE_REPORT.md) describes the Zen tool for checked call

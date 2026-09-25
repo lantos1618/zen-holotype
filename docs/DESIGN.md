@@ -986,8 +986,9 @@ Map*<K: Eq + Hash, V> = {
 // no test keyword, and no discovery baked into the compiler:
 // build.zen walks the module tree itself (b.module) and
 // registers Tester-taking functions as the test target. the
-// function name IS the test name. `zen test` is the intended runner,
-// but that CLI entry is still owed
+// function name IS the test name. Reflection-based registration remains
+// proposed. Today `zen test` runs explicit Builder.exe_test(Exe) targets, and
+// std.test.Suite supplies per-callback arenas and assertion reporting.
 
 TestError* = | Failed(str)
 
@@ -1311,8 +1312,8 @@ build = (b :: Builder) Res<(), BuildError> {
 
     // test discovery is just code, not compiler magic: walk the
     // PARSED module tree, keep every function whose single
-    // parameter is a Tester. The future `zen test` runs the target
-    // this registers. change the filter, change what a test is
+    // parameter is a Tester. Function-target execution is still proposed;
+    // the current `zen test` runs explicitly registered Exe targets. change the filter, change what a test is
     tests ::= b.alloc.Vec<Function>();
     b.module(Path("src")).functions.loop((h, f) {
         (f.params.len == 1 && f.params.get(0).try().type == Tester)

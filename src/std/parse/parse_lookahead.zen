@@ -76,14 +76,24 @@ targs_ahead* = (p :: Parser) bool {
 }
 
 // Index after a balanced group; stream length when it is unclosed.
-group_end_at = (p :: Parser, from: usize) usize {
-    depth ::= 0;
-    out   ::= p.tokens_len();
-    Range(from, p.tokens_len()).loop((h, k) {
-        depth = p.token_kind_at(k).delim_step(depth);
-        (depth == 0).then(() { out = k + 1; h.break() });
+// Results are memoized because the ambiguous-grammar lookahead asks for the
+// same suffix once per candidate shape. Zero is the not-yet-scanned sentinel.
+group_end_at* = (p :: Parser, from: usize) usize {
+    cached = p.group_ends.get(from).match({ Ok(out) => out, None => 0 });
+    (cached > 0).match({
+        true  => cached,
+        false => {
+            depth ::= 0;
+            out   ::= p.tokens_len();
+            Range(from, p.tokens_len()).loop((h, k) {
+                depth = p.token_kind_at(k).delim_step(depth);
+                (depth == 0).then(() { out = k + 1; h.break() });
+            });
+            // A missing cache slot only loses memoization, never syntax data.
+            p.group_ends.set(from, out).match({ Ok(_) => (), _ => () });
+            out
+        },
     });
-    out;
 }
 
 // Index after a balanced angle group. Return `from` when a token invalidates

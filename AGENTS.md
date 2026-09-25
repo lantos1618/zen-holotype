@@ -1,5 +1,9 @@
 # Working on Zen
 
+For the active parallel correctness sprint, read `docs/SPRINT_STAGEBOOK.md` and
+resume only from its current checkpoint. Never reset, stash, or overwrite
+pre-existing uncommitted work.
+
 Read `docs/STYLE.md` before editing Zen source. `docs/DESIGN.md` specifies the
 language; `docs/ERGONOMICS_PLAN.md` distinguishes implemented APIs from the
 remaining ergonomic design. Follow the user's current instructions when they

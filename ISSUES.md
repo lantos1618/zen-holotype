@@ -8,43 +8,29 @@ Move an entry to CLOSED with the commit that closed it, or delete it. Do not
 leave a fixed thing sitting under OPEN; a stale queue stops being read, which is
 how a gate that cannot fail happens to a list.
 
+**Verify before you record.** A closed entry is a claim that the defect no
+longer reproduces. Re-run the reproducer against the current compiler; an
+entry that no longer reproduces is closed, not open. On 2026-09-25 three
+headline INBOX miscompiles were stale: rebinding is now rejected with a
+precise diagnostic, call argument order is fixed, binder shadowing runs
+correctly. The maintained differential manifest has 14 fixtures; its success
+does not classify the separate historical 92-case hunt. Counts written here decay
+faster than the code does.
+
 ---
 
 ## INBOX — paste below this line
 
-**example/src/main_test.zen's four assertions, executed for the first time
-(2026-08-25).** Nothing ran them, and nothing could: `Tester.expect` and
-`Tester.expect_eq` are SIGNATURES with no bodies (src/std/test/test.zen:41,47
-— `expect_eq`'s own comment says "STAGE 5 for its BODY"), and there is no
-runner. Worse, main_test.zen was not even TYPE-CHECKED: nothing imports it
-from `main.zen`, the compiler follows imports, and appending
-
-    deliberate_error* = (t: Tester) Res<(), TestError> {
-        undefined_thing_xyz();
-        Ok(());
-    }
-
-to it produced ZERO diagnostics. `make parse` lexes it and that is all.
-
-Run by hand against the same values (Display impl, UFCS `area`, Vec) three of
-the four hold: `shape_prints` → `unit`, `area_is_ufcs` → true, `vec_grows` →
-20. The fourth cannot run at all:
-
-    circle_prints_its_radius  t.expect_eq(out.view(), "circle: 2")
-
-    main.zen:18:53: codegen does not lower this yet: `formatting a value of
-    this type`
-
-`{}` on an `f64` is refused by gen_c (gen_c_sink.zen:895), so `Shape`'s
-`Display` impl — `out.add("circle: {}", circle.radius)` — does not compile.
-That is a stage-4-shaped blocker inside a stage-5 file, and it is the reason
-two lines of `example/src/.expected` (`circle: 1`, `rect: 2 3`) are unreachable
-independently of actors and `pkg`. The assertion also PINS a formatting rule
-nobody has implemented: `2.0` must print as `2`, not `2.0`.
-
-Not edited to make it pass. `tests/bench/drivers/stored_field_read.zen` has
-been routing around the same hole for a while ("the self-hosted compiler
-cannot lower printing an f64 yet" — its escape is the exit code).
+**Reflection-based project test discovery remains unimplemented.**
+`Tester.expect` and generic `Tester.expect_eq` have executable bodies in
+`src/std/test/test.zen`. The remaining gap is `Module.functions`, registration
+of discovered functions in build plans, and executing `Builder.test(Test)`
+function targets. `zen test` runs explicitly registered executable targets via
+`Builder.exe_test(Exe)`; `std.test.Suite` provides isolated assertion callbacks.
+The compiler follows imports, so a test file beside an entry is not automatically checked.
+Discovery must explicitly include those files and reject invalid tests before
+execution. `docs/DESIGN.md` describes the intended discovery policy. The example build
+also uses other features that the current planner does not implement.
 
 **UFCS gate blind spots (2026-08-23 spot check; STYLE.md now documents them):**
 - `src/fmt/` is structurally invisible to `rule_ufcs` — no fmt module has a
@@ -70,10 +56,6 @@ and `copy_of` (fmt_break.zen:237) are identical twins.
 lsp_stdio.zen:148. As struct-body methods (`f.byte()`, `f.why()`) the exports
 and the justifying comment disappear.
 
-**Hand-copied insertion sort, twice.** lsp_compl.zen:572-611 and
-lsp_colour.zen:348-388 — same five functions line-for-line; only the element
-type and comparator differ. Zen has generics; std has no sort at all.
-
 **Wrapper chain:** lsp_reply.zen:227-287 — `request_of` delegates through
 eight 5-7-line functions each wrapping one `method.eq(..)` test; ~60 lines
 where one nested match would be ~25.
@@ -85,97 +67,29 @@ for stale bootstrapper framings: gen_c_expr.zen:118-119 (`ty_of`'s fallback
 justified by "the bootstrapper's backend") and gen_c_type.zen:52
 (`MAX_TYPE_PASSES` = "what the bootstrapper allows").
 
-**Two exported `write_label*` on `CBackend`, in the same folder.**
-`gen_c_loop.zen:762` takes `(be, stem: str, n: usize)` and
-`gen_c_sink.zen:921` takes `(be, done: usize)`. Zen has no function
-overloading and the C namespace is flat, so this is a name that resolves by
-luck. The UFCS rule DECLINES to recommend `be.write_label(..)` for either --
-"exactly one free function in the tree declares that name" is the condition
-that saved it -- so the gate silently routes around a collision instead of
-reporting one. `block` is the same shape but benign: `parse_stmt.zen:31` on
+**Duplicate free-function names need receiver-aware review.** Measured 2026-09-25: `src/` declares 119 names more than once
+(6x `settled`, 6x `to_i32`, 4x `message`), including legal receiver overloads. Emitted C mangles the
+module path into the symbol, so `write_label` on `CBackend` is
+`zu_f..._3gen5gen_c11gen_c_state8CBackendb3strb5usize`; a scan of `seed/zen.c`
+for duplicate *definitions* (signature plus body, ignoring forward
+declarations) finds **0 of 6591**. The `write_label` claim below was measured
+stale: only `gen_c_loop.zen` defines it now, and `gen_c_sink.zen` does not.
+The residual value here is as a REVIEW aid, not a soundness gate: a
+same-receiver collision would be the defect, and nothing checks that today.
+`ufcs_collisions.py` only checks a free function shadowing a METHOD.
+
+`block` is the same shape but benign: `parse_stmt.zen:31` on
 `Parser` and `gen_c_stmt.zen:51` on `CBackend` are different receivers.
-Nothing gates duplicate free-function names; `ufcs_collisions.py` only checks
-a free function shadowing a METHOD.
-
-**A second `x = ..` in one block: sema says shadowing, gen_c says assignment,
-and nobody type-checks it.** Found by a bug-hunt lane, reproduced three ways.
-sema permits the rebinding AT A DIFFERENT TYPE (shadowing "falls out for free"
-because `lookup` walks top-down, sema_check.zen:286); gen_c reuses ONE C slot
-and ONE live flag per NAME. Three symptoms, one cause:
-- `x = Noisy(id: 1); x = Noisy(id: 2)` prints `drop 2` and never `drop 1` --
-  the shadowed value's Drop never runs. An arena, file or lock held by the
-  first binding leaks, at exit 0.
-- `x = 1; x = "str"` emits `zg_str` into an `int64_t`. Only `cc` rejects it;
-  Zen reports nothing. `cc` is the type checker again.
-- `n = 42; n = 3.5` prints **3**. The emitted C is `int64_t zu_l1n; zu_l1n =
-  42; zu_l1n = 3.5;` -- C truncates, no Zen diagnostic, no cc warning, exit 0.
-  Zen has no cast keyword and conversions are methods, so an implicit
-  float->int here is exactly the silent wrong answer the gates cannot see.
-Repros (NOT added to tests/corpus -- a red board is the project's loudest
-signal and landing one is a decision, not a side effect): the three programs
-are in the session scratchpad under repros/. Decide the semantics first: if a
-rebinding is a new binding, both values must drop and the types may differ; if
-it is assignment, the old value must drop at the rebind and the type must
-match. Today it is neither.
-
-**Call arguments evaluate RIGHT-TO-LEFT, and the tree predicted it.**
-`three(d.tick(), d.tick(), d.tick())` over a counter prints `210`, not `012`;
-`pick(c.tick(), c.tick())` answers 10 instead of 01. The same three ticks
-written as statements run in order, so the corruption is specific to arguments
-inside one call. Cause: `write_written_args` (gen_c_call.zen) emits every
-argument inline into ONE C call expression, which hands the ordering decision
-to C, where it is unspecified -- gcc happens to go right-to-left.
-tests/corpus/codegen/nesting_calls.zen SAYS SO IN ITS HEADER: "any lowering
-that turns one Zen call into several C calls in an argument list has silently
-handed the ordering decision to the C compiler ... that test does not exist
-yet." It exists now and it is red. Decide whether Zen specifies an order (then
-gen_c must emit temporaries) or does not (then it must be written down, and
-`println`'s left-to-right walk is inconsistent with it).
-
-**A match binder shadowing an outer local emits an undeclared C variable.**
-`d: i32 = 7; got.get(0).match({ Ok(d) => println("{}", d), .. })` -- gen_c
-renames the binder to `zu_l1d_2` to dodge the collision with the outer `zu_l1d`
-and then never DECLARES it. cc: "'zu_l1d_2' undeclared (first use in this
-function); did you mean 'zu_l1d'?". 20-line repro; found by four independent
-hunt lanes. Shadowing is legal by design, so this is gen_c's bookkeeping, not
-a sema question.
-
-**92 programs where sema said yes and gen_c emitted C that cc rejects.**
-From 1232 hunt programs, mechanically triaged. Clustered by cc's message the
-population is dominated by TYPE errors -- 17 "incompatible types when
-returning", 16 "incompatible types when assigning", 14 more across
-initialising and argument passing -- which is the "cc is the type checker"
-shape again: sema is not checking what gen_c faithfully emits. 47 more
-programs compile with cc WARNINGS. Each is either gen_c emitting invalid C for
-a valid program or sema accepting a program it should reject; both are
-defects. The full triage is reproducible: run every program, bucket by
-ZEN_REJECTED / CC_REJECTED / CC_WARNING / RAN_OK / NONZERO_EXIT.
-
-<!-- paste snippets here. -->
 
 ---
 
 ## OPEN — being worked
 
-**Goto-definition answers `null` on an enum variant's payload type.**
-`ExprKind = Name(Name) | Literal(Literal) | ..` — asking for the definition of
-the inner `Name` gets nothing. **The cause is in sema, not the LSP**, and not
-where it looks: `told_at` DOES find the payload, via the arena's type-node
-fallback. What is missing is the memo. Measured with a server-free probe
-(reproducer at `/home/ubuntu/.claude/jobs/22ff9ad8/tmp/enum-payload-repro`):
-
-    1:17 -> a written type -> NOT IN THE MEMO      <- Point, inside Circle(Point)
-    1:15 -> a written type -> i32                  <- control, a struct field
-
-So `check_all` never routes a variant payload through `type_from_ast`, nothing
-lands in `type_memo`, and `lsp_def.zen` correctly reads the memo, finds
-nothing, and answers `null`. Hover has the same hole for the same reason.
-
-⚠️ **The obvious fix is wrong.** Adding an `Enum(en) =>` arm to `ast_named.zen`'s
-`decl_told` (it is `Tell.Nothing` today) does NOT fix this and makes clicking a
-variant's NAME report its payload's type, which is misleading. Verified: with
-that arm reverted, the payload position still answers. The fix belongs where
-enum declarations are checked.
+**Historical accepted-to-C hunt still needs classification.** The earlier
+1232-program hunt reported 92 C rejections and 47 warning cases. The current
+14-fixture differential manifest does not prove those separate cases fixed.
+Recover the original inputs and classify each against the current compiler
+before closing this report; retained failures need minimized regression tests.
 
 **The LSP hand-writes JSON; it should have structs with a derived `to_json`.**
 Measured: ~97 `add` calls spelling JSON punctuation across 12 files, and
@@ -200,41 +114,10 @@ Unblocked: `src/lsp/` is inside `src/`, which used to mean the Python
 bootstrapper had to compile any `@meta` it adopted. Fixpoint is rooted at
 `seed/zen.c` now, so step 2 waits on `@meta` itself and on nothing else.
 
-**The UTF-8 encoding table exists TWICE, in two folders, under two names.**
-`src/std/text/text_utf8.zen` owns the DECODER; `src/lsp/lsp_json_read.zen:467`
-owns the ENCODER (`push_utf8` + `two_wide`/`three_wide`/`four_wide`/`byte_of`,
-~60 lines) and its own comment calls itself "the inverse of
-`std.text.text_utf8`'s decoder". Eight constants are declared in both:
-
-    std UTF8_ASCII_MAX 128   = lsp ONE_BYTE_MAX 128
-    std UTF8_CONT_MIN  128   = lsp CONT         128
-    std UTF8_LEAD_MIN  192   = lsp LEAD_2       192
-    std UTF8_LEAD_3_MIN 224  = lsp LEAD_3       224
-    std UTF8_LEAD_4_MIN 240  = lsp LEAD_4       240
-    std UTF8_CONT_SCALE 64   = lsp CONT_SCALE    64
-    std UTF8_MIN_3    2048   = lsp TWO_BYTE_MAX 2048
-    std UTF8_MIN_4   65536   = lsp FOUR_BYTE_MIN 65536
-
-A fix to one will not reach the other. `lsp.zen:55` already re-exports
-`push_utf8*` and `byte_of*`, so the LSP root is publishing them as library
-surface from inside the wrong folder. **Move the encoder into
-`std/text/text_utf8.zen` beside its inverse and delete the duplicate
-constants.** Nothing about it is JSON.
-
-Note this is NOT the same as "move JSON to std" — that stays: one caller, and
-`build.zen:4` has no manifest ("source is the manifest"), so the obvious second
-caller is architecturally excluded.
-
-**`DIGITS` duplicates std, and `NAME_LEN` is a magic number.**
-`src/lsp/lsp_frame.zen:182` declares `DIGITS*: str = "0123456789"` and renders a
-digit as `DIGITS.index(n)`. `src/std/core/byte.zen:16` already has
-`DIGIT_ZERO*: u8 = '0'`, and `:107` renders one as `DIGIT_ZERO + nibble` — the
-lookup table does what arithmetic does. `text_fmt.zen:239` even argues the case.
-Delete `DIGITS`, use `DIGIT_ZERO + n`.
-In the same file, `NAME*: str = "content-length:"` beside `NAME_LEN*: usize = 15`
-restates `NAME.len` as a literal. The other framing constants (`BLANK_LEN`,
-`CRLF_LEN`) are protocol facts and belong where they are — this is not a
-std-promotion, it is a duplication.
+**`DIGITS` duplication and the magic `NAME_LEN`: measured stale 2026-09-25.**
+`lsp_frame.zen` declares no `DIGITS` any more (grep: 0 hits), so the lookup
+table has been replaced with `DIGIT_ZERO + n`. Re-check the surviving half
+before working it.
 
 **File headers carry design prose that belongs in `docs/`.** 4,592 of `src/`'s
 16,641 comment lines are file headers. Worst: `fmt_break.zen` 114,
@@ -265,67 +148,6 @@ valid fixed-array size.
 **`gen_c_print.zen` holds two subjects** at 543 lines — `println`'s lowering and
 the shared format classifier. A split is owed, and it carries the UFCS
 import hazard, so it needs its own fixpoint cycle.
-
-**~30% of a build is `gen_emit.order`'s insertion sort, which has no early
-exit.** `insert_ordered` (`gen_emit.zen:171-185`) runs `Range(1, n).loop` — ALL
-n−1 iterations — on every insertion, settled or not, so it is Θ(n²)
-unconditionally rather than adaptively. Measured with `make profile` and a
-`-O1 -pg` build, self-compiling `src/` (2.5s baseline):
-
-    10,032 calls to insert_ordered
-       ->  20,727,600 full `str.before` compares of 100+ char mangled symbols
-       ->  787,380,320 of the build's 860,436,866 `str.index` calls
-    -O2 self time: str.before 23.70% + view_at 4.33% + order 1.60% = 29.63%
-
-**The comment above it is why nobody saw this** (`gen_emit.zen:161-162`):
-"Hundreds of top-level names per unit, never millions — the simplest-to-verify
-version is the right one." It is ten thousand, and an insertion sort WITH an
-early exit is no harder to verify than one without. ~10 lines.
-
-Same family, both O(n²) over long mangled names and both top `str.eq` callers:
-`CBackend.seen_function` (`gen_c_state.zen:456-463`, 20.6M calls) and
-`CBackend.type_index` (`gen_c_state.zen:220-227`, 9.8M).
-
-**No bench would have caught it.** `tests/bench/` measures `vec_add`, two field
-reads and a stack-array fold — nothing on a compiler hot path. `Bencher.iter`,
-`BenchStats` and `Builder.budget` are bodiless declarations wired to nothing
-(`DESIGN.md:3` says so). Compile time is reported only as the un-baselined
-informational `fmt_tree` line.
-
-**A name is resolved by a linear scan over strings, defended by a comment that
-is false.** `sema_def.zen:19-23` says "A MODULE TABLE IS A `Vec`, NOT A `Map`,
-and that is measured rather than lazy: `Map.get` in this stdlib is `index_of`, a
-`find` over every entry — a linear scan already." **That is no longer true of
-this `Map`.** `collections_map.zen` is two Vecs, open-addressed with linear
-probing — `get:78` → `index_of:104` → `settle:117` → `walk:128`, which starts at
-`h.to_usize() % n` and steps — grown at a 3/4 load factor whose own comment
-(`:41-43`) calls the spare quarter a guard against "the linear scan this file
-exists to delete". So the premise the `Vec` was chosen on is backwards.
-
-Measured cost: **`str.eq` is called 63,701,481 times per self-compile**, and
-every caller is a linear scan, not one a hash lookup —
-
-    20,577,719  gen_c_state.CBackend.seen_function
-    11,226,859  sema_def.World.exact_index:136      one str.eq per module, x91
-     9,782,641  gen_c_state.CBackend.type_index
-     6,527,313  sema_def.collect_exported
-     3,334,813  sema_def.collect_named:762          one str.eq per decl, per name
-     2,246,379  sema_member.member_named
-       217,419  sema_check.Checker.lookup:427       the local-scope stack walk
-
-At -O2 the by-name scans sum to **16.9% of self time**. `str.eq` is a
-hand-written byte loop over `data.read(i)` (`text_str.zen:80-91`) and never
-reaches `memcmp`; the emitted C uses `memcmp` only for a `str` literal pattern
-in a match arm (`gen_c_flow.zen:333`).
-
-Two fixes, and they compose. Keying the tables on the `Map` that already ships
-turns each scan into a probe; interning identifiers to a `u32` atom (types are
-ALREADY interned — `sema_ty.zen:5-18`, every type comparison is an integer
-compare) makes each surviving comparison an integer one. The population is
-5,685 distinct identifiers over 137,828 code-only occurrences, 24:1 — a
-favourable atom table. The `Map` is the smaller change and should go first.
-Delete or correct the comment regardless; a false comment with live code shaped
-around it is the highest-value find a comment audit can make.
 
 **`group_end_at` rescans the rest of the file for every `(` after an unclosed
 one.** `parse_lookahead.zen:144-152` walks `Range(from, p.tokens_len())`
@@ -433,8 +255,8 @@ guaranteed by byte-copying, with the trivia doing the boundary work — stronger
 than printing, but a different claim from the one "trivia on AST nodes makes
 `zen fmt` lossless" suggests.
 
-**Three cleanups carried out of `SIGNATURE_REVIEW.md`, which is deleted.** All
-re-verified against this tree; the review's method write-up is in
+**Review candidates carried out of `SIGNATURE_REVIEW.md`, which is deleted.**
+These historical observations need current reproduction; the review's method write-up is in
 `scripts/signatures.py`'s own docstring and the model-calibration numbers were
 the point of the exercise, not of the file.
 
@@ -460,17 +282,7 @@ the point of the exercise, not of the file.
    come down in the same commit** or `make style` goes red. One wrinkle:
    `lsp_reply.zen` tests a const, and a pattern must be a literal.
 
-2. **A whole insertion sort duplicated across two LSP files — ~55 lines.**
-   `lsp_colour.zen:348` `sort_classes` and `lsp_compl.zen:573` `sort_items`,
-   with `bubble`/`out_of_order`/`swap_at`/`swap_pair` line-for-line identical,
-   differing in the element type and one comparison. `lsp_compl.zen` says so in
-   a comment. One `sort*<T>(v :: Vec<T>, before: (l: T, r: T) bool)` in
-   `std.core.loop` beside `find`/`filter`/`map` — `loop_find.zen:35` proves the
-   closure-taking generic builds. Must land under `std.core.loop`, not as a
-   free function, or `make ufcs` finds a second answer for `v.sort(..)`. These
-   are the only two hand-rolled sorts in `src/`.
-
-3. **Four parallel node arenas — ~90 lines, REPORTED AND NOT RECOMMENDED.**
+2. **Four parallel node arenas — ~90 lines, REPORTED AND NOT RECOMMENDED.**
    `ast_arena.zen` add/at/ids/each ×4, `ast_id.zen`'s four `{index*: u32}` with
    eight character-identical Eq/Hash, plus `sema_ty.zen`'s `TyId` as a fifth. A
    phantom-tagged `Id<T>` answers the objection both files state in comments
@@ -600,6 +412,14 @@ See `docs/design_meta.md`.
 - unused imports: gate + 1195 culled — `03d1b597`
 - a pattern naming a constant is reported, not silently irrefutable — `76dd2fe7`
 - array literal element type comes from its position — `d3bd7e9f`
+- a second `x = ..` in one block is rejected, not silently retyped — the
+  reproducer now reports "a name is bound once per block" and the emitted C
+  truncation (`n = 42; n = 3.5` printing `3`) cannot be produced
+- call arguments evaluate left to right — `tests/corpus/codegen/argument_order.zen`
+- a match binder may shadow an outer local — `inner 1 / outer 7` runs correctly
+- the UTF-8 boundary table has one owner in `src/std/text/text_utf8.zen` — `421264a93`
+- a workspace's own `std/std.zen` outranks ambient `ZEN_STD`, so LSP workspace
+  diagnostics are neither duplicated nor unclassified — `corpus/lsp/workspace_diagnostics`
 
 **`make build` fails intermittently, and the failure is a resolution error in
 a file you did not touch.** Seen three times in one session:

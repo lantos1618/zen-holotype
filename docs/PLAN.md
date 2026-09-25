@@ -33,9 +33,9 @@ zen/
 │                                    #     regenerate, THEN commit. never the reverse.
 │
 ├── src/                             # the real compiler + stdlib, in zen
-│   ├── zen/zen.zen                  # (1) thin cli: build / fmt / lsp;
-│   │                                #     `zen test` is reserved but still owed
-│   ├── zen/zen_cli.zen              # (1) argv -> Cli. touches no capability.
+│   ├── zen/zen.zen                  # (1) thin cli: build / check / run / fmt / test / lsp
+│   │                                #     tests use explicit executable targets
+│   ├── zen/zen_cli.zen              # (1) argv -> Cli; resolves project directories
 │   ├── zen/zen_build.zen            # (1) the build driver behind `zen build`
 │   ├── sema/sema.zen                # (1)
 │   ├── sema/sema_type.zen           # (1) type checking, generic instantiation
@@ -135,9 +135,10 @@ File naming and the 500/800-line review prompts are in `STYLE.md`. The short ver
 
 **1. Every stage ends at a gate that can fail.** Not "the code is written" — a command that exits non-zero when the stage is wrong. A stage without a red-capable gate is not done, it is unmeasured. Before trusting a new gate, break the thing it guards on purpose and watch it go red.
 
-**2. The compiler is a library from commit one.** `zen build`, `zen fmt`, and
-`zen lsp` are thin entry points into one artifact; `zen test` is the same target
-shape but remains owed. Never a second parser, AST, or formatter-only path.
+**2. The compiler is a library from commit one.** Build, check, run, format,
+test and LSP commands are thin entry points into one artifact. `zen test`
+executes explicit `Builder.exe_test(Exe)` targets; reflection-based function
+registration remains owed. Never a second parser, AST, or formatter-only path.
 
 ---
 

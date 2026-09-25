@@ -26,6 +26,60 @@ Two uses of it, both from 2026-08-17. **Proving an existing guard is load-bearin
 
 ---
 
+## Project test targets
+
+`zen test [PROJECT] [TARGET] [-- ARGS...]` builds and runs executable test
+targets registered by `build.zen`. Omitting PROJECT uses the current directory;
+omitting TARGET selects all executable tests in declaration order. A single
+argument can name a project directory or a target in the current project.
+Arguments after `--` are passed unchanged to every selected executable.
+
+```zen
+Builder, BuildError = std.build
+
+build = (b :: Builder) Res<(), BuildError> {
+    b.exe_test("unit", {
+        src: Path("src/unit_tests.zen"),
+        deps: [],
+    }).try();
+    Ok(())
+}
+```
+
+The executable test method takes `Exe`, with the same source, dependencies,
+backend and output options as `Builder.exe`. All selected targets compile
+before any test executes. A compilation failure prevents execution; a nonzero
+runtime status fails that target and subsequent targets still run. An empty
+selection or unknown target fails. Selected targets must have distinct output
+paths. Ordinary `zen build` builds executable application targets, not tests.
+
+A test entry can use the standard assertion suite:
+
+```zen
+Suite = std.test
+
+main = (env: Env) Res<i32, IoError> {
+    suite ::= Suite(env: env);
+    suite.run("integer equality", (test) { test.expect_eq(4, 4) }).try();
+    suite.run("boolean assertion", (test) { test.expect(true) }).try();
+    suite.finish()
+}
+```
+
+Each callback receives a `Tester` backed by its own arena, dropped when that
+callback's run ends. Callbacks return `Res<(), TestError>`; convert other
+recoverable failures explicitly. Assertion failures include the test name and
+message and do not stop later callbacks. `finish` reports counts and returns a
+nonzero status for failures or an empty suite. Traps terminate the executable;
+separate executable targets have independent process lifetimes.
+
+This is explicit registration. Files named `*_test.zen` are not implicitly
+collected. Registered entries and their imports are checked, including entries
+not imported by the application. The intended `Module.functions` reflection
+and `Builder.test(Test)` function-discovery path remain unimplemented. The
+Python corpus runner remains the repository's compatibility oracle, and
+`make verify` includes real CLI test-target regressions through `projectcheck`.
+
 ## The test file format
 
 One format, so ten authors produce one suite. The runner reads only this.

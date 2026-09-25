@@ -17,8 +17,10 @@ holds_build_zen = zen.zen_path
 Cli* = Build(BuildArgs)
      | Project(ProjectArgs)
      | Run(ProjectArgs)
+     | Test(ProjectArgs)
      | Fmt(FmtJob)
-     | Later(str)     // test / lsp — named, and not yet written
+     | Later(str)     // LSP transport arguments are handled by the server driver
+     | Version(str)
      | Usage(str)     // the word that made no sense; empty means nothing was said
      | UnavailableBackend(str)
      | Missing(str)   // a flag the build needs and did not get
@@ -164,11 +166,27 @@ help_model = (a: Alloc) Res<Command<HelpArg>, AllocError> {
     fmt.repeatable("path");
     app.subcommand(fmt).try();
 
-    app.subcommand(command<HelpArg>(
+    test ::= command<HelpArg>(
         a,
         "test",
-        "Run project tests (not yet implemented)"
-    )).try();
+        "Build and run registered executable test targets"
+    );
+    test.positional(
+        "project",
+        HelpArg.Project,
+        "PROJECT-OR-TARGET",
+        ValueType.Text,
+        "Project directory or test target name"
+    ).try();
+    test.positional(
+        "target",
+        HelpArg.Path,
+        "TARGET",
+        ValueType.Text,
+        "Test target within the selected project"
+    ).try();
+    test.trailing_args();
+    app.subcommand(test).try();
 
     lsp ::= command<HelpArg>(a, "lsp", "Run the language server");
     lsp.positional(
@@ -233,27 +251,28 @@ cli* = (env: Env, alloc: Alloc, argv: Vec<str>) Res<Cli, AllocError> {
 command = (env: Env, a: Alloc, argv: Vec<str>, name: str)
           Res<Cli, AllocError> {
     name.match({
-        "--help" => Ok(Cli.Usage(HELP_ROOT)),
-        "-h"     => Ok(Cli.Usage(HELP_ROOT)),
-        "build"  => help_requested(argv).match({
+        "--version" => Ok(Cli.Version("0.1.0")),
+        "--help"    => Ok(Cli.Usage(HELP_ROOT)),
+        "-h"        => Ok(Cli.Usage(HELP_ROOT)),
+        "build"     => help_requested(argv).match({
             true => Ok(Cli.Usage(HELP_BUILD)), false => job_of(env, a, argv)
         }),
-        "check"  => help_requested(argv).match({
+        "check"     => help_requested(argv).match({
             true => Ok(Cli.Usage(HELP_CHECK)), false => check_of(a, argv, env.var(ZEN_STD_ENV).match({ Ok(p) => p, None => "" }))
         }),
-        "run"    => help_requested(argv).match({
+        "run"       => help_requested(argv).match({
             true => Ok(Cli.Usage(HELP_RUN)), false => project_of(env, a, argv, true)
         }),
-        "fmt"    => help_requested(argv).match({
+        "fmt"       => help_requested(argv).match({
             true => Ok(Cli.Usage(HELP_FMT)), false => fmt_of(a, argv)
         }),
-        "test"   => help_requested(argv).match({
-            true => Ok(Cli.Usage(HELP_TEST)), false => Ok(Cli.Later(name))
+        "test"      => help_requested(argv).match({
+            true => Ok(Cli.Usage(HELP_TEST)), false => test_of(env, a, argv)
         }),
-        "lsp"    => help_requested(argv).match({
+        "lsp"       => help_requested(argv).match({
             true => Ok(Cli.Usage(HELP_LSP)), false => Ok(Cli.Later(name))
         }),
-        _        => Ok(Cli.Usage(name)),
+        _           => Ok(Cli.Usage(name)),
     })
 }
 
@@ -413,5 +432,42 @@ verdict = (args: BuildFlags, bad: str) Cli {
             Err(UnavailableBackend(name)) => Cli.UnavailableBackend(name),
             Ok(job)                       => Cli.Build(job),
         }),
+    })
+}
+
+// Only arguments following -- are passed to each selected test executable.
+test_of = (env: Env, a: Alloc, argv: Vec<str>) Res<Cli, AllocError> {
+    root   ::= ".";
+    target ::= "";
+    at     ::= ARGS;
+    bad    ::= "";
+    first = arg_at(argv, at);
+    (!first.is_empty() && !first.eq(OPTIONS_END) && !is_word(first)).then(() { bad = first; });
+    (!first.is_empty() && !first.eq(OPTIONS_END)).then(() {
+        holds_build_zen(env, a, first).match({
+            true  => {
+                root = first;
+                at   = at + 1;
+                next = arg_at(argv, at);
+                (!next.is_empty() && !next.eq(OPTIONS_END)).then(() {
+                    target = next;
+                    at     = at + 1;
+                });
+            },
+            false => { target = first; at = at + 1; },
+        });
+    });
+    (!target.is_empty() && !is_word(target)).then(() { bad = target; });
+    tail = arg_at(argv, at);
+    (!tail.is_empty() && !tail.eq(OPTIONS_END)).then(() { bad = tail; });
+    tail.eq(OPTIONS_END).then(() { at = at + 1; });
+    bad.is_empty().match({
+        false => Ok(Cli.Usage(bad)),
+        true  => Ok(Cli.Test(ProjectArgs(
+            root: root,
+            target: target,
+            argv: argv,
+            args_at: at
+        ))),
     })
 }
