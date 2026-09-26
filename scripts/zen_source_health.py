@@ -26,6 +26,7 @@ from zen_signature_inventory import (
 )
 
 
+SNAPSHOT_SCHEMA = 3
 DEFAULT_SNAPSHOTS = ROOT / "build" / "source_health"
 DEFAULT_REPORT = DEFAULT_SNAPSHOTS / "SOURCE_HEALTH.md"
 HISTORY_MARKERS = re.compile(
@@ -232,7 +233,7 @@ def measure(source_root: Path, grammar: Path, label: str, revision: str) -> dict
         ),
     )
     return {
-        "schema": 3,
+        "schema": SNAPSHOT_SCHEMA,
         "label": label,
         "revision": revision,
         "totals": totals,
@@ -340,10 +341,27 @@ def report_of(snapshots: list[dict]) -> str:
 
 
 def load_snapshots(directory: Path) -> list[dict]:
-    snapshots = [
-        json.loads(path.read_text()) for path in sorted(directory.glob("*.json"))
-    ]
-    return [snapshot for snapshot in snapshots if snapshot.get("schema") == 3]
+    """Read the comparable snapshots from `directory`, skipping the rest.
+
+    The snapshot directory is a scratch area that also holds unrelated
+    outputs, so a broad `*.json` can match a list, a bare number, or a
+    document that is not JSON at all. Only a mapping carrying this
+    schema is a snapshot; anything else is not ours to read. Skipping is
+    deliberate rather than an error: a foreign file in a disposable
+    directory must not make the structural report ungeneratable.
+    """
+    snapshots = []
+    for path in sorted(directory.glob("*.json")):
+        try:
+            document = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(document, dict):
+            continue
+        if document.get("schema") != SNAPSHOT_SCHEMA:
+            continue
+        snapshots.append(document)
+    return snapshots
 
 
 def main() -> int:

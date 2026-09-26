@@ -43,7 +43,7 @@ J       ?= $(shell nproc 2>/dev/null || echo 4)
 CACHE   ?= $(shell command -v ccache 2>/dev/null)
 ZCC      = $(CACHE) $(CC)
 
-.PHONY: projectcheck lspcheck all check build dev-build dev-check dev-run bootstrap buildcheck runnercheck editorcheck seed test verify differential runtimecheck warnings lint parse cap dupcomments faults lextile determinism fixpoint grammar fmt asan ubsan leak profile clean clean-obj clean-reports clean-all help
+.PHONY: reviewcheck projectcheck lspcheck all check build dev-build dev-check dev-run bootstrap buildcheck runnercheck editorcheck seed test verify differential runtimecheck warnings lint parse cap dupcomments faults lextile determinism fixpoint grammar fmt asan ubsan leak profile clean clean-obj clean-reports clean-all help
 
 # These gates share ./zen, build/, and grammar/zen.so. Keep their dependency
 # graphs serial even when an operator invokes `make -j verify`.
@@ -87,6 +87,11 @@ buildcheck:
 ## runnercheck: selection/report checks and optional real-C cache regressions.
 runnercheck:
 	$(PY) tests/quality/test_runner_parallel.py
+
+## reviewcheck: regression tests for local source-review artifact tooling.
+## Generated snapshots stay local; fresh checkouts need no pre-existing reports.
+reviewcheck:
+	$(PY) -m unittest discover -s tests/quality -p 'test_review_scripts.py'
 
 ## projectcheck: real CLI execution, selection, and failure propagation for test targets.
 projectcheck: build
@@ -141,7 +146,7 @@ lspcheck: build
 ## are built once per invocation, then formatting and determinism inspect the
 ## same compiler that ran the test suite.
 verify: override TEST_CACHE_ARGS := --result-cache "$(TEST_RESULTS)" --refresh-result-cache
-verify: test fmt determinism fixpoint differential runtimecheck ownershipcheck warnings ubsan buildcheck runnercheck editorcheck lspcheck projectcheck
+verify: test fmt determinism fixpoint differential runtimecheck ownershipcheck warnings ubsan buildcheck runnercheck reviewcheck editorcheck lspcheck projectcheck
 
 .PHONY: ownershipcheck
 ownershipcheck: build

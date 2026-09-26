@@ -52,6 +52,14 @@ python3 scripts/zen_review_pack.py --label round-NN
 Each command accepts `--check` to check existing outputs. External review
 remains a separate, explicit `zen_source_judge.py` invocation.
 
+`build/source_health/` is untracked and `make clean-reports` removes it, so
+`--check` is a local convenience and deliberately not a `make verify` gate: a
+fresh checkout has no snapshot to compare against, and a check that is red
+before anything is written is a check nobody trusts. `make reviewcheck` is in
+`verify` instead, and it asserts that the tools work — including that a
+foreign or unreadable `.json` in the scratch directory is skipped rather than
+crashing the run.
+
 Historical bootstrap bug ledgers and agent-run transcripts are intentionally
 not kept here. Once their reproducers are corpus tests, the tests are the
 maintained record and git history is the archive.
